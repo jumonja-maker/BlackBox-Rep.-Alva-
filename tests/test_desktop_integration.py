@@ -138,6 +138,29 @@ class InternalDiagnosticsWindowTest(unittest.TestCase):
                 finally:
                     window.close()
 
+    def test_review_outcome_lives_on_reports_without_platform_tab(self):
+        with tempfile.TemporaryDirectory() as temp:
+            with patch("blackbox_universal.monitor._default_sessions_root",
+                       return_value=Path(temp)):
+                window = UniversalWindow()
+                window._timer.stop()
+                try:
+                    self.assertNotIn("alva", window._page_ids)
+                    window._private_diagnostics_result({
+                        "status": "ok", "reviewed_checks": 4,
+                        "declared_checks": 4, "evidence_status": "ok"}, "")
+                    self.assertIn("4/4", window.evidence_status.text())
+                    self.assertNotIn("Alva", window.evidence_status.text())
+                    window._set_language("RU")
+                    self.assertIn("4/4", window.evidence_status.text())
+                    self.assertIn("свидетельств", window.evidence_status.text())
+                    window._private_diagnostics_result({
+                        "status": "ok", "reviewed_checks": 1,
+                        "declared_checks": 4, "evidence_status": "error"}, "")
+                    self.assertIn("1/4", window.evidence_status.text())
+                finally:
+                    window.close()
+
     def test_background_runtime_result_does_not_create_platform_ui(self):
         with tempfile.TemporaryDirectory() as temp:
             with patch("blackbox_universal.monitor._default_sessions_root",
