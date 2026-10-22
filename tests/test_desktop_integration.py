@@ -117,6 +117,30 @@ class InternalDiagnosticsWindowTest(unittest.TestCase):
                 finally:
                     window.close()
 
+    def test_bundled_alva_runs_automatically_without_python_or_tab(self):
+        with tempfile.TemporaryDirectory() as temp:
+            with patch("blackbox_universal.monitor._default_sessions_root",
+                       return_value=Path(temp)):
+                window = UniversalWindow()
+                window._timer.stop()
+                try:
+                    session = Path(temp) / "session"
+                    session.mkdir()
+                    (session / "report.json").write_text("{}", encoding="utf-8")
+                    window.probe.session_folder = session
+                    window._alva_interpreter = ""
+                    with patch("blackbox_universal.window.bundled_runtime_available",
+                               return_value=True), \
+                         patch.object(window, "_start_alva_worker") as launch:
+                        window._finalize_alva_if_configured()
+                        launch.assert_called_once_with(None, session, persist=True)
+                        window._finalize_alva_if_configured()
+                        launch.assert_called_once()
+                    self.assertNotIn("alva", window._page_ids)
+                    self.assertFalse(hasattr(window, "alva_connect"))
+                finally:
+                    window.close()
+
     def test_previously_authorized_runtime_runs_after_session_without_ui(self):
         with tempfile.TemporaryDirectory() as temp:
             with patch("blackbox_universal.monitor._default_sessions_root",
