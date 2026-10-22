@@ -124,8 +124,10 @@ jobs:
           $output = "dist\BLACK.BOX-Universal"
           Copy-Item -LiteralPath "LICENSE" -Destination "$output\LICENSE" -Force
           Copy-Item -LiteralPath "README.md" -Destination "$output\README.md" -Force
+          Copy-Item -LiteralPath "README.ru.md" -Destination "$output\README.ru.md" -Force
           Copy-Item -LiteralPath "docs\LICENSING.md" -Destination "$output\LICENSING.md" -Force
           if (-not (Test-Path "$output\LICENSE")) { throw "Missing public application license" }
+          if (-not (Test-Path "$output\README.ru.md")) { throw "Russian README missing from Windows release" }
       - name: Package portable folder without installing anything
         shell: pwsh
         run: |
