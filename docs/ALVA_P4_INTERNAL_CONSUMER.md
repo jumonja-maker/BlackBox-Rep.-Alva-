@@ -4,7 +4,7 @@
 
 ## Why this exists
 
-Previously BLACK.BOX called only three scoped `ComponentHost` operations that checked presence of observer metrics, completion status and observer errors. That was a valid narrow API consumer but did **not** meaningfully exploit Alva's verified pipeline, review, or structured handoff capabilities.
+Previously BLACK.BOX called only three scoped `ComponentHost` operations that checked presence of observer metrics, completion status and observer errors. That was a valid narrow API consumer but did **not** meaningfully exploit Alva's verified pipeline, review, or diagnostic classification capabilities.
 
 This integration adds a real second layer in the **authorized external Python** when Alva supports its P4 APIs. It is invoked **after session completion**, within the already existing non-UI sidecar, and does **not** re-read the target application or repeat any process mutation.
 
@@ -13,11 +13,10 @@ This integration adds a real second layer in the **authorized external Python** 
 | Alva API / facility | Execution in BLACK.BOX |
 |---|---|
 | `Component`, `CapabilityRegistry` indirectly, `ComponentHost` lifecycle | Three registered BLACK.BOX observer operations, permissioned and closed |
-| `open_scope`, `invoke_with_diagnostics` | Each scoped operation invoked once, bounded and with an Alva AI Handoff receipt |
+| `open_scope`, `invoke_with_diagnostics` | Each scoped operation invoked once with bounded diagnostics. Alva may assemble internal metadata, but BLACK.BOX does not export an AI Handoff |
 | `invoke_adapter_checked` | App-owned predicate checks shape of each scoped observation |
 | `run_checked_pipeline` (P4 checked facade, invokes `run_verified_pipeline`) | Four explicitly declared in-memory data-quality stages |
 | `review_pipeline_evidence` | Validates that the resulting Alva pipeline report is structurally consistent **but unauthenticated** |
-| `build_ai_handoff` | Produces limited machine-readable handoff (never a command/authorization) |
 | `OperationTrace` | Alva instruments the scoped and pipeline operations internally; raw data, secrets and process logs are not copied to the extended result |
 
 ### Four genuine P4 stages
@@ -35,14 +34,14 @@ The new wire result uses `bridge_schema:2` and `extended_diagnostics`; the paren
 
 The isolated external worker executes `python.exe -I -u alva_sidecar_worker.py` in an explicitly authorized Python environment that contains a separately installed genuine Alva package. Python `-I` intentionally hides untrusted `PYTHONPATH`, so the new **public** `alva_evidence_pipeline.py` file is loaded from a fixed location adjacent to the public sidecar via a checked importlib file spec. The existing Windows portable build definition now includes **both** public sidecar files under `_internal/alva_worker/`. This is *not* a copy of private Alva.
 
-BLACK.BOX's own SQLite/JSON/HTML/AI Handoff remain available without Python or Alva in the user's environment. The UI still exposes only **Overview / Processes / Event Log / Reports / Settings**. There is **no Alva Lab or install button**.
+BLACK.BOX's own SQLite/JSON/HTML human-readable reports remain available without Python or Alva in the user's environment. The UI still exposes only **Overview / Processes / Event Log / Reports / Settings**. There is **no Alva Lab or install button**.
 
 ## Extra genuine Alva trace handling
 
 In addition to the P4 checked pipeline, the **same already-completed** three
 ComponentHost calls supply in-process `OperationTrace` witnesses. If the
 installed Alva supports them, the worker invokes `classify_failure`,
-`build_report`, `review_pipeline_evidence`, and `build_ai_handoff`
+`build_report` and `review_pipeline_evidence`
 on the existing host evidence **without executing the component a second time**.
 This yields three bounded `host_trace_checks` receipts (or none for a
 partial legacy runtime) showing complete in-process coverage, the conservative

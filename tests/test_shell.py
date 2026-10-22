@@ -133,7 +133,7 @@ class QtShellTests(unittest.TestCase):
         self.assertTrue((session / "session.sqlite3").is_file())
         self.assertTrue((session / "report.json").is_file())
         self.assertTrue((session / "report.html").is_file())
-        self.assertTrue((session / "ai-handoff.json").is_file())
+        self.assertFalse((session / "ai-handoff.json").exists())
         self.assertGreaterEqual(summarize(session)["samples"], 1)
 
     def test_export_only_after_user_selection_without_cloud_upload(self):

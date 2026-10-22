@@ -7,12 +7,11 @@ import unittest
 from blackbox_rep_alva.contracts import ObserverError, Sample, event, bounded
 from blackbox_rep_alva.storage import SessionStore
 from blackbox_rep_alva.report import summarize, compare, write_report
-from blackbox_rep_alva.handoff import build_handoff
 from blackbox_rep_alva.recorder import record
 
 
 class EvidenceTests(unittest.TestCase):
-    def test_storage_report_and_handoff(self):
+    def test_storage_report_for_human_readers(self):
         with tempfile.TemporaryDirectory() as temp:
             store = SessionStore(Path(temp), os.getpid())
             store.write_sample(Sample(10, 512, 11.0, 2, None, None, 0))
@@ -25,9 +24,7 @@ class EvidenceTests(unittest.TestCase):
             self.assertEqual(report["peak_rss_bytes"], 1024)
             self.assertEqual(report["observation_errors"], {"SAMPLE_UNAVAILABLE": 1})
             self.assertEqual(report["root_cause"], "UNKNOWN")
-            handoff = build_handoff(path)
-            self.assertFalse(handoff["permission_to_act"])
-            self.assertEqual(handoff["classification"]["source"], "UNKNOWN")
+            self.assertEqual(report["root_cause_confidence"], "UNKNOWN")
             res = write_report(path)
             self.assertEqual(res["sample_count"], 2)
             self.assertIn("execution_attested", (path/"report.json").read_text())

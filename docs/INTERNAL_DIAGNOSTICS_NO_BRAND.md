@@ -8,7 +8,7 @@ Ordinary user journey is **select process → start → stop → read report**. 
 
 ## What is actually available at this SHA
 
-- BLACK.BOX process sampling (psutil), SQLite, report.json, report.html and offline ai-handoff.json are implemented by its own public code. **They are not the Alva Python package.**
+- BLACK.BOX process sampling (psutil), SQLite, report.json and report.html are implemented by its own public code. **They are not the Alva Python package.**
 - An optional, previously authorized interpreter path (existing QSettings `BlackBox / BLACK.BOX Universal / alva_python`) can activate the *already existing* external Alva sidecar **automatically after Stop**. A private runtime is not imported while sampling or during normal UI launch. Its work uses three predefined scoped operations about saved observer summaries and may append `alva-diagnostics.json`.
 - If no authorized interpreter was already configured, the app **does not** launch Python, fetch packages, change registry keys, ask for login, send data to a cloud service, or claim real Alva execution. It still produces the standard reports. A prior user preference is a local deployment configuration, not a guarantee of Git provenance.
 - The private platform repository remains private; its source code, wheels and runtime are neither imported into public source nor bundled into downloadable public PyInstaller binaries.

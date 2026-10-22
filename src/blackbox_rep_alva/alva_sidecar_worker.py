@@ -134,9 +134,7 @@ def _run(packet):
                         and result.get("evidence") == observations[operation]
                         and type(evidence) is dict
                         and evidence.get("contract_verdict") == "CHECK_ACCEPTED"
-                        and evidence.get("visibility") == "SCOPE_ONLY"
-                        and type(evidence.get("ai_handoff")) is dict
-                        and evidence["ai_handoff"].get("status") == "ok"):
+                        and evidence.get("visibility") == "SCOPE_ONLY"):
                     raise ValueError("ALVA_SCOPED_CONTRACT_FAILED")
                 observed_traces.append((operation, evidence))
                 outcomes.append({
@@ -144,15 +142,13 @@ def _run(packet):
                     "execution_state": call.execution_state,
                     "contract_verdict": "CHECK_ACCEPTED",
                     "visibility": evidence["visibility"],
-                    "ai_handoff_status": "ok",
                     "observation": result["evidence"],
                 })
     if host.state != "closed":
         raise ValueError("ALVA_HOST_NOT_CLOSED")
-    # The pinned Alva PREVIEW also provides checked pipeline, reviewer and
-    # handoff. Do not silently downgrade if those APIs exist but reject data.
-    features = ("run_checked_pipeline", "review_pipeline_evidence",
-                "build_ai_handoff")
+    # The pinned Alva PREVIEW provides checked pipeline and evidence reviewer.
+    # No AI handoff is requested or exported by BLACK.BOX.
+    features = ("run_checked_pipeline", "review_pipeline_evidence")
     advanced = all(callable(getattr(alva, key, None)) for key in features)
     if advanced:
         helpers = _public_evidence_pipeline()

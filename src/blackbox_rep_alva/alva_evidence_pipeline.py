@@ -25,7 +25,7 @@ def _checked_bool(value: object, expected: dict) -> bool:
 
 
 def verified_session_evidence(alva: object, summary: dict, operation: str) -> dict:
-    """Build real checked-pipeline + reviewer + Alva AI Handoff metadata.
+    """Build a checked evidence pipeline plus human-review-oriented findings.
 
     A rejected app-declared predicate means only 'verify this observer evidence'
     and never 'a defect has been proven in the observed external application'.
@@ -76,18 +76,10 @@ def verified_session_evidence(alva: object, summary: dict, operation: str) -> di
             or review.get("root_cause_proven") is not False
             or review.get("external_attestation") is not False):
         raise ValueError("PIPELINE_REVIEW_FAILED")
-    handoff = alva.build_ai_handoff(report)
-    if (type(handoff) is not dict or handoff.get("status") != "ok"
-            or type(handoff.get("result")) is not dict):
-        raise ValueError("HANDOFF_UNAVAILABLE")
     result = report["result"]
-    ai = handoff["result"]
-    if (result.get("evidence_origin") != "APP_SUPPLIED_NOT_AUTHENTICATED"
-            or ai.get("permission_to_act") is not False
-            or ai.get("root_cause_proven") is not False
-            or ai.get("execution_attested") is not False
-            or ai.get("review_required") is not True
-            or ai.get("record_status") != REVIEW_MARKER):
+    # The installed Alva is allowed to generate internal diagnostic metadata.
+    # BLACK.BOX neither requests nor exports an AI handoff.
+    if result.get("evidence_origin") != "APP_SUPPLIED_NOT_AUTHENTICATED":
         raise ValueError("EVIDENCE_PROVENANCE_REJECTED")
     declared = result.get("declared_stages")
     executed = result.get("executed_stages")
@@ -104,13 +96,6 @@ def verified_session_evidence(alva: object, summary: dict, operation: str) -> di
             or first is not None and first not in STAGE_NAMES
             or type(action) is not str or not 1 <= len(action) <= 64):
         raise ValueError("PIPELINE_METADATA_INVALID")
-    if (ai.get("declared_stages") != declared
-            or ai.get("executed_stages") != executed
-            or ai.get("accepted_checks") != accepted
-            or ai.get("verification_coverage") != coverage
-            or ai.get("observed_pipeline_status") != status
-            or ai.get("first_unverified_component") != first):
-        raise ValueError("HANDOFF_CORRELATION_FAILED")
     return {
         "diagnostic_pipeline": "REAL_ALVA_P4_CHECKED_PIPELINE",
         "declared_stages": declared,
@@ -121,7 +106,7 @@ def verified_session_evidence(alva: object, summary: dict, operation: str) -> di
         "first_unverified_component": first,
         "next_action_code": action,
         "record_status": REVIEW_MARKER,
-        "handoff_review_required": True,
+        "human_review_required": True,
         "permission_to_act": False,
         "root_cause_proven": False,
         "execution_attested": False,
@@ -153,7 +138,6 @@ def verified_host_traces(alva: object, entries: list[tuple[str, dict]]) -> list[
         classified = alva.classify_failure(trace)
         report = alva.build_report(trace)
         review = alva.review_pipeline_evidence(operation_report)
-        handoff = alva.build_ai_handoff(operation_report)
         if (type(classified) is not dict or classified.get("status") != "ok" or
                 type(classified.get("result")) is not dict or
                 classified["result"].get("source") != "UNKNOWN" or
@@ -167,12 +151,7 @@ def verified_host_traces(alva: object, entries: list[tuple[str, dict]]) -> list[
                 type(review) is not dict or review.get("status") != "ok" or
                 review.get("code") != REVIEW_MARKER or
                 review.get("root_cause_proven") is not False or
-                review.get("external_attestation") is not False or
-                type(handoff) is not dict or handoff.get("status") != "ok" or
-                type(handoff.get("result")) is not dict or
-                handoff["result"].get("permission_to_act") is not False or
-                handoff["result"].get("root_cause_proven") is not False or
-                handoff["result"].get("execution_attested") is not False):
+                review.get("external_attestation") is not False):
             raise ValueError("HOST_TRACE_REVIEW_FAILED")
         output.append({
             "component": name,

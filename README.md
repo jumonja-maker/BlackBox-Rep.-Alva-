@@ -47,7 +47,7 @@ The CPU/memory graph is based on actual samples; unavailable metrics are not fab
 2. Press **ATTACH SELECTED PROCESS** (or double-click it). BLACK.BOX checks whether the process is accessible.
 3. Return to **01 OVERVIEW** and press **START OBSERVING**. A new session folder and SQLite database are created.
 4. Use the target program normally. Observe the live indicators and the **03 EVENT LOG**.
-5. Press **STOP OBSERVING**. BLACK.BOX finalizes the session and generates HTML, JSON and an offline AI handoff automatically.
+5. Press **STOP OBSERVING**. BLACK.BOX finalizes the session and generates HTML and JSON reports for human review automatically.
 6. Open **04 REPORTS** for a snapshot, or **COMPARE TWO SESSIONS** and select two prior session folders.
 
 If the observed program closes, its PID changes or access is denied, BLACK.BOX records the observer failure instead of claiming that the target application was diagnosed.
@@ -63,7 +63,6 @@ Default Windows directory:
 | `session.sqlite3` | Durable timestamped sample series, session metadata and recorded observer error codes (SQLite WAL storage). |
 | `report.json` | Session state, start/end time, number of samples, peak RSS, peak CPU, child count and observer errors. |
 | `report.html` | Browser-readable version of the process observation report. |
-| `ai-handoff.json` | Small, **untrusted** evidence summary suitable for manually giving to a developer or AI chat. `permission_to_act=false`; it is **not** an automatic ChatGPT connection. |
 | `alva-diagnostics.json` | **Internal developer evidence only:** emitted if an authorized external runtime was previously provisioned; never proof of the observed application's root cause. |
 
 The Reports screen also offers an **explicit** JSON snapshot export to a location you select. Snapshots and saved sessions may contain process names, PIDs or paths: **review before sharing**.
@@ -114,7 +113,7 @@ python -m blackbox_rep_alva summary "sessions/session-REPLACE_WITH_ID"
 python -m blackbox_rep_alva compare "sessions/session-REPLACE_WITH_FIRST_ID" "sessions/session-REPLACE_WITH_SECOND_ID"
 ```
 
-For CLI recording, replace PID `1234` with the target PID and replace session placeholders with the actual folder name printed by `record`. The `export`, `handoff` and `alva-check` CLI commands are also available; see `python -m blackbox_rep_alva --help`. Run tests with `python -m unittest discover -s tests -v`.
+For CLI recording, replace PID `1234` with the target PID and replace session placeholders with the actual folder name printed by `record`. The `export` and `alva-check` CLI commands are also available; see `python -m blackbox_rep_alva --help`. Run tests with `python -m unittest discover -s tests -v`.
 
 ## Privacy, limitations and project status
 

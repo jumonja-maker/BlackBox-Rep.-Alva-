@@ -102,7 +102,7 @@ def main(argv: list[str] | None = None) -> int:
         print("FAIL: " + str(exc), file=sys.stderr)
         return 1
     print("PASS: GENUINE_INSTALLED_ALVA_API_COMPATIBILITY (source identity not attested)")
-    print("PASS: 3 SCOPED CALLS, 3 HOST TRACES, 4 P4 STAGES, REVIEW AND HANDOFF")
+    print("PASS: 3 SCOPED CALLS, 3 HOST TRACES, 4 P4 STAGES AND STRUCTURAL REVIEW")
     print("PASS: EMPTY-SAMPLE NEGATIVE REJECTED WITHOUT CLAIMING TARGET ROOT CAUSE")
     return 0
 

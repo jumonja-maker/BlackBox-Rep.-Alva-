@@ -26,7 +26,7 @@ PYTHONPATH=src python -m blackbox_rep_alva alva-check --diagnose sessions/sessio
 | P3.2 `Component` lifecycle, P3.3 adapter boundary, P3.4 `CapabilityRegistry` | Via actual `Component` inside host. No plugin discovery or dynamic loading. |
 | `ComponentHost`, scoped permissions | Bridge uses local host and `open_scope`; host is **not** thread-safe, auth, or sandbox. |
 | `invoke_with_diagnostics`, `OperationTrace` and host diagnostics | Bridge requests a single diagnostic call; contract verdict covers the component boundary, not target process events. |
-| Failure classification, source map, report, `build_ai_handoff`, recheck | Available as distinct Alva PREVIEW facilities but **not silently invoked** or treated as proof of native application's root cause. The app's own evidence/handoff remains plainly untrusted. Explicit integration and QA can be added independently. |
+| Failure classification, source map, report, `build_ai_handoff`, recheck | Available as distinct Alva PREVIEW facilities but **not silently invoked** or treated as proof of native application's root cause. The app's own human-facing reports preserve uncertainty. No BLACK.BOX AI Handoff file is generated. Explicit integration and QA can be added independently. |
 | Checked/verified pipeline, offline QA and evidence protocols | Platform-level developer tooling documented by Alva, not a sampling runtime dependency; no benchmark/acceptance claimed for this project. |
 | Experimental native Document Engine V3 | **Not included**. Universal process observation does not depend on conversion. V3-02 remains ACTIVE/PARTIAL; no product claim of full DOCX/PDF support. |
 | NETALVA | **Not included**. Offline by design; no server/listener or remote invocation. |

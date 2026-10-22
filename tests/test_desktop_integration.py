@@ -13,14 +13,13 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtWidgets import QApplication
 
 from blackbox_rep_alva.report import compare, summarize
-from blackbox_rep_alva.handoff import build_handoff
 from blackbox_universal.monitor import ReadOnlyProbe
 from blackbox_universal.theme import set_retro_theme
 from blackbox_universal.window import UniversalWindow
 
 
 class DurableDesktopIntegration(unittest.TestCase):
-    def test_two_full_session_lifecycles_have_isolated_sqlite_reports_and_handoffs(self):
+    def test_two_full_session_lifecycles_have_isolated_human_reports(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             observer = ReadOnlyProbe(output_root=root)
@@ -38,15 +37,15 @@ class DurableDesktopIntegration(unittest.TestCase):
                 self.assertEqual(observer.session_state, "COMPLETED")
                 self.assertFalse(observer.last_error)
                 self.assertEqual(observer.report_result["sample_count"], 3)
-                for name in ("session.sqlite3", "report.json", "report.html",
-                             "ai-handoff.json"):
+                for name in ("session.sqlite3", "report.json", "report.html"):
                     self.assertTrue((folder / name).is_file(), name)
+                self.assertFalse((folder / "ai-handoff.json").exists())
                 with closing(sqlite3.connect(folder / "session.sqlite3")) as db:
                     self.assertEqual(
                         db.execute("SELECT COUNT(*) FROM samples").fetchone()[0], 3)
-                handoff = json.loads((folder / "ai-handoff.json").read_text(encoding="utf-8"))
-                self.assertFalse(handoff["permission_to_act"])
-                self.assertEqual(handoff["classification"]["root_cause"], "NOT_DETERMINED")
+                html = (folder / "report.html").read_text(encoding="utf-8")
+                self.assertIn("BlackBox Process Observation", html)
+                self.assertIn("UNKNOWN", html)
                 report = summarize(folder)
                 self.assertEqual(report["state"], "closed")
                 self.assertEqual(report["samples"], 3)
@@ -80,7 +79,8 @@ class DurableDesktopIntegration(unittest.TestCase):
             observer.stop("UI_CLOSED")
             self.assertEqual(observer.session_state, "INTERRUPTED")
             self.assertEqual(summarize(observer.session_folder)["exit_code"], "INTERRUPTED")
-            self.assertEqual(build_handoff(observer.session_folder)["evidence"]["sample_count"], 1)
+            self.assertEqual(summarize(observer.session_folder)["samples"], 1)
+            self.assertFalse((observer.session_folder / "ai-handoff.json").exists())
 
     def test_export_has_no_pretend_platform_attestation(self):
         with tempfile.TemporaryDirectory() as temp:

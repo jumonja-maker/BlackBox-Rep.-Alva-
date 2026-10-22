@@ -1,5 +1,14 @@
 # BlackBox Rep. Alva — state / developer handoff (2026-10-22)
 
+## CURRENT OWNER DIRECTION — HUMAN-FIRST BLACK.BOX (2026-10-22)
+
+BLACK.BOX Universal is a **program for people**. Alva is only internal diagnostic infrastructure, not an AI companion. This Draft branch `feature/human-first-no-ai-handoff-20261022` is stacked on the existing `feature/alva-evidence-pipeline-20261022` (Draft PR #10).
+
+Current code change: normal Stop emits SQLite, JSON and browser-readable HTML only. **No `ai-handoff.json`**, no public `handoff` CLI command, no `handoff.py` module, no AI Handoff in Qt reports/About. Unit and GUI tests updated; new human-first contract test added. A previously authorized private Alva runtime still performs scoped component checks, a four-stage P4 evidence-quality pipeline, and structural classification/report review for BLACK.BOX-owned operations. Explicit `alva.build_ai_handoff` calls have been removed from public adapter code; the private Alva host may still assemble its own internal metadata, which BLACK.BOX does not publish. No private Alva source/wheel copied or modified. No extra Alva tab.
+
+**Execution status:** all exact-branch local unit and Windows frozen EXE tests **NOT RUN**. Prior test results may describe a superseded AI Handoff workflow. Do not merge this Draft until actual Windows/Ubuntu tests, CLI rejection and first-run human reports pass. See `docs/HUMAN_FIRST_PRODUCT.md`.
+
+
 ## Latest UI integration — use evidence in ordinary BLACK.BOX Reports (2026-10-22)
 
 The stacked Alva P4 branch also adds a **generic evidence-quality summary in
