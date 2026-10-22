@@ -57,6 +57,20 @@ class DurableDesktopIntegration(unittest.TestCase):
             self.assertFalse(comparison["regression_proven"])
             self.assertIn("peak_rss_bytes", comparison["metrics"])
 
+    def test_pid_reuse_between_attach_and_start_is_rejected_without_disk_writes(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            observer = ReadOnlyProbe(output_root=root)
+            observer.attach(os.getpid())
+            with patch("blackbox_universal.monitor.PsutilProbe") as probe:
+                probe.return_value.created = observer._core.created + 10
+                from blackbox_rep_alva.contracts import ObserverError
+                with self.assertRaises(ObserverError) as error:
+                    observer.start()
+                self.assertEqual(error.exception.code, "PID_REUSED")
+            self.assertFalse(observer.active)
+            self.assertFalse(list(root.iterdir()))
+
     def test_exit_closes_and_preserves_durable_evidence(self):
         with tempfile.TemporaryDirectory() as temp:
             observer = ReadOnlyProbe(Path(temp))
