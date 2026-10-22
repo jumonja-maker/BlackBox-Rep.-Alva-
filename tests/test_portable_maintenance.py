@@ -13,6 +13,7 @@ from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import patch
+from urllib.error import HTTPError
 import zipfile
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -20,7 +21,8 @@ from PySide6.QtWidgets import QApplication, QMessageBox
 
 from blackbox_universal.releases import (
     ARCHIVE_NAME, EXECUTABLE_NAME, INSTALL_MARKER, MAINTENANCE_NAME,
-    RELEASE_API, Release, check_latest_release, stage_release, version_tuple,
+    RELEASE_API, RELEASES_API, NoOfficialRelease, Release, check_latest_release,
+    stage_release, version_tuple,
     _extract_release,
 )
 from blackbox_universal.maintenance import (
@@ -87,6 +89,48 @@ class ReleasesTests(unittest.TestCase):
             metadata["assets"][0]["browser_download_url"] = "https://evil.invalid/file.zip"
             with self.assertRaisesRegex(ValueError, "RELEASE_ASSET_URL_UNTRUSTED"):
                 check_latest_release("0.1.0")
+
+    def test_no_official_release_has_a_separate_status(self):
+        seen = []
+        def fake_response(url):
+            seen.append(url)
+            if url == RELEASE_API:
+                raise HTTPError(url, 404, "Not Found", None, None)
+            self.assertEqual(url, RELEASES_API)
+            return BytesIO(b"[]")
+        with patch("blackbox_universal.releases._open", side_effect=fake_response):
+            with self.assertRaises(NoOfficialRelease):
+                check_latest_release("0.3.0")
+        self.assertEqual(seen, [RELEASE_API, RELEASES_API])
+
+    def test_prerelease_only_does_not_claim_official_update(self):
+        def fake_response(url):
+            if url == RELEASE_API:
+                raise HTTPError(url, 404, "Not Found", None, None)
+            return BytesIO(json.dumps([{"draft": False, "prerelease": True}]).encode())
+        with patch("blackbox_universal.releases._open", side_effect=fake_response):
+            with self.assertRaises(NoOfficialRelease):
+                check_latest_release("0.3.0")
+
+    def test_404_for_missing_repo_is_still_real_error(self):
+        def unavailable(url):
+            raise HTTPError(url, 404, "Not Found", None, None)
+        with patch("blackbox_universal.releases._open", side_effect=unavailable):
+            with self.assertRaises(HTTPError):
+                check_latest_release("0.3.0")
+
+    def test_inconsistent_or_corrupt_release_listing_not_accepted(self):
+        def check(data):
+            def fake_response(url):
+                if url == RELEASE_API:
+                    raise HTTPError(url, 404, "Not Found", None, None)
+                return BytesIO(data)
+            with patch("blackbox_universal.releases._open", side_effect=fake_response):
+                check_latest_release("0.3.0")
+        with self.assertRaisesRegex(ValueError, "RELEASE_LIST_INVALID"):
+            check(b'{"message":"Not Found"}')
+        with self.assertRaisesRegex(ValueError, "RELEASE_METADATA_INCONSISTENT"):
+            check(b'[{"draft":false,"prerelease":false}]')
 
     def test_clean_verified_staging_then_corrupt_download_refused(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -210,6 +254,19 @@ class LanguageAndFeedbackQtTests(unittest.TestCase):
         self.window._refresh_update_button()
         self.assertTrue(self.window.update_button.property("available"))
         self.assertIn("UPDATE AVAILABLE", self.window.update_button.text())
+
+    def test_no_official_release_is_not_a_network_failure_or_a_green_update(self):
+        self.window._available_release = None
+        self.window._set_language("EN")
+        self.window._update_checked(None, "NO_OFFICIAL_RELEASE")
+        self.assertIn("NO OFFICIAL RELEASE", self.window.update_button.text())
+        self.assertFalse(self.window.update_button.property("available"))
+        self.assertIn("not automatic updates", self.window.update_button.toolTip())
+        self.window._set_language("RU")
+        self.window._update_checked(None, "NO_OFFICIAL_RELEASE")
+        self.assertIn("РЕЛИЗОВ ПОКА НЕТ", self.window.update_button.text())
+        self.window._update_checked(None, "HTTPError")
+        self.assertIn("ПРОВЕРКА НЕ УДАЛАСЬ", self.window.update_button.text())
 
     def test_uninstall_refuses_unmarked_source_tree(self):
         with patch("blackbox_universal.window.runtime_directory", return_value=None), \
