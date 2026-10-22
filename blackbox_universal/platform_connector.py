@@ -196,7 +196,7 @@ def bundled_runtime_available() -> bool:
         raw = marker.read_bytes()
         if len(raw) > 4096:
             return False
-        info = json.loads(raw.decode("utf-8"))
+        info = json.loads(raw.decode("utf-8-sig"))
     except (OSError, ValueError, UnicodeError):
         return False
     if (type(info) is not dict or info.keys() != {
