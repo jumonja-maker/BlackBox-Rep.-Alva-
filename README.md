@@ -117,12 +117,13 @@ The core also has a separate Python CLI (not required for normal Windows users):
 
 ```sh
 python -m blackbox_rep_alva list
+mkdir sessions
 python -m blackbox_rep_alva record --pid 1234 --output sessions --duration 10 --interval 0.5
-python -m blackbox_rep_alva summary sessions/session-<id>
-python -m blackbox_rep_alva compare sessions/session-<id1> sessions/session-<id2>
+python -m blackbox_rep_alva summary "sessions/session-REPLACE_WITH_ID"
+python -m blackbox_rep_alva compare "sessions/session-REPLACE_WITH_FIRST_ID" "sessions/session-REPLACE_WITH_SECOND_ID"
 ```
 
-For CLI recording, `sessions` must already exist. The `export`, `handoff` and `alva-check` CLI commands are also available; see `python -m blackbox_rep_alva --help`. Run tests with `python -m unittest discover -s tests -v`.
+For CLI recording, replace PID `1234` with the target PID and replace session placeholders with the actual folder name printed by `record`. The `export`, `handoff` and `alva-check` CLI commands are also available; see `python -m blackbox_rep_alva --help`. Run tests with `python -m unittest discover -s tests -v`.
 
 ## Privacy, limitations and project status
 
