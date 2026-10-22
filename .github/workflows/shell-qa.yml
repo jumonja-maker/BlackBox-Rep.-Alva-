@@ -1,0 +1,182 @@
+name: BLACK.BOX Universal - Shell QA and Windows portable
+
+on:
+  push:
+    branches:
+      - main
+      - feature/universal-integrated-desktop-v01
+      - feature/retro-feedback-i18n-maintenance-20261022
+      - feature/release-v030-alva-integration-20261022
+      - feature/human-first-integration-qa-20261022
+    tags:
+      - "v*.*.*"
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  shell-tests:
+    name: Windows shell / read-only observer
+    runs-on: windows-latest
+    timeout-minutes: 18
+    env:
+      QT_QPA_PLATFORM: offscreen
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          architecture: x64
+          cache: pip
+      - name: Install integrated shell and observer core
+        run: |
+          python -m pip install -r requirements.txt
+          python -m pip install -e .
+      - name: Test real six-page Qt interface and process observer
+        run: python -m unittest discover -s tests -v
+      - name: Real Qt offscreen startup smoke
+        run: python app.py --smoke
+      - name: Validate human-first CLI (no platform command)
+        shell: pwsh
+        run: |
+          $helpText = python -m blackbox_rep_alva --help
+          if ($LASTEXITCODE -ne 0) { throw 'CLI help failed' }
+          if (($helpText -join ' ') -match 'alva-check|handoff') { throw 'Deprecated commands visible' }
+
+  linux-tests:
+    name: Linux compatibility check (independent of Windows release)
+    runs-on: ubuntu-latest
+    timeout-minutes: 18
+    env:
+      QT_QPA_PLATFORM: offscreen
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          architecture: x64
+          cache: pip
+      - name: Install Linux Qt shared-library prerequisites
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y libegl1 libopengl0 libxcb-cursor0 libxkbcommon-x11-0
+      - name: Install integrated shell and observer core
+        run: |
+          python -m pip install -r requirements.txt
+          python -m pip install -e .
+      - name: Qt offscreen unit checks
+        run: python -m unittest discover -s tests -v
+      - name: Qt offscreen startup smoke
+        run: python app.py --smoke
+      - name: Validate independent observer CLI
+        run: python -m blackbox_rep_alva --help
+
+  windows-portable:
+    name: Windows portable exe
+    needs: shell-tests
+    runs-on: windows-latest
+    timeout-minutes: 30
+    env:
+      QT_QPA_PLATFORM: offscreen
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          architecture: x64
+          cache: pip
+      - name: Install release tooling and public observer core
+        run: |
+          python -m pip install -r requirements.txt "pyinstaller>=6,<7" "Pillow>=10,<13"
+          python -m pip install -e .
+      - name: Generate original retro Windows icon
+        run: python tools/generate_icon.py
+      - name: Build separate Windows maintenance EXE
+        run: python -m PyInstaller --noconfirm --clean --onefile --windowed --name BLACK.BOX-Maintenance maintenance_entry.py
+      - name: Build BLACK.BOX Universal desktop with original icon
+        shell: pwsh
+        run: |
+          python -m PyInstaller --noconfirm --clean --onedir --windowed --collect-submodules blackbox_rep_alva --collect-submodules blackbox_universal --add-data "src/blackbox_rep_alva/alva_sidecar_worker.py;alva_worker" --add-data "src/blackbox_rep_alva/alva_evidence_pipeline.py;alva_worker" --icon assets/blackbox.ico --add-data "assets/blackbox.png;assets" --name BLACK.BOX-Universal app.py
+          if ($LASTEXITCODE -ne 0) { throw 'GUI build failed' }
+          Copy-Item "dist/BLACK.BOX-Maintenance.exe" "dist/BLACK.BOX-Universal/BLACK.BOX-Maintenance.exe"
+          Copy-Item ".blackbox-portable.json" "dist/BLACK.BOX-Universal/.blackbox-portable.json"
+          if (-not (Test-Path "dist/BLACK.BOX-Universal/BLACK.BOX-Maintenance.exe")) { throw 'Maintenance helper missing' }
+          if (-not (Test-Path "dist/BLACK.BOX-Universal/_internal/assets/blackbox.png")) { throw 'App icon missing' }
+          if (-not (Test-Path "dist/BLACK.BOX-Universal/_internal/alva_worker/alva_sidecar_worker.py")) {
+            throw 'Public Alva sidecar script not bundled with EXE'
+          }
+          if (-not (Test-Path "dist/BLACK.BOX-Universal/_internal/alva_worker/alva_evidence_pipeline.py")) {
+            throw 'Public evidence pipeline helper missing from Windows portable build'
+          }
+      - name: Smoke-test the actual frozen Windows EXE
+        shell: pwsh
+        run: |
+          $exe = Join-Path $PWD "dist\BLACK.BOX-Universal\BLACK.BOX-Universal.exe"
+          if (-not (Test-Path $exe)) { throw "Missing portable EXE" }
+          $job = Start-Process -FilePath $exe -ArgumentList "--smoke" -PassThru -Wait
+          if ($job.ExitCode -ne 0) { throw "Frozen Windows GUI failed: $($job.ExitCode)" }
+          Write-Host "Portable GUI smoke PASS"
+          $maintenance = Join-Path $PWD "dist\BLACK.BOX-Universal\BLACK.BOX-Maintenance.exe"
+          $check = Start-Process -FilePath $maintenance -ArgumentList "--help" -PassThru -Wait
+          if ($check.ExitCode -ne 0) { throw "Maintenance EXE failed smoke: $($check.ExitCode)" }
+      - name: Include public source license and distribution notices
+        shell: pwsh
+        run: |
+          $output = "dist\BLACK.BOX-Universal"
+          Copy-Item -LiteralPath "LICENSE" -Destination "$output\LICENSE" -Force
+          Copy-Item -LiteralPath "README.md" -Destination "$output\README.md" -Force
+          Copy-Item -LiteralPath "README.ru.md" -Destination "$output\README.ru.md" -Force
+          Copy-Item -LiteralPath "docs\LICENSING.md" -Destination "$output\LICENSING.md" -Force
+          if (-not (Test-Path "$output\LICENSE")) { throw "Missing public application license" }
+          if (-not (Test-Path "$output\README.ru.md")) { throw "Russian README missing from Windows release" }
+      - name: Package portable folder without installing anything
+        shell: pwsh
+        run: |
+          Compress-Archive -LiteralPath "dist\BLACK.BOX-Universal" -DestinationPath "BLACK.BOX-Universal-Windows.zip" -Force
+          if (-not (Test-Path "BLACK.BOX-Universal-Windows.zip")) { throw "ZIP missing" }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: BLACK.BOX-Universal-Windows
+          path: BLACK.BOX-Universal-Windows.zip
+          if-no-files-found: error
+          retention-days: 14
+
+  publish-release:
+    name: Publish only fully tested versioned release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [linux-tests, windows-portable]
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Check release tag matches application version
+        shell: pwsh
+        run: |
+          $version = (python -c "from blackbox_universal import __version__; print(__version__)").Trim()
+          if ("v" + $version -ne $env:GITHUB_REF_NAME) {
+            throw "Release tag must match __version__: v$version"
+          }
+      - uses: actions/download-artifact@v4
+        with:
+          name: BLACK.BOX-Universal-Windows
+          path: ./release
+      - name: Publish SHA256-digested GitHub Release asset
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $zip = "release/BLACK.BOX-Universal-Windows.zip"
+          if (-not (Test-Path $zip)) { throw 'Portable release ZIP missing' }
+          gh release create "$env:GITHUB_REF_NAME" "$zip" --verify-tag --title "BLACK.BOX Universal $env:GITHUB_REF_NAME" --notes "Portable Windows application. Logs are preserved on update/uninstall. Alva is optional and NOT bundled. Asset SHA256 digest is published by GitHub Releases."

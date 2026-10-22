@@ -1,5 +1,18 @@
 # Release checklist — not a release certificate
 
+## Human-first release gate (current policy)
+
+- [x] No private Alva source/wheel in public app or EXE; optional real runtime separately authorized.
+- [x] Exactly five user pages, no Alva Lab or platform-setup controls.
+- [x] Stop outputs SQLite + JSON + offline human-readable HTML; no `ai-handoff.json`; user CLI has no `handoff` or `alva-check` command.
+- [x] Internal P4 checks use bounded observer evidence and never prove target root cause.
+- [x] Automated Windows + Ubuntu + frozen EXE at integration SHA `32b399b93f987bce3122164b2875f2de943cd236`; later changes require fresh CI.
+- [ ] Authorized genuine Alva SHA-and-wheel-verified runtime test (not synthetic).
+- [ ] Full clean Windows user acceptance of portable EXE, real target process, report, comparison and update/uninstall.
+- [ ] Exact release dependency license inventory, privacy/security review and maintenance rollback under AV locks.
+- [ ] Approved final HEAD, documented acceptance and official tagged release. Do not merge merely because a Draft is mergeable.
+
+
 **Current status:** integrated standalone GUI developer preview. A
 Windows + Linux CI suite and real frozen Windows EXE smoke have passed on
 one integrated commit; clean physical Windows desktop sign-off and
@@ -16,9 +29,9 @@ private Alva runtime QA remain outstanding. See docs/QA_EVIDENCE.md.
 ## Gate B — product
 
 - [x] Real CLI process observation and local SQLite/JSON/HTML reports implemented.
-- [x] AI-independent/offline runtime paths with separate AI evidence export.
+- [x] Human-first, offline default: SQLite/JSON/HTML reports only, no AI handoff or private Alva requirement.
 - [ ] Windows-native tested process enumeration/attach/process-reuse/AccessDenied coverage.
-- [x] Six-screen functional Qt GUI built and automated Windows/Linux tests PASS.
+- [x] Five-screen (Overview, Processes, Event Log, Reports, Settings) Qt GUI; no Alva Lab or consumer platform controls; Windows/Linux automated tests PASS at recorded SHA.
 - [ ] Actual human visual review on Windows at target resolutions and scaling.
 - [x] Portable Windows PyInstaller EXE built and `--smoke` launched by GitHub Actions.
 - [ ] Clean end-user Windows host test, OS rights and antivirus behavior review.
@@ -36,7 +49,7 @@ private Alva runtime QA remain outstanding. See docs/QA_EVIDENCE.md.
 ## Gate D — reproducibility
 
 - [x] Executable local unittest command documented.
-- [x] Ubuntu and Windows automated test matrix on pinned commit `cb1aef6a`.
+- [x] Windows/Ubuntu tests PASS on pinned integration commit `32b399b93f987bce3122164b2875f2de943cd236` (65 tests each).
 - [ ] Re-run all release gates on final publication SHA and archive evidence.
 - [ ] Manual rollback test of Alva wheel version and fallback standalone mode.
 - [ ] Third-party independent newcomer can set up from docs and locate known seeded defect.

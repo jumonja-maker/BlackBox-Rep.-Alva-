@@ -1,5 +1,17 @@
 # BLACK.BOX Universal v0.3 — настоящая внешняя Alva без распространения закрытого кода
 
+> **Historical specification superseded for the UI (2026-10-22).** The
+> Alva Lab page, CONNECT EXTERNAL ALVA and DISCONNECT buttons described
+> below have been removed in Draft
+> `feature/internal-diagnostics-unbranded-20261022`.
+> For the current proposal see
+> [internal diagnostics without a branded screen](INTERNAL_DIAGNOSTICS_NO_BRAND.md).
+> The underlying scoped sidecar remains optional and can run after a
+> finalized session **only if a trusted runtime was previously authorized**.
+> This document records the older v0.3 UI behavior and must not be presented
+> as current end-user instructions. Alva remains private and NOT bundled.
+
+
 **Статус:** код интеграции реализован; испытание с установленной приватной
 Alva из коммита `a44297c5408628d9447bbf7db394b95ebd33fa20`
 требует отдельной авторизованной среды. Не смешивать CI с имитацией
