@@ -134,10 +134,12 @@ def _validate_output(result: object) -> dict:
             "accepted_checks", "observed_pipeline_status",
             "verification_coverage", "first_unverified_component",
             "next_action_code", "record_status", "handoff_review_required",
-            "permission_to_act", "root_cause_proven", "execution_attested"}
+            "permission_to_act", "root_cause_proven", "execution_attested",
+            "host_trace_checks"}
         stages = (
             "blackbox.evidence.samples", "blackbox.evidence.lifecycle",
             "blackbox.evidence.metrics", "blackbox.evidence.errors")
+        checks = data.get("host_trace_checks") if type(data) is dict else None
         if (type(data) is not dict or data.keys() != required_extended or
                 data["diagnostic_pipeline"] != "REAL_ALVA_P4_CHECKED_PIPELINE" or
                 type(data["declared_stages"]) is not int or data["declared_stages"] != 4 or
@@ -156,8 +158,24 @@ def _validate_output(result: object) -> dict:
                 data["handoff_review_required"] is not True or
                 data["permission_to_act"] is not False or
                 data["root_cause_proven"] is not False or
-                data["execution_attested"] is not False):
+                data["execution_attested"] is not False or
+                type(checks) is not list or len(checks) not in (0, 3)):
             raise ConnectionError("ALVA_EXTENDED_EVIDENCE_REJECTED")
+        names = OPS
+        for item, expected in zip(checks, names):
+            if (type(item) is not dict or item.keys() != {
+                    "component", "component_execution", "trace_step_coverage",
+                    "classification_source", "classification_confidence",
+                    "record_status", "root_cause_proven", "permission_to_act"} or
+                    item["component"] != expected or
+                    item["component_execution"] != "ok" or
+                    item["trace_step_coverage"] != "COMPLETE_SUCCESS_PATH" or
+                    item["classification_source"] != "UNKNOWN" or
+                    item["classification_confidence"] != "UNKNOWN" or
+                    item["record_status"] != "STRUCTURALLY_CONSISTENT_UNAUTHENTICATED" or
+                    item["root_cause_proven"] is not False or
+                    item["permission_to_act"] is not False):
+                raise ConnectionError("ALVA_HOST_TRACE_REJECTED")
     return result
 
 
