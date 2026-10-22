@@ -263,7 +263,7 @@ class UniversalWindow(QMainWindow):
         rule.setStyleSheet("background: #837789;")
         side.addWidget(rule)
         side.addWidget(_label("    NO CLOUD · NO INJECTION", "caption"))
-        side.addWidget(_label("    ALVA SLOT: PENDING", "caption"))
+        side.addWidget(_label("    ALVA: OPTIONAL", "caption"))
         body_layout.addWidget(sidebar)
 
         self.stack = QStackedWidget()
@@ -651,6 +651,22 @@ class UniversalWindow(QMainWindow):
         self.auto_check.setText(
             "Проверять GitHub Releases при запуске" if language == "RU"
             else "Check GitHub Releases when the app starts")
+        self.chart.set_language(language)
+        if self.alva_output.toPlainText() in (
+                "Alva is optional. The standalone recorder and AI Handoff work without it. "
+                "Use CHECK to inspect an explicitly installed Alva platform; "
+                "unverified import is not proof of provenance.",
+                "Alva необязательна. Мониторинг и AI Handoff работают без неё. "
+                "Кнопка проверки обращается к отдельно установленной Alva; "
+                "импорт API не подтверждает происхождение платформы."):
+            self.alva_output.setPlainText(
+                "Alva необязательна. Мониторинг и AI Handoff работают без неё. "
+                "Кнопка проверки обращается к отдельно установленной Alva; "
+                "импорт API не подтверждает происхождение платформы."
+                if language == "RU" else
+                "Alva is optional. The standalone recorder and AI Handoff work without it. "
+                "Use CHECK to inspect an explicitly installed Alva platform; "
+                "unverified import is not proof of provenance.")
         self.lang_ru.setProperty("active", language == "RU")
         self.lang_en.setProperty("active", language == "EN")
         for button in (self.lang_ru, self.lang_en):
