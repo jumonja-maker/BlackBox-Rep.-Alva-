@@ -102,7 +102,7 @@ RU = {
 "PRIVACY & SECURITY":"КОНФИДЕНЦИАЛЬНОСТЬ",
 "• Read-only process counters\n• No code injection or target manipulation\n• No automatic upload or account sign-in\n• Report export only when explicitly requested\n• No administrator privileges requested by this shell":"• Только чтение системных счётчиков\n• Без внедрения кода или управления целью\n• Без автоматической отправки данных\n• Дополнительный экспорт только по запросу\n• Права администратора не запрашиваются",
 "About BLACK.BOX":"О BLACK.BOX",
-"PREVIEW / v0.2":"ПРЕДПРОСМОТР / v0.2",
+"PREVIEW / v0.3":"ПРЕДПРОСМОТР / v0.3",
 "A public-domain-independent desktop shell built from original PySide6 widgets. Inspired by classic desktop window geometry and warm retro illustrations, not copied system artwork.":"Оригинальный интерфейс на PySide6, вдохновлённый классическими ОС и тёплым ретро-дизайном.",
 "Alva adapter: pending official integration basis. Deep tracing, Windows ETW and crash dump analysis are not present in this build.":"Alva подключается по желанию. Глубокая ETW-трассировка и анализ дампов в этой версии отсутствуют.",
 "Selected root process":"Выбранный процесс",
