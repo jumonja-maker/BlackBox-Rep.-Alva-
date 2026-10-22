@@ -119,12 +119,11 @@ def _validate_output(result: object) -> dict:
     for op, expected in zip(result["operations"], OPS):
         if (type(op) is not dict or
                 op.keys() != {"component", "execution_state", "contract_verdict",
-                              "visibility", "ai_handoff_status", "observation"} or
+                              "visibility", "observation"} or
                 op["component"] != expected or
                 op["execution_state"] != "RESPONSE_AVAILABLE" or
                 op["contract_verdict"] != "CHECK_ACCEPTED" or
                 op["visibility"] != "SCOPE_ONLY" or
-                op["ai_handoff_status"] != "ok" or
                 type(op["observation"]) is not dict):
             raise ConnectionError("ALVA_WORKER_OPERATION_REJECTED")
     if schema == 2:
@@ -133,7 +132,7 @@ def _validate_output(result: object) -> dict:
             "diagnostic_pipeline", "declared_stages", "executed_stages",
             "accepted_checks", "observed_pipeline_status",
             "verification_coverage", "first_unverified_component",
-            "next_action_code", "record_status", "handoff_review_required",
+            "next_action_code", "record_status", "human_review_required",
             "permission_to_act", "root_cause_proven", "execution_attested",
             "host_trace_checks"}
         stages = (
@@ -155,7 +154,7 @@ def _validate_output(result: object) -> dict:
                 type(data["next_action_code"]) is not str or
                 not 1 <= len(data["next_action_code"]) <= 64 or
                 data["record_status"] != "STRUCTURALLY_CONSISTENT_UNAUTHENTICATED" or
-                data["handoff_review_required"] is not True or
+                data["human_review_required"] is not True or
                 data["permission_to_act"] is not False or
                 data["root_cause_proven"] is not False or
                 data["execution_attested"] is not False or
