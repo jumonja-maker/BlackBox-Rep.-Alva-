@@ -118,8 +118,8 @@ class TrendChart(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._cpu: list[float] = []
-        self._ram: list[float] = []
+        self._cpu: list[float | None] = []
+        self._ram: list[float | None] = []
         self.language = "EN"
         self.setMinimumHeight(205)
         self.setAccessibleName("CPU and memory trend graph")
@@ -130,8 +130,10 @@ class TrendChart(QWidget):
 
     def set_samples(self, samples: list[dict]) -> None:
         window = samples[-100:]
-        self._cpu = [float(x.get("cpu_pct", 0)) for x in window]
-        self._ram = [float(x.get("rss_mb", 0)) for x in window]
+        self._cpu = [float(x["cpu_pct"]) if x.get("cpu_pct") is not None
+                     else None for x in window]
+        self._ram = [float(x["rss_mb"]) if x.get("rss_mb") is not None
+                     else None for x in window]
         self.update()
 
     def paintEvent(self, event):
@@ -161,8 +163,8 @@ class TrendChart(QWidget):
             painter.end()
             return
 
-        def draw_series(values: list[float], color: str, max_value: float):
-            if len(values) == 1:
+        def draw_series(values: list[float | None], color: str, max_value: float):
+            if len(values) == 1 and values[0] is not None:
                 painter.setBrush(QColor(color))
                 painter.setPen(Qt.PenStyle.NoPen)
                 painter.drawEllipse(QPointF(plot.left(), plot.bottom() -
@@ -170,11 +172,16 @@ class TrendChart(QWidget):
                                     4, 4)
                 return
             path = QPainterPath()
+            active = False
             for idx, value in enumerate(values):
-                x = plot.left() + plot.width() * idx / (len(values) - 1)
+                if value is None:
+                    active = False
+                    continue
+                x = plot.left() + plot.width() * idx / max(len(values) - 1, 1)
                 y = plot.bottom() - plot.height() * min(max(value / max_value, 0), 1)
-                if idx == 0:
+                if not active:
                     path.moveTo(x, y)
+                    active = True
                 else:
                     path.lineTo(x, y)
             painter.setPen(QPen(QColor(color), 2.8))
@@ -183,7 +190,9 @@ class TrendChart(QWidget):
 
         # RAM is a relative trend, so CPU% and RAM colors remain distinct.
         draw_series(self._cpu, COLORS["coral"], 100)
-        peak_ram = max(max(self._ram, default=1), 1.0)
+        peak_ram = max((value for value in self._ram if value is not None),
+                       default=0.0)
+        peak_ram = max(peak_ram, 1.0)
         draw_series(self._ram, COLORS["teal"], peak_ram * 1.08)
         painter.setFont(QFont("Consolas", 9))
         painter.setPen(QColor(COLORS["coral"]))
