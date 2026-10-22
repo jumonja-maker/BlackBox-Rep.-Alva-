@@ -1,0 +1,54 @@
+# Real Alva P4 evidence processing in BLACK.BOX (developer integration)
+
+**Status: Draft / PREVIEW, 2026-10-22.** Source branch `feature/alva-evidence-pipeline-20261022`, stacked on the **unbranded five-screen** `feature/internal-diagnostics-unbranded-20261022`. The Alva GitHub repository stays PRIVATE. No private source or wheel is copied into BLACK.BOX or the public EXE.
+
+## Why this exists
+
+Previously BLACK.BOX called only three scoped `ComponentHost` operations that checked presence of observer metrics, completion status and observer errors. That was a valid narrow API consumer but did **not** meaningfully exploit Alva's verified pipeline, review, or structured handoff capabilities.
+
+This integration adds a real second layer in the **authorized external Python** when Alva supports its P4 APIs. It is invoked **after session completion**, within the already existing non-UI sidecar, and does **not** re-read the target application or repeat any process mutation.
+
+## Actual Alva features exercised
+
+| Alva API / facility | Execution in BLACK.BOX |
+|---|---|
+| `Component`, `CapabilityRegistry` indirectly, `ComponentHost` lifecycle | Three registered BLACK.BOX observer operations, permissioned and closed |
+| `open_scope`, `invoke_with_diagnostics` | Each scoped operation invoked once, bounded and with an Alva AI Handoff receipt |
+| `invoke_adapter_checked` | App-owned predicate checks shape of each scoped observation |
+| `run_checked_pipeline` (P4 checked facade, invokes `run_verified_pipeline`) | Four explicitly declared in-memory data-quality stages |
+| `review_pipeline_evidence` | Validates that the resulting Alva pipeline report is structurally consistent **but unauthenticated** |
+| `build_ai_handoff` | Produces limited machine-readable handoff (never a command/authorization) |
+| `OperationTrace` | Alva instruments the scoped and pipeline operations internally; raw data, secrets and process logs are not copied to the extended result |
+
+### Four genuine P4 stages
+
+1. `blackbox.evidence.samples` — confirms that a finalized inspection has samples. A zero-sample session is an **observer-evidence gap**, not proof of a bug in the observed application.
+2. `blackbox.evidence.lifecycle` — confirms a finalized session was closed.
+3. `blackbox.evidence.metrics` — checks that a session with samples has at least one CPU/RSS resource signal.
+4. `blackbox.evidence.errors` — verifies the bounded, nonnegative count of observer errors (does **not** claim no errors existed).
+
+Each runs at most once, in memory, over the same small bounded summary sent by the original sidecar. Alva preflights all declarations before any stage executes; at the first rejected stage, later ones do not execute. The resulting report separates `status:ok` (the diagnostic report was assembled) from `observed_pipeline_status:error` (a quality predicate rejected observer evidence).
+
+The new wire result uses `bridge_schema:2` and `extended_diagnostics`; the parent validates exact keys, categorical values, stage count, bounded action code, `execution_attested:false`, `root_cause_proven:false`, `permission_to_act:false` and the **structurally consistent / unauthenticated** marker. Schema-1 result remains supported for older authorized Alva installations lacking the full P4 facade. If a supported facade exists but rejects or fails, the process reports an explicit failure; **it cannot silently downgrade** to a synthetic success.
+
+## Distribution and Windows frozen build
+
+The isolated external worker executes `python.exe -I -u alva_sidecar_worker.py` in an explicitly authorized Python environment that contains a separately installed genuine Alva package. Python `-I` intentionally hides untrusted `PYTHONPATH`, so the new **public** `alva_evidence_pipeline.py` file is loaded from a fixed location adjacent to the public sidecar via a checked importlib file spec. The existing Windows portable build definition now includes **both** public sidecar files under `_internal/alva_worker/`. This is *not* a copy of private Alva.
+
+BLACK.BOX's own SQLite/JSON/HTML/AI Handoff remain available without Python or Alva in the user's environment. The UI still exposes only **Overview / Processes / Event Log / Reports / Settings**. There is **no Alva Lab or install button**.
+
+## Strict limits
+
+- **No true Alva Runtime is included** for ordinary downloaders. Automatic genuine Alva execution for everyone is impossible under the current decision to keep the runtime undistributed and avoid servers. Do not claim all customers receive full Alva features.
+- P4 predicates validate *app-declared observer evidence*, not the correctness of the observed arbitrary EXE. Proven application source lines, automatic crash attribution, Windows ETW, memory dumps, cloud AI and automatic repair are NOT IMPLEMENTED.
+- Full Alva's `classify_failure`, `build_report` and `locate_source` on source-trace evidence are **not automatically applied to another application's internals**. `locate_source` would require an explicit trusted source mapping, which passive process sampling does not have. Document Engine V3 and NETALVA are intentionally unrelated/excluded.
+- The private Alva project's own P4 ≥2x developer-acceleration target remains unproven; this consumer PR is not an independent benchmark.
+
+## Acceptance gates, not yet passed
+
+1. Linux and Windows tests of the exact branch SHA for `tests/test_alva_p4_evidence.py` plus the full repository suite; packaged PyInstaller EXE smoke must verify **both** sidecar files are in the built archive.
+2. In a **private authorized** environment with installed Alva SHA `a44297c5408628d9447bbf7db394b95ebd33fa20`, run source worker `-I` with a bounded recorded summary. Confirm schema 2, 3 scoped calls, 4 P4 stages, completed host, conservative evidence/permission flags, and that the parent validates the result. Capture SHA and wheel digest **privately**; do not upload wheel to public CI.
+3. Negative scenarios: empty samples, interrupted session, absent CPU/RSS, wrong API, malformed / injected output, no Alva environment and subprocess timeout. Original reports must survive.
+4. Only after independent QA may this Draft be reviewed for merging. Previous tested commits **cannot certify** this new SHA.
+
+**Executed status:** source code, strict v2 validation, tests and Windows packaging changes are committed. Actual full-suite local/Windows runner, Windows EXE, real installed private Alva and authenticated wheel identity **NOT RUN** as part of this PR.
