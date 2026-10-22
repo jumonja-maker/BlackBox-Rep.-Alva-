@@ -69,6 +69,12 @@ def _public_evidence_pipeline():
     The frozen EXE must package this public helper beside the worker; it is
     not a private platform import and never uses PYTHONPATH or the target app.
     """
+    # In the PyInstaller bundle this module is imported as a proper package.
+    # Isolated standalone (-I) execution must still use its adjacent public
+    # helper, because external Python does not know the BLACK.BOX package.
+    if __package__ == "blackbox_rep_alva":
+        from blackbox_rep_alva import alva_evidence_pipeline
+        return alva_evidence_pipeline
     path = Path(__file__).resolve().with_name("alva_evidence_pipeline.py")
     if not path.is_file() or path.is_symlink():
         raise ValueError("PUBLIC_EVIDENCE_PIPELINE_MISSING")
