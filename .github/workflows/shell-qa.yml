@@ -14,6 +14,10 @@ on:
       - main
   workflow_dispatch:
 
+concurrency:
+  group: blackbox-public-qa-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
