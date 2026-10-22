@@ -1,4 +1,4 @@
-name: BLACK.BOX Universal - Shell QA and Windows portable
+name: BLACK.BOX Universal - public standalone QA (NOT the full Alva release)
 
 on:
   push:
@@ -8,8 +8,7 @@ on:
       - feature/retro-feedback-i18n-maintenance-20261022
       - feature/release-v030-alva-integration-20261022
       - feature/human-first-integration-qa-20261022
-    tags:
-      - "v*.*.*"
+      - feature/alva-bundled-consumer-windows-20261022-00
   pull_request:
     branches:
       - main
@@ -143,40 +142,12 @@ jobs:
           if (-not (Test-Path "BLACK.BOX-Universal-Windows.zip")) { throw "ZIP missing" }
       - uses: actions/upload-artifact@v4
         with:
-          name: BLACK.BOX-Universal-Windows
+          name: BLACKBOX-STANDALONE-QA-NO-ALVA
           path: BLACK.BOX-Universal-Windows.zip
           if-no-files-found: error
           retention-days: 14
 
-  publish-release:
-    name: Publish only fully tested versioned release
-    if: startsWith(github.ref, 'refs/tags/v')
-    needs: [linux-tests, windows-portable]
-    runs-on: windows-latest
-    permissions:
-      contents: write
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-      - name: Check release tag matches application version
-        shell: pwsh
-        run: |
-          $version = (python -c "from blackbox_universal import __version__; print(__version__)").Trim()
-          if ("v" + $version -ne $env:GITHUB_REF_NAME) {
-            throw "Release tag must match __version__: v$version"
-          }
-      - uses: actions/download-artifact@v4
-        with:
-          name: BLACK.BOX-Universal-Windows
-          path: ./release
-      - name: Publish SHA256-digested GitHub Release asset
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          $zip = "release/BLACK.BOX-Universal-Windows.zip"
-          if (-not (Test-Path $zip)) { throw 'Portable release ZIP missing' }
-          gh release create "$env:GITHUB_REF_NAME" "$zip" --verify-tag --title "BLACK.BOX Universal $env:GITHUB_REF_NAME" --notes "Portable Windows application. Logs are preserved on update/uninstall. Alva is optional and NOT bundled. Asset SHA256 digest is published by GitHub Releases."
+
+# Full public releases are intentionally built by the private Alva repository
+# on the owner-approved dedicated Windows runner. Never publish a standalone
+# public-CI artifact under the official BLACK.BOX release asset name.
