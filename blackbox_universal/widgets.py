@@ -119,8 +119,13 @@ class TrendChart(QWidget):
         super().__init__(parent)
         self._cpu: list[float] = []
         self._ram: list[float] = []
+        self.language = "EN"
         self.setMinimumHeight(205)
         self.setAccessibleName("CPU and memory trend graph")
+
+    def set_language(self, language: str) -> None:
+        self.language = language
+        self.update()
 
     def set_samples(self, samples: list[dict]) -> None:
         window = samples[-100:]
@@ -150,7 +155,8 @@ class TrendChart(QWidget):
         if not self._cpu:
             painter.setPen(QColor("#867c92"))
             painter.drawText(plot, Qt.AlignmentFlag.AlignCenter,
-                             "AWAITING LIVE SAMPLES")
+                             ("ОЖИДАНИЕ ИЗМЕРЕНИЙ" if self.language == "RU"
+                              else "AWAITING LIVE SAMPLES"))
             painter.end()
             return
 
@@ -183,5 +189,6 @@ class TrendChart(QWidget):
         painter.drawText(47, self.height() - 9, "━━ CPU (%)")
         painter.setPen(QColor(COLORS["teal"]))
         painter.drawText(151, self.height() - 9,
-                         f"━━ RAM (relative; peak {peak_ram:.0f} MB)")
+                         (f"━━ ОЗУ (пик {peak_ram:.0f} МБ)" if self.language == "RU"
+                          else f"━━ RAM (relative; peak {peak_ram:.0f} MB)"))
         painter.end()
