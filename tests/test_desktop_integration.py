@@ -117,6 +117,30 @@ class InternalDiagnosticsWindowTest(unittest.TestCase):
                 finally:
                     window.close()
 
+    def test_bundled_alva_runs_automatically_without_python_or_tab(self):
+        with tempfile.TemporaryDirectory() as temp:
+            with patch("blackbox_universal.monitor._default_sessions_root",
+                       return_value=Path(temp)):
+                window = UniversalWindow()
+                window._timer.stop()
+                try:
+                    session = Path(temp) / "session"
+                    session.mkdir()
+                    (session / "report.json").write_text("{}", encoding="utf-8")
+                    window.probe.session_folder = session
+                    window._alva_interpreter = ""
+                    with patch("blackbox_universal.window.bundled_runtime_available",
+                               return_value=True), \
+                         patch.object(window, "_start_alva_worker") as launch:
+                        window._finalize_alva_if_configured()
+                        launch.assert_called_once_with(None, session, persist=True)
+                        window._finalize_alva_if_configured()
+                        launch.assert_called_once()
+                    self.assertNotIn("alva", window._page_ids)
+                    self.assertFalse(hasattr(window, "alva_connect"))
+                finally:
+                    window.close()
+
     def test_previously_authorized_runtime_runs_after_session_without_ui(self):
         with tempfile.TemporaryDirectory() as temp:
             with patch("blackbox_universal.monitor._default_sessions_root",
@@ -158,6 +182,26 @@ class InternalDiagnosticsWindowTest(unittest.TestCase):
                         "status": "ok", "reviewed_checks": 1,
                         "declared_checks": 4, "evidence_status": "error"}, "")
                     self.assertIn("1/4", window.evidence_status.text())
+                finally:
+                    window.close()
+
+    def test_bundled_check_failure_is_visible_without_platform_brand(self):
+        with tempfile.TemporaryDirectory() as temp:
+            with patch("blackbox_universal.monitor._default_sessions_root",
+                       return_value=Path(temp)):
+                window = UniversalWindow()
+                window._timer.stop()
+                try:
+                    window.probe.report_result = {"status": "ok"}
+                    with patch("blackbox_universal.window.bundled_runtime_available",
+                               return_value=True):
+                        window._private_diagnostics_result({
+                            "status": "error",
+                            "error_code": "BUNDLED_RUNTIME_CHECK_FAILED"}, "")
+                    self.assertIn("did not complete", window.evidence_status.text())
+                    self.assertNotIn("Alva", window.evidence_status.text())
+                    window._set_language("RU")
+                    self.assertIn("не завершена", window.evidence_status.text())
                 finally:
                     window.close()
 

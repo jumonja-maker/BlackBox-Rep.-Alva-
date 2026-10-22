@@ -178,6 +178,91 @@ def _validate_output(result: object) -> dict:
     return result
 
 
+def bundled_runtime_available() -> bool:
+    """Only owner-built frozen distributions carrying a release marker qualify.
+
+    This local marker is a packaging switch, not a cryptographic provenance
+    certificate. Public source builds and ordinary public CI artifacts omit it.
+    """
+    if not getattr(sys, "frozen", False):
+        return False
+    base = getattr(sys, "_MEIPASS", None)
+    if type(base) is not str:
+        return False
+    marker = Path(base) / "alva_runtime_manifest.json"
+    if not marker.is_file() or marker.is_symlink():
+        return False
+    try:
+        raw = marker.read_bytes()
+        if len(raw) > 4096:
+            return False
+        info = json.loads(raw.decode("utf-8-sig"))
+    except (OSError, ValueError, UnicodeError):
+        return False
+    if (type(info) is not dict or info.keys() != {
+            "schema_version", "runtime", "alva_commit", "blackbox_commit"} or
+            type(info["schema_version"]) is not int or info["schema_version"] != 1 or
+            info["runtime"] != "bundled" or
+            any(type(info[key]) is not str or len(info[key]) != 40 or
+                not all(ch in "0123456789abcdef" for ch in info[key])
+                for key in ("alva_commit", "blackbox_commit"))):
+        return False
+    return True
+
+
+def inspect_bundled(session: Path | None = None) -> dict:
+    """Execute genuine packaged Alva in the existing background Qt thread.
+
+    No interpreter selector, Python installation or network. Data are the same
+    tightly scoped summary already used for the optional isolated sidecar.
+    """
+    if not bundled_runtime_available():
+        raise ConnectionError("BUNDLED_RUNTIME_NOT_AVAILABLE")
+    packet = {"schema_version": 1,
+              "operation": "inspect" if session is not None else "ping",
+              "summary": _summary(session)}
+    # Importing this public helper never copies private Alva source to GitHub.
+    from blackbox_rep_alva import alva_sidecar_worker
+    try:
+        result = alva_sidecar_worker._run(packet)
+    except Exception:
+        raise ConnectionError("BUNDLED_RUNTIME_CHECK_FAILED") from None
+    return _validate_output(result)
+
+
+def _write_diagnostics(result: dict, session: Path, filename: str) -> dict:
+    """Append-only file in the completed session; never a false success."""
+    session = Path(session)
+    target = session / filename
+    try:
+        with target.open("x", encoding="utf-8") as out:
+            json.dump(result, out, ensure_ascii=False, sort_keys=True,
+                      indent=2, allow_nan=False)
+            out.write("\n")
+    except OSError:
+        return {"status": "error", "error_code": "EVIDENCE_WRITE_FAILED"}
+    overview = {"status": result["status"], "error_code": result.get("error_code"),
+                "component_count": result.get("component_count", 0),
+                "file": filename}
+    checked = result.get("extended_diagnostics")
+    if result["status"] == "ok" and type(checked) is dict:
+        overview["reviewed_checks"] = checked["accepted_checks"]
+        overview["declared_checks"] = checked["declared_stages"]
+        overview["evidence_status"] = checked["observed_pipeline_status"]
+        overview["verification_coverage"] = checked["verification_coverage"]
+    return overview
+
+
+def save_bundled_diagnostics(session: Path) -> dict:
+    """Default internal path in an owner-built BLACK.BOX with bundled Alva."""
+    try:
+        result = inspect_bundled(session)
+    except ConnectionError as exc:
+        result = {"status": "error", "error_code": str(exc),
+                  "permission_to_act": False}
+    return _write_diagnostics(result, session, "evidence-checks.json")
+
+
 def inspect_external(interpreter: Path, session: Path | None = None) -> dict:
     """Executes at most 3 fixed Alva operations; no raw session files pass."""
     py = _validate_python(interpreter)
@@ -210,30 +295,10 @@ def inspect_external(interpreter: Path, session: Path | None = None) -> dict:
 
 
 def save_session_diagnostics(interpreter: Path, session: Path) -> dict:
-    """Best-effort, append-only Alva report after the standalone session closes."""
-    session = Path(session)
-    target = session / "alva-diagnostics.json"
+    """Legacy opt-in developer path; normal bundled users never select Python."""
     try:
         result = inspect_external(interpreter, session)
     except ConnectionError as exc:
         result = {"status": "error", "error_code": str(exc),
                   "permission_to_act": False}
-    try:
-        with target.open("x", encoding="utf-8") as out:
-            json.dump(result, out, ensure_ascii=False, sort_keys=True,
-                      indent=2, allow_nan=False)
-            out.write("\n")
-    except OSError:
-        return {"status": "error", "error_code": "ALVA_EVIDENCE_WRITE_FAILED"}
-    overview = {"status": result["status"], "error_code": result.get("error_code"),
-                "component_count": result.get("component_count", 0),
-                "file": "alva-diagnostics.json"}
-    # This is a SMALL, ordinary BLACK.BOX Reports status. Detailed bounded
-    # evidence stays only in the session-local diagnostic JSON file.
-    reviewed = result.get("extended_diagnostics")
-    if result["status"] == "ok" and type(reviewed) is dict:
-        overview["reviewed_checks"] = reviewed["accepted_checks"]
-        overview["declared_checks"] = reviewed["declared_stages"]
-        overview["evidence_status"] = reviewed["observed_pipeline_status"]
-        overview["verification_coverage"] = reviewed["verification_coverage"]
-    return overview
+    return _write_diagnostics(result, session, "alva-diagnostics.json")

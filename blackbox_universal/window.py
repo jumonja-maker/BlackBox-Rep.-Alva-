@@ -30,7 +30,9 @@ from PySide6.QtWidgets import (
 
 from .monitor import ReadOnlyProbe, available_processes, save_snapshot
 from .i18n import translate
-from .platform_connector import inspect_external, save_session_diagnostics
+from .platform_connector import (inspect_external, save_session_diagnostics,
+                                 bundled_runtime_available, inspect_bundled,
+                                 save_bundled_diagnostics)
 from .releases import (Release, check_latest_release, stage_release,
                        runtime_directory, MAINTENANCE_NAME)
 from .shortcuts import create_shortcut
@@ -95,7 +97,7 @@ class _AlvaWorker(QThread):
 
     result_ready = Signal(object, str)
 
-    def __init__(self, interpreter: Path, session: Path | None = None,
+    def __init__(self, interpreter: Path | None, session: Path | None = None,
                  parent=None, *, persist: bool = False):
         super().__init__(parent)
         self.interpreter = interpreter
@@ -104,9 +106,17 @@ class _AlvaWorker(QThread):
 
     def run(self) -> None:
         try:
-            result = (save_session_diagnostics(self.interpreter, self.session)
-                      if self.persist and self.session is not None else
-                      inspect_external(self.interpreter, self.session))
+            if bundled_runtime_available():
+                result = (save_bundled_diagnostics(self.session)
+                          if self.persist and self.session is not None else
+                          inspect_bundled(self.session))
+            elif self.interpreter is not None:
+                result = (save_session_diagnostics(self.interpreter, self.session)
+                          if self.persist and self.session is not None else
+                          inspect_external(self.interpreter, self.session))
+            else:
+                result = {"status": "unavailable",
+                          "error_code": "RUNTIME_NOT_PACKAGED"}
             self.result_ready.emit(result, "")
         except Exception:
             self.result_ready.emit(
@@ -982,7 +992,7 @@ class UniversalWindow(QMainWindow):
         self.report_preview.setPlainText(json.dumps(
             result, ensure_ascii=False, indent=2))
 
-    def _start_alva_worker(self, interpreter: Path, session: Path | None = None,
+    def _start_alva_worker(self, interpreter: Path | None, session: Path | None = None,
                            *, persist: bool = False) -> None:
         if self._alva_worker is not None:
             return
@@ -1015,6 +1025,9 @@ class UniversalWindow(QMainWindow):
                               "Идёт запись технических свидетельств…"),
                 "saved": ("Local observer report saved.",
                           "Локальный технический отчёт сохранён."),
+                "verification_failed": (
+                    "Observer report saved. Advanced evidence check did not complete.",
+                    "Отчёт сохранён. Дополнительная проверка свидетельств не завершена."),
                 "unavailable": ("Observer report unavailable; SQLite may remain.",
                                 "Отчёт недоступен; данные SQLite могли сохраниться."),
             }
@@ -1035,22 +1048,27 @@ class UniversalWindow(QMainWindow):
             kind = ("reviewed" if result.get("evidence_status") == "ok"
                     and accepted == total else "needs_review")
             self._set_evidence_status(kind, accepted, total)
-        elif result.get("status") == "error" and self.probe.report_result is not None:
-            self._set_evidence_status("saved")
+        elif result.get("status") in ("error", "unavailable") and self.probe.report_result is not None:
+            # Only advertise a failed *built-in* check when a bundled runtime
+            # actually exists. Standalone builds never pretend to run it.
+            self._set_evidence_status(
+                "verification_failed" if bundled_runtime_available() else "saved")
 
     def _alva_finished(self) -> None:
         self._alva_worker = None
 
     def _finalize_alva_if_configured(self) -> None:
         session = self.probe.session_folder
-        if (self._alva_interpreter and session is not None and
+        if ((bundled_runtime_available() or self._alva_interpreter)
+                and session is not None and
                 not self.probe.active and
                 self._last_alva_session != session and
                 self._alva_worker is None and
                 (session / "report.json").is_file()):
             self._last_alva_session = session
             self._start_alva_worker(
-                Path(self._alva_interpreter), session, persist=True)
+                None if bundled_runtime_available() else Path(self._alva_interpreter),
+                session, persist=True)
 
     def _export(self) -> None:
         if self.probe.pid is None:
@@ -1079,7 +1097,7 @@ class UniversalWindow(QMainWindow):
             self, "BLACK.BOX Universal",
             "BLACK.BOX Universal v0.3 — original retro desktop shell.\n\n"
             "Offline monitoring, human-readable HTML and JSON reports: available.\n"
-            "Optional internal diagnostic extensions run only when explicitly authorized.\n"
+            "Built-in evidence checks run automatically when packaged in the release.\n"
             "Windows ETW and crash dump collection: NOT IMPLEMENTED.\n\n"
             "No cloud upload, tunneling, process injection or admin escalation.")
 
