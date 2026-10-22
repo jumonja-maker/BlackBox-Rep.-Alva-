@@ -141,6 +141,7 @@ class UniversalWindow(QMainWindow):
         # Never discover/execute arbitrary Python paths or install private code.
         self._alva_interpreter = str(self._prefs.value("alva_python", "") or "")
         self._diagnostics_last_result = None
+        self._evidence_status = ("waiting", 0, 0)
         self._available_release = None
         self._maintenance_launching = False
         self._pending_update_stage = None
@@ -500,6 +501,9 @@ class UniversalWindow(QMainWindow):
         self.report_preview.setMinimumHeight(375)
         frame.content.addWidget(self.report_preview)
         content.addWidget(frame)
+        self.evidence_status = _label(
+            "Local evidence will be saved after Stop.", "caption")
+        content.addWidget(self.evidence_status)
         controls = QHBoxLayout()
         self.session_location = _label("No persisted session yet", "caption")
         controls.addWidget(self.session_location, 1)
@@ -581,7 +585,8 @@ class UniversalWindow(QMainWindow):
         # languages never translates already translated text.
         changing = {self.target_name, self.target_pid, self.state_text,
                     self.live_badge, self.toolbar_state, self.clock,
-                    self.session_location, self.process_count}
+                    self.session_location, self.process_count,
+                    self.evidence_status}
         from PySide6.QtWidgets import QLabel
         for label in self.findChildren(QLabel):
             if label in changing or label.objectName() == "metricValue":
@@ -628,6 +633,7 @@ class UniversalWindow(QMainWindow):
             "Проверять GitHub Releases при запуске" if language == "RU"
             else "Check GitHub Releases when the app starts")
         self.chart.set_language(language)
+        self._refresh_evidence_status()
         self.lang_ru.setProperty("active", language == "RU")
         self.lang_en.setProperty("active", language == "EN")
         for button in (self.lang_ru, self.lang_en):
@@ -871,10 +877,13 @@ class UniversalWindow(QMainWindow):
             QMessageBox.warning(self, "Observation",
                                 "Choose a running, accessible process first.")
             return
+        self._set_evidence_status("recording")
         self._update_all()
 
     def _stop(self) -> None:
         self.probe.stop()
+        self._set_evidence_status(
+            "saved" if self.probe.report_result is not None else "unavailable")
         self._update_all()
         self._finalize_alva_if_configured()
 
@@ -887,6 +896,8 @@ class UniversalWindow(QMainWindow):
         self.probe.tick()
         self._update_all()
         if was_active and not self.probe.active:
+            self._set_evidence_status(
+                "saved" if self.probe.report_result is not None else "unavailable")
             self._finalize_alva_if_configured()
 
     def _update_all(self) -> None:
@@ -981,11 +992,51 @@ class UniversalWindow(QMainWindow):
         self._alva_worker.finished.connect(self._alva_finished)
         self._alva_worker.start()
 
+    def _set_evidence_status(self, state: str, accepted: int = 0,
+                             total: int = 0) -> None:
+        """Only BLACK.BOX observation quality; no separate platform UI."""
+        self._evidence_status = (state, accepted, total)
+        self._refresh_evidence_status()
+
+    def _refresh_evidence_status(self) -> None:
+        state, accepted, total = self._evidence_status
+        ru = self.language == "RU"
+        if state == "reviewed":
+            message = (f"Проверки свидетельств: {accepted}/{total} принято."
+                       if ru else f"Evidence checks accepted: {accepted}/{total}.")
+        elif state == "needs_review":
+            message = (f"Требуется проверка свидетельств: {accepted}/{total} принято."
+                       if ru else f"Evidence requires review: {accepted}/{total} accepted.")
+        else:
+            messages = {
+                "waiting": ("Local evidence will be saved after Stop.",
+                            "После остановки будут сохранены локальные свидетельства."),
+                "recording": ("Recording observer evidence…",
+                              "Идёт запись технических свидетельств…"),
+                "saved": ("Local observer report saved.",
+                          "Локальный технический отчёт сохранён."),
+                "unavailable": ("Observer report unavailable; SQLite may remain.",
+                                "Отчёт недоступен; данные SQLite могли сохраниться."),
+            }
+            pair = messages.get(state, messages["waiting"])
+            message = pair[1] if ru else pair[0]
+        self.evidence_status.setText(message)
+
     def _private_diagnostics_result(self, result: object, error: str) -> None:
         """Record only internal runtime outcome; no public platform UI."""
         if type(result) is not dict:
             result = {"status": "error", "error_code": "DIAGNOSTICS_RESPONSE_INVALID"}
         self._diagnostics_last_result = result
+        accepted = result.get("reviewed_checks")
+        total = result.get("declared_checks")
+        if (result.get("status") == "ok" and
+                type(accepted) is int and type(total) is int and
+                0 <= accepted <= total == 4):
+            kind = ("reviewed" if result.get("evidence_status") == "ok"
+                    and accepted == total else "needs_review")
+            self._set_evidence_status(kind, accepted, total)
+        elif result.get("status") == "error" and self.probe.report_result is not None:
+            self._set_evidence_status("saved")
 
     def _alva_finished(self) -> None:
         self._alva_worker = None
