@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
 )
 
 from .monitor import ReadOnlyProbe, available_processes, save_snapshot
+from .access_status import explain_access, unconfigured_access
 from .i18n import translate
 from .platform_connector import inspect_external, save_session_diagnostics
 from .releases import (Release, check_latest_release, stage_release,
@@ -517,8 +518,8 @@ class UniversalWindow(QMainWindow):
         page, content = _page()
         content.addLayout(self._heading("PLATFORM / EXTENSION BAY",
                                         "Meet the Alva lab.",
-                                        "Optional: connect your authorized, separately installed Alva Python."))
-        head = WindowPanel("Platform handshake", "NOT CONNECTED")
+                                        "Offline recording works immediately. Alva is an optional developer extension."))
+        head = WindowPanel("Platform handshake", "STANDALONE READY")
         self.alva_panel = head
         row = QHBoxLayout()
         lab_icon = _label("◈", wrap=False)
@@ -527,8 +528,8 @@ class UniversalWindow(QMainWindow):
         desc = QVBoxLayout()
         desc.addWidget(_label("ALVA PLATFORM", "h2"))
         desc.addWidget(_label(
-            "Status: awaiting upstream foundation. "
-            "No diagnostic contracts or AI reports are being invented.", "caption"))
+            "Local diagnostics and offline AI Handoff are ready. "
+            "The private Alva runtime is not part of this download.", "caption"))
         row.addLayout(desc, 1)
         head.content.addLayout(row)
         self.alva_check = _button("◈  CHECK OPTIONAL ALVA PLATFORM")
@@ -551,9 +552,7 @@ class UniversalWindow(QMainWindow):
         self.alva_output.setReadOnly(True)
         self.alva_output.setMinimumHeight(116)
         self.alva_output.setPlainText(
-            "Alva is optional. The standalone recorder and AI Handoff work "
-            "without it. Use CHECK to inspect an explicitly installed Alva "
-            "platform; unverified import is not proof of provenance.")
+            self._t(explain_access(unconfigured_access())))
         head.content.addWidget(self.alva_output)
         content.addWidget(head)
         tiles = QHBoxLayout()
@@ -572,10 +571,10 @@ class UniversalWindow(QMainWindow):
         nl.setContentsMargins(16, 11, 16, 11)
         nl.addWidget(_label("A SAFE FOUNDATION", "h2"))
         nl.addWidget(_label(
-            "This public shell does not bundle the private Alva source, "
-            "activate external telemetry, open tunnels or upload reports. "
-            "Alva functionality will be added against its official public "
-            "interfaces after they are supplied.", "caption"))
+            "Download, open and observe: no Python or Alva setup is required. "
+            "The real private Alva runtime is optional, never bundled, and "
+            "cannot be installed automatically. Only explicitly authorized "
+            "users may connect their separately installed environment.", "caption"))
         content.addWidget(notice)
         return page
 
@@ -1066,7 +1065,7 @@ class UniversalWindow(QMainWindow):
         if self._alva_worker is not None:
             return
         choice, _ = QFileDialog.getOpenFileName(
-            self, self._t("Select Python with your authorized Alva installation"),
+            self, self._t("Select a trusted Python environment with authorized Alva (executes local code)"),
             "", "Python interpreter (python.exe python3.exe python python3)")
         if not choice:
             return
@@ -1084,9 +1083,8 @@ class UniversalWindow(QMainWindow):
         self._pending_alva_interpreter = None
         self._prefs.remove("alva_python")
         self.alva_connected.setText(self._t("External Alva: not configured"))
-        self.alva_panel.tag_label.setText(self._t("NOT CONNECTED"))
-        self.alva_output.setPlainText(self._t(
-            "External Alva disconnected. Standalone monitoring remains available."))
+        self.alva_panel.tag_label.setText(self._t("STANDALONE READY"))
+        self.alva_output.setPlainText(self._t(explain_access(unconfigured_access())))
 
     def _start_alva_worker(self, interpreter: Path, session: Path | None = None,
                            *, persist: bool = False) -> None:
@@ -1124,6 +1122,7 @@ class UniversalWindow(QMainWindow):
         self.alva_check.setProperty("bb_english", label)
         self.alva_check.setText(self._t(label))
         self.alva_output.setPlainText(
+            self._t(explain_access(result)) + "\n\n" +
             json.dumps(result, ensure_ascii=False, indent=2))
 
     def _alva_finished(self) -> None:
@@ -1152,8 +1151,16 @@ class UniversalWindow(QMainWindow):
                            else None)
                 self._start_alva_worker(Path(self._alva_interpreter), session)
             return
-        # Compatible developer-source fallback: inspect installed public
-        # Python APIs only on explicit request (not automatically).
+        if getattr(sys, "frozen", False):
+            # The frozen EXE cannot import a separately installed Alva.
+            # Never imply a platform was checked, nor auto-run unknown Python.
+            result = unconfigured_access()
+            self.alva_panel.tag_label.setText(self._t("STANDALONE READY"))
+            self.alva_output.setPlainText(
+                self._t(explain_access(result)) + "\n\n" +
+                json.dumps(result, ensure_ascii=False, indent=2))
+            return
+        # Developer-source fallback only; never installs or authenticates Alva.
         from blackbox_rep_alva.alva_bridge import inspect_platform
         try:
             result = inspect_platform(
