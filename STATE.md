@@ -1,5 +1,27 @@
 # BlackBox Rep. Alva — state / developer handoff (2026-10-22)
 
+## Latest UI integration — use evidence in ordinary BLACK.BOX Reports (2026-10-22)
+
+The stacked Alva P4 branch also adds a **generic evidence-quality summary in
+the normal Reports screen**, automatically updated after an authorized private
+runtime finishes processing a saved session. Shows counts 4/4 or an
+incomplete-evidence notice, translated EN/RU, **never a branded Alva page**.
+With no authorized runtime, Reports remains fully functional with its own
+offline observer evidence; no fabricated P4 result. No changes to private
+Alva, its visibility or default branch. Added test cases, **not yet run**.
+
+## Expanded real-Alva P4 consumer (Draft, 2026-10-22)
+
+Branch `feature/alva-evidence-pipeline-20261022` is stacked on Draft PR #9 (unbranded internal diagnostics), not on `main`. Adds a **real external Alva** checked pipeline of four data-quality stages over the bounded BLACK.BOX session summary, plus Alva's evidence reviewer, structured AI Handoff and reuse of three completed host traces through real classifier/report APIs when installed. The publicly distributed sidecar includes **only new public BLACK.BOX helper code**, not any private Alva files. Parent now accepts strict bridge schema v2 and retains v1 for older allowed environments. Public EXE has no Alva tab.
+
+**No claim of universal code tracing:** P4 observations are only about BLACK.BOX's own observer evidence. No root cause, foreign code access or automatic analysis by cloud AI.
+
+- Added opt-in **real private Alva** acceptance script `tools/verify_authorized_alva.py`: positive and rejected-observer-evidence synthetic session through isolated worker; no new installation or public wheel. Created but **NOT RUN**. See `docs/ALVA_P4_INTERNAL_CONSUMER.md`.
+
+**Current QA for this exact SHA:** static GitHub source review + synthetic test code added; actual local test execution, full-suite Windows/Ubuntu test, frozen EXE and real private Alva invocation **NOT RUN**. Tests are a labelled stand-in, not an installed Alva test. Do not merge/release until the gates in `docs/ALVA_P4_INTERNAL_CONSUMER.md` pass. Private Alva repository was not changed. No client-facing Alva UI was reintroduced.
+
+
+
 ## Product decision — internal Alva, no separate Alva UI (2026-10-22)
 
 Owner decision: **Alva is implementation infrastructure**, not a BLACK.BOX-branded page or an end-user prerequisite. The new Draft branch `feature/internal-diagnostics-unbranded-20261022` is based on the latest `feature/release-v030-alva-integration-20261022` head `64a3941519fb4f9a0f79fcb7c831422e757fb9f7`. Five user screens only: Overview, Processes, Event Log, Reports, Settings. No Alva Lab, no Connect Alva buttons, no platform mark in About/title/sidebar. Standard reports are automatic on Stop.

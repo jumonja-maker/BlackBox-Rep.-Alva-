@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import json
 import sys
+from pathlib import Path
+import importlib.util
 
 MAX_INPUT = 8192
 OPERATIONS = ("blackbox.observer.samples", "blackbox.observer.lifecycle",
@@ -60,6 +62,24 @@ def _consume_payload():
     return obj
 
 
+
+def _public_evidence_pipeline():
+    """Load only the adjacent public BLACK.BOX helper in isolated Python.
+
+    The frozen EXE must package this public helper beside the worker; it is
+    not a private platform import and never uses PYTHONPATH or the target app.
+    """
+    path = Path(__file__).resolve().with_name("alva_evidence_pipeline.py")
+    if not path.is_file() or path.is_symlink():
+        raise ValueError("PUBLIC_EVIDENCE_PIPELINE_MISSING")
+    spec = importlib.util.spec_from_file_location("_blackbox_evidence_pipeline", path)
+    if spec is None or spec.loader is None:
+        raise ValueError("PUBLIC_EVIDENCE_PIPELINE_INVALID")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def _run(packet):
     import alva
     from alva import Component, invoke_adapter_checked
@@ -98,6 +118,7 @@ def _run(packet):
 
     components = tuple(Component(name, handler(name)) for name in OPERATIONS)
     outcomes = []
+    observed_traces = []
     with ComponentHost(components, allow_dispatch=True) as host:
         with host.open_scope(permitted_operations=OPERATIONS) as scope:
             for operation in OPERATIONS:
@@ -117,6 +138,7 @@ def _run(packet):
                         and type(evidence.get("ai_handoff")) is dict
                         and evidence["ai_handoff"].get("status") == "ok"):
                     raise ValueError("ALVA_SCOPED_CONTRACT_FAILED")
+                observed_traces.append((operation, evidence))
                 outcomes.append({
                     "component": operation,
                     "execution_state": call.execution_state,
@@ -127,9 +149,24 @@ def _run(packet):
                 })
     if host.state != "closed":
         raise ValueError("ALVA_HOST_NOT_CLOSED")
-    return {
+    # The pinned Alva PREVIEW also provides checked pipeline, reviewer and
+    # handoff. Do not silently downgrade if those APIs exist but reject data.
+    features = ("run_checked_pipeline", "review_pipeline_evidence",
+                "build_ai_handoff")
+    advanced = all(callable(getattr(alva, key, None)) for key in features)
+    if advanced:
+        helpers = _public_evidence_pipeline()
+        extended = helpers.verified_session_evidence(alva, sample, packet["operation"])
+        trace_apis = ("classify_failure", "build_report")
+        extended["host_trace_checks"] = (
+            helpers.verified_host_traces(alva, observed_traces)
+            if all(callable(getattr(alva, key, None)) for key in trace_apis)
+            else [])
+    else:
+        extended = None
+    result = {
         "status": "ok",
-        "bridge_schema": 1,
+        "bridge_schema": 2 if advanced else 1,
         "mode": "EXTERNAL_ALVA_SCOPED_INSPECTION",
         "alva_version": str(getattr(alva, "__version__", "unknown"))[:50],
         "alva_origin_authenticated": False,
@@ -139,6 +176,9 @@ def _run(packet):
         "operations": outcomes,
         "component_count": len(outcomes),
     }
+    if advanced:
+        result["extended_diagnostics"] = extended
+    return result
 
 
 def main():

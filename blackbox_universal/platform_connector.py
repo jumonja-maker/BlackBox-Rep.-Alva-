@@ -92,11 +92,19 @@ def _validate_output(result: object) -> dict:
             return {"status": "unavailable" if code == "ALVA_NOT_INSTALLED" else "error",
                     "error_code": code, "permission_to_act": False}
         raise ConnectionError("ALVA_WORKER_ERROR_INVALID")
-    if (result.keys() != {
-            "status", "bridge_schema", "mode", "alva_version",
-            "alva_origin_authenticated", "target_root_cause_proven",
-            "permission_to_act", "evidence_origin", "operations",
-            "component_count"} or result["bridge_schema"] != 1 or
+    schema = result.get("bridge_schema")
+    if type(schema) is not int or schema not in (1, 2):
+        raise ConnectionError("ALVA_BRIDGE_SCHEMA_UNSUPPORTED")
+    required = {
+        "status", "bridge_schema", "mode", "alva_version",
+        "alva_origin_authenticated", "target_root_cause_proven",
+        "permission_to_act", "evidence_origin", "operations",
+        "component_count"}
+    if schema == 2:
+        required.add("extended_diagnostics")
+    if (result.keys() != required or
+            result["status"] != "ok" or
+            result["bridge_schema"] != schema or
             result["mode"] != "EXTERNAL_ALVA_SCOPED_INSPECTION" or
             result["alva_origin_authenticated"] is not False or
             result["target_root_cause_proven"] is not False or
@@ -119,6 +127,55 @@ def _validate_output(result: object) -> dict:
                 op["ai_handoff_status"] != "ok" or
                 type(op["observation"]) is not dict):
             raise ConnectionError("ALVA_WORKER_OPERATION_REJECTED")
+    if schema == 2:
+        data = result["extended_diagnostics"]
+        required_extended = {
+            "diagnostic_pipeline", "declared_stages", "executed_stages",
+            "accepted_checks", "observed_pipeline_status",
+            "verification_coverage", "first_unverified_component",
+            "next_action_code", "record_status", "handoff_review_required",
+            "permission_to_act", "root_cause_proven", "execution_attested",
+            "host_trace_checks"}
+        stages = (
+            "blackbox.evidence.samples", "blackbox.evidence.lifecycle",
+            "blackbox.evidence.metrics", "blackbox.evidence.errors")
+        checks = data.get("host_trace_checks") if type(data) is dict else None
+        if (type(data) is not dict or data.keys() != required_extended or
+                data["diagnostic_pipeline"] != "REAL_ALVA_P4_CHECKED_PIPELINE" or
+                type(data["declared_stages"]) is not int or data["declared_stages"] != 4 or
+                type(data["executed_stages"]) is not int or
+                not 1 <= data["executed_stages"] <= 4 or
+                type(data["accepted_checks"]) is not int or
+                not 0 <= data["accepted_checks"] <= data["executed_stages"] or
+                data["observed_pipeline_status"] not in ("ok", "error") or
+                data["verification_coverage"] not in (
+                    "ALL_DECLARED_CHECKS_ACCEPTED", "INCOMPLETE_OR_AMBIGUOUS") or
+                data["first_unverified_component"] is not None and
+                data["first_unverified_component"] not in stages or
+                type(data["next_action_code"]) is not str or
+                not 1 <= len(data["next_action_code"]) <= 64 or
+                data["record_status"] != "STRUCTURALLY_CONSISTENT_UNAUTHENTICATED" or
+                data["handoff_review_required"] is not True or
+                data["permission_to_act"] is not False or
+                data["root_cause_proven"] is not False or
+                data["execution_attested"] is not False or
+                type(checks) is not list or len(checks) not in (0, 3)):
+            raise ConnectionError("ALVA_EXTENDED_EVIDENCE_REJECTED")
+        names = OPS
+        for item, expected in zip(checks, names):
+            if (type(item) is not dict or item.keys() != {
+                    "component", "component_execution", "trace_step_coverage",
+                    "classification_source", "classification_confidence",
+                    "record_status", "root_cause_proven", "permission_to_act"} or
+                    item["component"] != expected or
+                    item["component_execution"] != "ok" or
+                    item["trace_step_coverage"] != "COMPLETE_SUCCESS_PATH" or
+                    item["classification_source"] != "UNKNOWN" or
+                    item["classification_confidence"] != "UNKNOWN" or
+                    item["record_status"] != "STRUCTURALLY_CONSISTENT_UNAUTHENTICATED" or
+                    item["root_cause_proven"] is not False or
+                    item["permission_to_act"] is not False):
+                raise ConnectionError("ALVA_HOST_TRACE_REJECTED")
     return result
 
 
@@ -169,6 +226,15 @@ def save_session_diagnostics(interpreter: Path, session: Path) -> dict:
             out.write("\n")
     except OSError:
         return {"status": "error", "error_code": "ALVA_EVIDENCE_WRITE_FAILED"}
-    return {"status": result["status"], "error_code": result.get("error_code"),
-            "component_count": result.get("component_count", 0),
-            "file": "alva-diagnostics.json"}
+    overview = {"status": result["status"], "error_code": result.get("error_code"),
+                "component_count": result.get("component_count", 0),
+                "file": "alva-diagnostics.json"}
+    # This is a SMALL, ordinary BLACK.BOX Reports status. Detailed bounded
+    # evidence stays only in the session-local diagnostic JSON file.
+    reviewed = result.get("extended_diagnostics")
+    if result["status"] == "ok" and type(reviewed) is dict:
+        overview["reviewed_checks"] = reviewed["accepted_checks"]
+        overview["declared_checks"] = reviewed["declared_stages"]
+        overview["evidence_status"] = reviewed["observed_pipeline_status"]
+        overview["verification_coverage"] = reviewed["verification_coverage"]
+    return overview

@@ -87,3 +87,27 @@ Source branch: `feature/internal-diagnostics-unbranded-20261022` (based on v0.3.
 **Execution evidence for this new commit:** automated unit tests, full PySide6 Qt GUI tests, Windows portable EXE, Linux smoke, genuine Alva runtime and security checks **NOT RUN**. No pass claim for the new SHA. Earlier Windows/Linux PASS at previous commit `cb1aef6a7b3f341a5040866a63ee2ce29f7894b0` is historical and cannot be generalized.
 
 **Required before promoting:** `python -m unittest discover -s tests -v`, `python app.py --smoke`, frozen Windows EXE smoke with a clean user profile and a real accessible process, RU/EN five-page navigation, ordinary report persistence, negative missing-runtime, and separate approved-runtime sidecar test. No new workflow or runner has been enabled by this patch.
+
+## Alva P4 real-runtime consumer proposal (2026-10-22, stacked Draft branch)
+
+**New implementation:** `src/blackbox_rep_alva/alva_evidence_pipeline.py` is PUBLIC BlackBox-only integration code. The authorized external private Alva runtime performs four checked-pipeline operations, a real Alva structural review, an Alva AI Handoff, plus conditional re-review/classification/reporting for the three in-process host traces. Only bounded metadata returns on bridge schema 2. A schema-1 compatibility path remains for older allowed environments.
+
+**Test source added:** `tests/test_alva_p4_evidence.py` includes 8 fake-Alva contract scenarios (success, missing measurements, ping, forged review, real-interface-shaped worker v2 handshake, forged proof, forged trace receipt, no hidden install). All test-double code is clearly labelled fake and does not authenticate or exercise private Alva.
+
+**Execution status at this exact proposed HEAD:** focused tests **NOT RUN**, entire GUI suite **NOT RUN**, PyInstaller Windows build with helper **NOT RUN**, real private Alva import **NOT RUN**, real Windows and Ubuntu integration **NOT RUN**. Do not substitute historical CI on a different SHA. A GitHub Actions workflow was only amended to package the second PUBLIC helper file; **no new runner/workflow was created** and the new branch is not on its predefined automatic push trigger list.
+
+**Required:** test on same SHA Windows + Ubuntu; smoke packaged EXE; private authorized venv with the exact pinned Alva SHA and verified wheel hash; verify all three host traces and four P4 stages, conservative provenance flags, bounded IPC, zero modification of observed app, fallback when private Alva missing.
+
+## BLACK.BOX Reports integrated evidence-summary UI (new Draft change, 2026-10-22)
+
+The standard five-page Qt Reports view now shows generic observer evidence
+status and, after an authorized real P4 result, an accepted/total counter.
+No platform branding or separate tab is introduced. Generic summary is
+returned by the existing sidecar write routine; detailed unauthenticated
+evidence remains in the sidecar's session-local file. A test for EN/RU GUI
+states and a persistence test have been added.
+
+**Actual Qt Windows and Linux execution for this new HEAD: NOT RUN**;
+new P4 tests are also **NOT RUN**. Earlier CI evidence is for a different
+commit. Exact SHA acceptance and one real private Alva installation test
+remain blocking.
