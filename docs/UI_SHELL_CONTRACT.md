@@ -37,11 +37,11 @@ Microsoft products in favor of usable modern Qt controls.
 - Upper wallpaper wordmark and original drawn computer icon.
 - Classical title bar with **functional** minimize, maximize/restore, close.
 - File/View/Help menus, visible offline-state indicator.
-- Left vertical navigation, fixed width (198px), six numbered sections.
+- Left vertical navigation, fixed width (198px), five numbered sections.
 - Scrollable content area for 1020px+ windows.
 - Bottom Windows-style taskbar with Start menu and local clock.
 
-### Six complete screens
+### Five complete screens
 
 **01 OVERVIEW** — friendly onboarding headline, four live readout cards,
 CPU/RAM vector plot, current process status, choose/start/stop and latest
