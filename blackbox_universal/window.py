@@ -8,15 +8,20 @@ from __future__ import annotations
 
 from datetime import datetime
 import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
 from pathlib import Path
 
 import psutil
 from blackbox_rep_alva.contracts import ObserverError
 from blackbox_rep_alva.report import compare as compare_sessions
-from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QAction
+from PySide6.QtCore import Qt, QTimer, QThread, Signal, QSettings, QUrl
+from PySide6.QtGui import QAction, QDesktopServices, QIcon
 from PySide6.QtWidgets import (
-    QAbstractItemView, QComboBox, QFileDialog, QFrame,
+    QAbstractItemView, QCheckBox, QComboBox, QFileDialog, QFrame,
     QGridLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
     QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QPushButton,
     QScrollArea, QStackedWidget, QTableWidget, QTableWidgetItem,
@@ -24,6 +29,10 @@ from PySide6.QtWidgets import (
 )
 
 from .monitor import ReadOnlyProbe, available_processes, save_snapshot
+from .i18n import translate
+from .releases import (Release, check_latest_release, stage_release,
+                       runtime_directory, MAINTENANCE_NAME)
+from .shortcuts import create_shortcut
 from .theme import COLORS
 from .widgets import DesktopMark, MetricCard, SparkleBorder, TrendChart, WindowPanel
 
@@ -54,6 +63,32 @@ def _page() -> tuple[QWidget, QVBoxLayout]:
     return widget, content
 
 
+class _UpdateWorker(QThread):
+    """All network and ZIP work is outside the Qt GUI event loop."""
+
+    result_ready = Signal(object, str)
+
+    def __init__(self, task: str, parent=None, release: Release | None = None,
+                 install: Path | None = None):
+        super().__init__(parent)
+        self.task = task
+        self.release = release
+        self.install = install
+
+    def run(self) -> None:
+        try:
+            if self.task == "check":
+                result = check_latest_release()
+            elif self.task == "download" and self.release and self.install:
+                result = stage_release(self.release, self.install)
+            else:
+                raise ValueError("INVALID_UPDATE_TASK")
+            self.result_ready.emit(result, "")
+        except Exception as exc:
+            # Do not expose network credentials, private paths or stack traces.
+            self.result_ready.emit(None, type(exc).__name__)
+
+
 class UniversalWindow(QMainWindow):
     PAGES = (
         ("dashboard", "01  OVERVIEW"),
@@ -70,6 +105,18 @@ class UniversalWindow(QMainWindow):
         self.setMinimumSize(1020, 690)
         self.resize(1330, 850)
         self.probe = ReadOnlyProbe()
+        self._prefs = QSettings("BlackBox", "BLACK.BOX Universal")
+        saved_language = self._prefs.value("language", "EN")
+        self.language = saved_language if saved_language in ("RU", "ENG", "EN") else "EN"
+        if self.language == "ENG":
+            self.language = "EN"
+        self._update_worker = None
+        self._available_release = None
+        self._maintenance_launching = False
+        icon_dir = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent.parent))
+        icon_file = icon_dir / "assets" / "blackbox.png"
+        if icon_file.is_file():
+            self.setWindowIcon(QIcon(str(icon_file)))
         self._process_rows: list[dict] = []
         self._nav_buttons: dict[str, QPushButton] = {}
         self._page_ids: dict[str, int] = {}
@@ -77,9 +124,12 @@ class UniversalWindow(QMainWindow):
         self._refresh_process_list()
         self._update_all()
         self._navigate("dashboard")
+        self._set_language(self.language)
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._tick)
         self._timer.start(1000)
+        if self._prefs.value("check_updates_at_start", True, type=bool):
+            QTimer.singleShot(1800, self._check_updates)
 
     def _build(self) -> None:
         desktop = QWidget()
@@ -149,6 +199,12 @@ class UniversalWindow(QMainWindow):
             button.setMenu(menu)
             tl.addWidget(button)
         tl.addStretch()
+        self.update_button = _button("↻  CHECK UPDATES", "update")
+        self.update_button.setProperty("available", False)
+        self.update_button.setToolTip(
+            "Checks official GitHub Releases. Only verified newer versions turn green.")
+        self.update_button.clicked.connect(self._update_click)
+        tl.addWidget(self.update_button)
         self.toolbar_state = _label("●  OBSERVER READY", "signal", False)
         tl.addWidget(self.toolbar_state)
         shell_layout.addWidget(toolbar)
@@ -177,6 +233,30 @@ class UniversalWindow(QMainWindow):
             self._nav_buttons[key] = button
             side.addWidget(button)
         side.addStretch()
+        # Compact feedback/language controls in the marked empty sidebar
+        # area; no networking until GitHub/email is explicitly opened.
+        feedback = QHBoxLayout()
+        feedback.setContentsMargins(8, 0, 8, 1)
+        feedback.setSpacing(4)
+        self.github_button = _button("⌂ GITHUB", "smallLink")
+        self.github_button.setToolTip("GitHub repository")
+        self.github_button.clicked.connect(self._open_github)
+        self.email_button = _button("✉ E-MAIL", "smallLink")
+        self.email_button.setToolTip("Send feedback")
+        self.email_button.clicked.connect(self._open_email)
+        feedback.addWidget(self.github_button)
+        feedback.addWidget(self.email_button)
+        side.addLayout(feedback)
+        languages = QHBoxLayout()
+        languages.setContentsMargins(8, 0, 8, 5)
+        languages.setSpacing(5)
+        self.lang_ru = _button("RU", "smallLink")
+        self.lang_en = _button("ENG", "smallLink")
+        self.lang_ru.clicked.connect(lambda: self._set_language("RU"))
+        self.lang_en.clicked.connect(lambda: self._set_language("EN"))
+        languages.addWidget(self.lang_ru)
+        languages.addWidget(self.lang_en)
+        side.addLayout(languages)
         rule = QFrame()
         rule.setFixedHeight(2)
         rule.setStyleSheet("background: #837789;")
@@ -471,6 +551,12 @@ class UniversalWindow(QMainWindow):
         setting.content.addWidget(_label(
             "This controls process sampling frequency. Longer intervals reduce "
             "overhead but can miss short-lived activity.", "caption"))
+        self.auto_check = QCheckBox("Check GitHub Releases when the app starts")
+        self.auto_check.setChecked(self._prefs.value(
+            "check_updates_at_start", True, type=bool))
+        self.auto_check.toggled.connect(
+            lambda value: self._prefs.setValue("check_updates_at_start", value))
+        setting.content.addWidget(self.auto_check)
         setting.content.addWidget(_label("PRIVACY & SECURITY", "cardTitle"))
         setting.content.addWidget(_label(
             "• Read-only process counters\n"
@@ -489,7 +575,243 @@ class UniversalWindow(QMainWindow):
             "Windows ETW and crash dump analysis are not present in this build.",
             "caption"))
         content.addWidget(about)
+        maint = WindowPanel("Portable maintenance", "Managed locally")
+        maint.content.addWidget(_label(
+            "Updates replace previous application files, keep local logs and "
+            "remove old versions. Uninstall removes the portable program "
+            "and keeps diagnostic sessions in Documents.", "caption"))
+        row = QHBoxLayout()
+        self.shortcut_button = _button("▣  CREATE DESKTOP SHORTCUT")
+        self.shortcut_button.clicked.connect(self._create_shortcut)
+        self.uninstall_button = _button("■  UNINSTALL APPLICATION")
+        self.uninstall_button.clicked.connect(self._request_uninstall)
+        row.addWidget(self.shortcut_button)
+        row.addWidget(self.uninstall_button)
+        maint.content.addLayout(row)
+        content.addWidget(maint)
         return page
+
+    def _t(self, original: str) -> str:
+        return translate(original, self.language)
+
+    def _set_language(self, language: str) -> None:
+        if language not in ("EN", "RU"):
+            return
+        self.language = language
+        self._prefs.setValue("language", language)
+        # Stable English source strings are kept separately so changing
+        # languages never translates already translated text.
+        changing = {self.target_name, self.target_pid, self.state_text,
+                    self.live_badge, self.toolbar_state, self.clock,
+                    self.session_location, self.process_count}
+        from PySide6.QtWidgets import QLabel
+        for label in self.findChildren(QLabel):
+            if label in changing or label.objectName() == "metricValue":
+                continue
+            original = label.property("bb_english")
+            if original is None:
+                original = label.text()
+                label.setProperty("bb_english", original)
+            label.setText(self._t(str(original)))
+        for button in self.findChildren(QPushButton):
+            if button in (self.update_button, self.lang_ru, self.lang_en,
+                          self.alva_check):
+                continue
+            original = button.property("bb_english")
+            if original is None:
+                original = button.text()
+                button.setProperty("bb_english", original)
+            button.setText(self._t(str(original)))
+            if button in (self.github_button, self.email_button):
+                button.setToolTip(self._t(
+                    "GitHub repository" if button is self.github_button else "Send feedback"))
+        for action in self.findChildren(QAction):
+            original = action.property("bb_english")
+            if original is None:
+                original = action.text()
+                action.setProperty("bb_english", original)
+            action.setText(self._t(str(original)))
+        for table in (self.process_table, self.event_table):
+            for i in range(table.columnCount()):
+                header = table.horizontalHeaderItem(i)
+                if header is None:
+                    continue
+                original = header.data(Qt.ItemDataRole.UserRole)
+                if not original:
+                    original = header.text()
+                    header.setData(Qt.ItemDataRole.UserRole, original)
+                header.setText(self._t(str(original)))
+        self.process_search.setPlaceholderText(
+            self._t("Search by process name or PID…"))
+        for i in range(self.interval_combo.count()):
+            seconds = self.interval_combo.itemData(i) // 1000
+            source = f"Every {seconds} second" + ("s" if seconds > 1 else "")
+            self.interval_combo.setItemText(i, self._t(source))
+        self.auto_check.setText(
+            "Проверять GitHub Releases при запуске" if language == "RU"
+            else "Check GitHub Releases when the app starts")
+        self.lang_ru.setProperty("active", language == "RU")
+        self.lang_en.setProperty("active", language == "EN")
+        for button in (self.lang_ru, self.lang_en):
+            button.style().unpolish(button)
+            button.style().polish(button)
+        self._refresh_update_button()
+        self._update_all()
+        self._filter_processes(self.process_search.text())
+        if self.stack.currentIndex() == self._page_ids["reports"]:
+            self._update_report_preview()
+
+    def _open_github(self) -> None:
+        QDesktopServices.openUrl(
+            QUrl("https://github.com/jumonja-maker/BlackBox-Rep.-Alva-"))
+
+    def _open_email(self) -> None:
+        QDesktopServices.openUrl(
+            QUrl("mailto:jumonjescu@mail.ru?subject=BLACK.BOX%20Universal%20feedback"))
+
+    def _refresh_update_button(self, state: str = "") -> None:
+        if self._available_release:
+            text = "✓  UPDATE AVAILABLE"
+            self.update_button.setToolTip(
+                f"BLACK.BOX Universal {self._available_release.version}")
+        elif state == "checking":
+            text = "Checking…"
+        elif state == "latest":
+            text = "✓  UP TO DATE"
+        elif state == "error":
+            text = "⚠  UPDATE CHECK FAILED"
+        else:
+            text = "↻  CHECK UPDATES"
+        self.update_button.setText(self._t(text))
+        self.update_button.setProperty("available", bool(self._available_release))
+        self.update_button.style().unpolish(self.update_button)
+        self.update_button.style().polish(self.update_button)
+
+    def _check_updates(self) -> None:
+        if self._update_worker is not None:
+            return
+        self._refresh_update_button("checking")
+        self._update_worker = _UpdateWorker("check", self)
+        self._update_worker.result_ready.connect(self._update_checked)
+        self._update_worker.finished.connect(self._worker_finished)
+        self._update_worker.start()
+
+    def _worker_finished(self) -> None:
+        # Let any queued signals complete before freeing the QThread.
+        self._update_worker = None
+
+    def _update_checked(self, release: object, error: str) -> None:
+        self._available_release = release if isinstance(release, Release) else None
+        self._refresh_update_button(
+            "error" if error else "latest")
+        if error:
+            self.update_button.setToolTip(
+                "Could not verify the release. Existing app is unaffected.")
+
+    def _update_click(self) -> None:
+        if self._update_worker is not None:
+            return
+        if self._available_release is None:
+            self._check_updates()
+            return
+        install = runtime_directory()
+        if install is None:
+            QMessageBox.information(
+                self, "Update", self._t(
+                    "Updates are available only in the installed portable Windows build."))
+            return
+        if self.probe.active:
+            QMessageBox.warning(
+                self, "Update", self._t(
+                    "Stop observing and save the session before updating."))
+            return
+        yes = QMessageBox.question(
+            self, "BLACK.BOX Universal",
+            self._t("Download and install the verified new version? "
+                    "Old application files will be replaced; logs are preserved."),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        if yes != QMessageBox.StandardButton.Yes:
+            return
+        self._refresh_update_button("checking")
+        self.update_button.setEnabled(False)
+        self._update_worker = _UpdateWorker(
+            "download", self, release=self._available_release, install=install)
+        self._update_worker.result_ready.connect(self._update_downloaded)
+        self._update_worker.finished.connect(self._worker_finished)
+        self._update_worker.start()
+
+    def _update_downloaded(self, staged: object, error: str) -> None:
+        self.update_button.setEnabled(True)
+        if error or not isinstance(staged, Path):
+            QMessageBox.warning(
+                self, "BLACK.BOX Universal",
+                self._t("Update download failed verification. "
+                        "Your current application remains unchanged."))
+            self._refresh_update_button("error")
+            return
+        self._launch_maintenance("update", staged=staged)
+
+    def _create_shortcut(self) -> None:
+        install = runtime_directory()
+        if install is None:
+            QMessageBox.information(
+                self, "BLACK.BOX Universal",
+                self._t("A shortcut can be created from the portable Windows EXE."))
+            return
+        try:
+            path = create_shortcut(install / "BLACK.BOX-Universal.exe")
+        except (OSError, ValueError, subprocess.SubprocessError):
+            QMessageBox.warning(self, "BLACK.BOX Universal",
+                                self._t("Could not create a desktop shortcut."))
+            return
+        QMessageBox.information(self, "BLACK.BOX Universal",
+                                self._t("Desktop shortcut created.") + "\n" + str(path))
+
+    def _request_uninstall(self) -> None:
+        install = runtime_directory()
+        if install is None:
+            QMessageBox.information(
+                self, "BLACK.BOX Universal",
+                self._t("Uninstall is available only for the portable Windows build."))
+            return
+        if self.probe.active:
+            QMessageBox.warning(
+                self, "BLACK.BOX Universal",
+                self._t("Stop observing before removing the application."))
+            return
+        answer = QMessageBox.warning(
+            self, "BLACK.BOX Universal",
+            self._t("Completely remove this portable application folder? "
+                    "Session evidence in Documents is preserved; any logs inside "
+                    "the app folder are moved into Documents first."),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No)
+        if answer == QMessageBox.StandardButton.Yes:
+            self._launch_maintenance("uninstall")
+
+    def _launch_maintenance(self, action: str, staged: Path | None = None) -> None:
+        install = runtime_directory()
+        if install is None:
+            return
+        scratch = Path(tempfile.mkdtemp(prefix="bb-maintenance-"))
+        try:
+            helper = scratch / MAINTENANCE_NAME
+            shutil.copy2(install / MAINTENANCE_NAME, helper)
+            command = [str(helper), action, "--install", str(install),
+                       "--wait-pid", str(os.getpid())]
+            if staged is not None:
+                command += ["--staged", str(staged)]
+            kwargs = {"cwd": str(scratch), "close_fds": True}
+            if os.name == "nt":
+                kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+            subprocess.Popen(command, **kwargs)
+        except (OSError, subprocess.SubprocessError):
+            shutil.rmtree(scratch, ignore_errors=True)
+            QMessageBox.warning(self, "BLACK.BOX Universal",
+                                self._t("Could not start maintenance. No files were changed."))
+            return
+        self._maintenance_launching = True
+        self.close()
 
     def _toggle_maximized(self) -> None:
         if self.isMaximized():
@@ -526,7 +848,9 @@ class UniversalWindow(QMainWindow):
                 if column == 1:
                     cell.setData(Qt.ItemDataRole.UserRole, item["pid"])
                 self.process_table.setItem(row_idx, column, cell)
-        self.process_count.setText(f"{len(visible)} shown / {len(self._process_rows)} available")
+        self.process_count.setText(
+            f"{len(visible)} из {len(self._process_rows)} процессов" if self.language == "RU"
+            else f"{len(visible)} shown / {len(self._process_rows)} available")
 
     def _attach_selected(self) -> None:
         selected = self.process_table.selectedItems()
@@ -577,10 +901,10 @@ class UniversalWindow(QMainWindow):
         current = self.probe.last
         self.card_cpu.set_readout(
             f'{current["cpu_pct"]:.1f}%' if self.probe.history else "--",
-            "Selected root process")
+            self._t("Selected root process"))
         self.card_ram.set_readout(
             f'{current["rss_mb"]:.1f} MB' if self.probe.history else "--",
-            "Tree total / RSS")
+            self._t("Tree total / RSS"))
         self.card_child.set_readout(
             str(current["process_count"]) if self.probe.history else "--")
         self.card_samples.set_readout(str(len(self.probe.history)))
@@ -589,25 +913,25 @@ class UniversalWindow(QMainWindow):
             self.target_name.setText(self.probe.name)
             self.target_pid.setText(f"PID {self.probe.pid}  /  local computer")
         else:
-            self.target_name.setText("No process selected")
-            self.target_pid.setText("Visit PROCESSES to attach.")
+            self.target_name.setText(self._t("No process selected"))
+            self.target_pid.setText(self._t("Visit PROCESSES to attach."))
         if running:
             status = "●  OBSERVING"
         elif selected:
             status = "●  READY / STOPPED"
         else:
             status = "○  WAITING FOR TARGET"
-        self.state_text.setText(status)
-        self.live_badge.setText(status)
-        self.toolbar_state.setText(status)
+        self.state_text.setText(self._t(status))
+        self.live_badge.setText(self._t(status))
+        self.toolbar_state.setText(self._t(status))
         if self.probe.session_folder is not None:
-            self.session_location.setText("Saved in " + str(self.probe.session_folder))
+            self.session_location.setText(self._t("Saved in ") + str(self.probe.session_folder))
         else:
-            self.session_location.setText("No persisted session yet")
+            self.session_location.setText(self._t("No persisted session yet"))
         self.recent_messages.setPlainText(
             "\n".join(f'{evt["timestamp_utc"][-8:]}  {evt["code"]}  {evt["detail"]}'
                       for evt in list(self.probe.events)[-5:]) or
-            "System ready. Choose a process in the PROCESS EXPLORER.")
+            self._t("System ready. Choose a process in the PROCESS EXPLORER."))
         if self.stack.currentIndex() == self._page_ids["events"]:
             self._update_event_table()
 
@@ -624,8 +948,8 @@ class UniversalWindow(QMainWindow):
     def _update_report_preview(self) -> None:
         if self.probe.pid is None:
             self.report_preview.setPlainText(
-                "// No report yet.\n// Choose a process, start observing, "
-                "then return here to inspect real samples.")
+                self._t("// No report yet.\n// Choose a process, start observing, "
+                        "then return here to inspect real samples."))
             return
         overview = self.probe.snapshot()
         overview["recent_samples"] = overview["recent_samples"][-15:]
@@ -700,6 +1024,14 @@ class UniversalWindow(QMainWindow):
             "No cloud upload, tunneling, process injection or admin escalation.")
 
     def closeEvent(self, event) -> None:
+        if (self._update_worker is not None and
+                self._update_worker.isRunning() and
+                not self._maintenance_launching):
+            event.ignore()
+            QMessageBox.information(
+                self, "BLACK.BOX Universal",
+                self._t("Finish the current update check or download before closing."))
+            return
         self.probe.stop("UI_CLOSED")
         self._timer.stop()
         super().closeEvent(event)
