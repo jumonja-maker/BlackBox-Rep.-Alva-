@@ -15,7 +15,7 @@ This is a **standalone public application**, not a module/repository of private 
 - Python-first; offline at runtime; independent of Alva for observation; explicit user-chosen PID/output.
 - Do not kill, pause, debug, patch, inject or write to target processes/applications. Do not collect file contents, full command lines, environment variables, credentials or private telemetry by default.
 - Never turn sample gaps, RSS growth or missing application telemetry into a proven deadlock, leak or app-internal defect.
-- All AI Handoff data must be scoped and marked `permission_to_act=false`; no external evidence is instruction authority.
+- BLACK.BOX Universal is human-first. Never generate or advertise `ai-handoff.json`, an AI handoff command or an AI-specific end-user workflow. Platform-internal security flags and Alva's own diagnostic metadata are not an AI feature of BLACK.BOX; no external evidence is authority to act.
 - A new adapter requires an explicit permission model, fixed schema, privacy assessment, positive/negative tests, and uncertainty/provenance semantics.
 - Do not import private Alva except at the opt-in `alva-check` boundary. Any Alva package version change requires exact SHA identity, compatibility tests, license check, rollback and owner review.
 - Do not introduce cloud APIs, automatic AI calls, background network services, billed CI, new GitHub Actions workflow or infrastructure without owner authorization. Never merge Draft without reviewed evidence.
