@@ -2,6 +2,40 @@
 
 **An independent open-source application, not a subproject of Alva.** Select any accessible Windows process by PID, observe it without modifying it, store evidence locally, and generate offline reports that distinguish observations from inferred causes. Supported modes: standalone Python CLI and integrated retro Qt GUI; the Windows portable EXE is gated by CI.
 
+## Retro desktop v0.2 — language, community and clean portable maintenance
+
+The next version adds compact **GITHUB / E-MAIL / RU / ENG** buttons in the
+lower left sidebar and **CHECK UPDATES** in the upper toolbar, integrated
+with the existing Windows 95 + peach/lilac theme.
+
+- GitHub opens the public repository; E-MAIL starts a local message to
+  `jumonjescu@mail.ru`. No report is transmitted by these buttons.
+- RU/ENG switches interface labels, menus, page titles, tips and graph text
+  immediately, with locally remembered preference; raw observer evidence
+  and JSON field names remain untranslated.
+- The update indicator is **green only for a newer official GitHub Release**
+  with an authenticated asset digest `sha256:...`. Checking metadata at
+  startup can be disabled under Settings; it contacts GitHub but never uploads
+  logs/process identifiers. Download/install needs user confirmation.
+- Updating checks size, SHA-256 and ZIP paths before invoking the separate
+  `BLACK.BOX-Maintenance.exe`. After the main EXE closes, the old portable
+  directory is replaced, kept logs are transferred, and the old version is
+  removed. An interrupted update has rollback protection.
+- **Create Desktop Shortcut** builds a real Windows `.lnk` pointing to this
+  app, using its original pixel-retro icon.
+- **Uninstall Application** asks for confirmation, closes the app and removes
+  the portable directory. `logs/`, `sessions/` and `reports/` inside it
+  are moved into Documents; existing external session evidence is retained.
+
+**Important:** GitHub Actions artifact builds are *not* release updates.
+The updater will show a green indicator only when the maintainer publishes
+a newer `vX.Y.Z` GitHub Release. The private Alva library is not included.
+Portable uninstall and in-place update need additional manual Windows
+acceptance; CI runs include unit/fault-injection and frozen EXE smoke.
+
+Detailed behavior and safety rules:
+[feedback, updating and uninstalling](docs/UPDATES_FEEDBACK_UNINSTALL.md).
+
 ## Integrated retro desktop — GUI + Alva-provided core
 
 A real, original desktop shell inspired by early Windows system windows and
@@ -53,7 +87,7 @@ The `record` command creates **a new session directory** and prints its exact pa
 
 ## Independence and safety
 
-- No AI, cloud, server, account, network listener, or network dependency for operation. Runtime writes only in an explicitly selected local output directory.
+- No AI, cloud, server, account or network listener needed for process observation. The optional GitHub Releases version check (enabled by default) uses an outbound HTTPS metadata request; it can be disabled in Settings and never uploads reports. Runtime writes only in an explicitly selected local output directory.
 - No injection, remote execution, service installation, process signals, termination, configuration mutation, or reading target document content.
 - `psutil` is an optional external process-observation library; `Alva` is a **separate optional PREVIEW dependency**, loaded exclusively through `alva-check` (when explicitly installed by an authorized developer).
 - A process's PID can be recycled. Binding includes its `create_time`. Access denied / process exit are explicit failures, not fake zero metrics.
