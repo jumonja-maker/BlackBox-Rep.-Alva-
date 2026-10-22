@@ -48,6 +48,87 @@ def summarize(folder: Path) -> dict:
         raise ObserverError("INVALID_DATA", "report") from None
 
 
+def _human_html(report: dict) -> str:
+    """Portable, static, bilingual human report. No JS, CDN or private runtime.
+
+    User-supplied IDs/error codes are escaped; every outcome is an observation,
+    never a claim about the target application's internal root cause.
+    """
+    def safe(value: object) -> str:
+        return escape(str(value if value is not None else "not available / нет данных"),
+                      quote=True)
+
+    def metric(label: str, value: object, unit: str = "") -> str:
+        suffix = (" " + unit) if value is not None and unit else ""
+        rendered = safe(value) + suffix
+        return ('<div class="metric"><span class="key">' + label +
+                '</span><strong>' + rendered + '</strong></div>')
+
+    state = report["exit_code"]
+    status_descriptions = {
+        "COMPLETED": "Session stopped normally / Наблюдение остановлено",
+        "INTERRUPTED": "Session interrupted / Сеанс прерван",
+        "PROCESS_EXITED": "Observed process exited / Процесс завершился",
+        "PID_REUSED": "PID changed identity / PID использован повторно",
+        "ACCESS_DENIED": "OS access denied / Доступ запрещён",
+        "SAMPLE_UNAVAILABLE": "Sample unavailable / Измерение недоступно",
+        "STORAGE_ERROR": "Storage error / Ошибка сохранения",
+        "UNKNOWN": "Unknown status / Статус неизвестен",
+    }
+    errors = report.get("observation_errors", {})
+    errors_html = "".join(
+        "<tr><td>" + safe(code) + "</td><td>" + safe(count) + "</td></tr>"
+        for code, count in sorted(errors.items())
+    ) or "<tr><td colspan='2'>None recorded / Нет зарегистрированных</td></tr>"
+    return (
+        "<!doctype html><html lang='en'><head><meta charset='utf-8'>"
+        "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+        "<title>BlackBox Process Observation</title>"
+        "<style>"
+        "body{font:15px system-ui,Segoe UI,Tahoma,sans-serif;max-width:960px;"
+        "margin:28px auto;padding:0 18px;color:#302c43;background:#fff7e4}"
+        "h1{border-bottom:5px solid #087f7b;padding-bottom:12px}"
+        "h2{margin-top:26px;font-size:18px}"
+        ".summary{background:#d8f3e8;border:2px solid #056c6d;padding:15px}"
+        ".grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(185px,1fr));gap:10px}"
+        ".metric{background:#fff;border:2px solid #a69caa;padding:12px}"
+        ".key{display:block;color:#605e6b;font-size:12px;margin-bottom:7px}"
+        "strong{font-size:18px}table{border-collapse:collapse;width:100%}"
+        "th,td{border:1px solid #bcb6c4;text-align:left;padding:9px}"
+        "th{background:#ead5c6}.warning{border-left:5px solid #ec725d;"
+        "background:#fff0e5;padding:12px}"
+        "</style></head><body>"
+        "<h1>BlackBox Process Observation</h1>"
+        "<p>Локальный отчёт о наблюдении / Local observation report</p>"
+        "<div class='summary'><strong>" + safe(state) + "</strong><p>" +
+        status_descriptions.get(state, "Unrecognized observer state / Неизвестное состояние") +
+        "</p></div>"
+        "<h2>Измерения / Measurements</h2><div class='grid'>" +
+        metric("Измерений / Samples", report["samples"]) +
+        metric("CPU (макс.) / Peak CPU", report["peak_cpu_percent"], "%") +
+        metric("RAM RSS (макс.) / Peak RSS", report["peak_rss_bytes"], "bytes") +
+        metric("Дочерние процессы / Max children", report["max_children"]) +
+        metric("Длительность / Elapsed", report["elapsed_ms"], "ms") +
+        "</div><h2>Сеанс / Session</h2><div class='grid'>" +
+        metric("Начало UTC / Started", report["started_utc"]) +
+        metric("Конец UTC / Ended", report["ended_utc"]) +
+        metric("Идентификатор / Session ID", report["session_id"]) +
+        "</div>"
+        "<h2>Ошибки наблюдателя / Observer events</h2>"
+        "<table><thead><tr><th>Код / Code</th><th>Количество / Count</th>"
+        "</tr></thead><tbody>" + errors_html + "</tbody></table>"
+        "<h2>Ограничения / Limitations</h2>"
+        "<p class='warning'><strong>Причина ошибки приложения не установлена / "
+        "Application root cause not determined.</strong><br>"
+        "CPU, RAM and I/O are external system measurements, not proof "
+        "of a memory leak, deadlock or internal application defect. "
+        "Высокая нагрузка не доказывает сбой, утечку памяти или зависание.</p>"
+        "<p>Работает автономно; внешние ресурсы, AI и закрытая платформа "
+        "не требуются / Offline: no external resources required.</p>"
+        "</body></html>"
+    )
+
+
 def write_report(folder: Path) -> dict:
     folder = Path(folder)
     report = summarize(folder)
@@ -61,9 +142,7 @@ def write_report(folder: Path) -> dict:
     try:
         with path.open("xb") as out:
             out.write(payload)
-        html = "<!doctype html><meta charset=\"utf-8\"><title>BlackBox Report</title>" + (
-            "<h1>BlackBox Process Observation</h1><pre>" +
-            escape(json.dumps(report, indent=2, ensure_ascii=False)) + "</pre>")
+        html = _human_html(report)
         with (folder / "report.html").open("x", encoding="utf-8") as output:
             output.write(html)
     except OSError:
