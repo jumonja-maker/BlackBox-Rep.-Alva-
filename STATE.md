@@ -1,5 +1,14 @@
 # BlackBox Rep. Alva — state / developer handoff (2026-10-22)
 
+## Product decision — internal Alva, no separate Alva UI (2026-10-22)
+
+Owner decision: **Alva is implementation infrastructure**, not a BLACK.BOX-branded page or an end-user prerequisite. The new Draft branch `feature/internal-diagnostics-unbranded-20261022` is based on the latest `feature/release-v030-alva-integration-20261022` head `64a3941519fb4f9a0f79fcb7c831422e757fb9f7`. Five user screens only: Overview, Processes, Event Log, Reports, Settings. No Alva Lab, no Connect Alva buttons, no platform mark in About/title/sidebar. Standard reports are automatic on Stop.
+
+Previously explicitly authorized Alva interpreter (existing per-user QSettings) can still be invoked internally after a finalized session, once per session; if absent, core processing succeeds without running private code. Never claim that the free public download contains or executes genuine Alva by default. **Platform private**; no code/wheel redistribution and no automatic unapproved installation. Full true-Alva one-download requires a separate distribution/license decision.
+
+This branch has modified Qt source, navigation test assertions, background behavior and public README EN/RU; see `docs/INTERNAL_DIAGNOSTICS_NO_BRAND.md`. **Exact-commit Windows EXE testing, whole test suite and genuine Alva-at-SHA consumer tests: NOT RUN**. Review as Draft, do not merge/release until evidence is produced. Existing older historical status below may refer to the replaced six-page UI.
+
+
 ## Latest: integrated standalone + retro desktop (after Alva foundation)
 
 - Integration Draft PR [#5](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/pull/5),

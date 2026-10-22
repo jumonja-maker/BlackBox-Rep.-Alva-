@@ -95,28 +95,60 @@ class DurableDesktopIntegration(unittest.TestCase):
             self.assertEqual(packet["evidence_origin"], "APP_SUPPLIED_NOT_AUTHENTICATED")
 
 
-class OptionalPlatformWindowTest(unittest.TestCase):
+class InternalDiagnosticsWindowTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
         set_retro_theme(cls.app)
 
-    def test_explicit_alva_check_uses_supplied_adapter_only_on_click(self):
+    def test_default_without_runtime_keeps_diagnostics_internal(self):
         with tempfile.TemporaryDirectory() as temp:
             with patch("blackbox_universal.monitor._default_sessions_root",
                        return_value=Path(temp)):
                 window = UniversalWindow()
                 window._timer.stop()
                 try:
-                    with patch("blackbox_rep_alva.alva_bridge.inspect_platform",
-                               return_value={"status": "unavailable", "code": "ALVA_UNAVAILABLE",
-                                             "provenance_verified": False}) as bridge:
-                        bridge.assert_not_called()
-                        window._navigate("alva")
-                        window.alva_check.click()
-                        bridge.assert_called_once_with(None)
-                        self.assertIn("ALVA_UNAVAILABLE", window.alva_output.toPlainText())
-                        self.assertNotIn("CHECK_ACCEPTED", window.alva_output.toPlainText())
+                    window._alva_interpreter = ""
+                    with patch.object(window, "_start_alva_worker") as start:
+                        window._finalize_alva_if_configured()
+                        start.assert_not_called()
+                    self.assertNotIn("alva", window._page_ids)
+                    self.assertFalse(hasattr(window, "alva_check"))
+                finally:
+                    window.close()
+
+    def test_previously_authorized_runtime_runs_after_session_without_ui(self):
+        with tempfile.TemporaryDirectory() as temp:
+            with patch("blackbox_universal.monitor._default_sessions_root",
+                       return_value=Path(temp)):
+                window = UniversalWindow()
+                window._timer.stop()
+                try:
+                    session = Path(temp) / "session"; session.mkdir()
+                    (session / "report.json").write_text("{}", encoding="utf-8")
+                    window.probe.session_folder = session
+                    window._alva_interpreter = str(Path(temp) / "authorized" / "python.exe")
+                    with patch.object(window, "_start_alva_worker") as start:
+                        window._finalize_alva_if_configured()
+                        start.assert_called_once_with(
+                            Path(window._alva_interpreter), session, persist=True)
+                        window._finalize_alva_if_configured()
+                        start.assert_called_once()
+                    self.assertNotIn("alva", window._page_ids)
+                finally:
+                    window.close()
+
+    def test_background_runtime_result_does_not_create_platform_ui(self):
+        with tempfile.TemporaryDirectory() as temp:
+            with patch("blackbox_universal.monitor._default_sessions_root",
+                       return_value=Path(temp)):
+                window = UniversalWindow()
+                window._timer.stop()
+                try:
+                    window._private_diagnostics_result(
+                        {"status": "error", "error_code": "ALVA_NOT_INSTALLED"}, "")
+                    self.assertEqual(window._diagnostics_last_result["status"], "error")
+                    self.assertFalse(hasattr(window, "alva_output"))
                 finally:
                     window.close()
 

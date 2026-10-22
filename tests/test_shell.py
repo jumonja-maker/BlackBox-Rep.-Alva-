@@ -95,10 +95,10 @@ class QtShellTests(unittest.TestCase):
         self.default_root.stop()
         self.tmp.cleanup()
 
-    def test_six_real_pages_and_classic_three_window_controls(self):
-        self.assertEqual(len(self.window.PAGES), 6)
-        self.assertEqual(self.window.stack.count(), 6)
-        self.assertEqual(len(self.window._nav_buttons), 6)
+    def test_five_real_pages_and_classic_three_window_controls(self):
+        self.assertEqual(len(self.window.PAGES), 5)
+        self.assertEqual(self.window.stack.count(), 5)
+        self.assertEqual(len(self.window._nav_buttons), 5)
         chrome = self.window.findChildren(QPushButton, "windowControl")
         self.assertEqual(len(chrome), 3)
         for key, _ in self.window.PAGES:
@@ -153,14 +153,20 @@ class QtShellTests(unittest.TestCase):
             self.assertFalse(report["root_cause_proven"])
             self.assertEqual(report["alva_status"], "NOT_CONNECTED")
 
-    def test_alva_page_never_fakes_integration_or_diagnostic_evidence(self):
-        self.window._navigate("alva")
-        contents = " ".join(child.text() for child in
-                            self.window.stack.currentWidget().findChildren(
-                                __import__("PySide6.QtWidgets",
-                                           fromlist=["QLabel"]).QLabel))
-        self.assertIn("NOT CONNECTED", contents)
-        self.assertIn("upstream foundation", contents)
+    def test_public_ui_has_no_platform_laboratory_or_brand(self):
+        self.assertNotIn("alva", self.window._page_ids)
+        self.assertEqual(
+            [page for page, _ in self.window.PAGES],
+            ["dashboard", "processes", "events", "reports", "settings"])
+        self.assertNotIn("Alva", self.window.windowTitle())
+        for page in self.window._page_ids:
+            self.window._navigate(page)
+            from PySide6.QtWidgets import QLabel
+            public_labels = " ".join(x.text() for x in
+                                     self.window.stack.currentWidget().findChildren(QLabel))
+            self.assertNotIn("ALVA PLATFORM", public_labels)
+        self.assertFalse(hasattr(self.window, "alva_check"))
+        self.assertFalse(hasattr(self.window, "alva_connect"))
 
     def test_sampling_interval_is_user_editable_and_connected(self):
         self.window.interval_combo.setCurrentIndex(2)
