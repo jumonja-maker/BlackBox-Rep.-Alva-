@@ -58,20 +58,6 @@ class FakeAlvaPipeline:
                 "code": "STRUCTURALLY_CONSISTENT_UNAUTHENTICATED",
                 "root_cause_proven": False, "external_attestation": False}
 
-    @staticmethod
-    def build_ai_handoff(report):
-        r = report["result"]
-        return {"status": "ok", "result": {
-            "permission_to_act": False, "root_cause_proven": False,
-            "execution_attested": False, "review_required": True,
-            "record_status": "STRUCTURALLY_CONSISTENT_UNAUTHENTICATED",
-            "declared_stages": r["declared_stages"],
-            "executed_stages": r["executed_stages"],
-            "accepted_checks": r["accepted_checks"],
-            "verification_coverage": r["verification_coverage"],
-            "observed_pipeline_status": r["observed_pipeline_status"],
-            "first_unverified_component": r["first_unverified_component"],
-        }}
 
 
 class FakeComponent:
@@ -125,7 +111,6 @@ class FakeScope:
             "diagnostics": {"result": {
                 "contract_verdict": "CHECK_ACCEPTED",
                 "visibility": "SCOPE_ONLY",
-                "ai_handoff": {"status": "ok"},
                 "trace": trace, "operation_report": single,
             }},
         })()
@@ -161,7 +146,7 @@ class P4EvidenceTests(unittest.TestCase):
         self.assertFalse(info["execution_attested"])
         self.assertFalse(info["root_cause_proven"])
         self.assertFalse(info["permission_to_act"])
-        self.assertTrue(info["handoff_review_required"])
+        self.assertTrue(info["human_review_required"])
         self.assertNotIn("pid", json.dumps(info).casefold())
 
     def test_bad_observer_evidence_rejected_without_target_blame(self):
@@ -180,7 +165,7 @@ class P4EvidenceTests(unittest.TestCase):
             "peak_rss_bytes": None}, "ping")
         self.assertEqual(info["observed_pipeline_status"], "ok")
 
-    def test_reviewer_and_handoff_rejection_fail_closed(self):
+    def test_inconsistent_evidence_reviewer_rejected(self):
         class Forged(FakeAlvaPipeline):
             @staticmethod
             def review_pipeline_evidence(report):
@@ -196,7 +181,6 @@ class P4EvidenceTests(unittest.TestCase):
         root.invoke_adapter_checked = fake_checked
         root.run_checked_pipeline = FakeAlvaPipeline.run_checked_pipeline
         root.review_pipeline_evidence = FakeAlvaPipeline.review_pipeline_evidence
-        root.build_ai_handoff = FakeAlvaPipeline.build_ai_handoff
         root.classify_failure = fake_classify
         root.build_report = fake_report
         root.__version__ = "test-double-not-private-alva"
@@ -218,7 +202,6 @@ class P4EvidenceTests(unittest.TestCase):
         root.invoke_adapter_checked = fake_checked
         root.run_checked_pipeline = FakeAlvaPipeline.run_checked_pipeline
         root.review_pipeline_evidence = FakeAlvaPipeline.review_pipeline_evidence
-        root.build_ai_handoff = FakeAlvaPipeline.build_ai_handoff
         root.__version__ = "test-double"
         host.ComponentHost = FakeHost
         with patch.dict(sys.modules, {"alva": root, "alva.host": host}):
@@ -253,7 +236,7 @@ class P4EvidenceTests(unittest.TestCase):
             "operations": [{
                 "component": name, "execution_state": "RESPONSE_AVAILABLE",
                 "contract_verdict": "CHECK_ACCEPTED",
-                "visibility": "SCOPE_ONLY", "ai_handoff_status": "ok",
+                "visibility": "SCOPE_ONLY",
                 "observation": {},
             } for name in worker.OPERATIONS],
             "extended_diagnostics": data,
