@@ -19,7 +19,11 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="BLACK.BOX Universal retro desktop")
     parser.add_argument("--smoke", action="store_true",
                         help="Run Qt offscreen and exit automatically (QA only)")
+    parser.add_argument("--require-bundled-alva", action="store_true",
+                        help="QA only: fail if genuine packaged Alva checks cannot execute")
     options = parser.parse_args(argv)
+    if options.require_bundled_alva and not options.smoke:
+        parser.error("--require-bundled-alva also requires --smoke")
     if options.smoke:
         os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     app = QApplication.instance() or QApplication(sys.argv[:1])
@@ -54,6 +58,19 @@ def main(argv: list[str] | None = None) -> int:
             html = (folder / "report.html").read_text(encoding="utf-8")
             if "Application root cause not determined" not in html:
                 raise RuntimeError("SMOKE_REPORT_NOT_HUMAN_READABLE")
+            if options.require_bundled_alva:
+                # Private-release CI *must* execute genuine Alva inside the
+                # ACTUAL PyInstaller binary before any public distribution.
+                from blackbox_universal.platform_connector import (
+                    bundled_runtime_available, save_bundled_diagnostics)
+                if not bundled_runtime_available():
+                    raise RuntimeError("SMOKE_REAL_ALVA_NOT_BUNDLED")
+                evidence = save_bundled_diagnostics(folder)
+                if (evidence.get("status") != "ok" or
+                        evidence.get("declared_checks") != 4 or
+                        evidence.get("reviewed_checks") != 4 or
+                        not (folder / "evidence-checks.json").is_file()):
+                    raise RuntimeError("SMOKE_REAL_ALVA_NOT_EXECUTED")
         QTimer.singleShot(280, app.quit)
     return app.exec()
 
