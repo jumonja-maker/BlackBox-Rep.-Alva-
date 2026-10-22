@@ -15,7 +15,7 @@ import re
 import shutil
 import stat
 import tempfile
-from urllib import request
+from urllib import error, request
 from urllib.parse import quote
 import zipfile
 
@@ -24,6 +24,7 @@ from . import __version__
 OWNER = "jumonja-maker"
 REPO = "BlackBox-Rep.-Alva-"
 RELEASE_API = f"https://api.github.com/repos/{OWNER}/{REPO}/releases/latest"
+RELEASES_API = f"https://api.github.com/repos/{OWNER}/{REPO}/releases?per_page=10"
 ARCHIVE_NAME = "BLACK.BOX-Universal-Windows.zip"
 EXECUTABLE_NAME = "BLACK.BOX-Universal.exe"
 MAINTENANCE_NAME = "BLACK.BOX-Maintenance.exe"
@@ -33,6 +34,10 @@ MAX_UNCOMPRESSED_BYTES = 1200 * 1024 * 1024
 MAX_MEMBERS = 10000
 _VERSION = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)$")
 _SHA256 = re.compile(r"^sha256:([0-9a-fA-F]{64})$")
+
+
+class NoOfficialRelease(LookupError):
+    """The public repository exists but has no stable GitHub Release."""
 
 
 @dataclass(frozen=True)
@@ -65,8 +70,27 @@ def check_latest_release(current: str = __version__) -> Release | None:
     now = version_tuple(current)
     if now is None:
         raise ValueError("LOCAL_VERSION_INVALID")
-    with _open(RELEASE_API) as connection:
-        data = connection.read(256 * 1024 + 1)
+    try:
+        with _open(RELEASE_API) as connection:
+            data = connection.read(256 * 1024 + 1)
+    except error.HTTPError as exc:
+        if exc.code != 404:
+            raise
+        # GitHub responds 404 when a public repo has no stable Release.
+        # Verify the Releases endpoint itself is accessible before treating
+        # that as a normal product state: a missing repo/permission/network
+        # error must still be shown as a genuine update-check failure.
+        with _open(RELEASES_API) as connection:
+            listing = connection.read(256 * 1024 + 1)
+        if len(listing) > 256 * 1024:
+            raise ValueError("RELEASE_METADATA_TOO_LARGE")
+        releases = json.loads(listing.decode("utf-8"))
+        if type(releases) is not list or any(type(item) is not dict for item in releases):
+            raise ValueError("RELEASE_LIST_INVALID")
+        if any(not item.get("draft") and not item.get("prerelease")
+               for item in releases):
+            raise ValueError("RELEASE_METADATA_INCONSISTENT")
+        raise NoOfficialRelease("NO_OFFICIAL_RELEASE") from None
     if len(data) > 256 * 1024:
         raise ValueError("RELEASE_METADATA_TOO_LARGE")
     payload = json.loads(data.decode("utf-8"))
