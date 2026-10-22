@@ -45,7 +45,7 @@ class DurableDesktopIntegration(unittest.TestCase):
                         db.execute("SELECT COUNT(*) FROM samples").fetchone()[0], 3)
                 html = (folder / "report.html").read_text(encoding="utf-8")
                 self.assertIn("BlackBox Process Observation", html)
-                self.assertIn("UNKNOWN", html)
+                self.assertIn("Application root cause not determined", html)
                 report = summarize(folder)
                 self.assertEqual(report["state"], "closed")
                 self.assertEqual(report["samples"], 3)
