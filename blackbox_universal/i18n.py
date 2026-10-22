@@ -172,6 +172,9 @@ RU = {
 "Alva connection could not be verified. BLACK.BOX has not modified the target or installed anything. Check the authorized Python environment or disconnect; ordinary offline reports remain available.":"Подключение Alva не подтверждено. BLACK.BOX не изменял целевой процесс и ничего не устанавливал. Проверьте разрешённую среду Python или отключите её; автономные отчёты по-прежнему доступны.",
 "Alva has not been verified. Monitoring, SQLite reports, comparisons and offline handoff remain available without it.":"Alva не проверена. Мониторинг, отчёты SQLite, сравнение и автономная передача диагностики работают без неё.",
 "Alva connection was not verified. You can still monitor processes and save offline reports without Alva.":"Подключение Alva не подтверждено. Вы всё равно можете наблюдать за процессами и сохранять отчёты без Alva.",
+"◎  ADVANCED: CONNECT AUTHORIZED ALVA":"◎  ДОПОЛНИТЕЛЬНО: ПОДКЛЮЧИТЬ РАЗРЕШЁННУЮ ALVA",
+"Three limited Alva checks, only for authorized users.":"Три ограниченные проверки Alva для пользователей с разрешением.",
+"Offline report ready without Alva or cloud.":"Автономный отчёт готов без Alva и облака.",
 }
 
 
