@@ -106,8 +106,10 @@ class ReadOnlyProbe:
             raise RuntimeError("Choose an accessible process first.")
         if self.active:
             return
-        # Re-validate PID identity on every Start.
+        # Fail closed if the selected PID was recycled after Attach.
         core = PsutilProbe(self.pid)
+        if self._core is not None and abs(core.created - self._core.created) > 0.000001:
+            raise ObserverError("PID_REUSED", "attach")
         root = self.output_root
         if root.is_symlink():
             raise RuntimeError("Session root must not be a symlink.")
