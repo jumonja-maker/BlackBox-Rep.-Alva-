@@ -63,6 +63,29 @@ class AuditCoreRegressions(unittest.TestCase):
                 ["OBSERVATION_STARTED", "USER_STOPPED"])
             self.assertEqual(summarize(probe.session_folder)["observation_errors"], {})
 
+    def test_alva_evidence_is_described_inside_normal_html(self):
+        from blackbox_universal.platform_connector import _write_diagnostics
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SessionStore(Path(tmp), os.getpid())
+            folder = store.folder
+            store.finish("COMPLETED")
+            store.close()
+            write_report(folder)
+            result = {
+                "status": "ok",
+                "extended_diagnostics": {
+                    "accepted_checks": 1, "declared_stages": 4,
+                    "observed_pipeline_status": "error",
+                    "first_unverified_component": "<unsupported>"}}
+            overview = _write_diagnostics(result, folder, "evidence-checks.json")
+            self.assertEqual(overview["reviewed_checks"], 1)
+            html = (folder / "report.html").read_text(encoding="utf-8")
+            self.assertIn("Requires review", html)
+            self.assertIn("1/4", html)
+            self.assertIn("&lt;unsupported&gt;", html)
+            self.assertNotIn("<unsupported>", html)
+            self.assertIn("root cause", html)
+
     def test_json_html_publication_rolls_back_if_second_replace_fails(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = SessionStore(Path(tmp), os.getpid())
