@@ -111,3 +111,11 @@ states and a persistence test have been added.
 new P4 tests are also **NOT RUN**. Earlier CI evidence is for a different
 commit. Exact SHA acceptance and one real private Alva installation test
 remain blocking.
+
+## Human-first no-AI-handoff refactor (2026-10-22 — new stacked Draft branch)
+
+**Owner decision:** BLACK.BOX is for people and must not create AI-transfer files as normal output. A new source-only change removes `ai-handoff.json` auto-generation, removes `handoff` from CLI, deletes `src/blackbox_rep_alva/handoff.py`, removes explicit P4 `build_ai_handoff` calls and replaces `handoff_review_required` with `human_review_required` in the internal bridge. Ordinary human reports remain available; user-facing EN/RU text and tests have been adjusted. Historic Alva-host internal AI metadata is not displayed or shipped.
+
+**Added tests:** `tests/test_human_first.py` covering real local-process session files and CLI rejection; updated `tests/test_core.py`, `tests/test_desktop_integration.py`, `tests/test_shell.py`, `tests/test_safety.py`, `tests/test_alva_sidecar.py` and `tests/test_alva_p4_evidence.py`. Tests are source files, not execution attestations.
+
+**Current exact-SHA tests/Windows EXE/real authorized Alva:** **NOT RUN**. Earlier suite PASS does not certify this refactor; full test suite and Windows frozen-executable check are release gates.
