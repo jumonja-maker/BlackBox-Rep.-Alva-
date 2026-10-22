@@ -59,13 +59,12 @@ preview), SQLite-backed finalized JSON/HTML report and offline AI handoff
 automatically stored on Stop, comparison between two selected session folders,
 and optional full local snapshot export via a user-selected path. No cloud upload.
 
-**05 ALVA LAB** — visibly disconnected by default with a user-triggered
-CHECK button that calls only the public consumer bridge. When authorized
-private Alva is installed, it can attempt the real scoped operation on an
-already-finalized local session. Import alone is not provenance attestation.
+**05 SETTINGS** — polling interval selector wired to QTimer, security and
+privacy disclosures, portable maintenance.
 
-**06 SETTINGS** — polling interval selector wired to QTimer, security and
-privacy disclosures.
+The app exposes no user-facing branded platform page. Diagnostics are a
+behind-the-scenes part of the completed-session evidence flow. See
+`docs/INTERNAL_DIAGNOSTICS_NO_BRAND.md`.
 
 ## Minimum functional semantics
 
@@ -86,17 +85,20 @@ privacy disclosures.
 - Native maximize/minimize/close controls work.
 - Read-only events are local and no sensitive dump attachments are made.
 
-## Alva adapter policy
+## Internal platform adapter policy (not a screen)
 
-Do **not** vendor the current private Alva repository here. When an upstream
-public foundation is available, introduce a dedicated adapter implementing
-versioned evidence contracts, scoped read-only calls, fail-closed validation,
-and a truthful AI handoff. The whole app must still work when Alva is absent.
+The application automatically stores its own SQLite / JSON / HTML /
+AI Handoff evidence on STOP. No private platform is needed for this.
 
-Initial state remains **NOT CONNECTED** until a user explicitly runs CHECK.
-A successful API import is never reported as independently verified source.
-No tool-controlled model, tunnel, hidden upload, debugger injection or
-unauthorized operation may be implied by a visual component.
+If and only if a trusted external interpreter was **previously authorized**,
+the already-integrated sidecar can run in the background after a finalized
+session, without separate navigation or the former Alva Lab button.
+The sidecar uses three limited scoped operations; it cannot infer root cause,
+cannot attest installed package origin and never installs/downloads Alva.
+The public EXE does not bundle the private library. In the absence of that
+runtime, ordinary report generation remains unchanged and shall not claim
+genuine Alva execution. Runtime setup/disconnect is now maintainer-facing,
+not presented as an end-user feature.
 
 ## Test and acceptance gates
 
