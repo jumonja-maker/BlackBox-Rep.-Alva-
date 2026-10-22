@@ -7,7 +7,7 @@ import re
 
 SCHEMA_VERSION = 1
 MAX_EVENT_BYTES = 8192
-STAGES = frozenset({"discovery", "attach", "sample", "storage", "report", "handoff", "platform"})
+STAGES = frozenset({"discovery", "attach", "sample", "storage", "report", "platform"})
 CODES = frozenset({"ACCESS_DENIED", "PROCESS_NOT_FOUND", "PID_REUSED", "PROCESS_EXITED",
                    "SAMPLE_UNAVAILABLE", "DEPENDENCY_MISSING", "STORAGE_ERROR", "INVALID_DATA",
                    "UNSUPPORTED_SCHEMA", "ALVA_UNAVAILABLE", "ALVA_FAILURE"})
