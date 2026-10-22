@@ -825,6 +825,9 @@ class UniversalWindow(QMainWindow):
             button.setProperty("active", key == page)
             button.style().unpolish(button)
             button.style().polish(button)
+        # Qt can auto-scroll to whichever child happens to take focus during
+        # construction. Always show the top title and full metric cards.
+        self.stack.currentWidget().verticalScrollBar().setValue(0)
         if page == "reports":
             self._update_report_preview()
         if page == "events":
