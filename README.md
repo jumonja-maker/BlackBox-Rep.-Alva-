@@ -4,15 +4,15 @@
 
 **v0.3.0 Release Candidate** · Portable Windows desktop application · Open-source observer · Internal evidence processing
 
-BLACK.BOX Universal monitors a **user-selected, accessible process** without installing an agent into that application. It collects OS-level performance evidence, stores each session locally, and creates reports for users, developers, or an AI chat **when the user chooses to share them**.
+BLACK.BOX Universal monitors a **user-selected, accessible process** without installing an agent into that application. It collects OS-level performance evidence, stores each session locally, and creates understandable local reports for people, with sharing only when the user explicitly chooses it.
 
 **No Python, local AI, Git, or PowerShell is required to run the Windows portable EXE.** Internal diagnostic processing is transparent to the user; an Alva Runtime is not bundled.
 
-> **Release status:** v0.3.0 is a tested release candidate in [Draft PR #7](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/pull/7), **not yet an official stable GitHub Release**. The current repository `main` remains separate until this PR is accepted. Windows/Linux automated tests and frozen-EXE startup checks have passed; manual Windows update/uninstall testing and a real private-Alva installation test are still outstanding.
+> **Release status:** v0.3.0 is a human-first integration candidate in [Draft PR #12](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/pull/12), **not an official stable GitHub Release**. The `main` branch does not yet contain this application. Exact SHA `4b1dd4c3be1b2654e03e56b60272840a717b81b1` passed **66/66 Windows and 66/66 Ubuntu tests**, frozen Windows EXE smoke and portable packaging ([Actions evidence](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/actions/runs/39838913391)). Manual clean Windows acceptance, updater/uninstaller validation, binary license review and genuine authorized private Alva compatibility remain open.
 
 ## Download and start (Windows x64)
 
-1. Open the [GitHub Actions builds](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/actions) for this candidate. In a **successful** *BLACK.BOX Universal - Shell QA and Windows portable* run, download the `BLACK.BOX-Universal-Windows` artifact. An official [Releases page](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/releases) will be used once the release is published.
+1. Open the [GitHub Actions builds](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/actions) for **PR #12** at the exact tested SHA. In a **successful** *BLACK.BOX Universal - Shell QA and Windows portable* run, download the `BLACK.BOX-Universal-Windows` artifact. An official [Releases page](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/releases) will be used once the release is published.
 2. Extract the **entire** `BLACK.BOX-Universal` directory. Do not take `BLACK.BOX-Universal.exe` out of that folder: its `_internal` files and the maintenance EXE are required.
 3. Double-click **`BLACK.BOX-Universal.exe`**. No account, terminal, or administrator elevation is requested for ordinary accessible processes.
 4. Use **RU / ENG** at the bottom of the left sidebar to change interface language. The preference is saved.
@@ -91,7 +91,7 @@ A maintainer-approved, previously selected local Python environment can still pr
 
 **Uninstall:** in **Settings → UNINSTALL APPLICATION**, confirm removal. A separate `BLACK.BOX-Maintenance.exe` waits for the main process to exit, removes the portable application directory and moves any `logs/`, `sessions/` or `reports/` inside it to a preserved folder under the user's Documents. Existing sessions in the default Documents location are **not deleted**. This is **portable-folder removal**, not registration in Windows “Installed Apps.” Manual physical-Windows update/uninstall acceptance is still pending.
 
-[Update and removal details](docs/UPDATES_FEEDBACK_UNINSTALL.md)
+[Update and removal details](docs/UPDATES_FEEDBACK_UNINSTALL.md) · [Windows acceptance plan](docs/WINDOWS_RELEASE_ACCEPTANCE.md)
 
 ## Source and developer CLI (optional)
 
