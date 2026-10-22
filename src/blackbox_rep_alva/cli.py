@@ -7,7 +7,6 @@ from .contracts import ObserverError
 from .probe import list_processes
 from .recorder import record
 from .report import summarize, write_report, compare
-from .handoff import build_handoff
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -19,7 +18,7 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--output", type=Path, required=True, help="Existing, non-symlink output root")
     r.add_argument("--duration", type=float, default=3.0)
     r.add_argument("--interval", type=float, default=0.5)
-    for name in ("summary", "export", "handoff", "alva-check"):
+    for name in ("summary", "export", "alva-check"):
         parser = sub.add_parser(name)
         if name == "alva-check":
             parser.add_argument("--diagnose", type=Path, help="Existing session directory")
@@ -38,8 +37,6 @@ def main(argv: list[str] | None = None) -> int:
             result = summarize(args.session)
         elif args.command == "export":
             result = write_report(args.session)
-        elif args.command == "handoff":
-            result = build_handoff(args.session)
         elif args.command == "compare":
             result = compare(args.before, args.after)
         elif args.command == "alva-check":
