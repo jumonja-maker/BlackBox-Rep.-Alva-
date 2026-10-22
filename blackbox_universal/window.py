@@ -1025,6 +1025,9 @@ class UniversalWindow(QMainWindow):
                               "Идёт запись технических свидетельств…"),
                 "saved": ("Local observer report saved.",
                           "Локальный технический отчёт сохранён."),
+                "verification_failed": (
+                    "Observer report saved. Advanced evidence check did not complete.",
+                    "Отчёт сохранён. Дополнительная проверка свидетельств не завершена."),
                 "unavailable": ("Observer report unavailable; SQLite may remain.",
                                 "Отчёт недоступен; данные SQLite могли сохраниться."),
             }
@@ -1045,8 +1048,11 @@ class UniversalWindow(QMainWindow):
             kind = ("reviewed" if result.get("evidence_status") == "ok"
                     and accepted == total else "needs_review")
             self._set_evidence_status(kind, accepted, total)
-        elif result.get("status") == "error" and self.probe.report_result is not None:
-            self._set_evidence_status("saved")
+        elif result.get("status") in ("error", "unavailable") and self.probe.report_result is not None:
+            # Only advertise a failed *built-in* check when a bundled runtime
+            # actually exists. Standalone builds never pretend to run it.
+            self._set_evidence_status(
+                "verification_failed" if bundled_runtime_available() else "saved")
 
     def _alva_finished(self) -> None:
         self._alva_worker = None
