@@ -39,6 +39,12 @@ class HumanFirstContractTests(unittest.TestCase):
                 main(["handoff", "some-session"])
         self.assertEqual(error.exception.code, 2)
 
+    def test_internal_platform_cli_command_is_not_advertised(self):
+        with redirect_stderr(StringIO()):
+            with self.assertRaises(SystemExit) as error:
+                main(["alva-check"])
+        self.assertEqual(error.exception.code, 2)
+
     def test_normal_cli_is_still_accessible_without_alva_or_ai(self):
         with redirect_stderr(StringIO()):
             with self.assertRaises(SystemExit) as error:
