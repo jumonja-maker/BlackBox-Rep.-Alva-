@@ -1,5 +1,16 @@
 # BlackBox Rep. Alva — state / developer handoff (2026-10-22)
 
+## New owner decision: Alva stays private, zero-setup BLACK.BOX UX (2026-10-22)
+
+- The Alva platform repository **remains private**. Do not include its sources, wheels or executables in this public repository or public releases; an open-source license and redistribution terms are not yet selected for Alva.
+- Proposed standalone UX branch: `feature/zero-setup-private-alva-ux-20261022`, stacked on `feature/release-v030-alva-integration-20261022` (base `e091496282c55782b279b4a5281273cc5828ec20`). **Draft only, do not merge before QA**.
+- The first-download product must work **without Python or Alva** for process observation, SQLite/JSON/HTML, comparison and offline handoff.
+- Frozen Alva Lab with no configured external Python now displays `ALVA_RUNTIME_NOT_CONFIGURED` and `STANDALONE READY`, never a fabricated API success or hidden installation. Approved external runtime connection remains optional, local and opt-in.
+- The current repo has no published Releases; do not describe CI artifacts as a finished public release.
+- QA: focused `access_status` **5/5 PASS** on local Linux Python 3.13.5 and compileall PASS for equivalent staged code; real Qt/frozen Windows at **this exact change**, genuine Alva and public user acceptance **NOT RUN**. See `docs/NO_SETUP_PUBLIC_RUNTIME.md`.
+- Next: test new PR SHA on Windows frozen EXE with no Python/Alva; then negative permission and optional Alva tests; inspect licensing for third-party dependencies; only after review consider Release.
+
+
 ## Latest: integrated standalone + retro desktop (after Alva foundation)
 
 - Integration Draft PR [#5](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/pull/5),
