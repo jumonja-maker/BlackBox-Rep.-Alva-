@@ -1,5 +1,33 @@
 # BlackBox Rep. Alva — state / developer handoff (2026-10-22)
 
+## Latest: integrated standalone + retro desktop (after Alva foundation)
+
+- Integration Draft PR [#5](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/pull/5),
+  branch `feature/universal-integrated-desktop-v01`, stacked **on PR #3**
+  and therefore including the complete PR #1→#2→#3 public platform base.
+- Original design Draft PR #4 supplied the theme, widgets and UI layouts.
+  **PR #4 should not also be merged separately**; it is superseded by #5.
+- The GUI uses `blackbox_rep_alva.probe.PsutilProbe` and
+  `blackbox_rep_alva.storage.SessionStore` for the single authoritative
+  sampler and SQLite format. Save/Stop automatically creates
+  `session.sqlite3`, `report.json`, `report.html` and an offline,
+  untrusted `ai-handoff.json`. Reports can compare saved sessions.
+- Alva Lab uses only the PR #2 `inspect_platform` on explicit CHECK.
+  Alva's private code is neither imported during normal observation nor
+  distributed in Windows builds. Permission-to-act stays false.
+- **Executed Windows/Linux + frozen EXE CI PASS** on integrated commit
+  `cb1aef6a7b3f341a5040866a63ee2ce29f7894b0`;
+  Windows 31 tests PASS, real PyInstaller windowed startup smoke PASS.
+  Details in `docs/QA_EVIDENCE.md`.
+- Later revisions include an explicit Attach→Start PID-reuse check, plus
+  additional QA; they require fresh CI validation. Real user Windows
+  usability, third-party app stress and **genuine Alva** testing remain
+  unverified. Do not merge into `main` or label a signed stable release
+  solely from automated CI.
+
+The following state describes the **earlier pre-GUI Alva platform stage**
+and remains as historical evidence, not the current GUI feature list.
+
 ## Exact engineering checkpoint
 
 Source repository: `jumonja-maker/BlackBox-Rep.-Alva-` (public), whose `main` was intentionally **not modified** during this delivery (base `0bc1bf94825fd6025a6e42d524581a2f1ca7bd4a`).
