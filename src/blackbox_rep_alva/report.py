@@ -40,7 +40,7 @@ def summarize(folder: Path) -> dict:
                 "root_cause": "UNKNOWN", "root_cause_confidence": "UNKNOWN",
                 "execution_attested": False,
                 "limitations": ["external_sampling_only", "no_proof_of_memory_leak",
-                                "not_an_application_internal_trace", "not_an_alva_origin_attestation"],
+                                "not_an_application_internal_trace"],
             }
             bounded(result, max_bytes=65536)
             return result
