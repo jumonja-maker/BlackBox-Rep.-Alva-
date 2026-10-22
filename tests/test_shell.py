@@ -121,10 +121,15 @@ class QtShellTests(unittest.TestCase):
             for key in ("dashboard", *expected):
                 self.window._navigate(key)
                 page = self.window.stack.currentWidget()
-                headings = [label.text() for label in page.findChildren(QLabel)
-                            if label.objectName() == "eyebrow"]
-                self.assertEqual(headings,
+                breadcrumbs = [label for label in page.findChildren(QLabel)
+                               if label.objectName() == "eyebrow"]
+                self.assertEqual([label.text() for label in breadcrumbs],
                                  [] if key == "dashboard" else [expected[key][index]])
+                for label in breadcrumbs:
+                    self.assertFalse(label.wordWrap(),
+                                     f"Breadcrumb wrapped on {key} in {language}")
+                    self.assertGreater(label.sizeHint().width(),
+                                       label.sizeHint().height() * 2)
                 self.assertFalse(
                     [label.text() for label in page.findChildren(QLabel)
                      if label.objectName() == "hero"],
