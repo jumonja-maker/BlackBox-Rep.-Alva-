@@ -411,6 +411,7 @@ class UniversalWindow(QMainWindow):
     def _build_processes(self) -> QWidget:
         page, content = _page()
         head = QHBoxLayout()
+        head.addWidget(_label("WINDOWS / PROCESS EXPLORER", "eyebrow"))
         head.addStretch()
         refresh = _button("↻  REFRESH")
         refresh.clicked.connect(self._refresh_process_list)
@@ -451,6 +452,7 @@ class UniversalWindow(QMainWindow):
 
     def _build_events(self) -> QWidget:
         page, content = _page()
+        content.addWidget(_label("WINDOWS / EVENT VIEWER", "eyebrow"))
         frame = WindowPanel("Session timeline", "LATEST FIRST")
         self.event_table = QTableWidget(0, 3)
         self.event_table.setHorizontalHeaderLabels(("TIME (UTC)", "SIGNAL", "DETAILS"))
@@ -475,6 +477,7 @@ class UniversalWindow(QMainWindow):
     def _build_reports(self) -> QWidget:
         page, content = _page()
         h = QHBoxLayout()
+        h.addWidget(_label("LOCAL DISK / REPORTS", "eyebrow"))
         h.addStretch()
         save = _button("▣  SAVE JSON SNAPSHOT", "primary")
         save.clicked.connect(self._export)
@@ -504,6 +507,7 @@ class UniversalWindow(QMainWindow):
 
     def _build_settings(self) -> QWidget:
         page, content = _page()
+        content.addWidget(_label("CONTROL PANEL / PREFERENCES", "eyebrow"))
         setting = WindowPanel("Observation settings", "LOCAL CONFIGURATION")
         setting.content.addWidget(_label("SAMPLE INTERVAL", "cardTitle"))
         self.interval_combo = QComboBox()
