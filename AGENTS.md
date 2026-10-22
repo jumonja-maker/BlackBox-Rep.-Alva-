@@ -11,7 +11,7 @@ This is a **standalone public application**, not a module/repository of private 
 
 ## Engineering operating rules
 
-- Start from the actual GitHub HEAD, distinguish `main`, Draft PR #1–#3 and inherited stacked bases.
+- Start from the actual GitHub HEAD. Current cumulative integration is **Draft PR #12** (PR #9 → #10 → #11), not old stacked PR #1–#3 or obsolete Alva Lab PR #7/#8; distinguish its HEAD from `main`. Do not merge old Drafts separately.
 - Python-first; offline at runtime; independent of Alva for observation; explicit user-chosen PID/output.
 - Do not kill, pause, debug, patch, inject or write to target processes/applications. Do not collect file contents, full command lines, environment variables, credentials or private telemetry by default.
 - Never turn sample gaps, RSS growth or missing application telemetry into a proven deadlock, leak or app-internal defect.
@@ -29,7 +29,7 @@ PYTHONPATH=src python -m unittest discover -s tests -v
 PYTHONPATH=src python -m blackbox_rep_alva --help
 ```
 
-No Windows or genuine Alva-at-SHA acceptance has been performed by these source commits. Do not rewrite status claims.
+At cumulative integration SHA `4b1dd4c3be1b2654e03e56b60272840a717b81b1`, Windows **66/66**, Ubuntu **66/66** and frozen Windows EXE smoke passed in [Actions #39838913391](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/actions/runs/39838913391). **Manual clean Windows acceptance and genuine Alva-at-pinned-SHA verification remain NOT RUN / BLOCKED.** Do not generalize test results to changed SHAs. See `docs/WINDOWS_RELEASE_ACCEPTANCE.md`.
 
 
 ## UI branding rule (owner decision 2026-10-22)
