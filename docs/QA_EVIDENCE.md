@@ -1,6 +1,21 @@
 # QA evidence for BLACK.BOX Universal
 
-## Current cumulative PR #12 — confirmed executed tests
+## Latest verified PR #12 integration HEAD — 2026-10-22
+
+- **Exact HEAD:** `4b1dd4c3be1b2654e03e56b60272840a717b81b1` on `feature/human-first-integration-qa-20261022`; `main` remains `282c92c11d15319aaa22146e683f767862bf9ecd` (NOT MERGED, PR #12 is Draft).
+- **PASS — Windows:** 66/66 unittest, Qt offscreen startup smoke and public CLI help checks, [PR Actions #39838913391](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/actions/runs/39838913391).
+- **PASS — Ubuntu:** 66/66 unittest, Qt offscreen startup smoke and CLI help checks, same run.
+- **PASS — Windows frozen portable package:** standalone `BLACK.BOX-Universal.exe` and `BLACK.BOX-Maintenance.exe` assembled; frozen `--smoke` tests five pages, one real self-process sample, SQLite + `report.json` + bilingual offline `report.html`, explicit unproven foreign-process root cause and absence of `ai-handoff.json`. Artifact `BLACK.BOX-Universal-Windows` ID `12452241891`, 60,462,054 bytes, expiration 2026-11-05. [Push Actions #39838907329](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/actions/runs/39838907329) also succeeded on the same SHA.
+- **LIMITED — Alva P4 tests:** synthetic **test doubles** validate bounded wire schema, four P4 quality checks and negative cases. No claim of genuine installed private Alva, wheel authenticity or arbitrary target root-cause proof.
+- **NOT RUN — manual Windows:** interactive GUI on a clean unprivileged physical Windows PC, varied DPI, target process lifecycle/denied access, offline first run, extended sessions and Windows Defender/reputation checks.
+- **NOT RUN — maintenance:** actual updater interaction with a verified newer official GitHub Release, rollback with file locks, complete portable uninstall with preserved user data, real shortcuts.
+- **BLOCKED — genuine private Alva:** exact authorized source SHA and separately installed wheel hash plus positive/negative `tools/verify_authorized_alva.py` run; never upload the wheel/source into public CI.
+- **OPEN — release governance:** exact packaged binary dependency inventory, licenses and required notices; owner sign-off, code-signing decision and official tag/release.
+
+The release-candidate binary is **not** an official published Release. Do not merge PR #9, #10 or #11 independently on top of PR #12. Manual procedure and evidence form: [WINDOWS_RELEASE_ACCEPTANCE.md](WINDOWS_RELEASE_ACCEPTANCE.md); licensing plan: [DEPENDENCY_LICENSE_AUDIT.md](DEPENDENCY_LICENSE_AUDIT.md).
+
+
+## Earlier intermediate PR #12 revision — historical CI evidence
 
 - **GitHub Actions run:** [39837259498](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/actions/runs/39837259498)
 - **Exact tested source SHA:** `32b399b93f987bce3122164b2875f2de943cd236`.
