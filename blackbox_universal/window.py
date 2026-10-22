@@ -149,6 +149,10 @@ class UniversalWindow(QMainWindow):
         self._update_worker = None
         self._alva_worker = None
         self._last_alva_session = None
+        self._active_alva_session = None
+        self._alva_queue = []
+        self._alva_sessions_queued = set()
+        self._alva_results_by_session = {}
         # Only a previously authorized interpreter can enable private diagnostics.
         # Never discover/execute arbitrary Python paths or install private code.
         self._alva_interpreter = str(self._prefs.value("alva_python", "") or "")
@@ -364,7 +368,7 @@ class UniversalWindow(QMainWindow):
         metrics = QGridLayout()
         metrics.setSpacing(11)
         self.card_cpu = MetricCard("PROCESS CPU", "--", "Current sample", COLORS["coral"])
-        self.card_ram = MetricCard("WORKING MEMORY", "--", "Process tree RSS", COLORS["teal"])
+        self.card_ram = MetricCard("WORKING MEMORY", "--", "Selected process RSS", COLORS["teal"])
         self.card_child = MetricCard("ACTIVE PROCESSES", "--", "Target + visible children", COLORS["lilac"])
         self.card_samples = MetricCard("SAMPLES", "0", "Read-only observations", COLORS["peach"])
         for i, card in enumerate((self.card_cpu, self.card_ram,
@@ -904,14 +908,14 @@ class UniversalWindow(QMainWindow):
         self.stop_btn.setEnabled(running)
         current = self.probe.last
         self.card_cpu.set_readout(
-            f'{current["cpu_pct"]:.1f}%' if self.probe.history else "--",
+            f'{current["cpu_pct"]:.1f}%' if self.probe.history and current["cpu_pct"] is not None else "—",
             self._t("Selected root process"))
         self.card_ram.set_readout(
-            f'{current["rss_mb"]:.1f} MB' if self.probe.history else "--",
-            self._t("Tree total / RSS"))
+            f'{current["rss_mb"]:.1f} MB' if self.probe.history and current["rss_mb"] is not None else "—",
+            self._t("Selected process RSS"))
         self.card_child.set_readout(
-            str(current["process_count"]) if self.probe.history else "--")
-        self.card_samples.set_readout(str(len(self.probe.history)))
+            str(current["process_count"]) if self.probe.history and current["process_count"] is not None else "—")
+        self.card_samples.set_readout(str(self.probe.total_samples))
         self.chart.set_samples(list(self.probe.history))
         if selected:
             self.target_name.setText(self.probe.name)
@@ -982,6 +986,7 @@ class UniversalWindow(QMainWindow):
                            *, persist: bool = False) -> None:
         if self._alva_worker is not None:
             return
+        self._active_alva_session = session
         self._alva_worker = _AlvaWorker(
             interpreter, session, self, persist=persist)
         self._alva_worker.result_ready.connect(self._private_diagnostics_result)
@@ -1025,6 +1030,13 @@ class UniversalWindow(QMainWindow):
         """Record only internal runtime outcome; no public platform UI."""
         if type(result) is not dict:
             result = {"status": "error", "error_code": "DIAGNOSTICS_RESPONSE_INVALID"}
+        session = self._active_alva_session
+        if session is not None:
+            self._alva_results_by_session[session] = result
+            if self.probe.session_folder != session:
+                # A completed earlier session must never change the status
+                # of the currently selected or recording session.
+                return
         self._diagnostics_last_result = result
         accepted = result.get("reviewed_checks")
         total = result.get("declared_checks")
@@ -1042,19 +1054,28 @@ class UniversalWindow(QMainWindow):
 
     def _alva_finished(self) -> None:
         self._alva_worker = None
+        self._active_alva_session = None
+        if self._alva_queue:
+            interpreter, session = self._alva_queue.pop(0)
+            self._alva_sessions_queued.discard(session)
+            self._start_alva_worker(interpreter, session, persist=True)
 
     def _finalize_alva_if_configured(self) -> None:
         session = self.probe.session_folder
-        if ((bundled_runtime_available() or self._alva_interpreter)
+        bundled = bundled_runtime_available()
+        if ((bundled or self._alva_interpreter)
                 and session is not None and
                 not self.probe.active and
                 self._last_alva_session != session and
-                self._alva_worker is None and
+                session not in self._alva_sessions_queued and
                 (session / "report.json").is_file()):
             self._last_alva_session = session
-            self._start_alva_worker(
-                None if bundled_runtime_available() else Path(self._alva_interpreter),
-                session, persist=True)
+            interpreter = None if bundled else Path(self._alva_interpreter)
+            if self._alva_worker is not None:
+                self._alva_sessions_queued.add(session)
+                self._alva_queue.append((interpreter, session))
+            else:
+                self._start_alva_worker(interpreter, session, persist=True)
 
     def _export(self) -> None:
         if self.probe.pid is None:
