@@ -109,6 +109,15 @@ class FakeScope:
     def invoke_with_diagnostics(self, request):
         name = request["operation"]
         data = self.host.components[name].fn(request["payload"])
+        trace = {"component": name, "status": "ok"}
+        single = {"status": "ok", "result": {
+            "observed_pipeline_status": "ok", "declared_stages": 1,
+            "executed_stages": 1, "accepted_checks": 1,
+            "first_unverified_component": None,
+            "verification_coverage": "ALL_DECLARED_CHECKS_ACCEPTED",
+            "next_action_code": "ALL_DECLARED_CHECKS_ACCEPTED",
+            "evidence_origin": "APP_SUPPLIED_NOT_AUTHENTICATED",
+        }}
         return type("Call", (), {
             "response": {"status": "ok", "result": data},
             "execution_state": "RESPONSE_AVAILABLE",
@@ -116,6 +125,7 @@ class FakeScope:
                 "contract_verdict": "CHECK_ACCEPTED",
                 "visibility": "SCOPE_ONLY",
                 "ai_handoff": {"status": "ok"},
+                "trace": trace, "operation_report": single,
             }},
         })()
 
@@ -125,6 +135,20 @@ def fake_checked(method, checker):
     if checker(value) is not True:
         raise ValueError("CHECK_REJECTED")
     return value
+
+
+def fake_classify(trace):
+    return {"status": "ok", "result": {
+        "source": "UNKNOWN", "confidence": "UNKNOWN",
+        "basis": "NO_FAILURE_OBSERVED"}}
+
+
+def fake_report(trace):
+    return {"status": "ok", "result": {
+        "component": trace["component"],
+        "observed_operation_status": "ok",
+        "step_coverage": "COMPLETE_SUCCESS_PATH",
+        "evidence_origin": "NOT_AUTHENTICATED"}}
 
 
 class P4EvidenceTests(unittest.TestCase):
@@ -172,6 +196,8 @@ class P4EvidenceTests(unittest.TestCase):
         root.run_checked_pipeline = FakeAlvaPipeline.run_checked_pipeline
         root.review_pipeline_evidence = FakeAlvaPipeline.review_pipeline_evidence
         root.build_ai_handoff = FakeAlvaPipeline.build_ai_handoff
+        root.classify_failure = fake_classify
+        root.build_report = fake_report
         root.__version__ = "test-double-not-private-alva"
         host.ComponentHost = FakeHost
         with patch.dict(sys.modules, {"alva": root, "alva.host": host}):
@@ -182,6 +208,7 @@ class P4EvidenceTests(unittest.TestCase):
         self.assertEqual(result["bridge_schema"], 2)
         self.assertEqual(result["component_count"], 3)
         self.assertEqual(result["extended_diagnostics"]["accepted_checks"], 4)
+        self.assertEqual(len(result["extended_diagnostics"]["host_trace_checks"]), 3)
         self.assertEqual(_validate_output(result), result)
 
     def test_v2_forged_root_cause_proof_is_rejected(self):
@@ -201,6 +228,39 @@ class P4EvidenceTests(unittest.TestCase):
         result["extended_diagnostics"]["root_cause_proven"] = True
         with self.assertRaises(ConnectionError):
             _validate_output(result)
+
+    def test_forged_host_trace_receipt_rejected(self):
+        data = verified_session_evidence(FakeAlvaPipeline, SUMMARY, "inspect")
+        data["host_trace_checks"] = [{
+            "component": name,
+            "component_execution": "ok",
+            "trace_step_coverage": "COMPLETE_SUCCESS_PATH",
+            "classification_source": "UNKNOWN",
+            "classification_confidence": "UNKNOWN",
+            "record_status": "STRUCTURALLY_CONSISTENT_UNAUTHENTICATED",
+            "root_cause_proven": False,
+            "permission_to_act": False,
+        } for name in worker.OPERATIONS]
+        record = {
+            "status": "ok", "bridge_schema": 2,
+            "mode": "EXTERNAL_ALVA_SCOPED_INSPECTION",
+            "alva_version": "test-double",
+            "alva_origin_authenticated": False,
+            "target_root_cause_proven": False, "permission_to_act": False,
+            "evidence_origin": "APP_SUPPLIED_NOT_AUTHENTICATED",
+            "component_count": 3,
+            "operations": [{
+                "component": name, "execution_state": "RESPONSE_AVAILABLE",
+                "contract_verdict": "CHECK_ACCEPTED",
+                "visibility": "SCOPE_ONLY", "ai_handoff_status": "ok",
+                "observation": {},
+            } for name in worker.OPERATIONS],
+            "extended_diagnostics": data,
+        }
+        self.assertEqual(_validate_output(record), record)
+        record["extended_diagnostics"]["host_trace_checks"][0]["root_cause_proven"] = True
+        with self.assertRaises(ConnectionError):
+            _validate_output(record)
 
     def test_private_package_not_installed_by_worker(self):
         source = Path(worker.__file__).read_text(encoding="utf-8")
