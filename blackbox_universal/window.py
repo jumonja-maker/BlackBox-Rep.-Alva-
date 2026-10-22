@@ -113,6 +113,7 @@ class UniversalWindow(QMainWindow):
         self._update_worker = None
         self._available_release = None
         self._maintenance_launching = False
+        self._pending_update_stage = None
         icon_dir = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent.parent))
         icon_file = icon_dir / "assets" / "blackbox.png"
         if icon_file.is_file():
@@ -697,8 +698,12 @@ class UniversalWindow(QMainWindow):
         self._update_worker.start()
 
     def _worker_finished(self) -> None:
-        # Let any queued signals complete before freeing the QThread.
+        # The executable must never close while a QThread remains alive.
         self._update_worker = None
+        if self._pending_update_stage is not None:
+            folder = self._pending_update_stage
+            self._pending_update_stage = None
+            self._launch_maintenance("update", staged=folder)
 
     def _update_checked(self, release: object, error: str) -> None:
         self._available_release = release if isinstance(release, Release) else None
@@ -749,7 +754,7 @@ class UniversalWindow(QMainWindow):
                         "Your current application remains unchanged."))
             self._refresh_update_button("error")
             return
-        self._launch_maintenance("update", staged=staged)
+        self._pending_update_stage = staged
 
     def _create_shortcut(self) -> None:
         install = runtime_directory()
@@ -807,6 +812,8 @@ class UniversalWindow(QMainWindow):
             subprocess.Popen(command, **kwargs)
         except (OSError, subprocess.SubprocessError):
             shutil.rmtree(scratch, ignore_errors=True)
+            if staged is not None:
+                shutil.rmtree(staged.parent, ignore_errors=True)
             QMessageBox.warning(self, "BLACK.BOX Universal",
                                 self._t("Could not start maintenance. No files were changed."))
             return
