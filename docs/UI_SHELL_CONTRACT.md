@@ -54,13 +54,15 @@ Double-click row or choose Attach.
 **03 EVENT LOG** — bounded in-memory observer timeline. Not a promise of
 native application call traces.
 
-**04 REPORTS** — real JSON snapshot preview (last 15 events/samples in the
-preview only), full bounded snapshot export through user's save dialog.
-No automatic export and no cloud upload.
+**04 REPORTS** — live JSON snapshot preview (last 15 events/samples in
+preview), SQLite-backed finalized JSON/HTML report and offline AI handoff
+automatically stored on Stop, comparison between two selected session folders,
+and optional full local snapshot export via a user-selected path. No cloud upload.
 
-**05 ALVA LAB** — visibly disconnected with three future contract stages:
-observe/verify/handoff. This is an interface boundary, **not simulated
-Alva execution**.
+**05 ALVA LAB** — visibly disconnected by default with a user-triggered
+CHECK button that calls only the public consumer bridge. When authorized
+private Alva is installed, it can attempt the real scoped operation on an
+already-finalized local session. Import alone is not provenance attestation.
 
 **06 SETTINGS** — polling interval selector wired to QTimer, security and
 privacy disclosures.
@@ -76,8 +78,10 @@ privacy disclosures.
 - Status, chart, event log, report preview, buttons and navigation update.
 - Child process events include only PID; no full command line or executable
   path is copied.
-- Local export is user-triggered, committed with atomic os.replace, and
-  contains the provenance and explicit diagnostic limitations.
+- Every explicit Start begins a new durable SQLite WAL session under the
+  user's Documents/BLACK.BOX Universal/sessions root. Stop finalizes the
+  core JSON/HTML report and offline AI Handoff. Manual snapshot export is
+  separately user-triggered, atomically committed with os.replace.
 - File/View/Help and taskbar Start menus work.
 - Native maximize/minimize/close controls work.
 - Read-only events are local and no sensitive dump attachments are made.
@@ -89,7 +93,8 @@ public foundation is available, introduce a dedicated adapter implementing
 versioned evidence contracts, scoped read-only calls, fail-closed validation,
 and a truthful AI handoff. The whole app must still work when Alva is absent.
 
-State label remains **NOT CONNECTED** until tests prove the adapter works.
+Initial state remains **NOT CONNECTED** until a user explicitly runs CHECK.
+A successful API import is never reported as independently verified source.
 No tool-controlled model, tunnel, hidden upload, debugger injection or
 unauthorized operation may be implied by a visual component.
 
@@ -101,7 +106,9 @@ unauthorized operation may be implied by a visual component.
 - Manual visual and keyboard-accessibility test on Windows 10/11.
 - Actual process selection, termination/restart and PID reuse tests.
 - Leak and overhead measurements during long sessions.
-- No secret or absolute path material in default JSON snapshots.
+- No sensitive file contents or environment variables in default JSON
+  snapshots. Local session path, process name and PID are intentionally
+  visible to the owner; users must review exports before sharing.
 
 A green result is claimed only after a real CI run supplies it; adding tests
 and workflow YAML is not itself proof of execution.
