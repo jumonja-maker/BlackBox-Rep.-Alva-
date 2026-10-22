@@ -497,6 +497,9 @@ class UniversalWindow(QMainWindow):
             "Local evidence will be saved after Stop.", "caption")
         content.addWidget(self.evidence_status)
         controls = QHBoxLayout()
+        self.open_report_button = _button("▣  OPEN HTML REPORT")
+        self.open_report_button.clicked.connect(self._open_saved_report)
+        controls.addWidget(self.open_report_button)
         self.session_location = _label("No persisted session yet", "caption")
         controls.addWidget(self.session_location, 1)
         compare_button = _button("≍  COMPARE TWO SESSIONS")
@@ -917,6 +920,9 @@ class UniversalWindow(QMainWindow):
             str(current["process_count"]) if self.probe.history and current["process_count"] is not None else "—")
         self.card_samples.set_readout(str(self.probe.total_samples))
         self.chart.set_samples(list(self.probe.history))
+        folder = self.probe.session_folder
+        self.open_report_button.setEnabled(
+            folder is not None and (folder / "report.html").is_file())
         if selected:
             self.target_name.setText(self.probe.name)
             self.target_pid.setText(f"PID {self.probe.pid}  /  local computer")
@@ -962,8 +968,37 @@ class UniversalWindow(QMainWindow):
         overview = self.probe.snapshot()
         overview["recent_samples"] = overview["recent_samples"][-15:]
         overview["recent_events"] = overview["recent_events"][-15:]
+        session = self.probe.session_folder
+        if session is not None:
+            evidence = session / "evidence-checks.json"
+            if evidence.is_file() and not evidence.is_symlink():
+                try:
+                    result = json.loads(evidence.read_text(encoding="utf-8"))
+                    if type(result) is dict:
+                        details = result.get("extended_diagnostics")
+                        overview["evidence_quality_review"] = {
+                            "status": result.get("status"),
+                            "accepted_checks": (details.get("accepted_checks")
+                                                if type(details) is dict else None),
+                            "declared_checks": (details.get("declared_stages")
+                                                if type(details) is dict else None),
+                            "first_unverified": (details.get("first_unverified_component")
+                                                 if type(details) is dict else None),
+                            "target_root_cause_proven": False}
+                except (OSError, ValueError, UnicodeError):
+                    overview["evidence_quality_review"] = {
+                        "status": "unavailable",
+                        "target_root_cause_proven": False}
         self.report_preview.setPlainText(
             json.dumps(overview, ensure_ascii=False, indent=2))
+
+    def _open_saved_report(self) -> None:
+        folder = self.probe.session_folder
+        if folder is None:
+            return
+        page = folder / "report.html"
+        if page.is_file() and not page.is_symlink():
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(page)))
 
     def _compare_sessions(self) -> None:
         first = QFileDialog.getExistingDirectory(self, "Choose first saved session")
