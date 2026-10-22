@@ -536,7 +536,7 @@ class UniversalWindow(QMainWindow):
         self.alva_check.clicked.connect(self._check_alva)
         head.content.addWidget(self.alva_check)
         connect_row = QHBoxLayout()
-        self.alva_connect = _button("◎  CONNECT EXTERNAL ALVA")
+        self.alva_connect = _button("◎  ADVANCED: CONNECT AUTHORIZED ALVA")
         self.alva_connect.clicked.connect(self._choose_alva_environment)
         self.alva_disconnect = _button("×  DISCONNECT")
         self.alva_disconnect.clicked.connect(self._disconnect_alva_environment)
@@ -558,8 +558,8 @@ class UniversalWindow(QMainWindow):
         tiles = QHBoxLayout()
         for heading, description in (
             ("01 / OBSERVE", "Bounded process signals from the local observer."),
-            ("02 / VERIFY", "Future scoped Alva contracts and diagnostic evidence."),
-            ("03 / HANDOFF", "Optional machine-readable analysis; no cloud required."),
+            ("02 / VERIFY", "Three limited Alva checks, only for authorized users."),
+            ("03 / HANDOFF", "Offline report ready without Alva or cloud."),
         ):
             card = WindowPanel(heading)
             card.content.addWidget(_label(description, "caption"))
