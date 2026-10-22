@@ -6,6 +6,7 @@ on:
       - main
       - feature/universal-integrated-desktop-v01
       - feature/retro-feedback-i18n-maintenance-20261022
+      - feature/release-v030-alva-integration-20261022
     tags:
       - "v*.*.*"
   pull_request:
@@ -97,12 +98,15 @@ jobs:
       - name: Build BLACK.BOX Universal desktop with original icon
         shell: pwsh
         run: |
-          python -m PyInstaller --noconfirm --clean --onedir --windowed --collect-submodules blackbox_rep_alva --collect-submodules blackbox_universal --icon assets/blackbox.ico --add-data "assets/blackbox.png;assets" --name BLACK.BOX-Universal app.py
+          python -m PyInstaller --noconfirm --clean --onedir --windowed --collect-submodules blackbox_rep_alva --collect-submodules blackbox_universal --add-data "src/blackbox_rep_alva/alva_sidecar_worker.py;alva_worker" --icon assets/blackbox.ico --add-data "assets/blackbox.png;assets" --name BLACK.BOX-Universal app.py
           if ($LASTEXITCODE -ne 0) { throw 'GUI build failed' }
           Copy-Item "dist/BLACK.BOX-Maintenance.exe" "dist/BLACK.BOX-Universal/BLACK.BOX-Maintenance.exe"
           Copy-Item ".blackbox-portable.json" "dist/BLACK.BOX-Universal/.blackbox-portable.json"
           if (-not (Test-Path "dist/BLACK.BOX-Universal/BLACK.BOX-Maintenance.exe")) { throw 'Maintenance helper missing' }
           if (-not (Test-Path "dist/BLACK.BOX-Universal/_internal/assets/blackbox.png")) { throw 'App icon missing' }
+          if (-not (Test-Path "dist/BLACK.BOX-Universal/_internal/alva_worker/alva_sidecar_worker.py")) {
+            throw 'Public Alva sidecar script not bundled with EXE'
+          }
       - name: Smoke-test the actual frozen Windows EXE
         shell: pwsh
         run: |
