@@ -123,7 +123,7 @@ def _human_html(report: dict) -> str:
         "CPU, RAM and I/O are external system measurements, not proof "
         "of a memory leak, deadlock or internal application defect. "
         "Высокая нагрузка не доказывает сбой, утечку памяти или зависание.</p>"
-        "<p>Работает автономно; внешние ресурсы, AI и закрытая платформа "
+        "<p>Работает автономно; внешние сервисы и дополнительная установка не требуются "
         "не требуются / Offline: no external resources required.</p>"
         "</body></html>"
     )
