@@ -76,6 +76,7 @@ class AuditCoreRegressions(unittest.TestCase):
                 "extended_diagnostics": {
                     "accepted_checks": 1, "declared_stages": 4,
                     "observed_pipeline_status": "error",
+                    "verification_coverage": "INCOMPLETE_OR_AMBIGUOUS",
                     "first_unverified_component": "<unsupported>"}}
             overview = _write_diagnostics(result, folder, "evidence-checks.json")
             self.assertEqual(overview["reviewed_checks"], 1)
