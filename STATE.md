@@ -1,3 +1,17 @@
+## 2026-10-22 — PR #12 human-first integrated release candidate (CURRENT)
+
+**Review:** [Draft PR #12](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/pull/12), `feature/human-first-integration-qa-20261022`; cumulative PR #9 → PR #10 → PR #11 derived from head `dd339cbf69047047e09d3354091c151af67285b4`, reconciled with current `main` documentation via merge commit `4bf9a521de8d6ed9e329c1d7606470d7549c0324`. Main was **not** changed by this work.
+
+**Product:** five GUI pages (Overview, Processes, Event Log, Reports, Settings); no Alva Lab or public platform controls; public CLI list/record/summary/export/compare only. Stop creates only `session.sqlite3`, `report.json`, `report.html`; no automatic `ai-handoff.json` or `handoff` command. Existing older user files are retained. New static bilingual RU/EN HTML report shows actual CPU/RSS/sample/time/error evidence and explicitly unproven root cause. Snapshot no longer exposes internal `alva_status`; the public translation dictionary has no retired platform/Lab labels. Ordinary Windows process observation and reporting work without Python, Alva, AI, or online account.
+
+**Optional internal validation:** separately previously authorized private interpreter invokes fixed three scoped ComponentHost operations, four P4 evidence-quality checks and structure reviewer, but only on BLACK.BOX's own collected observer evidence; results, where available, are summarized in ordinary Reports. Private Alva runtime **not bundled**, wheel/license **not authorized for redistribution**, true Alva-at-pinned-SHA external invocation **NOT RUN**. No arbitrary-program root cause is proven.
+
+**Actually executed CI evidence:** [run #39837259498](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/actions/runs/39837259498) at commit `32b399b93f987bce3122164b2875f2de943cd236`: **65/65 Windows**, **65/65 Ubuntu**, portable PyInstaller GUI and separate Maintenance EXE built/smoked, Windows artifact uploaded. This covers a prior functional revision. Subsequent QA/translation/documentation edits are **not** automatically certified by that run; check newest Actions at the current branch HEAD before merge.
+
+**Remaining release blockers:** final exact-commit CI, real physical Windows end-to-end observation/Reports/Uninstall/Update, independent licensing inventory and true authorized private Alva integration with wheel/source SHA verification. No official signed/stable release; Draft only.
+
+The following earlier checkpoints are historical and may describe superseded GUI or AI features. Do not use them as the current feature list.
+
 # BlackBox Rep. Alva — state / developer handoff (2026-10-22)
 
 ## CURRENT OWNER DIRECTION — HUMAN-FIRST BLACK.BOX (2026-10-22)
