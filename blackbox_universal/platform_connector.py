@@ -246,8 +246,12 @@ def _human_review_html(session: Path, result: dict) -> None:
     if marker in document or "</body>" not in document or len(document) > 512000:
         return
     extended = result.get("extended_diagnostics")
-    status = "Accepted" if result.get("status") == "ok" else "Not completed"
+    status = "Not completed"
     if type(extended) is dict:
+        status = ("Accepted" if result.get("status") == "ok"
+                  and extended.get("observed_pipeline_status") == "ok"
+                  and extended.get("accepted_checks") == extended.get("declared_stages")
+                  else "Requires review")
         count = extended.get("accepted_checks", 0)
         total = extended.get("declared_stages", 4)
         stage = extended.get("first_unverified_component") or "none"
