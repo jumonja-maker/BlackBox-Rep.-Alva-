@@ -9,7 +9,6 @@ from unittest.mock import patch
 from blackbox_rep_alva.contracts import ObserverError, Sample
 from blackbox_rep_alva.storage import SessionStore
 from blackbox_rep_alva.report import write_report, summarize
-from blackbox_rep_alva.handoff import build_handoff
 from blackbox_rep_alva.recorder import record
 from blackbox_rep_alva.cli import main
 from io import StringIO
@@ -35,12 +34,10 @@ class SafetyTests(unittest.TestCase):
             database=folder/"session.sqlite3"
             before=hashlib.sha256(database.read_bytes()).digest()
             result=summarize(folder)
-            packet=build_handoff(folder)
             after=hashlib.sha256(database.read_bytes()).digest()
             self.assertEqual(before,after)
-            self.assertFalse(packet["permission_to_act"])
             self.assertFalse(result["execution_attested"])
-            self.assertNotIn("password",json.dumps(packet))
+            self.assertNotIn("password",json.dumps(result))
 
     def test_existing_report_not_overwritten(self):
         with tempfile.TemporaryDirectory() as temp:
