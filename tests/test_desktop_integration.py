@@ -185,6 +185,26 @@ class InternalDiagnosticsWindowTest(unittest.TestCase):
                 finally:
                     window.close()
 
+    def test_bundled_check_failure_is_visible_without_platform_brand(self):
+        with tempfile.TemporaryDirectory() as temp:
+            with patch("blackbox_universal.monitor._default_sessions_root",
+                       return_value=Path(temp)):
+                window = UniversalWindow()
+                window._timer.stop()
+                try:
+                    window.probe.report_result = {"status": "ok"}
+                    with patch("blackbox_universal.window.bundled_runtime_available",
+                               return_value=True):
+                        window._private_diagnostics_result({
+                            "status": "error",
+                            "error_code": "BUNDLED_RUNTIME_CHECK_FAILED"}, "")
+                    self.assertIn("did not complete", window.evidence_status.text())
+                    self.assertNotIn("Alva", window.evidence_status.text())
+                    window._set_language("RU")
+                    self.assertIn("не завершена", window.evidence_status.text())
+                finally:
+                    window.close()
+
     def test_background_runtime_result_does_not_create_platform_ui(self):
         with tempfile.TemporaryDirectory() as temp:
             with patch("blackbox_universal.monitor._default_sessions_root",
