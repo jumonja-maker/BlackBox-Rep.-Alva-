@@ -134,8 +134,7 @@ def _run(packet):
                         and result.get("evidence") == observations[operation]
                         and type(evidence) is dict
                         and evidence.get("contract_verdict") == "CHECK_ACCEPTED"
-                        and evidence.get("visibility") == "SCOPE_ONLY"
-):
+                        and evidence.get("visibility") == "SCOPE_ONLY"):
                     raise ValueError("ALVA_SCOPED_CONTRACT_FAILED")
                 observed_traces.append((operation, evidence))
                 outcomes.append({
