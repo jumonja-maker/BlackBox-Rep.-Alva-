@@ -130,7 +130,7 @@ class UniversalWindow(QMainWindow):
         self._timer.timeout.connect(self._tick)
         self._timer.start(1000)
         if self._prefs.value("check_updates_at_start", True, type=bool):
-            QTimer.singleShot(1800, self._check_updates)
+            QTimer.singleShot(1800, self._automatic_update_check)
 
     def _build(self) -> None:
         desktop = QWidget()
@@ -706,6 +706,12 @@ class UniversalWindow(QMainWindow):
         self.update_button.setProperty("available", bool(self._available_release))
         self.update_button.style().unpolish(self.update_button)
         self.update_button.style().polish(self.update_button)
+
+    def _automatic_update_check(self) -> None:
+        # Never issue hidden HTTP requests while merely constructing a Qt
+        # widget in unit tests or while the app is already closing.
+        if self.isVisible() and not self._maintenance_launching:
+            self._check_updates()
 
     def _check_updates(self) -> None:
         if self._update_worker is not None:
