@@ -126,3 +126,62 @@ def verified_session_evidence(alva: object, summary: dict, operation: str) -> di
         "root_cause_proven": False,
         "execution_attested": False,
     }
+
+
+def verified_host_traces(alva: object, entries: list[tuple[str, dict]]) -> list[dict]:
+    """Reuse existing host traces: classify/report/review without re-execution.
+
+    The classification describes *in-process BLACK.BOX component calls*, not
+    an observed foreign executable. All evidence remains unauthenticated.
+    """
+    expected = (
+        "blackbox.observer.samples", "blackbox.observer.lifecycle",
+        "blackbox.observer.errors",
+    )
+    if type(entries) is not list or len(entries) != len(expected):
+        raise ValueError("HOST_TRACE_COUNT_INVALID")
+    output = []
+    for (name, evidence), expected_name in zip(entries, expected):
+        if name != expected_name or type(evidence) is not dict:
+            raise ValueError("HOST_TRACE_IDENTITY_INVALID")
+        trace = evidence.get("trace")
+        operation_report = evidence.get("operation_report")
+        if (type(trace) is not dict or trace.get("component") != name
+                or trace.get("status") != "ok" or
+                type(operation_report) is not dict):
+            raise ValueError("HOST_TRACE_MISSING")
+        classified = alva.classify_failure(trace)
+        report = alva.build_report(trace)
+        review = alva.review_pipeline_evidence(operation_report)
+        handoff = alva.build_ai_handoff(operation_report)
+        if (type(classified) is not dict or classified.get("status") != "ok" or
+                type(classified.get("result")) is not dict or
+                classified["result"].get("source") != "UNKNOWN" or
+                classified["result"].get("confidence") != "UNKNOWN" or
+                type(report) is not dict or report.get("status") != "ok" or
+                type(report.get("result")) is not dict or
+                report["result"].get("component") != name or
+                report["result"].get("observed_operation_status") != "ok" or
+                report["result"].get("step_coverage") != "COMPLETE_SUCCESS_PATH" or
+                report["result"].get("evidence_origin") != "NOT_AUTHENTICATED" or
+                type(review) is not dict or review.get("status") != "ok" or
+                review.get("code") != REVIEW_MARKER or
+                review.get("root_cause_proven") is not False or
+                review.get("external_attestation") is not False or
+                type(handoff) is not dict or handoff.get("status") != "ok" or
+                type(handoff.get("result")) is not dict or
+                handoff["result"].get("permission_to_act") is not False or
+                handoff["result"].get("root_cause_proven") is not False or
+                handoff["result"].get("execution_attested") is not False):
+            raise ValueError("HOST_TRACE_REVIEW_FAILED")
+        output.append({
+            "component": name,
+            "component_execution": "ok",
+            "trace_step_coverage": "COMPLETE_SUCCESS_PATH",
+            "classification_source": "UNKNOWN",
+            "classification_confidence": "UNKNOWN",
+            "record_status": REVIEW_MARKER,
+            "root_cause_proven": False,
+            "permission_to_act": False,
+        })
+    return output
