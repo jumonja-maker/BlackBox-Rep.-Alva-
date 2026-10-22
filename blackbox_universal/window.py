@@ -1028,7 +1028,7 @@ class UniversalWindow(QMainWindow):
             self, "BLACK.BOX Universal",
             "BLACK.BOX Universal v0.3 — original retro desktop shell.\n\n"
             "Offline process monitoring + SQLite + HTML/JSON + AI Handoff: available.\n"
-            "Optional Alva adapter: press CHECK to inspect an installed platform.\n"
+            "Optional internal diagnostic extensions run only when explicitly authorized.\n"
             "Windows ETW and crash dump collection: NOT IMPLEMENTED.\n\n"
             "No cloud upload, tunneling, process injection or admin escalation.")
 
