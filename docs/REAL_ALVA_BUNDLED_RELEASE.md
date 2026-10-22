@@ -30,6 +30,17 @@ selection, no user access to the private GitHub and no external service.
 - Public CI creates only a clearly named **standalone QA, not release**
   artifact; its tag-triggered release upload is disabled in this proposal.
 
+> **Governance update (2026-10-22):** private Alva
+> [PR #80](https://github.com/jumonja-maker/Alva/pull/80) proposes a
+> family-wide distribution standard and an embedded Runtime license template.
+> **None are approved.** The separate private binary release workflow from
+> private PR #79 has been moved to an **inert template** outside
+> `.github/workflows` because Alva currently authorizes only its existing
+> QA workflow. The actual full-binary release still requires separate owner
+> authorization for infrastructure as well as license, approved SHA and
+> real-runtime Windows testing. Do NOT interpret this guide as an active
+> public publishing pipeline.
+
 ## Build/provenance and first real downloadable release
 
 A separate **private Alva** PR implements a gated, manually dispatched
