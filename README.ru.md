@@ -117,12 +117,13 @@ python app.py
 
 ```sh
 python -m blackbox_rep_alva list
+mkdir sessions
 python -m blackbox_rep_alva record --pid 1234 --output sessions --duration 10 --interval 0.5
-python -m blackbox_rep_alva summary sessions/session-<id>
-python -m blackbox_rep_alva compare sessions/session-<id1> sessions/session-<id2>
+python -m blackbox_rep_alva summary "sessions/session-REPLACE_WITH_ID"
+python -m blackbox_rep_alva compare "sessions/session-REPLACE_WITH_FIRST_ID" "sessions/session-REPLACE_WITH_SECOND_ID"
 ```
 
-Для CLI папка `sessions` должна существовать заранее. Есть также команды `export`, `handoff`, `alva-check` — полный список: `python -m blackbox_rep_alva --help`. Проверка тестов: `python -m unittest discover -s tests -v`.
+Для CLI замени PID `1234` на PID нужной программы, а названия папок — на значения, которые вывела команда `record`. Есть также команды `export`, `handoff`, `alva-check` — полный список: `python -m blackbox_rep_alva --help`. Проверка тестов: `python -m unittest discover -s tests -v`.
 
 ## Конфиденциальность, ограничения и состояние проекта
 
