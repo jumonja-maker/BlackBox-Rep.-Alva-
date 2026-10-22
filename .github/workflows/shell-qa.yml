@@ -1,14 +1,9 @@
-name: BLACK.BOX Universal - public standalone QA (NOT the full Alva release)
+name: BLACK.BOX Universal - independent Windows build and release
 
 on:
   push:
     branches:
       - main
-      - feature/universal-integrated-desktop-v01
-      - feature/retro-feedback-i18n-maintenance-20261022
-      - feature/release-v030-alva-integration-20261022
-      - feature/human-first-integration-qa-20261022
-      - feature/alva-bundled-consumer-windows-20261022-00
   pull_request:
     branches:
       - main
@@ -47,9 +42,9 @@ jobs:
       - name: Validate human-first CLI (no platform command)
         shell: pwsh
         run: |
-          $helpText = python -m blackbox_rep_alva --help
+          $helpText = python -m blackbox_core --help
           if ($LASTEXITCODE -ne 0) { throw 'CLI help failed' }
-          if (($helpText -join ' ') -match 'alva-check|handoff') { throw 'Deprecated commands visible' }
+          if (($helpText -join ' ') -match 'handoff') { throw 'Deprecated command visible' }
 
   linux-tests:
     name: Linux compatibility check (independent of Windows release)
@@ -78,7 +73,7 @@ jobs:
       - name: Qt offscreen startup smoke
         run: python app.py --smoke
       - name: Validate independent observer CLI
-        run: python -m blackbox_rep_alva --help
+        run: python -m blackbox_core --help
 
   windows-portable:
     name: Windows portable exe
@@ -106,18 +101,12 @@ jobs:
       - name: Build BLACK.BOX Universal desktop with original icon
         shell: pwsh
         run: |
-          python -m PyInstaller --noconfirm --clean --onedir --windowed --collect-submodules blackbox_rep_alva --collect-submodules blackbox_universal --add-data "src/blackbox_rep_alva/alva_sidecar_worker.py;alva_worker" --add-data "src/blackbox_rep_alva/alva_evidence_pipeline.py;alva_worker" --icon assets/blackbox.ico --add-data "assets/blackbox.png;assets" --name BLACK.BOX-Universal app.py
+          python -m PyInstaller --noconfirm --clean --onedir --windowed --collect-submodules blackbox_core --collect-submodules blackbox_universal --icon assets/blackbox.ico --add-data "assets/blackbox.png;assets" --name BLACK.BOX-Universal app.py
           if ($LASTEXITCODE -ne 0) { throw 'GUI build failed' }
           Copy-Item "dist/BLACK.BOX-Maintenance.exe" "dist/BLACK.BOX-Universal/BLACK.BOX-Maintenance.exe"
           Copy-Item ".blackbox-portable.json" "dist/BLACK.BOX-Universal/.blackbox-portable.json"
           if (-not (Test-Path "dist/BLACK.BOX-Universal/BLACK.BOX-Maintenance.exe")) { throw 'Maintenance helper missing' }
           if (-not (Test-Path "dist/BLACK.BOX-Universal/_internal/assets/blackbox.png")) { throw 'App icon missing' }
-          if (-not (Test-Path "dist/BLACK.BOX-Universal/_internal/alva_worker/alva_sidecar_worker.py")) {
-            throw 'Public Alva sidecar script not bundled with EXE'
-          }
-          if (-not (Test-Path "dist/BLACK.BOX-Universal/_internal/alva_worker/alva_evidence_pipeline.py")) {
-            throw 'Public evidence pipeline helper missing from Windows portable build'
-          }
       - name: Verify Explorer icon is the same as the taskbar icon for both EXEs
         shell: pwsh
         run: |
@@ -151,17 +140,15 @@ jobs:
           if (-not (Test-Path "BLACK.BOX-Universal-Windows.zip")) { throw "ZIP missing" }
       - uses: actions/upload-artifact@v4
         with:
-          name: BLACKBOX-STANDALONE-QA-NO-ALVA
+          name: BLACKBOX-INDEPENDENT-WINDOWS-QA
           path: BLACK.BOX-Universal-Windows.zip
           if-no-files-found: error
           retention-days: 14
 
 
-# Owner-authorized standalone 0.3.1 test release for checking the in-app
-# updater end-to-end. This does NOT claim to include the private Alva runtime.
-# A full-Alva release must still be built privately with separate authorization.
+# Independent v0.3.2 release is published after Windows/Linux tests.
   publish-updater-test:
-    name: Publish standalone updater acceptance release
+    name: Publish independent BLACK.BOX release
     needs: [linux-tests, windows-portable]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
@@ -174,16 +161,16 @@ jobs:
           persist-credentials: false
       - uses: actions/download-artifact@v4
         with:
-          name: BLACKBOX-STANDALONE-QA-NO-ALVA
+          name: BLACKBOX-INDEPENDENT-WINDOWS-QA
           path: verified-portable
-      - name: Publish reviewed standalone v0.3.1 updater test
+      - name: Publish verified standalone v0.3.2
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           VERSION="$(python -c 'from blackbox_universal import __version__; print(__version__)')"
-          if [[ "$VERSION" != "0.3.1" ]]; then
+          if [[ "$VERSION" != "0.3.2" ]]; then
             echo "No owner-authorized test release for v$VERSION"
             exit 0
           fi
@@ -196,23 +183,23 @@ jobs:
           fi
           sha256sum "$ZIP" > "$ZIP.sha256"
           cat > release-notes.md <<'EOF'
-          BLACK.BOX Universal 0.3.1 — owner-requested standalone updater test.
+          BLACK.BOX Universal v0.3.2 — independent Windows desktop release.
 
-          Windows x64 portable ZIP. Extract all files before running BLACK.BOX-Universal.exe.
-          The old 0.3.0 EXE should detect this higher version through Check Updates.
-          Includes audit fixes: missing metrics no longer become zero, selected-process
-          RSS labels, durable observer lifecycle, staged HTML/JSON reporting,
-          session-safe additional evidence checks, and improved HTML review.
+          Removed external platform adapters, integration workers and unused setup.
+          This is a local, independent observer of user-selected Windows processes.
+          No separately installed Python, service or account is required.
+          Portable ZIP includes executable, libraries and maintenance helper.
+          Existing 0.3.0 and 0.3.1 installs can update via Check Updates.
 
-          IMPORTANT: This public test build does NOT bundle the private Project Alva
-          runtime. It is NOT a completed full-Alva release or signed stable build.
-          No private Alva source, wheel or manifest is included.
-          End-user Windows update/uninstall, antivirus, and full binary license
+          The program records CPU, RSS, process counts, local events, and
+          durable SQLite/JSON/HTML reports. It cannot prove the internal cause
+          of arbitrary external application failures.
+          End-user upgrade/rollback, antivirus and dependency licensing
           acceptance still require manual validation.
           EOF
           gh release create "$TAG" "$ZIP" "$ZIP.sha256" \
             --target "$GITHUB_SHA" \
-            --title "BLACK.BOX Universal v0.3.1 — standalone updater test" \
+            --title "BLACK.BOX Universal v0.3.2 — independent Windows app" \
             --notes-file release-notes.md --latest
           echo "Published $TAG from $GITHUB_SHA after Windows + Linux QA"
 

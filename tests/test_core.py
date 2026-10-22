@@ -4,10 +4,10 @@ from pathlib import Path
 import os
 import tempfile
 import unittest
-from blackbox_rep_alva.contracts import ObserverError, Sample, event, bounded
-from blackbox_rep_alva.storage import SessionStore
-from blackbox_rep_alva.report import summarize, compare, write_report
-from blackbox_rep_alva.recorder import record
+from blackbox_core.contracts import ObserverError, Sample, event, bounded
+from blackbox_core.storage import SessionStore
+from blackbox_core.report import summarize, compare, write_report
+from blackbox_core.recorder import record
 
 
 class EvidenceTests(unittest.TestCase):

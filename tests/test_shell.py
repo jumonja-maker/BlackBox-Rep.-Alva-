@@ -17,8 +17,8 @@ from PySide6.QtWidgets import QApplication, QMessageBox, QPushButton
 from blackbox_universal.monitor import (
     ReadOnlyProbe, available_processes, save_snapshot,
 )
-from blackbox_rep_alva.contracts import ObserverError
-from blackbox_rep_alva.report import summarize
+from blackbox_core.contracts import ObserverError
+from blackbox_core.report import summarize
 from blackbox_universal.theme import set_retro_theme
 from blackbox_universal.window import UniversalWindow
 
@@ -40,7 +40,6 @@ class ObserverTests(unittest.TestCase):
         self.assertFalse(observer.active)
         record = observer.snapshot()
         self.assertEqual(record["schema_version"], 1)
-        self.assertNotIn("alva_status", record)
         self.assertFalse(record["root_cause_proven"])
         self.assertEqual(record["sample_count"], 1)
         self.assertEqual(record["observed_process"]["pid"], os.getpid())
@@ -181,22 +180,16 @@ class QtShellTests(unittest.TestCase):
             report = json.loads(dst.read_text(encoding="utf-8"))
             self.assertEqual(report["source"], "local_read_only_psutil")
             self.assertFalse(report["root_cause_proven"])
-            self.assertNotIn("alva_status", report)
 
     def test_public_ui_has_no_platform_laboratory_or_brand(self):
-        self.assertNotIn("alva", self.window._page_ids)
         self.assertEqual(
             [page for page, _ in self.window.PAGES],
             ["dashboard", "processes", "events", "reports", "settings"])
-        self.assertNotIn("Alva", self.window.windowTitle())
         for page in self.window._page_ids:
             self.window._navigate(page)
             from PySide6.QtWidgets import QLabel
             public_labels = " ".join(x.text() for x in
                                      self.window.stack.currentWidget().findChildren(QLabel))
-            self.assertNotIn("ALVA PLATFORM", public_labels)
-        self.assertFalse(hasattr(self.window, "alva_check"))
-        self.assertFalse(hasattr(self.window, "alva_connect"))
 
     def test_sampling_interval_is_user_editable_and_connected(self):
         self.window.interval_combo.setCurrentIndex(2)

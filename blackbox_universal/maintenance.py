@@ -2,7 +2,7 @@
 
 Built as a separate EXE so Windows never attempts to overwrite a running
 application. Refuses unmarked directories, junctions and system roots.
-No subprocess shell execution, no internet, and no private Alva dependency.
+No subprocess shell execution or internet is required.
 """
 from __future__ import annotations
 

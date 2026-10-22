@@ -1,7 +1,7 @@
 """Regression checks for the 2026-10-23 full technical audit.
 
 Tests exercise actual SQLite/HTML, missing OS metrics, rollback on failure,
-and sequential background checks without requiring private Alva modules.
+and offline process reports without any optional platform.
 """
 from __future__ import annotations
 
@@ -17,9 +17,9 @@ from unittest.mock import patch
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtWidgets import QApplication
 
-from blackbox_rep_alva.contracts import Sample, ObserverError
-from blackbox_rep_alva.report import summarize, write_report
-from blackbox_rep_alva.storage import SessionStore
+from blackbox_core.contracts import Sample, ObserverError
+from blackbox_core.report import summarize, write_report
+from blackbox_core.storage import SessionStore
 from blackbox_universal.monitor import ReadOnlyProbe
 from blackbox_universal.window import UniversalWindow
 
@@ -63,30 +63,6 @@ class AuditCoreRegressions(unittest.TestCase):
                 ["OBSERVATION_STARTED", "USER_STOPPED"])
             self.assertEqual(summarize(probe.session_folder)["observation_errors"], {})
 
-    def test_alva_evidence_is_described_inside_normal_html(self):
-        from blackbox_universal.platform_connector import _write_diagnostics
-        with tempfile.TemporaryDirectory() as tmp:
-            store = SessionStore(Path(tmp), os.getpid())
-            folder = store.folder
-            store.finish("COMPLETED")
-            store.close()
-            write_report(folder)
-            result = {
-                "status": "ok",
-                "extended_diagnostics": {
-                    "accepted_checks": 1, "declared_stages": 4,
-                    "observed_pipeline_status": "error",
-                    "verification_coverage": "INCOMPLETE_OR_AMBIGUOUS",
-                    "first_unverified_component": "<unsupported>"}}
-            overview = _write_diagnostics(result, folder, "evidence-checks.json")
-            self.assertEqual(overview["reviewed_checks"], 1)
-            html = (folder / "report.html").read_text(encoding="utf-8")
-            self.assertIn("Requires review", html)
-            self.assertIn("1/4", html)
-            self.assertIn("&lt;unsupported&gt;", html)
-            self.assertNotIn("<unsupported>", html)
-            self.assertIn("root cause", html)
-
     def test_json_html_publication_rolls_back_if_second_replace_fails(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = SessionStore(Path(tmp), os.getpid())
@@ -102,7 +78,7 @@ class AuditCoreRegressions(unittest.TestCase):
                     raise OSError("simulated filesystem failure")
                 return real_replace(source, destination)
 
-            with patch("blackbox_rep_alva.report.os.replace",
+            with patch("blackbox_core.report.os.replace",
                        side_effect=replace_then_fail):
                 with self.assertRaises(ObserverError):
                     write_report(folder)
@@ -116,39 +92,6 @@ class AuditQtRegressions(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
-
-    def test_two_fast_sessions_are_queued_and_stale_result_ignored(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            with patch("blackbox_universal.monitor._default_sessions_root",
-                       return_value=Path(tmp)):
-                window = UniversalWindow()
-            window._timer.stop()
-            try:
-                s1, s2 = Path(tmp) / "one", Path(tmp) / "two"
-                for session in (s1, s2):
-                    session.mkdir()
-                    (session / "report.json").write_text("{}", encoding="utf-8")
-                window._alva_interpreter = ""
-                window._alva_worker = object()  # first session still processing
-                window._active_alva_session = s1
-                window.probe.session_folder = s2
-                window._set_evidence_status("saved")
-                with patch("blackbox_universal.window.bundled_runtime_available",
-                           return_value=True):
-                    window._finalize_alva_if_configured()
-                self.assertEqual(len(window._alva_queue), 1)
-                window._private_diagnostics_result(
-                    {"status": "ok", "reviewed_checks": 4,
-                     "declared_checks": 4, "evidence_status": "ok"}, "")
-                self.assertEqual(window._evidence_status[0], "saved")
-                self.assertEqual(window._alva_results_by_session[s1]["status"], "ok")
-                with patch.object(window, "_start_alva_worker") as launch:
-                    window._alva_finished()
-                    launch.assert_called_once_with(None, s2, persist=True)
-                self.assertFalse(window._alva_queue)
-            finally:
-                window._alva_worker = None
-                window.close()
 
     def test_chart_and_cards_do_not_crash_on_missing_values(self):
         with patch("blackbox_universal.monitor._default_sessions_root",

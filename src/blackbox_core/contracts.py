@@ -10,7 +10,7 @@ MAX_EVENT_BYTES = 8192
 STAGES = frozenset({"discovery", "attach", "sample", "storage", "report", "platform"})
 CODES = frozenset({"ACCESS_DENIED", "PROCESS_NOT_FOUND", "PID_REUSED", "PROCESS_EXITED",
                    "SAMPLE_UNAVAILABLE", "DEPENDENCY_MISSING", "STORAGE_ERROR", "INVALID_DATA",
-                   "UNSUPPORTED_SCHEMA", "ALVA_UNAVAILABLE", "ALVA_FAILURE"})
+                   "UNSUPPORTED_SCHEMA"})
 CODE_PATTERN = re.compile(r"[A-Z][A-Z0-9_]{0,63}\Z", re.ASCII)
 
 

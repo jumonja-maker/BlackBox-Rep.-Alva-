@@ -9,14 +9,13 @@ import tempfile
 import unittest
 
 from blackbox_universal.monitor import ReadOnlyProbe
-from blackbox_rep_alva.cli import main
+from blackbox_core.cli import main
 
 
 class HumanFirstContractTests(unittest.TestCase):
-    def test_translations_expose_no_private_platform_brand(self):
+    def test_translations_are_focused_on_user_ui(self):
         from blackbox_universal.i18n import RU
         labels = " ".join([*RU.keys(), *RU.values()]).casefold()
-        self.assertNotIn("alva", labels)
         self.assertNotIn("ai handoff", labels)
 
     def test_one_human_session_generates_html_json_sqlite_not_ai_handoff(self):
@@ -49,13 +48,7 @@ class HumanFirstContractTests(unittest.TestCase):
                 main(["handoff", "some-session"])
         self.assertEqual(error.exception.code, 2)
 
-    def test_internal_platform_cli_command_is_not_advertised(self):
-        with redirect_stderr(StringIO()):
-            with self.assertRaises(SystemExit) as error:
-                main(["alva-check"])
-        self.assertEqual(error.exception.code, 2)
-
-    def test_normal_cli_is_still_accessible_without_alva_or_ai(self):
+    def test_normal_cli_is_still_accessible(self):
         with redirect_stderr(StringIO()):
             with self.assertRaises(SystemExit) as error:
                 main(["--help"])

@@ -16,8 +16,8 @@ import tempfile
 from pathlib import Path
 
 import psutil
-from blackbox_rep_alva.contracts import ObserverError
-from blackbox_rep_alva.report import compare as compare_sessions
+from blackbox_core.contracts import ObserverError
+from blackbox_core.report import compare as compare_sessions
 from PySide6.QtCore import Qt, QTimer, QThread, Signal, QSettings, QUrl
 from PySide6.QtGui import QAction, QDesktopServices, QIcon
 from PySide6.QtWidgets import (
@@ -30,9 +30,6 @@ from PySide6.QtWidgets import (
 
 from .monitor import ReadOnlyProbe, available_processes, save_snapshot
 from .i18n import translate
-from .platform_connector import (inspect_external, save_session_diagnostics,
-                                 bundled_runtime_available, inspect_bundled,
-                                 save_bundled_diagnostics)
 from .releases import (Release, NoOfficialRelease, check_latest_release, stage_release,
                        runtime_directory, MAINTENANCE_NAME)
 from .shortcuts import create_shortcut
@@ -94,38 +91,6 @@ class _UpdateWorker(QThread):
             self.result_ready.emit(None, type(exc).__name__)
 
 
-class _AlvaWorker(QThread):
-    """Optional diagnostics outside the Qt UI thread and observed process."""
-
-    result_ready = Signal(object, str)
-
-    def __init__(self, interpreter: Path | None, session: Path | None = None,
-                 parent=None, *, persist: bool = False):
-        super().__init__(parent)
-        self.interpreter = interpreter
-        self.session = session
-        self.persist = persist
-
-    def run(self) -> None:
-        try:
-            if bundled_runtime_available():
-                result = (save_bundled_diagnostics(self.session)
-                          if self.persist and self.session is not None else
-                          inspect_bundled(self.session))
-            elif self.interpreter is not None:
-                result = (save_session_diagnostics(self.interpreter, self.session)
-                          if self.persist and self.session is not None else
-                          inspect_external(self.interpreter, self.session))
-            else:
-                result = {"status": "unavailable",
-                          "error_code": "RUNTIME_NOT_PACKAGED"}
-            self.result_ready.emit(result, "")
-        except Exception:
-            self.result_ready.emit(
-                {"status": "error", "error_code": "ALVA_EXTERNAL_CONNECTION_FAILED"},
-                "ALVA_EXTERNAL_CONNECTION_FAILED")
-
-
 class UniversalWindow(QMainWindow):
     PAGES = (
         ("dashboard", "01  OVERVIEW"),
@@ -147,17 +112,7 @@ class UniversalWindow(QMainWindow):
         if self.language == "ENG":
             self.language = "EN"
         self._update_worker = None
-        self._alva_worker = None
-        self._last_alva_session = None
-        self._active_alva_session = None
-        self._alva_queue = []
-        self._alva_sessions_queued = set()
-        self._alva_results_by_session = {}
-        # Only a previously authorized interpreter can enable private diagnostics.
-        # Never discover/execute arbitrary Python paths or install private code.
-        self._alva_interpreter = str(self._prefs.value("alva_python", "") or "")
-        self._diagnostics_last_result = None
-        self._evidence_status = ("waiting", 0, 0)
+        self._report_state = "waiting"
         self._available_release = None
         self._maintenance_launching = False
         self._pending_update_stage = None
@@ -493,9 +448,9 @@ class UniversalWindow(QMainWindow):
         self.report_preview.setMinimumHeight(375)
         frame.content.addWidget(self.report_preview)
         content.addWidget(frame)
-        self.evidence_status = _label(
+        self.report_status_label = _label(
             "Local evidence will be saved after Stop.", "caption")
-        content.addWidget(self.evidence_status)
+        content.addWidget(self.report_status_label)
         controls = QHBoxLayout()
         self.open_report_button = _button("▣  OPEN HTML REPORT")
         self.open_report_button.clicked.connect(self._open_saved_report)
@@ -579,7 +534,7 @@ class UniversalWindow(QMainWindow):
         changing = {self.target_name, self.target_pid, self.state_text,
                     self.live_badge, self.toolbar_state, self.clock,
                     self.session_location, self.process_count,
-                    self.evidence_status}
+                    self.report_status_label}
         from PySide6.QtWidgets import QLabel
         for label in self.findChildren(QLabel):
             if label in changing or label.objectName() == "metricValue":
@@ -626,7 +581,7 @@ class UniversalWindow(QMainWindow):
             "Проверять GitHub Releases при запуске" if language == "RU"
             else "Check GitHub Releases when the app starts")
         self.chart.set_language(language)
-        self._refresh_evidence_status()
+        self._refresh_report_status()
         self.lang_ru.setProperty("active", language == "RU")
         self.lang_en.setProperty("active", language == "EN")
         for button in (self.lang_ru, self.lang_en):
@@ -880,15 +835,14 @@ class UniversalWindow(QMainWindow):
             QMessageBox.warning(self, "Observation",
                                 "Choose a running, accessible process first.")
             return
-        self._set_evidence_status("recording")
+        self._set_report_status("recording")
         self._update_all()
 
     def _stop(self) -> None:
         self.probe.stop()
-        self._set_evidence_status(
+        self._set_report_status(
             "saved" if self.probe.report_result is not None else "unavailable")
         self._update_all()
-        self._finalize_alva_if_configured()
 
     def _change_interval(self, index: int) -> None:
         if hasattr(self, "_timer"):
@@ -899,10 +853,9 @@ class UniversalWindow(QMainWindow):
         self.probe.tick()
         self._update_all()
         if was_active and not self.probe.active:
-            self._set_evidence_status(
+            self._set_report_status(
                 "saved" if self.probe.report_result is not None else "unavailable")
-            self._finalize_alva_if_configured()
-
+    
     def _update_all(self) -> None:
         self.clock.setText(datetime.now().strftime("%H:%M"))
         selected = self.probe.pid is not None
@@ -968,27 +921,6 @@ class UniversalWindow(QMainWindow):
         overview = self.probe.snapshot()
         overview["recent_samples"] = overview["recent_samples"][-15:]
         overview["recent_events"] = overview["recent_events"][-15:]
-        session = self.probe.session_folder
-        if session is not None:
-            evidence = session / "evidence-checks.json"
-            if evidence.is_file() and not evidence.is_symlink():
-                try:
-                    result = json.loads(evidence.read_text(encoding="utf-8"))
-                    if type(result) is dict:
-                        details = result.get("extended_diagnostics")
-                        overview["evidence_quality_review"] = {
-                            "status": result.get("status"),
-                            "accepted_checks": (details.get("accepted_checks")
-                                                if type(details) is dict else None),
-                            "declared_checks": (details.get("declared_stages")
-                                                if type(details) is dict else None),
-                            "first_unverified": (details.get("first_unverified_component")
-                                                 if type(details) is dict else None),
-                            "target_root_cause_proven": False}
-                except (OSError, ValueError, UnicodeError):
-                    overview["evidence_quality_review"] = {
-                        "status": "unavailable",
-                        "target_root_cause_proven": False}
         self.report_preview.setPlainText(
             json.dumps(overview, ensure_ascii=False, indent=2))
 
@@ -1017,100 +949,25 @@ class UniversalWindow(QMainWindow):
         self.report_preview.setPlainText(json.dumps(
             result, ensure_ascii=False, indent=2))
 
-    def _start_alva_worker(self, interpreter: Path | None, session: Path | None = None,
-                           *, persist: bool = False) -> None:
-        if self._alva_worker is not None:
-            return
-        self._active_alva_session = session
-        self._alva_worker = _AlvaWorker(
-            interpreter, session, self, persist=persist)
-        self._alva_worker.result_ready.connect(self._private_diagnostics_result)
-        self._alva_worker.finished.connect(self._alva_finished)
-        self._alva_worker.start()
+    def _set_report_status(self, state: str) -> None:
+        """Show the state of independently saved local process reports."""
+        self._report_state = state
+        self._refresh_report_status()
 
-    def _set_evidence_status(self, state: str, accepted: int = 0,
-                             total: int = 0) -> None:
-        """Only BLACK.BOX observation quality; no separate platform UI."""
-        self._evidence_status = (state, accepted, total)
-        self._refresh_evidence_status()
-
-    def _refresh_evidence_status(self) -> None:
-        state, accepted, total = self._evidence_status
+    def _refresh_report_status(self) -> None:
         ru = self.language == "RU"
-        if state == "reviewed":
-            message = (f"Проверки свидетельств: {accepted}/{total} принято."
-                       if ru else f"Evidence checks accepted: {accepted}/{total}.")
-        elif state == "needs_review":
-            message = (f"Требуется проверка свидетельств: {accepted}/{total} принято."
-                       if ru else f"Evidence requires review: {accepted}/{total} accepted.")
-        else:
-            messages = {
-                "waiting": ("Local evidence will be saved after Stop.",
-                            "После остановки будут сохранены локальные свидетельства."),
-                "recording": ("Recording observer evidence…",
-                              "Идёт запись технических свидетельств…"),
-                "saved": ("Local observer report saved.",
-                          "Локальный технический отчёт сохранён."),
-                "verification_failed": (
-                    "Observer report saved. Advanced evidence check did not complete.",
-                    "Отчёт сохранён. Дополнительная проверка свидетельств не завершена."),
-                "unavailable": ("Observer report unavailable; SQLite may remain.",
-                                "Отчёт недоступен; данные SQLite могли сохраниться."),
-            }
-            pair = messages.get(state, messages["waiting"])
-            message = pair[1] if ru else pair[0]
-        self.evidence_status.setText(message)
-
-    def _private_diagnostics_result(self, result: object, error: str) -> None:
-        """Record only internal runtime outcome; no public platform UI."""
-        if type(result) is not dict:
-            result = {"status": "error", "error_code": "DIAGNOSTICS_RESPONSE_INVALID"}
-        session = self._active_alva_session
-        if session is not None:
-            self._alva_results_by_session[session] = result
-            if self.probe.session_folder != session:
-                # A completed earlier session must never change the status
-                # of the currently selected or recording session.
-                return
-        self._diagnostics_last_result = result
-        accepted = result.get("reviewed_checks")
-        total = result.get("declared_checks")
-        if (result.get("status") == "ok" and
-                type(accepted) is int and type(total) is int and
-                0 <= accepted <= total == 4):
-            kind = ("reviewed" if result.get("evidence_status") == "ok"
-                    and accepted == total else "needs_review")
-            self._set_evidence_status(kind, accepted, total)
-        elif result.get("status") in ("error", "unavailable") and self.probe.report_result is not None:
-            # Only advertise a failed *built-in* check when a bundled runtime
-            # actually exists. Standalone builds never pretend to run it.
-            self._set_evidence_status(
-                "verification_failed" if bundled_runtime_available() else "saved")
-
-    def _alva_finished(self) -> None:
-        self._alva_worker = None
-        self._active_alva_session = None
-        if self._alva_queue:
-            interpreter, session = self._alva_queue.pop(0)
-            self._alva_sessions_queued.discard(session)
-            self._start_alva_worker(interpreter, session, persist=True)
-
-    def _finalize_alva_if_configured(self) -> None:
-        session = self.probe.session_folder
-        bundled = bundled_runtime_available()
-        if ((bundled or self._alva_interpreter)
-                and session is not None and
-                not self.probe.active and
-                self._last_alva_session != session and
-                session not in self._alva_sessions_queued and
-                (session / "report.json").is_file()):
-            self._last_alva_session = session
-            interpreter = None if bundled else Path(self._alva_interpreter)
-            if self._alva_worker is not None:
-                self._alva_sessions_queued.add(session)
-                self._alva_queue.append((interpreter, session))
-            else:
-                self._start_alva_worker(interpreter, session, persist=True)
+        messages = {
+            "waiting": ("Local report will be saved after Stop.",
+                        "После остановки будет сохранён локальный отчёт."),
+            "recording": ("Recording process observations…",
+                          "Идёт запись наблюдений за процессом…"),
+            "saved": ("Local process report saved.",
+                      "Локальный отчёт о процессе сохранён."),
+            "unavailable": ("Report unavailable; SQLite data may remain.",
+                            "Отчёт недоступен; данные SQLite могли сохраниться."),
+        }
+        pair = messages.get(self._report_state, messages["waiting"])
+        self.report_status_label.setText(pair[1] if ru else pair[0])
 
     def _export(self) -> None:
         if self.probe.pid is None:
@@ -1137,19 +994,18 @@ class UniversalWindow(QMainWindow):
     def _about(self) -> None:
         QMessageBox.about(
             self, "BLACK.BOX Universal",
-            "BLACK.BOX Universal v0.3.1 — standalone updater test.\n\n"
+            "BLACK.BOX Universal v0.3.2 — independent process observer.\n\n"
             "Offline monitoring, human-readable HTML and JSON reports: available.\n"
-            "Built-in evidence checks run automatically when packaged in the release.\n"
+            "Diagnostics use local operating-system observations.\n"
             "Windows ETW and crash dump collection: NOT IMPLEMENTED.\n\n"
             "No cloud upload, tunneling, process injection or admin escalation.")
 
     def closeEvent(self, event) -> None:
-        if ((self._update_worker is not None and self._update_worker.isRunning())
-                or (self._alva_worker is not None and self._alva_worker.isRunning())):
+        if self._update_worker is not None and self._update_worker.isRunning():
             event.ignore()
             QMessageBox.information(
                 self, "BLACK.BOX Universal",
-                self._t("Finish the current update or background diagnostic before closing."))
+                self._t("Finish the current update before closing."))
             return
         self.probe.stop("UI_CLOSED")
         self._timer.stop()

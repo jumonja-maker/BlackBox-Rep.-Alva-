@@ -1,8 +1,6 @@
-"""Qt observer facade over Alva's public BLACK.BOX process-recording core.
+"""Qt facade over the independent BLACK.BOX process-observation core.
 
-The one authoritative process sampler is blackbox_rep_alva.probe.PsutilProbe.
-Durable observations go to its SessionStore; Stop produces JSON and HTML reports
-for human readers. The visual shell never distributes private Alva code.
+No process injection, modification or external runtime is required.
 """
 from __future__ import annotations
 
@@ -14,10 +12,10 @@ from pathlib import Path
 import tempfile
 from typing import Any
 
-from blackbox_rep_alva.contracts import ObserverError, event
-from blackbox_rep_alva.probe import PsutilProbe, list_processes
-from blackbox_rep_alva.report import write_report
-from blackbox_rep_alva.storage import SessionStore
+from blackbox_core.contracts import ObserverError, event
+from blackbox_core.probe import PsutilProbe, list_processes
+from blackbox_core.report import write_report
+from blackbox_core.storage import SessionStore
 
 
 def utc_stamp() -> str:

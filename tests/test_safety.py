@@ -6,11 +6,11 @@ from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import patch
-from blackbox_rep_alva.contracts import ObserverError, Sample
-from blackbox_rep_alva.storage import SessionStore
-from blackbox_rep_alva.report import write_report, summarize
-from blackbox_rep_alva.recorder import record
-from blackbox_rep_alva.cli import main
+from blackbox_core.contracts import ObserverError, Sample
+from blackbox_core.storage import SessionStore
+from blackbox_core.report import write_report, summarize
+from blackbox_core.recorder import record
+from blackbox_core.cli import main
 from io import StringIO
 from contextlib import redirect_stdout
 
@@ -62,14 +62,12 @@ class SafetyTests(unittest.TestCase):
             self.assertEqual(result["state"],"COMPLETED")
             self.assertGreaterEqual(result["samples"],1)
 
-    def test_cli_without_alva_installed(self):
-        # Normal report path must not need to import private platform at all.
+    def test_cli_runs_offline(self):
         with tempfile.TemporaryDirectory() as temp:
             store=SessionStore(Path(temp),42)
             folder=store.folder
             store.finish("COMPLETED");store.close()
-            with patch.dict("sys.modules",{"alva":None,"alva.host":None}):
-                with redirect_stdout(StringIO()) as stream:
-                    status=main(["summary",str(folder)])
+            with redirect_stdout(StringIO()) as stream:
+                status=main(["summary",str(folder)])
             self.assertEqual(status,0)
             self.assertIn('"root_cause": "UNKNOWN"',stream.getvalue())
