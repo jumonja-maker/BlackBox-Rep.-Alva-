@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=65"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "blackbox-rep-alva"
+version = "0.1.0.dev0"
+description = "Local-first, read-only process observation and evidence reports"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+authors = [{name = "BlackBox Rep. Alva contributors"}]
+dependencies = []
+
+[project.optional-dependencies]
+process = ["psutil>=6,<8"]
+
+[project.scripts]
+blackbox-rep = "blackbox_rep_alva.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
