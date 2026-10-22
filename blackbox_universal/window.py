@@ -647,7 +647,7 @@ class UniversalWindow(QMainWindow):
         # languages never translates already translated text.
         changing = {self.target_name, self.target_pid, self.state_text,
                     self.live_badge, self.toolbar_state, self.clock,
-                    self.session_location, self.process_count}
+                    self.session_location, self.process_count, self.alva_connected}
         from PySide6.QtWidgets import QLabel
         for label in self.findChildren(QLabel):
             if label in changing or label.objectName() == "metricValue":
@@ -720,6 +720,9 @@ class UniversalWindow(QMainWindow):
             "◈  CHECK OPTIONAL ALVA PLATFORM"))
         self.alva_panel.tag_label.setText(
             self._t("API CONNECTED" if self._alva_interpreter else "NOT CONNECTED"))
+        self.alva_connected.setText(self._t(
+            "External Alva: connected, source not authenticated"
+            if self._alva_interpreter else "External Alva: not configured"))
         self._refresh_update_button()
         self._update_all()
         self._filter_processes(self.process_search.text())
