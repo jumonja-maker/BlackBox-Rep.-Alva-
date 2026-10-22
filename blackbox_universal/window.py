@@ -672,6 +672,9 @@ class UniversalWindow(QMainWindow):
         for button in (self.lang_ru, self.lang_en):
             button.style().unpolish(button)
             button.style().polish(button)
+        self.alva_check.setText(self._t(
+            self.alva_check.property("bb_english") or
+            "◈  CHECK OPTIONAL ALVA PLATFORM"))
         self._refresh_update_button()
         self._update_all()
         self._filter_processes(self.process_search.text())
@@ -1012,11 +1015,13 @@ class UniversalWindow(QMainWindow):
         self.alva_output.setPlainText(
             json.dumps(result, ensure_ascii=False, indent=2))
         if result.get("status") == "invoked":
-            self.alva_check.setText("✓  ALVA: SCOPED CALL COMPLETED")
+            english = "✓  ALVA: SCOPED CALL COMPLETED"
         elif result.get("status") == "api_imported":
-            self.alva_check.setText("◈  ALVA: API IMPORTED, NOT VERIFIED")
+            english = "◈  ALVA: API IMPORTED, NOT VERIFIED"
         else:
-            self.alva_check.setText("◈  ALVA: UNAVAILABLE OR UNVERIFIED")
+            english = "◈  ALVA: UNAVAILABLE OR UNVERIFIED"
+        self.alva_check.setProperty("bb_english", english)
+        self.alva_check.setText(self._t(english))
 
     def _export(self) -> None:
         if self.probe.pid is None:
