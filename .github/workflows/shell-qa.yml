@@ -1,0 +1,100 @@
+name: BLACK.BOX Universal - Shell QA and Windows portable
+
+on:
+  push:
+    branches:
+      - main
+      - feature/retro-universal-shell-v01
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  shell-tests:
+    name: Windows shell / read-only observer
+    runs-on: windows-latest
+    timeout-minutes: 18
+    env:
+      QT_QPA_PLATFORM: offscreen
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          architecture: x64
+          cache: pip
+      - name: Install shell dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Test real six-page Qt interface and process observer
+        run: python -m unittest discover -s tests -v
+      - name: Real Qt offscreen startup smoke
+        run: python app.py --smoke
+
+  linux-tests:
+    name: Linux compatibility check (independent of Windows release)
+    runs-on: ubuntu-latest
+    timeout-minutes: 18
+    env:
+      QT_QPA_PLATFORM: offscreen
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          architecture: x64
+          cache: pip
+      - name: Install Linux Qt shared-library prerequisites
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y libegl1 libopengl0 libxcb-cursor0 libxkbcommon-x11-0
+      - name: Install shell dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Qt offscreen unit checks
+        run: python -m unittest discover -s tests -v
+      - name: Qt offscreen startup smoke
+        run: python app.py --smoke
+
+  windows-portable:
+    name: Windows portable exe
+    needs: shell-tests
+    runs-on: windows-latest
+    timeout-minutes: 30
+    env:
+      QT_QPA_PLATFORM: offscreen
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          architecture: x64
+          cache: pip
+      - name: Install release tooling
+        run: python -m pip install -r requirements.txt "pyinstaller>=6,<7"
+      - name: Build original BLACK.BOX Universal retro desktop
+        run: python -m PyInstaller --noconfirm --clean --onedir --windowed --name BLACK.BOX-Universal app.py
+      - name: Smoke-test the actual frozen Windows EXE
+        shell: pwsh
+        run: |
+          $exe = Join-Path $PWD "dist\BLACK.BOX-Universal\BLACK.BOX-Universal.exe"
+          if (-not (Test-Path $exe)) { throw "Missing portable EXE" }
+          $job = Start-Process -FilePath $exe -ArgumentList "--smoke" -PassThru -Wait
+          if ($job.ExitCode -ne 0) { throw "Frozen Windows GUI failed: $($job.ExitCode)" }
+          Write-Host "Portable GUI smoke PASS"
+      - name: Package portable folder without installing anything
+        shell: pwsh
+        run: |
+          Compress-Archive -LiteralPath "dist\BLACK.BOX-Universal" -DestinationPath "BLACK.BOX-Universal-Windows.zip" -Force
+          if (-not (Test-Path "BLACK.BOX-Universal-Windows.zip")) { throw "ZIP missing" }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: BLACK.BOX-Universal-Windows
+          path: BLACK.BOX-Universal-Windows.zip
+          if-no-files-found: error
+          retention-days: 14
