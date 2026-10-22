@@ -49,6 +49,10 @@ jobs:
           python-version: "3.11"
           architecture: x64
           cache: pip
+      - name: Install Linux Qt shared-library prerequisites
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y libegl1 libopengl0 libxcb-cursor0 libxkbcommon-x11-0
       - name: Install shell dependencies
         run: python -m pip install -r requirements.txt
       - name: Qt offscreen unit checks
