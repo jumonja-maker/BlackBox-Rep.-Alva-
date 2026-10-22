@@ -11,6 +11,8 @@ import json
 from pathlib import Path
 
 import psutil
+from blackbox_rep_alva.contracts import ObserverError
+from blackbox_rep_alva.report import compare as compare_sessions
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
@@ -388,9 +390,17 @@ class UniversalWindow(QMainWindow):
         self.report_preview.setMinimumHeight(375)
         frame.content.addWidget(self.report_preview)
         content.addWidget(frame)
+        controls = QHBoxLayout()
+        self.session_location = _label("No persisted session yet", "caption")
+        controls.addWidget(self.session_location, 1)
+        compare_button = _button("≍  COMPARE TWO SESSIONS")
+        compare_button.clicked.connect(self._compare_sessions)
+        controls.addWidget(compare_button)
+        content.addLayout(controls)
         content.addWidget(_label(
-            "Reports may contain process names and PIDs. Review before sharing.",
-            "caption"))
+            "Automatic session SQLite, HTML, JSON and offline AI Handoff are saved "
+            "when you press STOP. Manual JSON exports are optional. "
+            "Inspect process names and PIDs before sharing.", "caption"))
         return page
 
     def _build_alva(self) -> QWidget:
@@ -410,6 +420,17 @@ class UniversalWindow(QMainWindow):
             "No diagnostic contracts or AI reports are being invented.", "caption"))
         row.addLayout(desc, 1)
         head.content.addLayout(row)
+        self.alva_check = _button("◈  CHECK OPTIONAL ALVA PLATFORM")
+        self.alva_check.clicked.connect(self._check_alva)
+        head.content.addWidget(self.alva_check)
+        self.alva_output = QPlainTextEdit()
+        self.alva_output.setReadOnly(True)
+        self.alva_output.setMinimumHeight(116)
+        self.alva_output.setPlainText(
+            "Alva is optional. The standalone recorder and AI Handoff work "
+            "without it. Use CHECK to inspect an explicitly installed Alva "
+            "platform; unverified import is not proof of provenance.")
+        head.content.addWidget(self.alva_output)
         content.addWidget(head)
         tiles = QHBoxLayout()
         for heading, description in (
@@ -518,7 +539,7 @@ class UniversalWindow(QMainWindow):
             return
         try:
             self.probe.attach(int(pid_item.data(Qt.ItemDataRole.UserRole)))
-        except (psutil.Error, OSError, ValueError, RuntimeError) as error:
+        except (psutil.Error, OSError, ValueError, RuntimeError, ObserverError):
             QMessageBox.warning(
                 self, "Cannot attach",
                 "This process is unavailable or protected. Choose another one.")
@@ -529,7 +550,7 @@ class UniversalWindow(QMainWindow):
     def _start(self) -> None:
         try:
             self.probe.start()
-        except (psutil.Error, OSError, RuntimeError) as error:
+        except (psutil.Error, OSError, RuntimeError, ObserverError):
             QMessageBox.warning(self, "Observation",
                                 "Choose a running, accessible process first.")
             return
@@ -579,6 +600,10 @@ class UniversalWindow(QMainWindow):
         self.state_text.setText(status)
         self.live_badge.setText(status)
         self.toolbar_state.setText(status)
+        if self.probe.session_folder is not None:
+            self.session_location.setText("Saved in " + str(self.probe.session_folder))
+        else:
+            self.session_location.setText("No persisted session yet")
         self.recent_messages.setPlainText(
             "\n".join(f'{evt["timestamp_utc"][-8:]}  {evt["code"]}  {evt["detail"]}'
                       for evt in list(self.probe.events)[-5:]) or
@@ -608,6 +633,41 @@ class UniversalWindow(QMainWindow):
         self.report_preview.setPlainText(
             json.dumps(overview, ensure_ascii=False, indent=2))
 
+    def _compare_sessions(self) -> None:
+        first = QFileDialog.getExistingDirectory(self, "Choose first saved session")
+        if not first:
+            return
+        second = QFileDialog.getExistingDirectory(self, "Choose second saved session")
+        if not second:
+            return
+        try:
+            result = compare_sessions(Path(first), Path(second))
+        except (ObserverError, OSError, ValueError, TypeError):
+            QMessageBox.warning(self, "Comparison failed",
+                                "These folders do not contain valid BLACK.BOX sessions.")
+            return
+        self.report_preview.setPlainText(json.dumps(
+            result, ensure_ascii=False, indent=2))
+        self._navigate("reports")
+
+    def _check_alva(self) -> None:
+        # Installed private Alva is contacted only on this explicit user action.
+        from blackbox_rep_alva.alva_bridge import inspect_platform
+        try:
+            result = inspect_platform(
+                self.probe.session_folder if not self.probe.active else None)
+        except (ObserverError, OSError, ValueError, RuntimeError):
+            result = {"status": "error", "code": "ALVA_DIAGNOSTICS_FAILED",
+                      "provenance_verified": False}
+        self.alva_output.setPlainText(
+            json.dumps(result, ensure_ascii=False, indent=2))
+        if result.get("status") == "invoked":
+            self.alva_check.setText("✓  ALVA: SCOPED CALL COMPLETED")
+        elif result.get("status") == "api_imported":
+            self.alva_check.setText("◈  ALVA: API IMPORTED, NOT VERIFIED")
+        else:
+            self.alva_check.setText("◈  ALVA: UNAVAILABLE OR UNVERIFIED")
+
     def _export(self) -> None:
         if self.probe.pid is None:
             QMessageBox.information(
@@ -634,8 +694,8 @@ class UniversalWindow(QMainWindow):
         QMessageBox.about(
             self, "BLACK.BOX Universal",
             "BLACK.BOX Universal v0.1 — original retro desktop shell.\n\n"
-            "Read-only local process sampling: available.\n"
-            "Alva deep diagnostics: NOT CONNECTED.\n"
+            "Offline process monitoring + SQLite + HTML/JSON + AI Handoff: available.\n"
+            "Optional Alva adapter: press CHECK to inspect an installed platform.\n"
             "Windows ETW and crash dump collection: NOT IMPLEMENTED.\n\n"
             "No cloud upload, tunneling, process injection or admin escalation.")
 
