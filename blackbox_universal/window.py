@@ -1,8 +1,8 @@
 """The BLACK.BOX Universal desktop shell.
 
 Classic desktop window semantics + warm illustrated 90s palette.
-All visible action buttons work. Advanced Alva analysis is intentionally
-marked NOT CONNECTED until an upstream integration contract is supplied.
+Visible application actions work independently of any privately provided
+optional diagnostics runtime. Platform provenance stays in technical reports.
 """
 from __future__ import annotations
 
@@ -120,13 +120,12 @@ class UniversalWindow(QMainWindow):
         ("processes", "02  PROCESSES"),
         ("events", "03  EVENT LOG"),
         ("reports", "04  REPORTS"),
-        ("alva", "05  ALVA LAB"),
-        ("settings", "06  SETTINGS"),
+        ("settings", "05  SETTINGS"),
     )
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("BLACK.BOX Universal + Alva | Retro Workstation")
+        self.setWindowTitle("BLACK.BOX Universal | Retro Workstation")
         self.setMinimumSize(1020, 690)
         self.resize(1330, 850)
         self.probe = ReadOnlyProbe()
@@ -137,9 +136,11 @@ class UniversalWindow(QMainWindow):
             self.language = "EN"
         self._update_worker = None
         self._alva_worker = None
-        self._pending_alva_interpreter = None
         self._last_alva_session = None
+        # Only a previously authorized interpreter can enable private diagnostics.
+        # Never discover/execute arbitrary Python paths or install private code.
         self._alva_interpreter = str(self._prefs.value("alva_python", "") or "")
+        self._diagnostics_last_result = None
         self._available_release = None
         self._maintenance_launching = False
         self._pending_update_stage = None
@@ -292,7 +293,7 @@ class UniversalWindow(QMainWindow):
         rule.setStyleSheet("background: #837789;")
         side.addWidget(rule)
         side.addWidget(_label("    NO CLOUD · NO INJECTION", "caption"))
-        side.addWidget(_label("    ALVA: OPTIONAL", "caption"))
+        side.addWidget(_label("    READ-ONLY · OFFLINE", "caption"))
         body_layout.addWidget(sidebar)
 
         self.stack = QStackedWidget()
@@ -303,7 +304,6 @@ class UniversalWindow(QMainWindow):
             ("processes", self._build_processes),
             ("events", self._build_events),
             ("reports", self._build_reports),
-            ("alva", self._build_alva),
             ("settings", self._build_settings),
         )
         for key, build in builders:
@@ -513,72 +513,6 @@ class UniversalWindow(QMainWindow):
             "Inspect process names and PIDs before sharing.", "caption"))
         return page
 
-    def _build_alva(self) -> QWidget:
-        page, content = _page()
-        content.addLayout(self._heading("PLATFORM / EXTENSION BAY",
-                                        "Meet the Alva lab.",
-                                        "Optional: connect your authorized, separately installed Alva Python."))
-        head = WindowPanel("Platform handshake", "NOT CONNECTED")
-        self.alva_panel = head
-        row = QHBoxLayout()
-        lab_icon = _label("◈", wrap=False)
-        lab_icon.setStyleSheet("font: bold 56px 'Consolas'; color: #ec725d;")
-        row.addWidget(lab_icon)
-        desc = QVBoxLayout()
-        desc.addWidget(_label("ALVA PLATFORM", "h2"))
-        desc.addWidget(_label(
-            "Status: awaiting upstream foundation. "
-            "No diagnostic contracts or AI reports are being invented.", "caption"))
-        row.addLayout(desc, 1)
-        head.content.addLayout(row)
-        self.alva_check = _button("◈  CHECK OPTIONAL ALVA PLATFORM")
-        self.alva_check.clicked.connect(self._check_alva)
-        head.content.addWidget(self.alva_check)
-        connect_row = QHBoxLayout()
-        self.alva_connect = _button("◎  CONNECT EXTERNAL ALVA")
-        self.alva_connect.clicked.connect(self._choose_alva_environment)
-        self.alva_disconnect = _button("×  DISCONNECT")
-        self.alva_disconnect.clicked.connect(self._disconnect_alva_environment)
-        connect_row.addWidget(self.alva_connect)
-        connect_row.addWidget(self.alva_disconnect)
-        head.content.addLayout(connect_row)
-        self.alva_connected = _label(
-            "External Alva: configured (unverified)"
-            if self._alva_interpreter else "External Alva: not configured",
-            "caption")
-        head.content.addWidget(self.alva_connected)
-        self.alva_output = QPlainTextEdit()
-        self.alva_output.setReadOnly(True)
-        self.alva_output.setMinimumHeight(116)
-        self.alva_output.setPlainText(
-            "Alva is optional. The standalone recorder and AI Handoff work "
-            "without it. Use CHECK to inspect an explicitly installed Alva "
-            "platform; unverified import is not proof of provenance.")
-        head.content.addWidget(self.alva_output)
-        content.addWidget(head)
-        tiles = QHBoxLayout()
-        for heading, description in (
-            ("01 / OBSERVE", "Bounded process signals from the local observer."),
-            ("02 / VERIFY", "Future scoped Alva contracts and diagnostic evidence."),
-            ("03 / HANDOFF", "Optional machine-readable analysis; no cloud required."),
-        ):
-            card = WindowPanel(heading)
-            card.content.addWidget(_label(description, "caption"))
-            tiles.addWidget(card, 1)
-        content.addLayout(tiles)
-        notice = QFrame()
-        notice.setObjectName("notice")
-        nl = QVBoxLayout(notice)
-        nl.setContentsMargins(16, 11, 16, 11)
-        nl.addWidget(_label("A SAFE FOUNDATION", "h2"))
-        nl.addWidget(_label(
-            "This public shell does not bundle the private Alva source, "
-            "activate external telemetry, open tunnels or upload reports. "
-            "Alva functionality will be added against its official public "
-            "interfaces after they are supplied.", "caption"))
-        content.addWidget(notice)
-        return page
-
     def _build_settings(self) -> QWidget:
         page, content = _page()
         content.addLayout(self._heading("CONTROL PANEL / PREFERENCES",
@@ -615,7 +549,7 @@ class UniversalWindow(QMainWindow):
             "PySide6 widgets. Inspired by classic desktop window geometry "
             "and warm retro illustrations, not copied system artwork.", "caption"))
         about.content.addWidget(_label(
-            "Alva adapter: pending official integration basis. Deep tracing, "
+            "Diagnostics are produced by the local observer. Deep tracing, "
             "Windows ETW and crash dump analysis are not present in this build.",
             "caption"))
         content.addWidget(about)
@@ -647,7 +581,7 @@ class UniversalWindow(QMainWindow):
         # languages never translates already translated text.
         changing = {self.target_name, self.target_pid, self.state_text,
                     self.live_badge, self.toolbar_state, self.clock,
-                    self.session_location, self.process_count, self.alva_connected}
+                    self.session_location, self.process_count}
         from PySide6.QtWidgets import QLabel
         for label in self.findChildren(QLabel):
             if label in changing or label.objectName() == "metricValue":
@@ -658,8 +592,7 @@ class UniversalWindow(QMainWindow):
                 label.setProperty("bb_english", original)
             label.setText(self._t(str(original)))
         for button in self.findChildren(QPushButton):
-            if button in (self.update_button, self.lang_ru, self.lang_en,
-                          self.alva_check):
+            if button in (self.update_button, self.lang_ru, self.lang_en):
                 continue
             original = button.property("bb_english")
             if original is None:
@@ -695,34 +628,11 @@ class UniversalWindow(QMainWindow):
             "Проверять GitHub Releases при запуске" if language == "RU"
             else "Check GitHub Releases when the app starts")
         self.chart.set_language(language)
-        if self.alva_output.toPlainText() in (
-                "Alva is optional. The standalone recorder and AI Handoff work without it. "
-                "Use CHECK to inspect an explicitly installed Alva platform; "
-                "unverified import is not proof of provenance.",
-                "Alva необязательна. Мониторинг и AI Handoff работают без неё. "
-                "Кнопка проверки обращается к отдельно установленной Alva; "
-                "импорт API не подтверждает происхождение платформы."):
-            self.alva_output.setPlainText(
-                "Alva необязательна. Мониторинг и AI Handoff работают без неё. "
-                "Кнопка проверки обращается к отдельно установленной Alva; "
-                "импорт API не подтверждает происхождение платформы."
-                if language == "RU" else
-                "Alva is optional. The standalone recorder and AI Handoff work without it. "
-                "Use CHECK to inspect an explicitly installed Alva platform; "
-                "unverified import is not proof of provenance.")
         self.lang_ru.setProperty("active", language == "RU")
         self.lang_en.setProperty("active", language == "EN")
         for button in (self.lang_ru, self.lang_en):
             button.style().unpolish(button)
             button.style().polish(button)
-        self.alva_check.setText(self._t(
-            self.alva_check.property("bb_english") or
-            "◈  CHECK OPTIONAL ALVA PLATFORM"))
-        self.alva_panel.tag_label.setText(
-            self._t("API CONNECTED" if self._alva_interpreter else "NOT CONNECTED"))
-        self.alva_connected.setText(self._t(
-            "External Alva: connected, source not authenticated"
-            if self._alva_interpreter else "External Alva: not configured"))
         self._refresh_update_button()
         self._update_all()
         self._filter_processes(self.process_search.text())
@@ -1061,76 +971,24 @@ class UniversalWindow(QMainWindow):
         self.report_preview.setPlainText(json.dumps(
             result, ensure_ascii=False, indent=2))
 
-    def _choose_alva_environment(self) -> None:
-        # Explicitly authorized interpreter with separately licensed Alva.
-        if self._alva_worker is not None:
-            return
-        choice, _ = QFileDialog.getOpenFileName(
-            self, self._t("Select Python with your authorized Alva installation"),
-            "", "Python interpreter (python.exe python3.exe python python3)")
-        if not choice:
-            return
-        choice = Path(choice)
-        if not choice.is_absolute() or not choice.is_file():
-            QMessageBox.warning(self, "Alva", self._t("Select a valid Python interpreter."))
-            return
-        self._pending_alva_interpreter = choice
-        self._start_alva_worker(choice)
-
-    def _disconnect_alva_environment(self) -> None:
-        if self._alva_worker is not None:
-            return
-        self._alva_interpreter = ""
-        self._pending_alva_interpreter = None
-        self._prefs.remove("alva_python")
-        self.alva_connected.setText(self._t("External Alva: not configured"))
-        self.alva_panel.tag_label.setText(self._t("NOT CONNECTED"))
-        self.alva_output.setPlainText(self._t(
-            "External Alva disconnected. Standalone monitoring remains available."))
-
     def _start_alva_worker(self, interpreter: Path, session: Path | None = None,
                            *, persist: bool = False) -> None:
         if self._alva_worker is not None:
             return
-        self.alva_check.setEnabled(False)
-        self.alva_connect.setEnabled(False)
-        self.alva_disconnect.setEnabled(False)
         self._alva_worker = _AlvaWorker(
             interpreter, session, self, persist=persist)
-        self._alva_worker.result_ready.connect(self._alva_result)
+        self._alva_worker.result_ready.connect(self._private_diagnostics_result)
         self._alva_worker.finished.connect(self._alva_finished)
         self._alva_worker.start()
 
-    def _alva_result(self, result: object, unused_error: str) -> None:
+    def _private_diagnostics_result(self, result: object, error: str) -> None:
+        """Record only internal runtime outcome; no public platform UI."""
         if type(result) is not dict:
-            result = {"status": "error", "error_code": "ALVA_RESPONSE_INVALID"}
-        if self._pending_alva_interpreter is not None:
-            if result.get("status") == "ok":
-                self._alva_interpreter = str(self._pending_alva_interpreter)
-                self._prefs.setValue("alva_python", self._alva_interpreter)
-                self.alva_connected.setText(
-                    self._t("External Alva: connected, source not authenticated"))
-                self.alva_panel.tag_label.setText(self._t("API CONNECTED"))
-            else:
-                self.alva_connected.setText(
-                    self._t("External Alva: connection failed"))
-                self.alva_panel.tag_label.setText(self._t("NOT CONNECTED"))
-            self._pending_alva_interpreter = None
-        if result.get("status") == "ok":
-            self.alva_panel.tag_label.setText(self._t("API CONNECTED"))
-            label = "✓  ALVA: SCOPED CALL COMPLETED"
-        else:
-            label = "◈  ALVA: UNAVAILABLE OR UNVERIFIED"
-        self.alva_check.setProperty("bb_english", label)
-        self.alva_check.setText(self._t(label))
-        self.alva_output.setPlainText(
-            json.dumps(result, ensure_ascii=False, indent=2))
+            result = {"status": "error", "error_code": "DIAGNOSTICS_RESPONSE_INVALID"}
+        self._diagnostics_last_result = result
 
     def _alva_finished(self) -> None:
         self._alva_worker = None
-        self.alva_check.setEnabled(True)
-        self.alva_connect.setEnabled(True)
-        self.alva_disconnect.setEnabled(True)
 
     def _finalize_alva_if_configured(self) -> None:
         session = self.probe.session_folder
@@ -1142,35 +1000,6 @@ class UniversalWindow(QMainWindow):
             self._last_alva_session = session
             self._start_alva_worker(
                 Path(self._alva_interpreter), session, persist=True)
-
-    def _check_alva(self) -> None:
-        if self._alva_interpreter:
-            if self._alva_worker is None:
-                session = (self.probe.session_folder if
-                           not self.probe.active and self.probe.session_folder and
-                           (self.probe.session_folder / "report.json").is_file()
-                           else None)
-                self._start_alva_worker(Path(self._alva_interpreter), session)
-            return
-        # Compatible developer-source fallback: inspect installed public
-        # Python APIs only on explicit request (not automatically).
-        from blackbox_rep_alva.alva_bridge import inspect_platform
-        try:
-            result = inspect_platform(
-                self.probe.session_folder if not self.probe.active else None)
-        except (ObserverError, OSError, ValueError, RuntimeError):
-            result = {"status": "error", "code": "ALVA_DIAGNOSTICS_FAILED",
-                      "provenance_verified": False}
-        self.alva_output.setPlainText(
-            json.dumps(result, ensure_ascii=False, indent=2))
-        if result.get("status") == "invoked":
-            english = "✓  ALVA: SCOPED CALL COMPLETED"
-        elif result.get("status") == "api_imported":
-            english = "◈  ALVA: API IMPORTED, NOT VERIFIED"
-        else:
-            english = "◈  ALVA: UNAVAILABLE OR UNVERIFIED"
-        self.alva_check.setProperty("bb_english", english)
-        self.alva_check.setText(self._t(english))
 
     def _export(self) -> None:
         if self.probe.pid is None:
@@ -1209,7 +1038,7 @@ class UniversalWindow(QMainWindow):
             event.ignore()
             QMessageBox.information(
                 self, "BLACK.BOX Universal",
-                self._t("Finish the current update or Alva diagnostic before closing."))
+                self._t("Finish the current update or background diagnostic before closing."))
             return
         self.probe.stop("UI_CLOSED")
         self._timer.stop()
