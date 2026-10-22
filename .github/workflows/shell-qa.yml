@@ -157,6 +157,62 @@ jobs:
           retention-days: 14
 
 
-# Full public releases are intentionally built by the private Alva repository
-# on the owner-approved dedicated Windows runner. Never publish a standalone
-# public-CI artifact under the official BLACK.BOX release asset name.
+# Owner-authorized standalone 0.3.1 test release for checking the in-app
+# updater end-to-end. This does NOT claim to include the private Alva runtime.
+# A full-Alva release must still be built privately with separate authorization.
+  publish-updater-test:
+    name: Publish standalone updater acceptance release
+    needs: [linux-tests, windows-portable]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: BLACKBOX-STANDALONE-QA-NO-ALVA
+          path: verified-portable
+      - name: Publish reviewed standalone v0.3.1 updater test
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          VERSION="$(python -c 'from blackbox_universal import __version__; print(__version__)')"
+          if [[ "$VERSION" != "0.3.1" ]]; then
+            echo "No owner-authorized test release for v$VERSION"
+            exit 0
+          fi
+          TAG="v$VERSION"
+          ZIP="verified-portable/BLACK.BOX-Universal-Windows.zip"
+          test -s "$ZIP"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists, never silently overwrite"
+            exit 0
+          fi
+          sha256sum "$ZIP" > "$ZIP.sha256"
+          cat > release-notes.md <<'EOF'
+          BLACK.BOX Universal 0.3.1 — owner-requested standalone updater test.
+
+          Windows x64 portable ZIP. Extract all files before running BLACK.BOX-Universal.exe.
+          The old 0.3.0 EXE should detect this higher version through Check Updates.
+          Includes audit fixes: missing metrics no longer become zero, selected-process
+          RSS labels, durable observer lifecycle, staged HTML/JSON reporting,
+          session-safe additional evidence checks, and improved HTML review.
+
+          IMPORTANT: This public test build does NOT bundle the private Project Alva
+          runtime. It is NOT a completed full-Alva release or signed stable build.
+          No private Alva source, wheel or manifest is included.
+          End-user Windows update/uninstall, antivirus, and full binary license
+          acceptance still require manual validation.
+          EOF
+          gh release create "$TAG" "$ZIP" "$ZIP.sha256" \
+            --target "$GITHUB_SHA" \
+            --title "BLACK.BOX Universal v0.3.1 — standalone updater test" \
+            --notes-file release-notes.md --latest
+          echo "Published $TAG from $GITHUB_SHA after Windows + Linux QA"
+
