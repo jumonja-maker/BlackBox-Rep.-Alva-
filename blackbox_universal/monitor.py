@@ -67,11 +67,24 @@ class ReadOnlyProbe:
         self.report_result: dict | None = None
         self.last_error: str | None = None
         self.history: deque[dict] = deque(maxlen=3600)
+        self.total_samples = 0
         self.events: deque[dict] = deque(maxlen=300)
 
     def _event(self, code: str, detail: str = "") -> None:
-        self.events.append({"timestamp_utc": utc_stamp(), "code": code,
-                            "detail": detail[:120]})
+        entry = {"timestamp_utc": utc_stamp(), "code": code,
+                 "detail": detail[:120]}
+        self.events.append(entry)
+        if self._store is not None:
+            try:
+                self._store.write_event({"kind": "observer_lifecycle",
+                                         "code": code,
+                                         "timestamp_utc": entry["timestamp_utc"],
+                                         "detail": entry["detail"]})
+            except ObserverError:
+                self.last_error = "STORAGE_ERROR"
+                self.events.append({"timestamp_utc": utc_stamp(),
+                                    "code": "STORAGE_ERROR",
+                                    "detail": "Event persistence unavailable"})
 
     def attach(self, pid: int) -> None:
         if self.active:
@@ -89,6 +102,7 @@ class ReadOnlyProbe:
         self.report_result = None
         self.last_error = None
         self.history.clear()
+        self.total_samples = 0
         self.events.clear()
         self._event("PROCESS_SELECTED", f"{self.name} · PID {pid}")
 
@@ -115,6 +129,7 @@ class ReadOnlyProbe:
         self.report_result = None
         self.last_error = None
         self.history.clear()
+        self.total_samples = 0
         self.events.clear()
         self.active = True
         self.started_at = utc_stamp()
@@ -131,9 +146,9 @@ class ReadOnlyProbe:
         }.get(reason, "INTERRUPTED")
         self.active = False
         store = self._store
-        self._store = None
         self.session_state = status
         self._event(reason)
+        self._store = None
         try:
             store.finish(status)
         except ObserverError as exc:
@@ -159,14 +174,19 @@ class ReadOnlyProbe:
             record = {
                 "at": utc_stamp(),
                 "seconds": round(sample.elapsed_ms / 1000, 2),
-                "cpu_pct": round(float(sample.cpu_percent or 0), 1),
-                "rss_mb": round((sample.rss_bytes or 0) / 1048576, 1),
-                "process_count": 1 + int(sample.children_count or 0),
-                "thread_count": int(sample.num_threads or 0),
+                "cpu_pct": (round(float(sample.cpu_percent), 1)
+                            if sample.cpu_percent is not None else None),
+                "rss_mb": (round(sample.rss_bytes / 1048576, 1)
+                           if sample.rss_bytes is not None else None),
+                "process_count": (1 + int(sample.children_count)
+                                  if sample.children_count is not None else None),
+                "thread_count": (int(sample.num_threads)
+                                  if sample.num_threads is not None else None),
                 "read_bytes": sample.read_bytes,
                 "write_bytes": sample.write_bytes,
             }
             self.history.append(record)
+            self.total_samples += 1
             return record
         except ObserverError as exc:
             self.last_error = exc.code
@@ -195,7 +215,7 @@ class ReadOnlyProbe:
             "observation_active_at_export": self.active,
             "session_state": self.session_state,
             "session_folder": str(self.session_folder) if self.session_folder else None,
-            "sample_count": len(self.history), "recent_samples": list(self.history),
+            "sample_count": self.total_samples, "recent_samples": list(self.history),
             "recent_events": list(self.events),
             "report_generated": self.report_result is not None,
             "limitations": [
