@@ -4,6 +4,8 @@ from html import escape
 import hashlib
 from contextlib import closing
 import json
+import os
+import tempfile
 from pathlib import Path
 import sqlite3
 from .contracts import ObserverError, bounded
@@ -23,8 +25,9 @@ def summarize(folder: Path) -> dict:
             counts = {}
             for entry in events:
                 record = json.loads(entry["data"])
-                kind = record.get("code", "UNKNOWN")
-                counts[kind] = counts.get(kind, 0) + 1
+                if record.get("kind") == "observer_error":
+                    kind = record.get("code", "UNKNOWN")
+                    counts[kind] = counts.get(kind, 0) + 1
             result = {
                 "schema_version": 1,
                 "report_type": "BLACKBOX_PROCESS_OBSERVATION",
@@ -123,8 +126,8 @@ def _human_html(report: dict) -> str:
         "CPU, RAM and I/O are external system measurements, not proof "
         "of a memory leak, deadlock or internal application defect. "
         "Высокая нагрузка не доказывает сбой, утечку памяти или зависание.</p>"
-        "<p>Работает автономно; внешние сервисы и дополнительная установка не требуются "
-        "не требуются / Offline: no external resources required.</p>"
+        "<p>Работает автономно; дополнительные сервисы не требуются / "
+        "Offline: no external resources required.</p>"
         "</body></html>"
     )
 
@@ -136,17 +139,36 @@ def write_report(folder: Path) -> dict:
     if folder.is_symlink():
         raise ObserverError("STORAGE_ERROR", "storage")
     payload = json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True).encode("utf-8") + b"\n"
-    path = folder / "report.json"
-    if path.exists() or path.is_symlink():
+    json_path = folder / "report.json"
+    html_path = folder / "report.html"
+    if any(p.exists() or p.is_symlink() for p in (json_path, html_path)):
         raise ObserverError("STORAGE_ERROR", "storage")
+    staged = []
+    published = []
     try:
-        with path.open("xb") as out:
-            out.write(payload)
-        html = _human_html(report)
-        with (folder / "report.html").open("x", encoding="utf-8") as output:
-            output.write(html)
+        for content, encoding in ((payload, None),
+                                  (_human_html(report).encode("utf-8"), "utf-8")):
+            fd, tmp_name = tempfile.mkstemp(prefix=".blackbox-report-",
+                                             suffix=".tmp", dir=folder)
+            tmp = Path(tmp_name)
+            staged.append(tmp)
+            with os.fdopen(fd, "wb") as output:
+                output.write(content)
+                output.flush()
+                os.fsync(output.fileno())
+        # Keep report.json last: it is the completion marker for consumers.
+        for source, target in ((staged[1], html_path), (staged[0], json_path)):
+            if target.exists() or target.is_symlink():
+                raise OSError("Report destination already exists")
+            os.replace(source, target)
+            published.append(target)
     except OSError:
+        for target in reversed(published):
+            target.unlink(missing_ok=True)
         raise ObserverError("STORAGE_ERROR", "storage") from None
+    finally:
+        for tmp in staged:
+            tmp.unlink(missing_ok=True)
     return {"report_sha256": hashlib.sha256(payload).hexdigest(),
             "report_file": "report.json", "sample_count": report["samples"],
             "session_id": report["session_id"]}
