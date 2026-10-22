@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import json
 import sys
+from pathlib import Path
+import importlib.util
 
 MAX_INPUT = 8192
 OPERATIONS = ("blackbox.observer.samples", "blackbox.observer.lifecycle",
@@ -58,6 +60,24 @@ def _consume_payload():
             "STORAGE_ERROR", "UNKNOWN"):
         raise ValueError("ALVA_BAD_STATE")
     return obj
+
+
+
+def _public_evidence_pipeline():
+    """Load only the adjacent public BLACK.BOX helper in isolated Python.
+
+    The frozen EXE must package this public helper beside the worker; it is
+    not a private platform import and never uses PYTHONPATH or the target app.
+    """
+    path = Path(__file__).resolve().with_name("alva_evidence_pipeline.py")
+    if not path.is_file() or path.is_symlink():
+        raise ValueError("PUBLIC_EVIDENCE_PIPELINE_MISSING")
+    spec = importlib.util.spec_from_file_location("_blackbox_evidence_pipeline", path)
+    if spec is None or spec.loader is None:
+        raise ValueError("PUBLIC_EVIDENCE_PIPELINE_INVALID")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.verified_session_evidence
 
 
 def _run(packet):
@@ -127,9 +147,16 @@ def _run(packet):
                 })
     if host.state != "closed":
         raise ValueError("ALVA_HOST_NOT_CLOSED")
-    return {
+    # The pinned Alva PREVIEW also provides checked pipeline, reviewer and
+    # handoff. Do not silently downgrade if those APIs exist but reject data.
+    features = ("run_checked_pipeline", "review_pipeline_evidence",
+                "build_ai_handoff")
+    advanced = all(callable(getattr(alva, key, None)) for key in features)
+    extended = (_public_evidence_pipeline()(alva, sample, packet["operation"])
+                if advanced else None)
+    result = {
         "status": "ok",
-        "bridge_schema": 1,
+        "bridge_schema": 2 if advanced else 1,
         "mode": "EXTERNAL_ALVA_SCOPED_INSPECTION",
         "alva_version": str(getattr(alva, "__version__", "unknown"))[:50],
         "alva_origin_authenticated": False,
@@ -139,6 +166,9 @@ def _run(packet):
         "operations": outcomes,
         "component_count": len(outcomes),
     }
+    if advanced:
+        result["extended_diagnostics"] = extended
+    return result
 
 
 def main():
