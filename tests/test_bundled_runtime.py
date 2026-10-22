@@ -22,7 +22,7 @@ class BundledRuntimeTests(unittest.TestCase):
 
     def test_no_marker_no_private_bundle_even_if_frozen(self):
         with tempfile.TemporaryDirectory() as tmp:
-            with patch.object(bridge.sys, "frozen", True, create=True), \\
+            with patch.object(bridge.sys, "frozen", True, create=True), \
                  patch.object(bridge.sys, "_MEIPASS", tmp, create=True):
                 self.assertFalse(bridge.bundled_runtime_available())
                 with self.assertRaisesRegex(
@@ -32,7 +32,7 @@ class BundledRuntimeTests(unittest.TestCase):
     def test_manifest_is_exact_versioned_and_pinned(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
-            with patch.object(bridge.sys, "frozen", True, create=True), \\
+            with patch.object(bridge.sys, "frozen", True, create=True), \
                  patch.object(bridge.sys, "_MEIPASS", tmp, create=True):
                 self._marker(base)
                 self.assertTrue(bridge.bundled_runtime_available())
@@ -44,7 +44,7 @@ class BundledRuntimeTests(unittest.TestCase):
     def test_normal_public_source_never_claims_bundled_runtime(self):
         with tempfile.TemporaryDirectory() as tmp:
             self._marker(Path(tmp))
-            with patch.object(bridge.sys, "frozen", False, create=True), \\
+            with patch.object(bridge.sys, "frozen", False, create=True), \
                  patch.object(bridge.sys, "_MEIPASS", tmp, create=True):
                 self.assertFalse(bridge.bundled_runtime_available())
 
@@ -53,12 +53,12 @@ class BundledRuntimeTests(unittest.TestCase):
             self._marker(Path(tmp))
             result = {"status": "ok", "bridge_schema": 2,
                       "extended_diagnostics": {"accepted_checks": 4}}
-            with patch.object(bridge.sys, "frozen", True, create=True), \\
-                 patch.object(bridge.sys, "_MEIPASS", tmp, create=True), \\
+            with patch.object(bridge.sys, "frozen", True, create=True), \
+                 patch.object(bridge.sys, "_MEIPASS", tmp, create=True), \
                  patch("blackbox_universal.platform_connector._summary",
-                       return_value={"sample_count": 5, "closed": True}) as summary, \\
+                       return_value={"sample_count": 5, "closed": True}) as summary, \
                  patch("blackbox_rep_alva.alva_sidecar_worker._run",
-                       return_value=result) as run, \\
+                       return_value=result) as run, \
                  patch("blackbox_universal.platform_connector._validate_output",
                        side_effect=lambda packet: packet):
                 packet = bridge.inspect_bundled(Path(tmp))
