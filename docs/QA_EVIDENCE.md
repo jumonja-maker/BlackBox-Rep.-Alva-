@@ -76,3 +76,16 @@ Local tests were run against code staged for these PRs; the standalone core bran
 third-party app, Windows crash/disk-full/permission edge cases,
 unsigned EXE reputation/AV, full performance characterization, genuine
 Alva-at-exact-SHA integration and package redistribution rights.
+
+## Focused user-access UX patch (separate new branch, 2026-10-22)
+
+Local Linux Python 3.13.5, isolated **equivalent copy of two staged new source files**, without Qt, Alva, PyInstaller or network. Commands:
+
+```bash
+PYTHONPATH=/mnt/data/blackbox_access_qa python -W error::ResourceWarning -m unittest discover -s /mnt/data/blackbox_access_qa/tests -v
+# Ran 5 tests; OK, exit code 0
+python -m compileall -q /mnt/data/blackbox_access_qa
+# PASS, exit code 0
+```
+
+The tests cover first-launch truthful `ALVA_RUNTIME_NOT_CONFIGURED`, continued native offline readiness, absence of automatic install, warnings about unauthenticated real runtime and target root cause, malformed input and redaction-safe user-facing errors. **These are narrow unit tests, not execution of the entire GitHub branch or the Qt Windows GUI.** Actual Windows frozen click path, PyInstaller packaging, full suite, actual installed private Alva, Windows/Ubuntu end-user smoke at the new SHA: **NOT RUN**. Release remains gated.
