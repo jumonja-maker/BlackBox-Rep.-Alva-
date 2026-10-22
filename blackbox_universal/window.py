@@ -95,16 +95,18 @@ class _AlvaWorker(QThread):
 
     result_ready = Signal(object, str)
 
-    def __init__(self, interpreter: Path, session: Path | None = None, parent=None):
+    def __init__(self, interpreter: Path, session: Path | None = None,
+                 parent=None, *, persist: bool = False):
         super().__init__(parent)
         self.interpreter = interpreter
         self.session = session
+        self.persist = persist
 
     def run(self) -> None:
         try:
             result = (save_session_diagnostics(self.interpreter, self.session)
-                      if self.session is not None else
-                      inspect_external(self.interpreter))
+                      if self.persist and self.session is not None else
+                      inspect_external(self.interpreter, self.session))
             self.result_ready.emit(result, "")
         except Exception:
             self.result_ready.emit(
@@ -515,8 +517,9 @@ class UniversalWindow(QMainWindow):
         page, content = _page()
         content.addLayout(self._heading("PLATFORM / EXTENSION BAY",
                                         "Meet the Alva lab.",
-                                        "The interface is ready; the official platform integration is not connected yet."))
+                                        "Optional: connect your authorized, separately installed Alva Python."))
         head = WindowPanel("Platform handshake", "NOT CONNECTED")
+        self.alva_panel = head
         row = QHBoxLayout()
         lab_icon = _label("◈", wrap=False)
         lab_icon.setStyleSheet("font: bold 56px 'Consolas'; color: #ec725d;")
@@ -715,6 +718,8 @@ class UniversalWindow(QMainWindow):
         self.alva_check.setText(self._t(
             self.alva_check.property("bb_english") or
             "◈  CHECK OPTIONAL ALVA PLATFORM"))
+        self.alva_panel.tag_label.setText(
+            self._t("API CONNECTED" if self._alva_interpreter else "NOT CONNECTED"))
         self._refresh_update_button()
         self._update_all()
         self._filter_processes(self.process_search.text())
@@ -1076,16 +1081,19 @@ class UniversalWindow(QMainWindow):
         self._pending_alva_interpreter = None
         self._prefs.remove("alva_python")
         self.alva_connected.setText(self._t("External Alva: not configured"))
+        self.alva_panel.tag_label.setText(self._t("NOT CONNECTED"))
         self.alva_output.setPlainText(self._t(
             "External Alva disconnected. Standalone monitoring remains available."))
 
-    def _start_alva_worker(self, interpreter: Path, session: Path | None = None) -> None:
+    def _start_alva_worker(self, interpreter: Path, session: Path | None = None,
+                           *, persist: bool = False) -> None:
         if self._alva_worker is not None:
             return
         self.alva_check.setEnabled(False)
         self.alva_connect.setEnabled(False)
         self.alva_disconnect.setEnabled(False)
-        self._alva_worker = _AlvaWorker(interpreter, session, self)
+        self._alva_worker = _AlvaWorker(
+            interpreter, session, self, persist=persist)
         self._alva_worker.result_ready.connect(self._alva_result)
         self._alva_worker.finished.connect(self._alva_finished)
         self._alva_worker.start()
@@ -1099,11 +1107,14 @@ class UniversalWindow(QMainWindow):
                 self._prefs.setValue("alva_python", self._alva_interpreter)
                 self.alva_connected.setText(
                     self._t("External Alva: connected, source not authenticated"))
+                self.alva_panel.tag_label.setText(self._t("API CONNECTED"))
             else:
                 self.alva_connected.setText(
                     self._t("External Alva: connection failed"))
+                self.alva_panel.tag_label.setText(self._t("NOT CONNECTED"))
             self._pending_alva_interpreter = None
         if result.get("status") == "ok":
+            self.alva_panel.tag_label.setText(self._t("API CONNECTED"))
             label = "✓  ALVA: SCOPED CALL COMPLETED"
         else:
             label = "◈  ALVA: UNAVAILABLE OR UNVERIFIED"
@@ -1126,7 +1137,8 @@ class UniversalWindow(QMainWindow):
                 self._alva_worker is None and
                 (session / "report.json").is_file()):
             self._last_alva_session = session
-            self._start_alva_worker(Path(self._alva_interpreter), session)
+            self._start_alva_worker(
+                Path(self._alva_interpreter), session, persist=True)
 
     def _check_alva(self) -> None:
         if self._alva_interpreter:
