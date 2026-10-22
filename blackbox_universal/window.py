@@ -1137,7 +1137,7 @@ class UniversalWindow(QMainWindow):
     def _about(self) -> None:
         QMessageBox.about(
             self, "BLACK.BOX Universal",
-            "BLACK.BOX Universal v0.3 — original retro desktop shell.\n\n"
+            "BLACK.BOX Universal v0.3.1 — standalone updater test.\n\n"
             "Offline monitoring, human-readable HTML and JSON reports: available.\n"
             "Built-in evidence checks run automatically when packaged in the release.\n"
             "Windows ETW and crash dump collection: NOT IMPLEMENTED.\n\n"
