@@ -3,8 +3,10 @@
 ## Latest: integrated standalone + retro desktop (after Alva foundation)
 
 - Integration Draft PR [#5](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/pull/5),
-  branch `feature/universal-integrated-desktop-v01`, stacked **on PR #3**
-  and therefore including the complete PR #1→#2→#3 public platform base.
+  branch `feature/universal-integrated-desktop-v01`, now targets
+  **main directly** as the single complete first-release candidate. Its
+  cumulative diff includes all public platform work from PR #1→#2→#3
+  plus the original retro GUI from PR #4. Older PRs stay unmerged.
 - Original design Draft PR #4 supplied the theme, widgets and UI layouts.
   **PR #4 should not also be merged separately**; it is superseded by #5.
 - The GUI uses `blackbox_rep_alva.probe.PsutilProbe` and
