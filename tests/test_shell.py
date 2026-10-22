@@ -40,7 +40,7 @@ class ObserverTests(unittest.TestCase):
         self.assertFalse(observer.active)
         record = observer.snapshot()
         self.assertEqual(record["schema_version"], 1)
-        self.assertEqual(record["alva_status"], "NOT_CONNECTED")
+        self.assertNotIn("alva_status", record)
         self.assertFalse(record["root_cause_proven"])
         self.assertEqual(record["sample_count"], 1)
         self.assertEqual(record["observed_process"]["pid"], os.getpid())
@@ -151,7 +151,7 @@ class QtShellTests(unittest.TestCase):
             report = json.loads(dst.read_text(encoding="utf-8"))
             self.assertEqual(report["source"], "local_read_only_psutil")
             self.assertFalse(report["root_cause_proven"])
-            self.assertEqual(report["alva_status"], "NOT_CONNECTED")
+            self.assertNotIn("alva_status", report)
 
     def test_public_ui_has_no_platform_laboratory_or_brand(self):
         self.assertNotIn("alva", self.window._page_ids)
