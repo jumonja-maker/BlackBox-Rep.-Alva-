@@ -107,17 +107,28 @@ class QtShellTests(unittest.TestCase):
                              self.window._page_ids[key])
         self.assertTrue(self.window.windowTitle().startswith("BLACK.BOX"))
 
-    def test_no_mockup_marketing_headings_or_redundant_process_banner(self):
+    def test_section_breadcrumbs_without_marketing_headings(self):
         from PySide6.QtWidgets import QFrame, QLabel
-        for language in ("EN", "RU"):
+        expected = {
+            "processes": ("WINDOWS / PROCESS EXPLORER", "WINDOWS / ПРОЦЕССЫ"),
+            "events": ("WINDOWS / EVENT VIEWER", "WINDOWS / ЖУРНАЛ СОБЫТИЙ"),
+            "reports": ("LOCAL DISK / REPORTS", "ЛОКАЛЬНЫЙ ДИСК / ОТЧЁТЫ"),
+            "settings": ("CONTROL PANEL / PREFERENCES",
+                         "ПАНЕЛЬ УПРАВЛЕНИЯ / НАСТРОЙКИ"),
+        }
+        for language, index in (("EN", 0), ("RU", 1)):
             self.window._set_language(language)
-            for key in ("dashboard", "processes", "events", "reports", "settings"):
+            for key in ("dashboard", *expected):
                 self.window._navigate(key)
                 page = self.window.stack.currentWidget()
+                headings = [label.text() for label in page.findChildren(QLabel)
+                            if label.objectName() == "eyebrow"]
+                self.assertEqual(headings,
+                                 [] if key == "dashboard" else [expected[key][index]])
                 self.assertFalse(
                     [label.text() for label in page.findChildren(QLabel)
-                     if label.objectName() in ("hero", "eyebrow")],
-                    f"Mockup heading remains on {key} in {language}")
+                     if label.objectName() == "hero"],
+                    f"Marketing slogan returned on {key} in {language}")
                 if key == "processes":
                     self.assertFalse(page.findChildren(QFrame, "notice"))
 
