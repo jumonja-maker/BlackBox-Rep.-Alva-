@@ -107,6 +107,20 @@ class QtShellTests(unittest.TestCase):
                              self.window._page_ids[key])
         self.assertTrue(self.window.windowTitle().startswith("BLACK.BOX"))
 
+    def test_no_mockup_marketing_headings_or_redundant_process_banner(self):
+        from PySide6.QtWidgets import QFrame, QLabel
+        for language in ("EN", "RU"):
+            self.window._set_language(language)
+            for key in ("dashboard", "processes", "events", "reports", "settings"):
+                self.window._navigate(key)
+                page = self.window.stack.currentWidget()
+                self.assertFalse(
+                    [label.text() for label in page.findChildren(QLabel)
+                     if label.objectName() in ("hero", "eyebrow")],
+                    f"Mockup heading remains on {key} in {language}")
+                if key == "processes":
+                    self.assertFalse(page.findChildren(QFrame, "notice"))
+
     def test_real_process_picker_filter_and_attach_workflow(self):
         target = {"pid": os.getpid(),
                   "name": psutil.Process().name(),
