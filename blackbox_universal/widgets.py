@@ -103,6 +103,7 @@ class WindowPanel(QFrame):
             label = QLabel(tag)
             label.setStyleSheet("font: 800 10px 'Consolas'; color: #6c586d;")
             title.addWidget(label)
+            self.tag_label = label
         root.addWidget(title_row)
         self.body = QWidget()
         self.body.setStyleSheet("background: #fffaf0;")
