@@ -7,6 +7,7 @@ on:
       - feature/universal-integrated-desktop-v01
       - feature/retro-feedback-i18n-maintenance-20261022
       - feature/release-v030-alva-integration-20261022
+      - feature/human-first-integration-qa-20261022
     tags:
       - "v*.*.*"
   pull_request:
