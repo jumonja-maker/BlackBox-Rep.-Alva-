@@ -1,4 +1,18 @@
-# Executed QA evidence — 2026-10-22
+# QA evidence for BLACK.BOX Universal
+
+## Current cumulative PR #12 — confirmed executed tests
+
+- **GitHub Actions run:** [39837259498](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/actions/runs/39837259498)
+- **Exact tested source SHA:** `32b399b93f987bce3122164b2875f2de943cd236`.
+- **Windows runner:** 65/65 Python tests PASS; actual Qt offscreen GUI smoke PASS.
+- **Ubuntu runner:** 65/65 Python tests PASS; Qt offscreen GUI smoke PASS.
+- **Windows portable:** PyInstaller windowed `BLACK.BOX-Universal.exe` and `BLACK.BOX-Maintenance.exe` built, frozen smoke PASS; artifact `BLACK.BOX-Universal-Windows` (ID `12451876396`) uploaded.
+- **Functional verification in these tests:** ordinary sessions create SQLite, JSON, HTML and no `ai-handoff.json`; no Alva UI, five sections, RU/ENG; private sidecar and P4 API protocol checked against explicitly labeled **test doubles only**; basic CLI report and before/after comparison preserved. Test doubles do **NOT** prove real private Alva compatibility.
+- **Post-test changes:** later branch revisions adjust UI translation catalog, report documentation and history reconciliation. The exact current branch head must have its own green Actions run before merging.
+- **NOT RUN / BLOCKED:** genuine separately installed private Alva at pinned SHA, full Windows desktop manual exercise, actual in-place update/uninstall end-to-end, Windows reputation/AV and exact binary license audit.
+- **Main unchanged by this PR.** Source/wheel of private Alva not copied to public repository or build.
+
+## Earlier historical stages — not current branch proof
 
 > The section below records the **earlier Alva CLI foundation**. The newest
 > integrated GUI/EXE results are separately documented at the end.
