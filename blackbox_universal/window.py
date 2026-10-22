@@ -512,7 +512,7 @@ class UniversalWindow(QMainWindow):
         controls.addWidget(compare_button)
         content.addLayout(controls)
         content.addWidget(_label(
-            "Automatic session SQLite, HTML, JSON and offline AI Handoff are saved "
+            "Automatic SQLite, HTML and JSON session reports are saved "
             "when you press STOP. Manual JSON exports are optional. "
             "Inspect process names and PIDs before sharing.", "caption"))
         return page
@@ -1078,7 +1078,7 @@ class UniversalWindow(QMainWindow):
         QMessageBox.about(
             self, "BLACK.BOX Universal",
             "BLACK.BOX Universal v0.3 — original retro desktop shell.\n\n"
-            "Offline process monitoring + SQLite + HTML/JSON + AI Handoff: available.\n"
+            "Offline monitoring, human-readable HTML and JSON reports: available.\n"
             "Optional internal diagnostic extensions run only when explicitly authorized.\n"
             "Windows ETW and crash dump collection: NOT IMPLEMENTED.\n\n"
             "No cloud upload, tunneling, process injection or admin escalation.")
