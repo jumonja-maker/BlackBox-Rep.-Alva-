@@ -6,6 +6,8 @@ Branch `feature/alva-evidence-pipeline-20261022` is stacked on Draft PR #9 (unbr
 
 **No claim of universal code tracing:** P4 observations are only about BLACK.BOX's own observer evidence. No root cause, foreign code access or automatic analysis by cloud AI.
 
+- Added opt-in **real private Alva** acceptance script `tools/verify_authorized_alva.py`: positive and rejected-observer-evidence synthetic session through isolated worker; no new installation or public wheel. Created but **NOT RUN**. See `docs/ALVA_P4_INTERNAL_CONSUMER.md`.
+
 **Current QA for this exact SHA:** static GitHub source review + synthetic test code added; actual local test execution, full-suite Windows/Ubuntu test, frozen EXE and real private Alva invocation **NOT RUN**. Tests are a labelled stand-in, not an installed Alva test. Do not merge/release until the gates in `docs/ALVA_P4_INTERNAL_CONSUMER.md` pass. Private Alva repository was not changed. No client-facing Alva UI was reintroduced.
 
 
