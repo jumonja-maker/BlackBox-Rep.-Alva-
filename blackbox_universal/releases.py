@@ -135,10 +135,21 @@ def _extract_release(zip_path: Path, dest: Path) -> Path:
             original = item.filename
             if "\\" in original or "\x00" in original:
                 raise ValueError("ARCHIVE_PATH_INVALID")
+            raw_parts = original.rstrip("/").split("/")
+            # Windows filesystem aliases (CON, trailing dots, ADS colons)
+            # and noncanonical components can bypass path comparisons.
+            if (not raw_parts or any(
+                    not part or part in (".", "..") or
+                    part.endswith((".", " ")) or ":" in part or
+                    part.split(".")[0].upper() in (
+                        "CON", "PRN", "AUX", "NUL",
+                        "COM1", "COM2", "COM3", "COM4", "COM5",
+                        "LPT1", "LPT2", "LPT3", "LPT4", "LPT5")
+                    for part in raw_parts)):
+                raise ValueError("ARCHIVE_PATH_INVALID")
             name = PurePosixPath(original)
             parts = name.parts
-            if (name.is_absolute() or not parts or parts[0] != root_name or
-                    any(p in ("..", ".") for p in parts)):
+            if name.is_absolute() or parts[0] != root_name:
                 raise ValueError("ARCHIVE_PATH_INVALID")
             if original.casefold() in seen:
                 raise ValueError("ARCHIVE_DUPLICATE_PATH")
