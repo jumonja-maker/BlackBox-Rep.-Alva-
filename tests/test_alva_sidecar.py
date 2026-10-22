@@ -173,6 +173,22 @@ class WorkerContractTests(unittest.TestCase):
             self.assertEqual(report["error_code"], "ALVA_WORKER_UNAVAILABLE")
             self.assertFalse(report["permission_to_act"])
 
+    def test_manual_recheck_never_overwrites_saved_alva_diagnostics(self):
+        from blackbox_universal.window import _AlvaWorker
+        with tempfile.TemporaryDirectory() as td:
+            session = Path(td)
+            existing = session / "alva-diagnostics.json"
+            existing.write_text('{"status":"original"}', encoding="utf-8")
+            worker = _AlvaWorker(Path(sys.executable), session, persist=False)
+            with patch("blackbox_universal.window.inspect_external",
+                       return_value={"status": "ok"}) as inspect, \\
+                 patch("blackbox_universal.window.save_session_diagnostics") as save:
+                worker.run()
+                inspect.assert_called_once_with(Path(sys.executable), session)
+                save.assert_not_called()
+            self.assertEqual(existing.read_text(encoding="utf-8"),
+                             '{"status":"original"}')
+
     def test_external_connect_never_executes_without_explicit_interpreter(self):
         with self.assertRaises(ConnectionError):
             inspect_external(Path("python.exe"))
