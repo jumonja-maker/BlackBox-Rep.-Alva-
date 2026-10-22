@@ -105,7 +105,6 @@ def _validate_output(result: object) -> dict:
     if (result.keys() != required or
             result["status"] != "ok" or
             result["bridge_schema"] != schema or
-            "status", "bridge_schema", "mode", "alva_version",
             result["mode"] != "EXTERNAL_ALVA_SCOPED_INSPECTION" or
             result["alva_origin_authenticated"] is not False or
             result["target_root_cause_proven"] is not False or
