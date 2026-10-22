@@ -180,9 +180,11 @@ class WorkerContractTests(unittest.TestCase):
             existing = session / "alva-diagnostics.json"
             existing.write_text('{"status":"original"}', encoding="utf-8")
             worker = _AlvaWorker(Path(sys.executable), session, persist=False)
-            with patch("blackbox_universal.window.inspect_external",
-                       return_value={"status": "ok"}) as inspect, \\
-                 patch("blackbox_universal.window.save_session_diagnostics") as save:
+            with (
+                patch("blackbox_universal.window.inspect_external",
+                      return_value={"status": "ok"}) as inspect,
+                patch("blackbox_universal.window.save_session_diagnostics") as save,
+            ):
                 worker.run()
                 inspect.assert_called_once_with(Path(sys.executable), session)
                 save.assert_not_called()
