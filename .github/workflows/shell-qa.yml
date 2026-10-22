@@ -98,7 +98,7 @@ jobs:
       - name: Build BLACK.BOX Universal desktop with original icon
         shell: pwsh
         run: |
-          python -m PyInstaller --noconfirm --clean --onedir --windowed --collect-submodules blackbox_rep_alva --collect-submodules blackbox_universal --add-data "src/blackbox_rep_alva/alva_sidecar_worker.py;alva_worker" --icon assets/blackbox.ico --add-data "assets/blackbox.png;assets" --name BLACK.BOX-Universal app.py
+          python -m PyInstaller --noconfirm --clean --onedir --windowed --collect-submodules blackbox_rep_alva --collect-submodules blackbox_universal --add-data "src/blackbox_rep_alva/alva_sidecar_worker.py;alva_worker" --add-data "src/blackbox_rep_alva/alva_evidence_pipeline.py;alva_worker" --icon assets/blackbox.ico --add-data "assets/blackbox.png;assets" --name BLACK.BOX-Universal app.py
           if ($LASTEXITCODE -ne 0) { throw 'GUI build failed' }
           Copy-Item "dist/BLACK.BOX-Maintenance.exe" "dist/BLACK.BOX-Universal/BLACK.BOX-Maintenance.exe"
           Copy-Item ".blackbox-portable.json" "dist/BLACK.BOX-Universal/.blackbox-portable.json"
@@ -106,6 +106,9 @@ jobs:
           if (-not (Test-Path "dist/BLACK.BOX-Universal/_internal/assets/blackbox.png")) { throw 'App icon missing' }
           if (-not (Test-Path "dist/BLACK.BOX-Universal/_internal/alva_worker/alva_sidecar_worker.py")) {
             throw 'Public Alva sidecar script not bundled with EXE'
+          }
+          if (-not (Test-Path "dist/BLACK.BOX-Universal/_internal/alva_worker/alva_evidence_pipeline.py")) {
+            throw 'Public evidence pipeline helper missing from Windows portable build'
           }
       - name: Smoke-test the actual frozen Windows EXE
         shell: pwsh
