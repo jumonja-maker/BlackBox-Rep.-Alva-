@@ -160,14 +160,23 @@ def apply_update(install: Path, staged: Path) -> None:
                 raise MaintenanceError("UPDATE_DATA_COLLISION")
             previous.replace(new_place)
             moved.append((new_place, previous))
-        # Old runtime is only deleted AFTER new runtime and preserved data
-        # have been installed. No accumulated version folders on success.
-        shutil.rmtree(backup)
+        # New version and user data are now committed. Do not roll back
+        # to a partially deleted old version if antivirus delays cleanup.
         old_renamed = False
+        for attempt in range(4):
+            try:
+                shutil.rmtree(backup)
+                break
+            except OSError:
+                if attempt == 3:
+                    # Keep the working new app; a preserved backup can be
+                    # inspected/retried instead of risking irreversible loss.
+                    break
+                time.sleep(0.4)
         try:
             shutil.rmtree(staged.parent)
         except OSError:
-            pass  # A later cleanup can delete the temporary staging dir.
+            pass
     except Exception:
         # If deleting the backup partly succeeded, it must NOT be used as a
         # rollback source. Leave the new working installation intact.
