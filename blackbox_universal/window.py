@@ -646,9 +646,9 @@ class UniversalWindow(QMainWindow):
             QMessageBox.warning(self, "Comparison failed",
                                 "These folders do not contain valid BLACK.BOX sessions.")
             return
+        self._navigate("reports")
         self.report_preview.setPlainText(json.dumps(
             result, ensure_ascii=False, indent=2))
-        self._navigate("reports")
 
     def _check_alva(self) -> None:
         # Installed private Alva is contacted only on this explicit user action.
