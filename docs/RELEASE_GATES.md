@@ -6,10 +6,10 @@
 - [x] Exactly five user pages, no Alva Lab or platform-setup controls.
 - [x] Stop outputs SQLite + JSON + offline human-readable HTML; no `ai-handoff.json`; user CLI has no `handoff` or `alva-check` command.
 - [x] Internal P4 checks use bounded observer evidence and never prove target root cause.
-- [x] Automated Windows + Ubuntu + frozen EXE at integration SHA `32b399b93f987bce3122164b2875f2de943cd236`; later changes require fresh CI.
+- [x] Automated Windows **66/66** + Ubuntu **66/66** + frozen EXE real-observer smoke at integration SHA `4b1dd4c3be1b2654e03e56b60272840a717b81b1` ([Actions #39838913391](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/actions/runs/39838913391)); future changes require fresh exact-head CI.
 - [ ] Authorized genuine Alva SHA-and-wheel-verified runtime test (not synthetic).
-- [ ] Full clean Windows user acceptance of portable EXE, real target process, report, comparison and update/uninstall.
-- [ ] Exact release dependency license inventory, privacy/security review and maintenance rollback under AV locks.
+- [ ] Full clean Windows user acceptance of portable EXE, real target process, report, comparison and update/uninstall. See [manual test and evidence matrix](WINDOWS_RELEASE_ACCEPTANCE.md).
+- [ ] Exact release dependency license inventory, privacy/security review and maintenance rollback under AV locks. See [binary dependency audit plan](DEPENDENCY_LICENSE_AUDIT.md).
 - [ ] Approved final HEAD, documented acceptance and official tagged release. Do not merge merely because a Draft is mergeable.
 
 
@@ -49,7 +49,7 @@ private Alva runtime QA remain outstanding. See docs/QA_EVIDENCE.md.
 ## Gate D — reproducibility
 
 - [x] Executable local unittest command documented.
-- [x] Windows/Ubuntu tests PASS on pinned integration commit `32b399b93f987bce3122164b2875f2de943cd236` (65 tests each).
+- [x] Windows/Ubuntu tests PASS on pinned integration commit `4b1dd4c3be1b2654e03e56b60272840a717b81b1` (66 tests each), frozen Windows GUI + Maintenance EXE smoke PASS.
 - [ ] Re-run all release gates on final publication SHA and archive evidence.
 - [ ] Manual rollback test of Alva wheel version and fallback standalone mode.
 - [ ] Third-party independent newcomer can set up from docs and locate known seeded defect.
