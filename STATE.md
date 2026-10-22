@@ -1,3 +1,17 @@
+## 2026-10-23 — CURRENT main: owner-directed standalone 0.3.1 update acceptance
+
+**Authority:** The current branch is `main` and PR #12/#14 are already merged. Historical sections below describe old Draft branches; they are NOT the latest status.
+
+**New audit fixes being validated in GitHub Actions:** nullable CPU/RSS/process-tree observations retain unavailable state; chart and cards display gaps; observer lifecycle events persist in SQLite without becoming false errors; JSON/HTML report creation is staged with rollback on ordinary I/O failure; per-session Alva result queues prevent missing subsequent checks and stale GUI status; unbranded human evidence review is appended to report.html only when actual diagnostics are produced, and Reports can open the saved human HTML.
+
+**Owner-requested updater test:** v0.3.1 standalone ZIP is published as a *test* GitHub Release only after both Windows and Linux CI pass and frozen EXE smoke passes. Release title and notes explicitly say NO bundled Alva. Old v0.3.0 checks official GitHub Releases for strictly newer versions. Full private Alva binary remains a different release gate: no owner-approved redistributable runtime ZIP has been attested, and independent Windows EXE, licensing, anti-virus, maintenance/rollback and DPI checks remain OPEN.
+
+**Real private worker evidence:** [Alva run #39850629465](https://github.com/jumonja-maker/Alva/actions/runs/39850629465) completed successfully for three scoped ComponentHost calls/traces, four P4 checks, positive/zero-sample negative with genuine installed private Alva in an isolated Windows Python worker. This is NOT the frozen bundled application; source/wheel provenance was not independently attested. No claim of an arbitrary target-program root cause.
+
+**Exact test evidence:** See newest [main Actions](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/actions?query=branch%3Amain) for the final v0.3.1 source SHA and recorded PASS/FAIL. Do not apply old 65/80 test counts to a newer, untested HEAD.
+
+---
+
 ## 2026-10-22 — PR #12 human-first integrated release candidate (CURRENT)
 
 **Review:** [Draft PR #12](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/pull/12), `feature/human-first-integration-qa-20261022`; cumulative PR #9 → PR #10 → PR #11 derived from head `dd339cbf69047047e09d3354091c151af67285b4`, reconciled with current `main` documentation via merge commit `4bf9a521de8d6ed9e329c1d7606470d7549c0324`. Main was **not** changed by this work.
