@@ -25,7 +25,9 @@ def summarize(folder: Path) -> dict:
             counts = {}
             for entry in events:
                 record = json.loads(entry["data"])
-                if record.get("kind") == "observer_error":
+                # Preserve historical warning/error reporting, but never
+                # count lifecycle timeline messages as observation errors.
+                if record.get("kind") != "observer_lifecycle":
                     kind = record.get("code", "UNKNOWN")
                     counts[kind] = counts.get(kind, 0) + 1
             result = {
