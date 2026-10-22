@@ -70,7 +70,7 @@ class FakeScope:
             "diagnostics": {"result": {
                 "contract_verdict": "CHECK_ACCEPTED",
                 "visibility": "SCOPE_ONLY",
-                "ai_handoff": {"status": "ok"}}},
+                }}} ,
             "execution_state": "RESPONSE_AVAILABLE"})()
 
 
