@@ -351,20 +351,9 @@ class UniversalWindow(QMainWindow):
         scroll.setWidget(page)
         return scroll
 
-    def _heading(self, kicker: str, headline: str, detail: str) -> QVBoxLayout:
-        content = QVBoxLayout()
-        content.setSpacing(4)
-        content.addWidget(_label(kicker, "eyebrow"))
-        content.addWidget(_label(headline, "hero"))
-        content.addWidget(_label(detail, "caption"))
-        return content
-
     def _build_dashboard(self) -> QWidget:
         page, content = _page()
         top = QHBoxLayout()
-        top.addLayout(self._heading("WELCOME TO YOUR WORKSTATION",
-                                    "Hello, curious human.",
-                                    "An independent window into what your applications are doing."))
         top.addStretch()
         self.live_badge = _label("●  NO TARGET SELECTED", "signal", False)
         top.addWidget(self.live_badge)
@@ -420,21 +409,11 @@ class UniversalWindow(QMainWindow):
     def _build_processes(self) -> QWidget:
         page, content = _page()
         head = QHBoxLayout()
-        head.addLayout(self._heading("WINDOWS / PROCESS EXPLORER",
-                                     "Choose your application.",
-                                     "Attach to a running process without installing an agent inside it."))
         head.addStretch()
         refresh = _button("↻  REFRESH")
         refresh.clicked.connect(self._refresh_process_list)
         head.addWidget(refresh)
         content.addLayout(head)
-        notice = QFrame()
-        notice.setObjectName("notice")
-        notice_body = QHBoxLayout(notice)
-        notice_body.addWidget(_label(
-            "◎ Read-only mode · No debugging injection · "
-            "Some protected processes may be unavailable.", "caption"))
-        content.addWidget(notice)
         self.process_search = QLineEdit()
         self.process_search.setPlaceholderText("Search by process name or PID…")
         self.process_search.setClearButtonEnabled(True)
@@ -470,9 +449,6 @@ class UniversalWindow(QMainWindow):
 
     def _build_events(self) -> QWidget:
         page, content = _page()
-        content.addLayout(self._heading("WINDOWS / EVENT VIEWER",
-                                        "The little things add up.",
-                                        "Chronological local observer events; not internal application traces."))
         frame = WindowPanel("Session timeline", "LATEST FIRST")
         self.event_table = QTableWidget(0, 3)
         self.event_table.setHorizontalHeaderLabels(("TIME (UTC)", "SIGNAL", "DETAILS"))
@@ -497,9 +473,6 @@ class UniversalWindow(QMainWindow):
     def _build_reports(self) -> QWidget:
         page, content = _page()
         h = QHBoxLayout()
-        h.addLayout(self._heading("LOCAL DISK / REPORTS",
-                                  "Evidence, not guesses.",
-                                  "Inspect the current read-only snapshot. Files stay on your computer."))
         h.addStretch()
         save = _button("▣  SAVE JSON SNAPSHOT", "primary")
         save.clicked.connect(self._export)
@@ -529,9 +502,6 @@ class UniversalWindow(QMainWindow):
 
     def _build_settings(self) -> QWidget:
         page, content = _page()
-        content.addLayout(self._heading("CONTROL PANEL / PREFERENCES",
-                                        "Your machine, your rules.",
-                                        "Small decisions that make diagnostics trustworthy."))
         setting = WindowPanel("Observation settings", "LOCAL CONFIGURATION")
         setting.content.addWidget(_label("SAMPLE INTERVAL", "cardTitle"))
         self.interval_combo = QComboBox()
