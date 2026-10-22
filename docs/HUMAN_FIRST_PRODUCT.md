@@ -36,13 +36,13 @@ There is **no Alva Lab** in the user interface. Alva remains private and is not 
 
 ## Acceptance checklist
 
-- [ ] Unit tests: Stop yields SQLite/JSON/HTML but **not** `ai-handoff.json`; CLI rejects `handoff`.
-- [ ] EN/RU Qt GUI test: Reports/About text mentions no AI Handoff or separate Alva tab.
+- [x] Automated tests at integration SHA `4b1dd4c3be1b2654e03e56b60272840a717b81b1`: Stop yields SQLite/JSON/HTML but **not** `ai-handoff.json`; CLI rejects `handoff`.
+- [x] Windows/Ubuntu automated Qt GUI tests on that integration SHA: five pages, no user-facing AI Handoff or Alva Lab.
 - [ ] Windows frozen EXE: end-to-end run with no private Alva, no internet and no Python installation.
 - [ ] With already-authorized Alva: optional checks complete, ordinary human reports survive failures.
 - [ ] Verify no unexpected AI-specific data is transmitted, persisted or exposed.
 - [ ] Publish only after validating the exact reviewed SHA in GitHub Actions or a trusted Windows host.
 
-At the time of authoring, source changes and tests are committed but **full local/Windows tests have not been executed at this SHA**. Historical QA in earlier documents is not a result for this branch.
+**Evidence update (cumulative PR #12, not the original stacked branch):** Windows and Ubuntu **66/66**, frozen Windows EXE `--smoke` PASS at the exact integration SHA above ([Actions #39838913391](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/actions/runs/39838913391)). This does not demonstrate a clean consumer PC with no Python, full updater/uninstaller, or genuine Alva. See [Windows acceptance plan](WINDOWS_RELEASE_ACCEPTANCE.md).
 
 This contract supersedes any older README or engineering note describing AI Handoff as a default BLACK.BOX feature.
