@@ -5,6 +5,9 @@ on:
     branches:
       - main
       - feature/universal-integrated-desktop-v01
+      - feature/retro-feedback-i18n-maintenance-20261022
+    tags:
+      - "v*.*.*"
   pull_request:
     branches:
       - main
@@ -85,10 +88,21 @@ jobs:
           cache: pip
       - name: Install release tooling and public observer core
         run: |
-          python -m pip install -r requirements.txt "pyinstaller>=6,<7"
+          python -m pip install -r requirements.txt "pyinstaller>=6,<7" "Pillow>=10,<13"
           python -m pip install -e .
-      - name: Build original BLACK.BOX Universal retro desktop
-        run: python -m PyInstaller --noconfirm --clean --onedir --windowed --collect-submodules blackbox_rep_alva --name BLACK.BOX-Universal app.py
+      - name: Generate original retro Windows icon
+        run: python tools/generate_icon.py
+      - name: Build separate Windows maintenance EXE
+        run: python -m PyInstaller --noconfirm --clean --onefile --windowed --name BLACK.BOX-Maintenance maintenance_entry.py
+      - name: Build BLACK.BOX Universal desktop with original icon
+        shell: pwsh
+        run: |
+          python -m PyInstaller --noconfirm --clean --onedir --windowed --collect-submodules blackbox_rep_alva --collect-submodules blackbox_universal --icon assets/blackbox.ico --add-data "assets/blackbox.png;assets" --name BLACK.BOX-Universal app.py
+          if ($LASTEXITCODE -ne 0) { throw 'GUI build failed' }
+          Copy-Item "dist/BLACK.BOX-Maintenance.exe" "dist/BLACK.BOX-Universal/BLACK.BOX-Maintenance.exe"
+          Copy-Item ".blackbox-portable.json" "dist/BLACK.BOX-Universal/.blackbox-portable.json"
+          if (-not (Test-Path "dist/BLACK.BOX-Universal/BLACK.BOX-Maintenance.exe")) { throw 'Maintenance helper missing' }
+          if (-not (Test-Path "dist/BLACK.BOX-Universal/_internal/assets/blackbox.png")) { throw 'App icon missing' }
       - name: Smoke-test the actual frozen Windows EXE
         shell: pwsh
         run: |
@@ -97,6 +111,9 @@ jobs:
           $job = Start-Process -FilePath $exe -ArgumentList "--smoke" -PassThru -Wait
           if ($job.ExitCode -ne 0) { throw "Frozen Windows GUI failed: $($job.ExitCode)" }
           Write-Host "Portable GUI smoke PASS"
+          $maintenance = Join-Path $PWD "dist\BLACK.BOX-Universal\BLACK.BOX-Maintenance.exe"
+          $check = Start-Process -FilePath $maintenance -ArgumentList "--help" -PassThru -Wait
+          if ($check.ExitCode -ne 0) { throw "Maintenance EXE failed smoke: $($check.ExitCode)" }
       - name: Include public source license and distribution notices
         shell: pwsh
         run: |
@@ -116,3 +133,36 @@ jobs:
           path: BLACK.BOX-Universal-Windows.zip
           if-no-files-found: error
           retention-days: 14
+
+  publish-release:
+    name: Publish only fully tested versioned release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [linux-tests, windows-portable]
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Check release tag matches application version
+        shell: pwsh
+        run: |
+          $version = (python -c "from blackbox_universal import __version__; print(__version__)").Trim()
+          if ("v" + $version -ne $env:GITHUB_REF_NAME) {
+            throw "Release tag must match __version__: v$version"
+          }
+      - uses: actions/download-artifact@v4
+        with:
+          name: BLACK.BOX-Universal-Windows
+          path: ./release
+      - name: Publish SHA256-digested GitHub Release asset
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $zip = "release/BLACK.BOX-Universal-Windows.zip"
+          if (-not (Test-Path $zip)) { throw 'Portable release ZIP missing' }
+          gh release create "$env:GITHUB_REF_NAME" "$zip" --verify-tag --title "BLACK.BOX Universal $env:GITHUB_REF_NAME" --notes "Portable Windows application. Logs are preserved on update/uninstall. Alva is optional and NOT bundled. Asset SHA256 digest is published by GitHub Releases."

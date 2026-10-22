@@ -123,6 +123,43 @@ QPushButton#nav[active="true"] {
     background: #fff7e4;
     border-left: 5px solid #ec725d;
 }
+QPushButton#smallLink {
+    padding: 2px 5px;
+    min-height: 20px;
+    max-height: 24px;
+    font-size: 10px;
+    font-weight: 900;
+    font-family: "Consolas", monospace;
+    color: #302c43;
+    background: #f7e3c9;
+    border-top: 2px solid #fffaf0;
+    border-left: 2px solid #fffaf0;
+    border-bottom: 2px solid #796c88;
+    border-right: 2px solid #796c88;
+}
+QPushButton#smallLink:hover { background: #ffcb9a; }
+QPushButton#smallLink[active="true"] {
+    background: #83d5b3;
+    border-bottom: 3px solid #056c6d;
+}
+QPushButton#update {
+    min-height: 25px;
+    padding: 2px 10px;
+    font-family: "Consolas", monospace;
+    font-weight: 900;
+    font-size: 11px;
+    background: #e8d6bc;
+    color: #302c43;
+}
+QPushButton#update[available="true"] {
+    background: #83d5b3;
+    color: #123e36;
+    border-top: 2px solid #dcfbe9;
+    border-left: 2px solid #dcfbe9;
+    border-right: 2px solid #056c6d;
+    border-bottom: 2px solid #056c6d;
+}
+QPushButton#update[available="true"]:hover { background: #a6f0c6; }
 QPushButton#windowControl {
     min-width: 24px;
     max-width: 24px;
