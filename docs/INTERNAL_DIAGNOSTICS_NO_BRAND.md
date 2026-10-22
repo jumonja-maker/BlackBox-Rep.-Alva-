@@ -43,4 +43,4 @@ Once runtime distribution is permitted, a tested internal runtime provider can b
 - Previously approved runtime + finalized report ⇒ at most one background sidecar attempt per session; on failure preserve original report and preserve provenance markers.
 - Real frozen Windows EXE smoke on exact PR SHA and normal user experience before promotion. Private genuine Alva acceptance remains **NOT RUN**.
 
-**Status: code and tests committed for review; new full-suite / exact-commit Windows frozen EXE acceptance NOT RUN.**
+**Status clarification:** That NOT RUN statement described the *original unbranded Draft* when authored. The cumulative [PR #12](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/pull/12) later passed **66/66 Windows, 66/66 Ubuntu and frozen EXE smoke** at `4b1dd4c3be1b2654e03e56b60272840a717b81b1` ([Actions #39838913391](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/actions/runs/39838913391)). Clean interactive Windows acceptance and genuine private Alva runtime are **still NOT RUN**. Do not infer they passed from the packaged smoke test.
