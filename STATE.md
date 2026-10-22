@@ -1,5 +1,15 @@
 # BlackBox Rep. Alva — state / developer handoff (2026-10-22)
 
+## Latest UI integration — use evidence in ordinary BLACK.BOX Reports (2026-10-22)
+
+The stacked Alva P4 branch also adds a **generic evidence-quality summary in
+the normal Reports screen**, automatically updated after an authorized private
+runtime finishes processing a saved session. Shows counts 4/4 or an
+incomplete-evidence notice, translated EN/RU, **never a branded Alva page**.
+With no authorized runtime, Reports remains fully functional with its own
+offline observer evidence; no fabricated P4 result. No changes to private
+Alva, its visibility or default branch. Added test cases, **not yet run**.
+
 ## Expanded real-Alva P4 consumer (Draft, 2026-10-22)
 
 Branch `feature/alva-evidence-pipeline-20261022` is stacked on Draft PR #9 (unbranded internal diagnostics), not on `main`. Adds a **real external Alva** checked pipeline of four data-quality stages over the bounded BLACK.BOX session summary, plus Alva's evidence reviewer, structured AI Handoff and reuse of three completed host traces through real classifier/report APIs when installed. The publicly distributed sidecar includes **only new public BLACK.BOX helper code**, not any private Alva files. Parent now accepts strict bridge schema v2 and retains v1 for older allowed environments. Public EXE has no Alva tab.
