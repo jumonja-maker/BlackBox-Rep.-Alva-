@@ -97,3 +97,17 @@ Source branch: `feature/internal-diagnostics-unbranded-20261022` (based on v0.3.
 **Execution status at this exact proposed HEAD:** focused tests **NOT RUN**, entire GUI suite **NOT RUN**, PyInstaller Windows build with helper **NOT RUN**, real private Alva import **NOT RUN**, real Windows and Ubuntu integration **NOT RUN**. Do not substitute historical CI on a different SHA. A GitHub Actions workflow was only amended to package the second PUBLIC helper file; **no new runner/workflow was created** and the new branch is not on its predefined automatic push trigger list.
 
 **Required:** test on same SHA Windows + Ubuntu; smoke packaged EXE; private authorized venv with the exact pinned Alva SHA and verified wheel hash; verify all three host traces and four P4 stages, conservative provenance flags, bounded IPC, zero modification of observed app, fallback when private Alva missing.
+
+## BLACK.BOX Reports integrated evidence-summary UI (new Draft change, 2026-10-22)
+
+The standard five-page Qt Reports view now shows generic observer evidence
+status and, after an authorized real P4 result, an accepted/total counter.
+No platform branding or separate tab is introduced. Generic summary is
+returned by the existing sidecar write routine; detailed unauthenticated
+evidence remains in the sidecar's session-local file. A test for EN/RU GUI
+states and a persistence test have been added.
+
+**Actual Qt Windows and Linux execution for this new HEAD: NOT RUN**;
+new P4 tests are also **NOT RUN**. Earlier CI evidence is for a different
+commit. Exact SHA acceptance and one real private Alva installation test
+remain blocking.
