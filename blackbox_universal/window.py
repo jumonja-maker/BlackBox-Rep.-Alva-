@@ -33,7 +33,7 @@ from .i18n import translate
 from .platform_connector import (inspect_external, save_session_diagnostics,
                                  bundled_runtime_available, inspect_bundled,
                                  save_bundled_diagnostics)
-from .releases import (Release, check_latest_release, stage_release,
+from .releases import (Release, NoOfficialRelease, check_latest_release, stage_release,
                        runtime_directory, MAINTENANCE_NAME)
 from .shortcuts import create_shortcut
 from .theme import COLORS
@@ -87,6 +87,8 @@ class _UpdateWorker(QThread):
             else:
                 raise ValueError("INVALID_UPDATE_TASK")
             self.result_ready.emit(result, "")
+        except NoOfficialRelease:
+            self.result_ready.emit(None, "NO_OFFICIAL_RELEASE")
         except Exception as exc:
             # Do not expose network credentials, private paths or stack traces.
             self.result_ready.emit(None, type(exc).__name__)
@@ -642,6 +644,8 @@ class UniversalWindow(QMainWindow):
             text = "Checking…"
         elif state == "latest":
             text = "✓  UP TO DATE"
+        elif state == "no_release":
+            text = "ℹ  NO OFFICIAL RELEASE"
         elif state == "error":
             text = "⚠  UPDATE CHECK FAILED"
         else:
@@ -676,11 +680,19 @@ class UniversalWindow(QMainWindow):
 
     def _update_checked(self, release: object, error: str) -> None:
         self._available_release = release if isinstance(release, Release) else None
-        self._refresh_update_button(
-            "error" if error else "latest")
-        if error:
-            self.update_button.setToolTip(
-                "Could not verify the release. Existing app is unaffected.")
+        if error == "NO_OFFICIAL_RELEASE":
+            self._refresh_update_button("no_release")
+            self.update_button.setToolTip(self._t(
+                "No official version is published yet. Development builds are not automatic updates."))
+        elif error:
+            self._refresh_update_button("error")
+            self.update_button.setToolTip(self._t(
+                "Could not verify the release. Existing app is unaffected."))
+        else:
+            self._refresh_update_button("latest")
+            if self._available_release is None:
+                self.update_button.setToolTip(self._t(
+                    "No newer verified official version is available."))
 
     def _update_click(self) -> None:
         if self._update_worker is not None:
