@@ -6,11 +6,13 @@ Never install or distribute Alva. No local network endpoint or tunnel.
 """
 from __future__ import annotations
 
+from html import escape
 import json
 import os
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
 
 from blackbox_rep_alva.report import summarize
 
@@ -230,6 +232,53 @@ def inspect_bundled(session: Path | None = None) -> dict:
     return _validate_output(result)
 
 
+def _human_review_html(session: Path, result: dict) -> None:
+    """Add unbranded, escaped evidence-quality findings to the usual HTML report.
+
+    This is about observer evidence, NOT the observed program's root cause.
+    A finished standalone HTML report remains readable even if this fails.
+    """
+    page = session / "report.html"
+    if not page.is_file() or page.is_symlink():
+        return
+    document = page.read_text(encoding="utf-8")
+    marker = "<!-- BLACKBOX-EVIDENCE-REVIEW -->"
+    if marker in document or "</body>" not in document or len(document) > 512000:
+        return
+    extended = result.get("extended_diagnostics")
+    status = "Accepted" if result.get("status") == "ok" else "Not completed"
+    if type(extended) is dict:
+        count = extended.get("accepted_checks", 0)
+        total = extended.get("declared_stages", 4)
+        stage = extended.get("first_unverified_component") or "none"
+        details = (f"<p>Evidence checks: {escape(str(count))}/"
+                   f"{escape(str(total))}; first unverified stage: "
+                   f"{escape(str(stage))}.</p>")
+    else:
+        details = "<p>Additional evidence review could not complete.</p>"
+    section = (marker + "<section><h2>Quality of observations / "
+               "Качество наблюдений</h2><p>" + escape(status) +
+               "</p>" + details +
+               "<p>This reviews BLACK.BOX measurements only. The root cause "
+               "of the observed application is not established. / "
+               "Проверяется качество измерений BLACK.BOX, а не причина "
+               "ошибки сторонней программы.</p></section>")
+    output = document.replace("</body>", section + "</body>", 1)
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8",
+                                         dir=session, prefix=".blackbox-review-",
+                                         suffix=".tmp", delete=False) as handle:
+            temporary = Path(handle.name)
+            handle.write(output)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, page)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
 def _write_diagnostics(result: dict, session: Path, filename: str) -> dict:
     """Append-only file in the completed session; never a false success."""
     session = Path(session)
@@ -241,6 +290,13 @@ def _write_diagnostics(result: dict, session: Path, filename: str) -> dict:
             out.write("\n")
     except OSError:
         return {"status": "error", "error_code": "EVIDENCE_WRITE_FAILED"}
+    if filename == "evidence-checks.json":
+        try:
+            _human_review_html(session, result)
+        except (OSError, ValueError, UnicodeError):
+            # The full structured result remains in evidence-checks.json.
+            # The original human report is still valid and readable.
+            pass
     overview = {"status": result["status"], "error_code": result.get("error_code"),
                 "component_count": result.get("component_count", 0),
                 "file": filename}
