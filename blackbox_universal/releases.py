@@ -1,0 +1,200 @@
+"""GitHub Releases update discovery and cautious staging of a portable build.
+
+No silent downloads, background installs, arbitrary URLs or release scraping.
+The user must confirm each update. Verified SHA-256 is REQUIRED for the
+official release asset. Incomplete/stale staging never touches an installation.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass
+import hashlib
+import json
+import os
+from pathlib import Path, PurePosixPath
+import re
+import shutil
+import stat
+import tempfile
+from urllib import request
+from urllib.parse import quote
+import zipfile
+
+from . import __version__
+
+OWNER = "jumonja-maker"
+REPO = "BlackBox-Rep.-Alva-"
+RELEASE_API = f"https://api.github.com/repos/{OWNER}/{REPO}/releases/latest"
+ARCHIVE_NAME = "BLACK.BOX-Universal-Windows.zip"
+EXECUTABLE_NAME = "BLACK.BOX-Universal.exe"
+MAINTENANCE_NAME = "BLACK.BOX-Maintenance.exe"
+INSTALL_MARKER = ".blackbox-portable.json"
+MAX_ARCHIVE_BYTES = 350 * 1024 * 1024
+MAX_UNCOMPRESSED_BYTES = 1200 * 1024 * 1024
+MAX_MEMBERS = 10000
+_VERSION = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)$")
+_SHA256 = re.compile(r"^sha256:([0-9a-fA-F]{64})$")
+
+
+@dataclass(frozen=True)
+class Release:
+    version: str
+    asset_url: str
+    size: int
+    sha256: str
+    notes_url: str
+
+
+def version_tuple(raw: str) -> tuple[int, int, int] | None:
+    match = _VERSION.fullmatch(raw.strip())
+    return tuple(int(v) for v in match.groups()) if match else None
+
+
+def _open(url: str):
+    return request.urlopen(request.Request(
+        url, headers={"User-Agent": "BLACK.BOX-Universal-updater",
+                      "Accept": "application/vnd.github+json"}),
+        timeout=12)
+
+
+def check_latest_release(current: str = __version__) -> Release | None:
+    """Return only a strictly newer RELEASE with a trustworthy GitHub digest.
+
+    A missing release or an unverified asset is not a green update indicator.
+    Any network/metadata failure is reported as an exception, not 'no update'.
+    """
+    now = version_tuple(current)
+    if now is None:
+        raise ValueError("LOCAL_VERSION_INVALID")
+    with _open(RELEASE_API) as connection:
+        data = connection.read(256 * 1024 + 1)
+    if len(data) > 256 * 1024:
+        raise ValueError("RELEASE_METADATA_TOO_LARGE")
+    payload = json.loads(data.decode("utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError("RELEASE_METADATA_INVALID")
+    tag = payload.get("tag_name")
+    if payload.get("draft") or payload.get("prerelease") or not isinstance(tag, str):
+        return None
+    found = version_tuple(tag)
+    if found is None or found <= now:
+        return None
+    for item in payload.get("assets", []):
+        if not isinstance(item, dict) or item.get("name") != ARCHIVE_NAME:
+            continue
+        digest = item.get("digest") or ""
+        match = _SHA256.fullmatch(digest)
+        if not match:
+            raise ValueError("RELEASE_DIGEST_MISSING")
+        url = item.get("browser_download_url")
+        expected = (f"https://github.com/{OWNER}/{REPO}/releases/"
+                    f"download/{quote(tag, safe='')}/{ARCHIVE_NAME}")
+        if url != expected:
+            raise ValueError("RELEASE_ASSET_URL_UNTRUSTED")
+        size = item.get("size")
+        if type(size) is not int or not (1 <= size <= MAX_ARCHIVE_BYTES):
+            raise ValueError("RELEASE_SIZE_INVALID")
+        html_url = payload.get("html_url")
+        if html_url != f"https://github.com/{OWNER}/{REPO}/releases/tag/{quote(tag, safe='')}":
+            raise ValueError("RELEASE_NOTES_URL_UNTRUSTED")
+        return Release(tag, url, size, match.group(1).lower(), html_url)
+    raise ValueError("RELEASE_ARCHIVE_NOT_FOUND")
+
+
+def runtime_directory() -> Path | None:
+    """Portable updates allowed only for a bundled EXE with our install marker."""
+    import sys
+    if not getattr(sys, "frozen", False) or os.name != "nt":
+        return None
+    folder = Path(sys.executable).resolve().parent
+    marker = folder / INSTALL_MARKER
+    if marker.is_symlink() or not marker.is_file():
+        return None
+    try:
+        value = json.loads(marker.read_text(encoding="utf-8"))
+        if (value.get("product") != "blackbox-universal" or
+                value.get("install_type") != "portable"):
+            return None
+    except (OSError, ValueError, AttributeError):
+        return None
+    if not (folder / MAINTENANCE_NAME).is_file():
+        return None
+    return folder
+
+
+def _extract_release(zip_path: Path, dest: Path) -> Path:
+    """Reject paths escaping the package, links, duplicate targets, and zip bombs."""
+    root_name = "BLACK.BOX-Universal"
+    root = dest / root_name
+    seen = set()
+    used = 0
+    with zipfile.ZipFile(zip_path) as archive:
+        members = archive.infolist()
+        if len(members) > MAX_MEMBERS:
+            raise ValueError("RELEASE_TOO_MANY_FILES")
+        for item in members:
+            original = item.filename
+            if "\\" in original or "\x00" in original:
+                raise ValueError("ARCHIVE_PATH_INVALID")
+            name = PurePosixPath(original)
+            parts = name.parts
+            if (name.is_absolute() or not parts or parts[0] != root_name or
+                    any(p in ("..", ".") for p in parts)):
+                raise ValueError("ARCHIVE_PATH_INVALID")
+            if original.casefold() in seen:
+                raise ValueError("ARCHIVE_DUPLICATE_PATH")
+            seen.add(original.casefold())
+            kind = (item.external_attr >> 16) & 0o170000
+            if kind == stat.S_IFLNK:
+                raise ValueError("ARCHIVE_SYMLINK_REFUSED")
+            used += item.file_size
+            if used > MAX_UNCOMPRESSED_BYTES:
+                raise ValueError("ARCHIVE_TOO_LARGE")
+        for item in members:
+            if item.is_dir():
+                continue
+            dest_file = dest.joinpath(*PurePosixPath(item.filename).parts)
+            dest_file.parent.mkdir(parents=True, exist_ok=True)
+            with archive.open(item) as source, dest_file.open("xb") as target:
+                shutil.copyfileobj(source, target, length=1024 * 1024)
+    if not (root / EXECUTABLE_NAME).is_file():
+        raise ValueError("RELEASE_EXE_MISSING")
+    if not (root / MAINTENANCE_NAME).is_file():
+        raise ValueError("RELEASE_MAINTENANCE_MISSING")
+    if not (root / INSTALL_MARKER).is_file():
+        raise ValueError("RELEASE_MARKER_MISSING")
+    try:
+        marker = json.loads((root / INSTALL_MARKER).read_text(encoding="utf-8"))
+        if marker != {"product": "blackbox-universal", "install_type": "portable"}:
+            raise ValueError("RELEASE_MARKER_INVALID")
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError("RELEASE_MARKER_INVALID") from error
+    return root
+
+
+def stage_release(release: Release, install: Path) -> Path:
+    """Prepare complete replacement next to installation, without touching it."""
+    install = Path(install).resolve()
+    parent = install.parent
+    workspace = Path(tempfile.mkdtemp(prefix=".blackbox-stage-", dir=parent))
+    archive = workspace / "release.zip"
+    try:
+        total = 0
+        digest = hashlib.sha256()
+        with _open(release.asset_url) as connection, archive.open("xb") as target:
+            while True:
+                chunk = connection.read(1024 * 1024)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > MAX_ARCHIVE_BYTES or total > release.size:
+                    raise ValueError("RELEASE_DOWNLOAD_TOO_LARGE")
+                digest.update(chunk)
+                target.write(chunk)
+        if total != release.size or digest.hexdigest() != release.sha256:
+            raise ValueError("RELEASE_CHECKSUM_MISMATCH")
+        result = _extract_release(archive, workspace)
+        archive.unlink()
+        return result
+    except Exception:
+        shutil.rmtree(workspace, ignore_errors=True)
+        raise
