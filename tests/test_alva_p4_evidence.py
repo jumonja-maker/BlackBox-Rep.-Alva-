@@ -7,13 +7,14 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import sys
+import tempfile
 from types import ModuleType
 import unittest
 from unittest.mock import patch
 
 from blackbox_rep_alva.alva_evidence_pipeline import verified_session_evidence
 from blackbox_rep_alva import alva_sidecar_worker as worker
-from blackbox_universal.platform_connector import _validate_output, ConnectionError
+from blackbox_universal.platform_connector import (_validate_output, save_session_diagnostics, ConnectionError)
 
 NAMES = ("blackbox.evidence.samples", "blackbox.evidence.lifecycle",
          "blackbox.evidence.metrics", "blackbox.evidence.errors")
@@ -261,6 +262,27 @@ class P4EvidenceTests(unittest.TestCase):
         record["extended_diagnostics"]["host_trace_checks"][0]["root_cause_proven"] = True
         with self.assertRaises(ConnectionError):
             _validate_output(record)
+
+    def test_persisted_session_surfaces_review_counts_without_platform_ui(self):
+        with tempfile.TemporaryDirectory() as td:
+            session = Path(td)
+            response = {
+                "status": "ok", "bridge_schema": 2,
+                "extended_diagnostics": {
+                    "accepted_checks": 4, "declared_stages": 4,
+                    "observed_pipeline_status": "ok",
+                    "verification_coverage": "ALL_DECLARED_CHECKS_ACCEPTED",
+                },
+                "component_count": 3,
+            }
+            with patch("blackbox_universal.platform_connector.inspect_external",
+                       return_value=response):
+                overview = save_session_diagnostics(Path(sys.executable), session)
+            self.assertEqual(overview["reviewed_checks"], 4)
+            self.assertEqual(overview["declared_checks"], 4)
+            self.assertEqual(overview["evidence_status"], "ok")
+            self.assertTrue((session / "alva-diagnostics.json").is_file())
+            self.assertNotIn("root_cause_proven", json.dumps(overview))
 
     def test_private_package_not_installed_by_worker(self):
         source = Path(worker.__file__).read_text(encoding="utf-8")
