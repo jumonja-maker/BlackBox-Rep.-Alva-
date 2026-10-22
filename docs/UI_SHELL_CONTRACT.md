@@ -55,8 +55,8 @@ Double-click row or choose Attach.
 native application call traces.
 
 **04 REPORTS** — live JSON snapshot preview (last 15 events/samples in
-preview), SQLite-backed finalized JSON/HTML report and offline AI handoff
-automatically stored on Stop, comparison between two selected session folders,
+preview), SQLite-backed finalized JSON/HTML human-readable evidence
+stored automatically on Stop, comparison between two selected session folders,
 and optional full local snapshot export via a user-selected path. No cloud upload.
 
 **05 SETTINGS** — polling interval selector wired to QTimer, security and
@@ -79,7 +79,7 @@ behind-the-scenes part of the completed-session evidence flow. See
   path is copied.
 - Every explicit Start begins a new durable SQLite WAL session under the
   user's Documents/BLACK.BOX Universal/sessions root. Stop finalizes the
-  core JSON/HTML report and offline AI Handoff. Manual snapshot export is
+  core JSON/HTML report for human review. Manual snapshot export is
   separately user-triggered, atomically committed with os.replace.
 - File/View/Help and taskbar Start menus work.
 - Native maximize/minimize/close controls work.
@@ -87,8 +87,7 @@ behind-the-scenes part of the completed-session evidence flow. See
 
 ## Internal platform adapter policy (not a screen)
 
-The application automatically stores its own SQLite / JSON / HTML /
-AI Handoff evidence on STOP. No private platform is needed for this.
+The application automatically stores its own SQLite / JSON / HTML evidence on STOP. No private platform is needed for this.
 
 If and only if a trusted external interpreter was **previously authorized**,
 the already-integrated sidecar can run in the background after a finalized
