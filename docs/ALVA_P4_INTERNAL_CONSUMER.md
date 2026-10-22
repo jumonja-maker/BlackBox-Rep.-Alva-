@@ -53,6 +53,19 @@ These are **BLACK.BOX component trace reports**, NEVER internal telemetry
 from the foreign Windows process. A successful trace does not mean that
 the observed target app was correct.
 
+## Ordinary Reports screen (no platform tab)
+
+After STOP, BLACK.BOX always writes its own local evidence. When an **already
+authorized** private Alva Runtime is available, the background sidecar
+additionally writes its P4 evidence report and returns only a bounded
+`accepted_checks / declared_checks / observed_pipeline_status` summary.
+The standard **Reports** page displays "Evidence checks accepted: 4/4"
+(or a conservative "requires review" message). RU/EN are both supported.
+**Alva is never mentioned in the visible label.** No extra navigation, user
+sign-in or manual diagnostic button exists. Without Alva the Reports page
+simply states the local observer report was saved; it NEVER invents a reviewed
+result. A failed optional review cannot invalidate an existing SQLite report.
+
 ## Strict limits
 
 - **No true Alva Runtime is included** for ordinary downloaders. Automatic genuine Alva execution for everyone is impossible under the current decision to keep the runtime undistributed and avoid servers. Do not claim all customers receive full Alva features.
