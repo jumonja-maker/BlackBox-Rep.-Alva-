@@ -41,8 +41,12 @@ jobs:
         run: python -m unittest discover -s tests -v
       - name: Real Qt offscreen startup smoke
         run: python app.py --smoke
-      - name: Validate packaged CLI is independent of optional Alva
-        run: python -m blackbox_rep_alva alva-check
+      - name: Validate human-first CLI (no platform command)
+        shell: pwsh
+        run: |
+          $helpText = python -m blackbox_rep_alva --help
+          if ($LASTEXITCODE -ne 0) { throw 'CLI help failed' }
+          if (($helpText -join ' ') -match 'alva-check|handoff') { throw 'Deprecated commands visible' }
 
   linux-tests:
     name: Linux compatibility check (independent of Windows release)
