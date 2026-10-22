@@ -2,6 +2,14 @@
 
 **An independent open-source application, not a subproject of Alva.** Select any accessible Windows process by PID, observe it without modifying it, store evidence locally, and generate offline reports that distinguish observations from inferred causes. Supported modes: standalone Python CLI and integrated retro Qt GUI; the Windows portable EXE is gated by CI.
 
+## Download-and-use policy: private Alva, no setup required
+
+**Alva stays private.** BLACK.BOX is a genuinely independent offline process observer: a future reviewed portable Windows build works without installing Python, Alva, Git, a local AI or a user account. Monitoring, session reports and AI Handoff never require a connection to the private platform.
+
+**Alva Lab is an optional developer extension, not an onboarding requirement.** Ordinary users should use BLACK.BOX immediately. A full private Alva runtime is **not** included with the public EXE and is **not automatically downloaded**. If you already have authorized access to a separately installed Alva, you can connect a trusted Python environment locally and receive a limited diagnostic handshake, with source provenance explicitly unverified. No server or hidden account flow is provided.
+
+**No public release exists yet at this checkpoint.** A Draft PR or CI artifact is not the official downloadable version. Publication requires an accepted Windows EXE and licensing/security checks. Full explanation: [No-setup user access and private-runtime policy](docs/NO_SETUP_PUBLIC_RUNTIME.md).
+
 ## BLACK.BOX Universal v0.3.0 — first public release candidate
 
 The v0.3.0 candidate unifies **the real, open-source process observer**
