@@ -1,4 +1,7 @@
-# Executed local QA evidence — 2026-10-22
+# Executed QA evidence — 2026-10-22
+
+> The section below records the **earlier Alva CLI foundation**. The newest
+> integrated GUI/EXE results are separately documented at the end.
 
 **Repository:** `jumonja-maker/BlackBox-Rep.-Alva-`; review stack #1 → #2 → #3. **Environment:** local Linux / Python 3.13.5 / psutil 7.2.2. No GitHub Actions was configured or executed.
 
@@ -42,3 +45,34 @@ Local tests were run against code staged for these PRs; the standalone core bran
 - Performance benchmark, third-party review and formal release gate: NOT RUN.
 
 **Result:** 18/18 local tests PASS, *limited developer preview*. This does not certify a finished universal Windows product or a release of the private Alva platform.
+
+
+## Integrated universal desktop — executed GitHub Actions QA (newer)
+
+**Source:** [GitHub Actions run 39804565375](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/actions/runs/39804565375), commit
+`cb1aef6a7b3f341a5040866a63ee2ce29f7894b0`.
+
+- Windows hosted runner / Python 3.11: **31 tests PASS**, 5.530 seconds;
+  includes the Alva-provided core, true SQLite sessions, Qt offscreen
+  navigation, process picker, full offline report and AI Handoff.
+- Linux hosted runner / Python 3.11: **unit suite PASS** and offscreen
+  GUI smoke PASS after installing required Qt shared libraries.
+- Windows `--windowed` PyInstaller executable: **built and launched
+  successfully in --smoke mode**, portable ZIP uploaded by GitHub Actions.
+  The Python process in this smoke exits with code 0; a separate GUI
+  usability review on an ordinary Windows desktop remains outstanding.
+- All eight? **No.** This new public application has a basic read-only
+  process observer, not the eight application-specific proprietary
+  BLACK.BOX A.I.O diagnostic components.
+- Private Alva runtime: **NOT RUN**. The public app imports Alva only
+  if a user explicitly opts in to its bridge; platform provenance remains
+  `false`. No private Alva source is packaged or uploaded.
+- Later source revisions may add tests (e.g. checking PID reuse between
+  Attach and Start). Those commit SHAs require **their own** fresh CI
+  results before claiming release PASS. Do not apply this report to
+  an untested future SHA.
+
+**Known outstanding:** independent physical Windows desktop test with a
+third-party app, Windows crash/disk-full/permission edge cases,
+unsigned EXE reputation/AV, full performance characterization, genuine
+Alva-at-exact-SHA integration and package redistribution rights.
