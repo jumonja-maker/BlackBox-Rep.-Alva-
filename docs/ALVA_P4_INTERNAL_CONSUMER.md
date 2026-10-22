@@ -60,6 +60,27 @@ the observed target app was correct.
 - `classify_failure` and `build_report` are applied only to BLACK.BOX's own observed component traces. `locate_source` is **not automatically applied to another application's internals**. `locate_source` would require an explicit trusted source mapping, which passive process sampling does not have. Document Engine V3 and NETALVA are intentionally unrelated/excluded.
 - The private Alva project's own P4 ≥2x developer-acceleration target remains unproven; this consumer PR is not an independent benchmark.
 
+### Repeatable authorized-runtime smoke (new)
+
+A public source-only acceptance harness is committed at
+`tools/verify_authorized_alva.py`. On a **developer/maintainer-owned**
+machine with an already installed, authorized Alva in a trusted venv, run:
+
+```powershell
+py -3 tools/verify_authorized_alva.py "C:\trusted-alva-venv\Scripts\python.exe"
+```
+
+It performs two genuine isolated-Python calls: one synthetic positive
+session (5 samples, 3 checked host traces and 4 P4 stages) and one synthetic
+negative session (0 samples → first observed *observer-evidence* predicate
+rejected). It does not open real target process files, import A.I.O, install
+anything, contact a server, or prove installed package provenance. The
+required `Alva` wheel must **not** be copied to the public repo or CI.
+Capture results, exact SHA and wheel hash **privately**, then publish only a
+bounded PASS/FAIL summary (without paths or secrets) if approved.
+
+This script has been **created, NOT RUN** against the private library.
+
 ## Acceptance gates, not yet passed
 
 1. Linux and Windows tests of the exact branch SHA for `tests/test_alva_p4_evidence.py` plus the full repository suite; packaged PyInstaller EXE smoke must verify **both** sidecar files are in the built archive.
