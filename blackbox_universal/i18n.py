@@ -145,6 +145,8 @@ RU = {
 "Send feedback":"Написать пожелание",
 "◎  CONNECT EXTERNAL ALVA":"◎  ПОДКЛЮЧИТЬ ALVA",
 "×  DISCONNECT":"×  ОТКЛЮЧИТЬ",
+"API CONNECTED":"API ПОДКЛЮЧЕН",
+"Optional: connect your authorized, separately installed Alva Python.":"Опционально: подключите Python с вашей разрешённой установкой Alva.",
 "External Alva: configured (unverified)":"Внешняя Alva: настроена (без подтверждения)",
 "External Alva: not configured":"Внешняя Alva: не настроена",
 "External Alva: connected, source not authenticated":"Внешняя Alva: связь есть, источник не подтверждён",
