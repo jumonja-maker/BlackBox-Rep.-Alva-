@@ -10,6 +10,22 @@ BLACK.BOX Universal monitors a **user-selected, accessible process** without ins
 
 > **Release status:** v0.3.0 is a tested release candidate in [Draft PR #7](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/pull/7), **not yet an official stable GitHub Release**. The current repository `main` remains separate until this PR is accepted. Windows/Linux automated tests and frozen-EXE startup checks have passed; manual Windows update/uninstall testing and a real private-Alva installation test are still outstanding.
 
+## A complete BLACK.BOX with built-in Alva (planned official release)
+
+The **official** Windows ZIP will be built by the owner from the PRIVATE Alva
+runtime plus the PUBLIC BLACK.BOX source. The downloaded executable will run
+its Alva-backed evidence checks **automatically after STOP** with no separate
+Alva tab, Python environment chooser, account or Internet connection.
+
+**Not shipped yet:** the currently downloadable public GitHub Actions builds
+are **standalone QA builds without Alva**. They remain suitable for testing
+ordinary BLACK.BOX features, but must not be described as full-Alva releases.
+The first full version requires a private Windows build that executes real
+Alva P4 checks, an explicit binary redistribution license, and owner approval.
+Only then will the reviewed ZIP appear in the
+[official BLACK.BOX Releases](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/releases).
+See [full-runtime distribution architecture](docs/REAL_ALVA_BUNDLED_RELEASE.md).
+
 ## Download and start (Windows x64)
 
 1. Open the [GitHub Actions builds](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/actions) for this candidate. In a **successful** *BLACK.BOX Universal - Shell QA and Windows portable* run, download the `BLACK.BOX-Universal-Windows` artifact. An official [Releases page](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/releases) will be used once the release is published.
