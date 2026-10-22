@@ -2,33 +2,17 @@
 
 **ENGLISH** · [Русский / README.ru.md](README.ru.md)
 
-**v0.3.0 Release Candidate** · Portable Windows desktop application · Open-source observer · Internal evidence processing
+**v0.3.1 Standalone updater QA build** · Portable Windows desktop application · Local read-only process observer
 
-BLACK.BOX Universal monitors a **user-selected, accessible process** without installing an agent into that application. It collects OS-level performance evidence, stores each session locally, and creates reports for users, developers, or an AI chat **when the user chooses to share them**.
+BLACK.BOX Universal monitors a user-selected accessible Windows process. It records OS-level CPU, RSS and process I/O evidence locally without injecting or modifying the target. Optional evidence-quality checks run after Stop **only when the authorized private Alva runtime is actually bundled**.
 
-**No Python, local AI, Git, or PowerShell is required to run the Windows portable EXE.** Internal diagnostic processing is transparent to the user; an Alva Runtime is not bundled.
+**The public v0.3.1 test Release does NOT bundle Alva.** It exists to test the official GitHub Releases update channel from v0.3.0. The separately prepared private Alva-built ZIP remains under independent Windows, licensing and owner acceptance. No Python installation is required to run either portable Windows build.
 
-> **Release status:** v0.3.0 is a tested release candidate in [Draft PR #7](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/pull/7), **not yet an official stable GitHub Release**. The current repository `main` remains separate until this PR is accepted. Windows/Linux automated tests and frozen-EXE startup checks have passed; manual Windows update/uninstall testing and a real private-Alva installation test are still outstanding.
-
-## A complete BLACK.BOX with built-in Alva (planned official release)
-
-The **official** Windows ZIP will be built by the owner from the PRIVATE Alva
-runtime plus the PUBLIC BLACK.BOX source. The downloaded executable will run
-its Alva-backed evidence checks **automatically after STOP** with no separate
-Alva tab, Python environment chooser, account or Internet connection.
-
-**Not shipped yet:** the currently downloadable public GitHub Actions builds
-are **standalone QA builds without Alva**. They remain suitable for testing
-ordinary BLACK.BOX features, but must not be described as full-Alva releases.
-The first full version requires a private Windows build that executes real
-Alva P4 checks, an explicit binary redistribution license, and owner approval.
-Only then will the reviewed ZIP appear in the
-[official BLACK.BOX Releases](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/releases).
-See [full-runtime distribution architecture](docs/REAL_ALVA_BUNDLED_RELEASE.md).
+**Download:** [GitHub Releases](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/releases), choose `BLACK.BOX-Universal-Windows.zip`. The Release is a user-directed QA/test build, not certified full-Alva production software.
 
 ## Download and start (Windows x64)
 
-1. Open the [GitHub Actions builds](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/actions) for this candidate. In a **successful** *BLACK.BOX Universal - Shell QA and Windows portable* run, download the `BLACK.BOX-Universal-Windows` artifact. An official [Releases page](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/releases) will be used once the release is published.
+1. Open [GitHub Releases](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/releases) and download the `BLACK.BOX-Universal-Windows.zip` asset from the v0.3.1 test Release (or use the Actions standalone artifact while release QA is pending).
 2. Extract the **entire** `BLACK.BOX-Universal` directory. Do not take `BLACK.BOX-Universal.exe` out of that folder: its `_internal` files and the maintenance EXE are required.
 3. Double-click **`BLACK.BOX-Universal.exe`**. No account, terminal, or administrator elevation is requested for ordinary accessible processes.
 4. Use **RU / ENG** at the bottom of the left sidebar to change interface language. The preference is saved.
@@ -83,21 +67,11 @@ Default Windows directory:
 
 The Reports screen also offers an **explicit** JSON snapshot export to a location you select. Snapshots and saved sessions may contain process names, PIDs or paths: **review before sharing**.
 
-## Alva: private platform, optional integration
+## Alva integration: exact scope
 
-BLACK.BOX Universal has its **own public observation core** (process sampling, SQLite and basic reports). It also provides an integration with **Alva**, a **separate, private Python developer/diagnostics platform** maintained at [jumonja-maker/Alva](https://github.com/jumonja-maker/Alva) (access required).
+The separate private Alva platform remains PRIVATE. BLACK.BOX already contains the public Python adapters for ComponentHost checked operations, three host traces, four P4 observer-quality checks and structural evidence review. The real Alva worker passed a Windows private-runner compatibility test, but the **public portable EXE is standalone and does not embed actual Alva modules**.
 
-**Important distribution distinction:**
-
-- The public BLACK.BOX source and Windows EXE **do not include the private Alva package, source code or wheel**, and cannot silently install it.
-- Authorized users may separately install Alva in a trusted Python **3.11+** environment. BLACK.BOX is fully functional without it.
-- The Alva integration targets a **preview API**, pinned in the current engineering contract to commit `a44297c5408628d9447bbf7db394b95ebd33fa20`. Selecting Python or receiving an API response **does not verify** the installed package's Git provenance or redistribution rights.
-
-### Internal diagnostic runtime (maintainers only)
-
-The BLACK.BOX user interface contains **no Alva tab, platform onboarding or separate diagnosis button**. Users collect and inspect reports through the ordinary **Overview / Processes / Event Log / Reports / Settings** workflow. Core evidence is produced automatically after STOP, independent of Alva.
-
-A maintainer-approved, previously selected local Python environment can still provide a *limited* private Alva check **in the background** after a completed session; it may create `alva-diagnostics.json` alongside the normal reports. Public builds do not install or bundle Alva. New users without that provisioned environment do **not** execute private Alva; the ordinary report is not misrepresented as its result. Details and migration steps: [internal engine contract](docs/INTERNAL_DIAGNOSTICS_NO_BRAND.md).
+A full owner-built runtime bundle must pass its own Windows executable smoke and licensing checks. When genuinely included, Alva runs automatically after Stop and puts an unbranded evidence-quality section into the usual `report.html`, plus `evidence-checks.json`. The checks describe the quality of collected BLACK.BOX observations — never a proven root cause inside the target application. No Alva Lab or AI Handoff is added.
 
 ## Updates, shortcut, uninstall
 
