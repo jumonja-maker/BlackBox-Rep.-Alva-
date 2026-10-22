@@ -93,7 +93,7 @@ jobs:
       - name: Generate original retro Windows icon
         run: python tools/generate_icon.py
       - name: Build separate Windows maintenance EXE
-        run: python -m PyInstaller --noconfirm --clean --onefile --windowed --collect-submodules blackbox_universal --name BLACK.BOX-Maintenance maintenance_entry.py
+        run: python -m PyInstaller --noconfirm --clean --onefile --windowed --name BLACK.BOX-Maintenance maintenance_entry.py
       - name: Build BLACK.BOX Universal desktop with original icon
         shell: pwsh
         run: |
