@@ -2,6 +2,31 @@
 
 **An independent open-source application, not a subproject of Alva.** Select any accessible Windows process by PID, observe it without modifying it, store evidence locally, and generate offline reports that distinguish observations from inferred causes. Supported modes: standalone Python CLI and integrated retro Qt GUI; the Windows portable EXE is gated by CI.
 
+## BLACK.BOX Universal v0.3.0 — first public release candidate
+
+The v0.3.0 candidate unifies **the real, open-source process observer**
+with the retro Qt desktop, session-local SQLite WAL, JSON/HTML and offline
+AI Handoff. Works with any accessible process without modifying its code,
+without an account or a local AI. The first official GitHub Release is
+**not** the same as a Draft PR or Actions artifact; the candidate must
+pass release acceptance before a public version tag.
+
+### Genuine *optional* Alva runtime connection (without republishing Alva)
+
+Open **Alva Lab → CONNECT EXTERNAL ALVA**, then select a trusted
+`python.exe` from your *separately authorized* Alva environment.
+BLACK.BOX uses a public `-I` isolated subprocess worker to execute
+**three real scoped Alva ComponentHost operations** checking observer
+samples, session lifecycle and observer-error evidence. After Stop, an
+opted-in user also receives `alva-diagnostics.json` automatically.
+Without a connected platform, standalone observation, reports,
+comparison and ordinary `ai-handoff.json` continue as normal.
+
+The private Alva package is **never bundled, downloaded or installed**
+by the public EXE. Its API/commit provenance must be verified separately.
+No automatic diagnosis of arbitrary native source-code root causes is
+claimed. See [v0.3 external Alva protocol](docs/ALVA_EXTERNAL_RELEASE_V030.md).
+
 ## Retro desktop v0.2 — language, community and clean portable maintenance
 
 The next version adds compact **GITHUB / E-MAIL / RU / ENG** buttons in the
