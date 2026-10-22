@@ -77,7 +77,7 @@ def _public_evidence_pipeline():
         raise ValueError("PUBLIC_EVIDENCE_PIPELINE_INVALID")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    return module.verified_session_evidence
+    return module
 
 
 def _run(packet):
@@ -118,6 +118,7 @@ def _run(packet):
 
     components = tuple(Component(name, handler(name)) for name in OPERATIONS)
     outcomes = []
+    observed_traces = []
     with ComponentHost(components, allow_dispatch=True) as host:
         with host.open_scope(permitted_operations=OPERATIONS) as scope:
             for operation in OPERATIONS:
@@ -137,6 +138,7 @@ def _run(packet):
                         and type(evidence.get("ai_handoff")) is dict
                         and evidence["ai_handoff"].get("status") == "ok"):
                     raise ValueError("ALVA_SCOPED_CONTRACT_FAILED")
+                observed_traces.append((operation, evidence))
                 outcomes.append({
                     "component": operation,
                     "execution_state": call.execution_state,
@@ -152,8 +154,16 @@ def _run(packet):
     features = ("run_checked_pipeline", "review_pipeline_evidence",
                 "build_ai_handoff")
     advanced = all(callable(getattr(alva, key, None)) for key in features)
-    extended = (_public_evidence_pipeline()(alva, sample, packet["operation"])
-                if advanced else None)
+    if advanced:
+        helpers = _public_evidence_pipeline()
+        extended = helpers.verified_session_evidence(alva, sample, packet["operation"])
+        trace_apis = ("classify_failure", "build_report")
+        extended["host_trace_checks"] = (
+            helpers.verified_host_traces(alva, observed_traces)
+            if all(callable(getattr(alva, key, None)) for key in trace_apis)
+            else [])
+    else:
+        extended = None
     result = {
         "status": "ok",
         "bridge_schema": 2 if advanced else 1,
