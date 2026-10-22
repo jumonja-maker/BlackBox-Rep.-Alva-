@@ -37,17 +37,33 @@ The isolated external worker executes `python.exe -I -u alva_sidecar_worker.py` 
 
 BLACK.BOX's own SQLite/JSON/HTML/AI Handoff remain available without Python or Alva in the user's environment. The UI still exposes only **Overview / Processes / Event Log / Reports / Settings**. There is **no Alva Lab or install button**.
 
+## Extra genuine Alva trace handling
+
+In addition to the P4 checked pipeline, the **same already-completed** three
+ComponentHost calls supply in-process `OperationTrace` witnesses. If the
+installed Alva supports them, the worker invokes `classify_failure`,
+`build_report`, `review_pipeline_evidence`, and `build_ai_handoff`
+on the existing host evidence **without executing the component a second time**.
+This yields three bounded `host_trace_checks` receipts (or none for a
+partial legacy runtime) showing complete in-process coverage, the conservative
+UNKNOWN classification and unauthenticated provenance. Raw traces, process
+identifiers, paths, private code and exception text are not returned.
+
+These are **BLACK.BOX component trace reports**, NEVER internal telemetry
+from the foreign Windows process. A successful trace does not mean that
+the observed target app was correct.
+
 ## Strict limits
 
 - **No true Alva Runtime is included** for ordinary downloaders. Automatic genuine Alva execution for everyone is impossible under the current decision to keep the runtime undistributed and avoid servers. Do not claim all customers receive full Alva features.
 - P4 predicates validate *app-declared observer evidence*, not the correctness of the observed arbitrary EXE. Proven application source lines, automatic crash attribution, Windows ETW, memory dumps, cloud AI and automatic repair are NOT IMPLEMENTED.
-- Full Alva's `classify_failure`, `build_report` and `locate_source` on source-trace evidence are **not automatically applied to another application's internals**. `locate_source` would require an explicit trusted source mapping, which passive process sampling does not have. Document Engine V3 and NETALVA are intentionally unrelated/excluded.
+- `classify_failure` and `build_report` are applied only to BLACK.BOX's own observed component traces. `locate_source` is **not automatically applied to another application's internals**. `locate_source` would require an explicit trusted source mapping, which passive process sampling does not have. Document Engine V3 and NETALVA are intentionally unrelated/excluded.
 - The private Alva project's own P4 ≥2x developer-acceleration target remains unproven; this consumer PR is not an independent benchmark.
 
 ## Acceptance gates, not yet passed
 
 1. Linux and Windows tests of the exact branch SHA for `tests/test_alva_p4_evidence.py` plus the full repository suite; packaged PyInstaller EXE smoke must verify **both** sidecar files are in the built archive.
-2. In a **private authorized** environment with installed Alva SHA `a44297c5408628d9447bbf7db394b95ebd33fa20`, run source worker `-I` with a bounded recorded summary. Confirm schema 2, 3 scoped calls, 4 P4 stages, completed host, conservative evidence/permission flags, and that the parent validates the result. Capture SHA and wheel digest **privately**; do not upload wheel to public CI.
+2. In a **private authorized** environment with installed Alva SHA `a44297c5408628d9447bbf7db394b95ebd33fa20`, run source worker `-I` with a bounded recorded summary. Confirm schema 2, 3 scoped calls, 4 P4 stages, 3 trace summaries, completed host, conservative evidence/permission flags, and that the parent validates the result. Capture SHA and wheel digest **privately**; do not upload wheel to public CI.
 3. Negative scenarios: empty samples, interrupted session, absent CPU/RSS, wrong API, malformed / injected output, no Alva environment and subprocess timeout. Original reports must survive.
 4. Only after independent QA may this Draft be reviewed for merging. Previous tested commits **cannot certify** this new SHA.
 
