@@ -91,7 +91,7 @@ class DurableDesktopIntegration(unittest.TestCase):
             observer.stop()
             packet = observer.snapshot()
             self.assertFalse(packet["root_cause_proven"])
-            self.assertEqual(packet["alva_status"], "NOT_CONNECTED")
+            self.assertNotIn("alva_status", packet)
             self.assertEqual(packet["evidence_origin"], "APP_SUPPLIED_NOT_AUTHENTICATED")
 
 
