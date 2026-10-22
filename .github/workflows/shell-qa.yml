@@ -40,7 +40,7 @@ jobs:
         run: |
           python -m pip install -r requirements.txt
           python -m pip install -e .
-      - name: Test real six-page Qt interface and process observer
+      - name: Test five-page Qt interface and process observer
         run: python -m unittest discover -s tests -v
       - name: Real Qt offscreen startup smoke
         run: python app.py --smoke
@@ -102,7 +102,7 @@ jobs:
       - name: Generate original retro Windows icon
         run: python tools/generate_icon.py
       - name: Build separate Windows maintenance EXE
-        run: python -m PyInstaller --noconfirm --clean --onefile --windowed --name BLACK.BOX-Maintenance maintenance_entry.py
+        run: python -m PyInstaller --noconfirm --clean --onefile --windowed --icon assets/blackbox.ico --name BLACK.BOX-Maintenance maintenance_entry.py
       - name: Build BLACK.BOX Universal desktop with original icon
         shell: pwsh
         run: |
@@ -118,6 +118,11 @@ jobs:
           if (-not (Test-Path "dist/BLACK.BOX-Universal/_internal/alva_worker/alva_evidence_pipeline.py")) {
             throw 'Public evidence pipeline helper missing from Windows portable build'
           }
+      - name: Verify Explorer icon is the same as the taskbar icon for both EXEs
+        shell: pwsh
+        run: |
+          python tools/verify_windows_exe_icons.py assets/blackbox.ico "dist/BLACK.BOX-Universal/BLACK.BOX-Universal.exe" "dist/BLACK.BOX-Universal/BLACK.BOX-Maintenance.exe"
+          if ($LASTEXITCODE -ne 0) { throw 'BLACK.BOX executable icon QA failed' }
       - name: Smoke-test the actual frozen Windows EXE
         shell: pwsh
         run: |
