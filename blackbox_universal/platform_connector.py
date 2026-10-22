@@ -226,6 +226,15 @@ def save_session_diagnostics(interpreter: Path, session: Path) -> dict:
             out.write("\n")
     except OSError:
         return {"status": "error", "error_code": "ALVA_EVIDENCE_WRITE_FAILED"}
-    return {"status": result["status"], "error_code": result.get("error_code"),
-            "component_count": result.get("component_count", 0),
-            "file": "alva-diagnostics.json"}
+    overview = {"status": result["status"], "error_code": result.get("error_code"),
+                "component_count": result.get("component_count", 0),
+                "file": "alva-diagnostics.json"}
+    # This is a SMALL, ordinary BLACK.BOX Reports status. Detailed bounded
+    # evidence stays only in the session-local diagnostic JSON file.
+    reviewed = result.get("extended_diagnostics")
+    if result["status"] == "ok" and type(reviewed) is dict:
+        overview["reviewed_checks"] = reviewed["accepted_checks"]
+        overview["declared_checks"] = reviewed["declared_stages"]
+        overview["evidence_status"] = reviewed["observed_pipeline_status"]
+        overview["verification_coverage"] = reviewed["verification_coverage"]
+    return overview
