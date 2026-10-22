@@ -17,7 +17,7 @@ This is a **standalone public application**, not a module/repository of private 
 - Never turn sample gaps, RSS growth or missing application telemetry into a proven deadlock, leak or app-internal defect.
 - BLACK.BOX Universal is human-first. Never generate or advertise `ai-handoff.json`, an AI handoff command or an AI-specific end-user workflow. Platform-internal security flags and Alva's own diagnostic metadata are not an AI feature of BLACK.BOX; no external evidence is authority to act.
 - A new adapter requires an explicit permission model, fixed schema, privacy assessment, positive/negative tests, and uncertainty/provenance semantics.
-- Do not import private Alva except at the opt-in `alva-check` boundary. Any Alva package version change requires exact SHA identity, compatibility tests, license check, rollback and owner review.
+- Do not import private Alva except through the maintainer-authorized, internal diagnostic boundary. Any Alva package version change requires exact SHA identity, compatibility tests, license check, rollback and owner review.
 - Do not introduce cloud APIs, automatic AI calls, background network services, billed CI, new GitHub Actions workflow or infrastructure without owner authorization. Never merge Draft without reviewed evidence.
 - Update `STATE.md` and the QA evidence for each real completion; distinguish PASS / LIMITED / NOT RUN / BLOCKED. New code requires real local tests.
 - No automatic upgrading of BLACK.BOX or Alva. A change to the closed-source platform is a separate, owner-approved workstream.
@@ -27,7 +27,6 @@ This is a **standalone public application**, not a module/repository of private 
 ```sh
 PYTHONPATH=src python -m unittest discover -s tests -v
 PYTHONPATH=src python -m blackbox_rep_alva --help
-PYTHONPATH=src python -m blackbox_rep_alva alva-check
 ```
 
 No Windows or genuine Alva-at-SHA acceptance has been performed by these source commits. Do not rewrite status claims.
