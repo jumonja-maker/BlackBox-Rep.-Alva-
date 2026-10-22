@@ -76,3 +76,14 @@ Local tests were run against code staged for these PRs; the standalone core bran
 third-party app, Windows crash/disk-full/permission edge cases,
 unsigned EXE reputation/AV, full performance characterization, genuine
 Alva-at-exact-SHA integration and package redistribution rights.
+
+
+## Internal unbranded diagnostics UI (2026-10-22; new Draft branch)
+
+Source branch: `feature/internal-diagnostics-unbranded-20261022` (based on v0.3.0 release-candidate work; query GitHub for exact HEAD).
+
+**Code implemented / static review:** five pages; public Alva page/buttons/title/sidebar removed, corresponding Qt tests rewritten; background optional authorized-sidecar execution on finalized session retained; default observation produces independent report with no Alva runtime. Documentation/translation synchronized.
+
+**Execution evidence for this new commit:** automated unit tests, full PySide6 Qt GUI tests, Windows portable EXE, Linux smoke, genuine Alva runtime and security checks **NOT RUN**. No pass claim for the new SHA. Earlier Windows/Linux PASS at previous commit `cb1aef6a7b3f341a5040866a63ee2ce29f7894b0` is historical and cannot be generalized.
+
+**Required before promoting:** `python -m unittest discover -s tests -v`, `python app.py --smoke`, frozen Windows EXE smoke with a clean user profile and a real accessible process, RU/EN five-page navigation, ordinary report persistence, negative missing-runtime, and separate approved-runtime sidecar test. No new workflow or runner has been enabled by this patch.
