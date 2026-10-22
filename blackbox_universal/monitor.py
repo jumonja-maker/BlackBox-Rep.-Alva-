@@ -1,8 +1,8 @@
-"""Read-only system-process observation for the universal desktop shell.
+"""Qt observer facade over Alva's public BLACK.BOX process-recording core.
 
-This is *not* an Alva adapter. The future Alva platform will consume these
-bounded, versioned observations. No injection, handles with write privileges,
-network upload, file contents, ETW session or administrator requirement.
+The one authoritative process sampler is blackbox_rep_alva.probe.PsutilProbe.
+Durable observations go to its SessionStore; stop produces its JSON, HTML and
+AI Handoff. The visual shell never imports or distributes private Alva code.
 """
 from __future__ import annotations
 
@@ -12,9 +12,13 @@ import json
 import os
 from pathlib import Path
 import tempfile
-import time
+from typing import Any
 
-import psutil
+from blackbox_rep_alva.contracts import ObserverError, event
+from blackbox_rep_alva.handoff import build_handoff
+from blackbox_rep_alva.probe import PsutilProbe, list_processes
+from blackbox_rep_alva.report import write_report
+from blackbox_rep_alva.storage import SessionStore
 
 
 def utc_stamp() -> str:
@@ -22,139 +26,165 @@ def utc_stamp() -> str:
 
 
 def available_processes(limit: int = 500) -> list[dict]:
-    """Best-effort process picker; access-denied processes are harmless."""
+    """Core discovery plus best-effort RSS for the GUI process picker."""
+    try:
+        import psutil
+    except ImportError:
+        return []
     rows: list[dict] = []
-    for proc in psutil.process_iter(["pid", "name", "memory_info", "status"]):
+    for item in list_processes():
         try:
-            d = proc.info
-            name = (d.get("name") or "Unknown").strip()[:96]
-            mem = d.get("memory_info")
-            rows.append({
-                "pid": int(d["pid"]),
-                "name": name,
-                "rss_mb": round(mem.rss / 1048576, 1) if mem else None,
-                "status": (d.get("status") or "unknown")[:32],
-            })
-        except (psutil.Error, OSError, TypeError, ValueError, KeyError):
-            continue
+            proc = psutil.Process(item["pid"])
+            memory = proc.memory_info()
+            status = proc.status()
+            rss = round(memory.rss / 1048576, 1)
+        except (psutil.Error, OSError):
+            rss, status = None, "unknown"
+        rows.append({
+            "pid": item["pid"], "name": item["name"],
+            "rss_mb": rss, "status": str(status)[:32],
+        })
     rows.sort(key=lambda r: (r["name"].casefold(), r["pid"]))
     return rows[:limit]
 
 
-class ReadOnlyProbe:
-    """Single selected process + its visible children; 1-second cadence from UI."""
+def _default_sessions_root() -> Path:
+    return Path.home() / "Documents" / "BLACK.BOX Universal" / "sessions"
 
-    def __init__(self) -> None:
+
+def _write_handoff(path: Path, packet: dict) -> None:
+    with path.open("x", encoding="utf-8") as out:
+        json.dump(packet, out, ensure_ascii=False, indent=2, allow_nan=False)
+        out.write("\n")
+
+
+class ReadOnlyProbe:
+    """A durable recording per explicit Start; all GUI views are read-only."""
+
+    def __init__(self, output_root: Path | None = None) -> None:
+        self.output_root = Path(output_root) if output_root else _default_sessions_root()
         self.pid: int | None = None
         self.name = ""
         self.active = False
         self.started_at: str | None = None
-        self._started_monotonic = 0.0
-        self._proc: psutil.Process | None = None
-        self._created: float | None = None
+        self._core: PsutilProbe | None = None
+        self._store: SessionStore | None = None
+        self.session_folder: Path | None = None
+        self.session_state = "NO_SESSION"
+        self.report_result: dict | None = None
+        self.handoff_result: dict | None = None
+        self.last_error: str | None = None
         self.history: deque[dict] = deque(maxlen=3600)
         self.events: deque[dict] = deque(maxlen=300)
-        self._known_children: set[tuple[int, float]] = set()
 
     def _event(self, code: str, detail: str = "") -> None:
-        self.events.append({
-            "timestamp_utc": utc_stamp(),
-            "code": code,
-            "detail": detail[:120],
-        })
+        self.events.append({"timestamp_utc": utc_stamp(), "code": code,
+                            "detail": detail[:120]})
 
     def attach(self, pid: int) -> None:
-        """Requires an existing OS process, but does not start observation."""
         if self.active:
-            raise RuntimeError("Stop the current observation before switching.")
-        candidate = psutil.Process(int(pid))
-        created = candidate.create_time()
-        name = candidate.name()[:96]
-        if not candidate.is_running():
-            raise psutil.NoSuchProcess(pid)
-        self.pid = int(pid)
-        self.name = name
-        self._created = created
-        self._proc = candidate
+            raise RuntimeError("Stop observation before switching targets.")
+        core = PsutilProbe(pid)
+        self._core = core
+        self.pid = pid
+        try:
+            self.name = core.process.name()[:96]
+        except Exception:
+            self.name = "Unknown"
         self.started_at = None
+        self.session_folder = None
+        self.session_state = "NO_SESSION"
+        self.report_result = None
+        self.handoff_result = None
+        self.last_error = None
         self.history.clear()
         self.events.clear()
-        self._known_children.clear()
-        self._event("PROCESS_SELECTED", f"{name} · PID {pid}")
+        self._event("PROCESS_SELECTED", f"{self.name} · PID {pid}")
 
     def start(self) -> None:
-        if self._proc is None:
-            raise RuntimeError("Choose a process first.")
+        if self.pid is None:
+            raise RuntimeError("Choose an accessible process first.")
         if self.active:
             return
-        if not self._identity_valid():
-            raise RuntimeError("The selected process is no longer running.")
-        self._proc.cpu_percent(interval=None)
+        # Re-validate PID identity on every Start.
+        core = PsutilProbe(self.pid)
+        root = self.output_root
+        if root.is_symlink():
+            raise RuntimeError("Session root must not be a symlink.")
+        root.mkdir(parents=True, exist_ok=True)
+        if not root.is_dir() or root.is_symlink():
+            raise RuntimeError("Session root is unavailable.")
+        store = SessionStore(root, self.pid)
+        self._core = core
+        self._store = store
+        self.session_folder = store.folder
+        self.session_state = "RECORDING"
+        self.report_result = None
+        self.handoff_result = None
+        self.last_error = None
+        self.history.clear()
+        self.events.clear()
         self.active = True
         self.started_at = utc_stamp()
-        self._started_monotonic = time.monotonic()
         self._event("OBSERVATION_STARTED")
 
     def stop(self, reason: str = "USER_STOPPED") -> None:
-        if self.active:
-            self.active = False
-            self._event(reason)
-
-    def _identity_valid(self) -> bool:
+        if not self.active or self._store is None:
+            return
+        status = {
+            "USER_STOPPED": "COMPLETED", "UI_CLOSED": "INTERRUPTED",
+            "PROCESS_EXITED": "PROCESS_EXITED", "PID_REUSED": "PID_REUSED",
+            "ACCESS_DENIED": "ACCESS_DENIED", "SAMPLE_UNAVAILABLE": "SAMPLE_UNAVAILABLE",
+            "STORAGE_ERROR": "STORAGE_ERROR",
+        }.get(reason, "INTERRUPTED")
+        self.active = False
+        store = self._store
+        self._store = None
+        self.session_state = status
+        self._event(reason)
         try:
-            return bool(self._proc and self._proc.is_running() and
-                        self._proc.create_time() == self._created and
-                        self._proc.status() != psutil.STATUS_ZOMBIE)
-        except (psutil.Error, OSError):
-            return False
+            store.finish(status)
+        except ObserverError as exc:
+            self.last_error = exc.code
+            self._event("STORAGE_ERROR", exc.code)
+        finally:
+            store.close()
+        if self.session_folder is None:
+            return
+        try:
+            self.report_result = write_report(self.session_folder)
+            self.handoff_result = build_handoff(self.session_folder)
+            _write_handoff(self.session_folder / "ai-handoff.json", self.handoff_result)
+            self._event("EVIDENCE_SAVED", "SQLite, HTML, JSON, AI Handoff")
+        except (ObserverError, OSError, ValueError, TypeError):
+            self.last_error = "REPORT_UNAVAILABLE"
+            self._event("REPORT_UNAVAILABLE", "SQLite data retained")
 
     def tick(self) -> dict | None:
-        if not self.active or self._proc is None:
-            return None
-        if not self._identity_valid():
-            self.stop("PROCESS_EXITED")
+        if not self.active or self._core is None or self._store is None:
             return None
         try:
-            root = self._proc
-            children = root.children(recursive=True)
-            nodes = [root, *children]
-            rss = 0
-            threads = 0
-            count = 0
-            for node in nodes:
-                try:
-                    info = node.memory_info()
-                    rss += max(0, info.rss)
-                    threads += max(0, node.num_threads())
-                    count += 1
-                except (psutil.NoSuchProcess, psutil.ZombieProcess,
-                        psutil.AccessDenied, OSError):
-                    continue
-            cpu = root.cpu_percent(interval=None)
-            current: set[tuple[int, float]] = set()
-            for child in children:
-                try:
-                    current.add((child.pid, child.create_time()))
-                except (psutil.Error, OSError):
-                    continue
-            for pid, _ in sorted(current - self._known_children):
-                self._event("CHILD_STARTED", f"PID {pid}")
-            for pid, _ in sorted(self._known_children - current):
-                self._event("CHILD_EXITED", f"PID {pid}")
-            self._known_children = current
+            sample = self._core.sample()
+            self._store.write_sample(sample)
             record = {
                 "at": utc_stamp(),
-                "seconds": round(time.monotonic() - self._started_monotonic, 2),
-                "cpu_pct": round(max(0, cpu), 1),
-                "rss_mb": round(rss / 1048576, 1),
-                "process_count": count,
-                "thread_count": threads,
+                "seconds": round(sample.elapsed_ms / 1000, 2),
+                "cpu_pct": round(float(sample.cpu_percent or 0), 1),
+                "rss_mb": round((sample.rss_bytes or 0) / 1048576, 1),
+                "process_count": 1 + int(sample.children_count or 0),
+                "thread_count": int(sample.num_threads or 0),
+                "read_bytes": sample.read_bytes,
+                "write_bytes": sample.write_bytes,
             }
             self.history.append(record)
             return record
-        except (psutil.NoSuchProcess, psutil.ZombieProcess,
-                psutil.AccessDenied, OSError):
-            self.stop("OBSERVATION_UNAVAILABLE")
+        except ObserverError as exc:
+            self.last_error = exc.code
+            try:
+                self._store.write_event(event("observer_error", exc.code, exc.stage, 0))
+            except ObserverError:
+                pass
+            self.stop(exc.code)
             return None
 
     @property
@@ -165,46 +195,42 @@ class ReadOnlyProbe:
         }
 
     def snapshot(self) -> dict:
-        """Data is app-supplied and not independently attested."""
         return {
-            "schema_version": 1,
-            "product": "BLACK.BOX Universal",
+            "schema_version": 1, "product": "BLACK.BOX Universal",
             "source": "local_read_only_psutil",
             "evidence_origin": "APP_SUPPLIED_NOT_AUTHENTICATED",
             "root_cause_proven": False,
             "alva_status": "NOT_CONNECTED",
             "observed_process": {"name": self.name, "pid": self.pid},
-            "started_at_utc": self.started_at,
-            "exported_at_utc": utc_stamp(),
+            "started_at_utc": self.started_at, "exported_at_utc": utc_stamp(),
             "observation_active_at_export": self.active,
-            "sample_count": len(self.history),
-            "recent_samples": list(self.history),
+            "session_state": self.session_state,
+            "session_folder": str(self.session_folder) if self.session_folder else None,
+            "sample_count": len(self.history), "recent_samples": list(self.history),
             "recent_events": list(self.events),
+            "report_generated": self.report_result is not None,
+            "handoff_generated": self.handoff_result is not None,
             "limitations": [
-                "No internal app events without cooperative instrumentation.",
-                "Process memory growth alone does not prove a memory leak.",
-                "CPU percent is sampled; no native root-cause proof.",
-                "Sensitive process names/PIDs may be present; review before sharing.",
+                "Only process/system sampling, not internal app tracing.",
+                "Memory growth alone does not prove a memory leak.",
+                "The recorded evidence is app-supplied and unauthenticated.",
+                "Process names/PIDs are private; inspect before sharing.",
             ],
         }
 
 
 def save_snapshot(path: Path, data: dict) -> None:
-    """Explicit, user-selected export; publish complete JSON atomically."""
+    """Explicit user-selected JSON snapshot with atomic publication."""
     destination = Path(path)
     stage: Path | None = None
     try:
         with tempfile.NamedTemporaryFile(
-                mode="w", encoding="utf-8",
-                dir=destination.parent, prefix=".blackbox-", suffix=".tmp",
-                delete=False) as handle:
-            stage = Path(handle.name)
-            json.dump(data, handle, ensure_ascii=False, indent=2, allow_nan=False)
-            handle.write("\n")
+                mode="w", encoding="utf-8", dir=destination.parent,
+                prefix=".blackbox-", suffix=".tmp", delete=False) as out:
+            stage = Path(out.name)
+            json.dump(data, out, ensure_ascii=False, indent=2, allow_nan=False)
+            out.write("\n")
         os.replace(stage, destination)
     finally:
         if stage is not None:
-            try:
-                stage.unlink(missing_ok=True)
-            except OSError:
-                pass
+            stage.unlink(missing_ok=True)
