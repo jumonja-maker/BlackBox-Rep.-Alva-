@@ -606,7 +606,7 @@ class UniversalWindow(QMainWindow):
             "• Report export only when explicitly requested\n"
             "• No administrator privileges requested by this shell", "caption"))
         content.addWidget(setting)
-        about = WindowPanel("About BLACK.BOX", "PREVIEW / v0.2")
+        about = WindowPanel("About BLACK.BOX", "PREVIEW / v0.3")
         about.content.addWidget(_label(
             "A public-domain-independent desktop shell built from original "
             "PySide6 widgets. Inspired by classic desktop window geometry "
@@ -1182,7 +1182,7 @@ class UniversalWindow(QMainWindow):
     def _about(self) -> None:
         QMessageBox.about(
             self, "BLACK.BOX Universal",
-            "BLACK.BOX Universal v0.2 — original retro desktop shell.\n\n"
+            "BLACK.BOX Universal v0.3 — original retro desktop shell.\n\n"
             "Offline process monitoring + SQLite + HTML/JSON + AI Handoff: available.\n"
             "Optional Alva adapter: press CHECK to inspect an installed platform.\n"
             "Windows ETW and crash dump collection: NOT IMPLEMENTED.\n\n"
