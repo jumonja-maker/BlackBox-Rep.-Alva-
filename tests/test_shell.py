@@ -17,13 +17,17 @@ from PySide6.QtWidgets import QApplication, QMessageBox, QPushButton
 from blackbox_universal.monitor import (
     ReadOnlyProbe, available_processes, save_snapshot,
 )
+from blackbox_rep_alva.contracts import ObserverError
+from blackbox_rep_alva.report import summarize
 from blackbox_universal.theme import set_retro_theme
 from blackbox_universal.window import UniversalWindow
 
 
 class ObserverTests(unittest.TestCase):
     def test_attach_current_process_sample_stop_and_export(self):
-        observer = ReadOnlyProbe()
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        observer = ReadOnlyProbe(output_root=Path(self.temp.name))
         observer.attach(os.getpid())
         self.assertFalse(observer.active)
         observer.start()
@@ -56,8 +60,9 @@ class ObserverTests(unittest.TestCase):
 
     def test_invalid_pid_is_not_mistaken_for_live_target(self):
         observer = ReadOnlyProbe()
-        with self.assertRaises(psutil.NoSuchProcess):
+        with self.assertRaises(ObserverError) as failure:
             observer.attach(2**31 - 1)
+        self.assertEqual(failure.exception.code, 'PROCESS_NOT_FOUND')
         self.assertFalse(observer.active)
 
     def test_process_picker_returns_only_bounded_metadata(self):
@@ -78,11 +83,17 @@ class QtShellTests(unittest.TestCase):
         set_retro_theme(cls.app)
 
     def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.default_root = patch('blackbox_universal.monitor._default_sessions_root',
+                                  return_value=Path(self.tmp.name))
+        self.default_root.start()
         self.window = UniversalWindow()
         self.window._timer.stop()
 
     def tearDown(self):
         self.window.close()
+        self.default_root.stop()
+        self.tmp.cleanup()
 
     def test_six_real_pages_and_classic_three_window_controls(self):
         self.assertEqual(len(self.window.PAGES), 6)
@@ -117,6 +128,13 @@ class QtShellTests(unittest.TestCase):
         self.assertTrue(self.window.stop_btn.isEnabled())
         self.window._stop()
         self.assertFalse(self.window.probe.active)
+        session = self.window.probe.session_folder
+        self.assertIsNotNone(session)
+        self.assertTrue((session / "session.sqlite3").is_file())
+        self.assertTrue((session / "report.json").is_file())
+        self.assertTrue((session / "report.html").is_file())
+        self.assertTrue((session / "ai-handoff.json").is_file())
+        self.assertGreaterEqual(summarize(session)["samples"], 1)
 
     def test_export_only_after_user_selection_without_cloud_upload(self):
         with tempfile.TemporaryDirectory() as folder:
