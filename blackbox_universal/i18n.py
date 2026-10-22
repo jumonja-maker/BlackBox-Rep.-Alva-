@@ -34,6 +34,7 @@ RU = {
 "SAMPLES":"ИЗМЕРЕНИЯ",
 "Current sample":"Текущие данные",
 "Process tree RSS":"Память дерева процессов",
+"Selected process RSS":"RSS выбранного процесса",
 "Target + visible children":"Целевой и дочерние",
 "Read-only observations":"Наблюдения без изменений",
 "Resource telemetry":"Монитор ресурсов",
