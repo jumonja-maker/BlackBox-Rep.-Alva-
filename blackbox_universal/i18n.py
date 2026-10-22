@@ -161,6 +161,17 @@ RU = {
 "Portable maintenance":"Обслуживание версии",
 "Managed locally":"Локальное обслуживание",
 "Updates replace previous application files, keep local logs and remove old versions. Uninstall removes the portable program and keeps diagnostic sessions in Documents.":"Обновление заменяет старые файлы и не копит версии. Удаление сохраняет логи и сеансы в Документах.",
+"STANDALONE READY":"АВТОНОМНО ГОТОВО",
+"Offline recording works immediately. Alva is an optional developer extension.":"Наблюдение работает сразу. Alva — необязательное расширение для разработчиков.",
+"Local diagnostics and offline AI Handoff are ready. The private Alva runtime is not part of this download.":"Локальная диагностика и отчёты для ИИ готовы. Закрытая Alva не входит в эту сборку.",
+"Download, open and observe: no Python or Alva setup is required. The real private Alva runtime is optional, never bundled, and cannot be installed automatically. Only explicitly authorized users may connect their separately installed environment.":"Скачайте, откройте и наблюдайте: Python и Alva для обычной работы не нужны. Закрытая Alva не входит в сборку и не устанавливается автоматически. Подключать её могут только пользователи с разрешённой установкой.",
+"Select a trusted Python environment with authorized Alva (executes local code)":"Выберите доверенную среду Python с разрешённой Alva (будет запущен локальный код)",
+"BLACK.BOX is ready: choose a process and start observing. All ordinary reports and offline AI Handoff work without Alva or Python. Advanced Alva checks are optional and currently require a separately authorized installation.":"BLACK.BOX готов: выберите процесс и начните наблюдение. Обычные отчёты и передача диагностики ИИ работают без Alva и Python. Расширенные проверки Alva необязательны и требуют отдельной разрешённой установки.",
+"The selected Python environment does not contain a usable Alva runtime. No installation was attempted. Choose a trusted environment with an authorized Alva install, or continue using BLACK.BOX normally without it.":"В выбранной среде Python нет подходящей Alva. Ничего не устанавливалось. Выберите доверенную среду с разрешённой Alva или продолжайте пользоваться BLACK.BOX без неё.",
+"The selected external Alva environment answered the limited diagnostic check. Its source/version is NOT authenticated. This does not prove a fault in the observed program. Ordinary BLACK.BOX monitoring remains independent.":"Внешняя Alva ответила на ограниченную диагностическую проверку. Происхождение и версия НЕ подтверждены. Это не доказывает ошибку в наблюдаемом приложении. Обычная работа BLACK.BOX независима от Alva.",
+"Alva connection could not be verified. BLACK.BOX has not modified the target or installed anything. Check the authorized Python environment or disconnect; ordinary offline reports remain available.":"Подключение Alva не подтверждено. BLACK.BOX не изменял целевой процесс и ничего не устанавливал. Проверьте разрешённую среду Python или отключите её; автономные отчёты по-прежнему доступны.",
+"Alva has not been verified. Monitoring, SQLite reports, comparisons and offline handoff remain available without it.":"Alva не проверена. Мониторинг, отчёты SQLite, сравнение и автономная передача диагностики работают без неё.",
+"Alva connection was not verified. You can still monitor processes and save offline reports without Alva.":"Подключение Alva не подтверждено. Вы всё равно можете наблюдать за процессами и сохранять отчёты без Alva.",
 }
 
 
