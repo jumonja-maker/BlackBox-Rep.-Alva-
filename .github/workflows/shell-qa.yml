@@ -15,12 +15,8 @@ permissions:
 
 jobs:
   shell-tests:
-    name: "Qt shell / read-only observer (${{ matrix.os }})"
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest]
+    name: Windows shell / read-only observer
+    runs-on: windows-latest
     timeout-minutes: 18
     env:
       QT_QPA_PLATFORM: offscreen
@@ -34,9 +30,30 @@ jobs:
           cache: pip
       - name: Install shell dependencies
         run: python -m pip install -r requirements.txt
-      - name: Verify process sampler and six-page Qt interface
+      - name: Test real six-page Qt interface and process observer
         run: python -m unittest discover -s tests -v
-      - name: Start the real GUI in offscreen smoke mode
+      - name: Real Qt offscreen startup smoke
+        run: python app.py --smoke
+
+  linux-tests:
+    name: Linux compatibility check (independent of Windows release)
+    runs-on: ubuntu-latest
+    timeout-minutes: 18
+    env:
+      QT_QPA_PLATFORM: offscreen
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          architecture: x64
+          cache: pip
+      - name: Install shell dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Qt offscreen unit checks
+        run: python -m unittest discover -s tests -v
+      - name: Qt offscreen startup smoke
         run: python app.py --smoke
 
   windows-portable:
