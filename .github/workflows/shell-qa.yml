@@ -102,7 +102,7 @@ jobs:
           Copy-Item "dist/BLACK.BOX-Maintenance.exe" "dist/BLACK.BOX-Universal/BLACK.BOX-Maintenance.exe"
           Copy-Item ".blackbox-portable.json" "dist/BLACK.BOX-Universal/.blackbox-portable.json"
           if (-not (Test-Path "dist/BLACK.BOX-Universal/BLACK.BOX-Maintenance.exe")) { throw 'Maintenance helper missing' }
-          if (-not (Test-Path "dist/BLACK.BOX-Universal/assets/blackbox.png")) { throw 'App icon missing' }
+          if (-not (Test-Path "dist/BLACK.BOX-Universal/_internal/assets/blackbox.png")) { throw 'App icon missing' }
       - name: Smoke-test the actual frozen Windows EXE
         shell: pwsh
         run: |
