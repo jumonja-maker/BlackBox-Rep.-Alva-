@@ -13,6 +13,12 @@ from blackbox_rep_alva.cli import main
 
 
 class HumanFirstContractTests(unittest.TestCase):
+    def test_translations_expose_no_private_platform_brand(self):
+        from blackbox_universal.i18n import RU
+        labels = " ".join([*RU.keys(), *RU.values()]).casefold()
+        self.assertNotIn("alva", labels)
+        self.assertNotIn("ai handoff", labels)
+
     def test_one_human_session_generates_html_json_sqlite_not_ai_handoff(self):
         with tempfile.TemporaryDirectory() as temp:
             recorder = ReadOnlyProbe(Path(temp))
