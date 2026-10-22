@@ -190,7 +190,6 @@ class ReadOnlyProbe:
             "source": "local_read_only_psutil",
             "evidence_origin": "APP_SUPPLIED_NOT_AUTHENTICATED",
             "root_cause_proven": False,
-            "alva_status": "NOT_CONNECTED",
             "observed_process": {"name": self.name, "pid": self.pid},
             "started_at_utc": self.started_at, "exported_at_utc": utc_stamp(),
             "observation_active_at_export": self.active,
