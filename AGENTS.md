@@ -31,3 +31,14 @@ PYTHONPATH=src python -m blackbox_rep_alva alva-check
 ```
 
 No Windows or genuine Alva-at-SHA acceptance has been performed by these source commits. Do not rewrite status claims.
+
+
+## UI branding rule (owner decision 2026-10-22)
+
+Alva is a **behind-the-scenes platform** for BLACK.BOX, not a user-facing page,
+feature brand, onboarding wizard, separate diagnostic product or mandatory
+installation. Do not add back `ALVA LAB` or `CONNECT EXTERNAL ALVA` buttons,
+or misrepresent normal BLACK.BOX evidence as output from the private Alva
+runtime. Ordinary diagnostics remain available automatically without Alva;
+previously authorized private runtime may add limited, provenance-aware
+background session checks. See `docs/INTERNAL_DIAGNOSTICS_NO_BRAND.md`.
