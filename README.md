@@ -1,134 +1,134 @@
-# BlackBox Rep. Alva — universal local process observer (developer preview)
+# BLACK.BOX Universal
 
-**An independent open-source application, not a subproject of Alva.** Select any accessible Windows process by PID, observe it without modifying it, store evidence locally, and generate offline reports that distinguish observations from inferred causes. Supported modes: standalone Python CLI and integrated retro Qt GUI; the Windows portable EXE is gated by CI.
+**ENGLISH** · [Русский / README.ru.md](README.ru.md)
 
-## BLACK.BOX Universal v0.3.0 — first public release candidate
+**v0.3.0 Release Candidate** · Portable Windows desktop application · Open-source observer · Optional private Alva integration
 
-The v0.3.0 candidate unifies **the real, open-source process observer**
-with the retro Qt desktop, session-local SQLite WAL, JSON/HTML and offline
-AI Handoff. Works with any accessible process without modifying its code,
-without an account or a local AI. The first official GitHub Release is
-**not** the same as a Draft PR or Actions artifact; the candidate must
-pass release acceptance before a public version tag.
+BLACK.BOX Universal monitors a **user-selected, accessible process** without installing an agent into that application. It collects OS-level performance evidence, stores each session locally, and creates reports for users, developers, or an AI chat **when the user chooses to share them**.
 
-### Genuine *optional* Alva runtime connection (without republishing Alva)
+**No Python, local AI, Git, or PowerShell is required to run the Windows portable EXE.** Alva is **not** required for normal operation.
 
-Open **Alva Lab → CONNECT EXTERNAL ALVA**, then select a trusted
-`python.exe` from your *separately authorized* Alva environment.
-BLACK.BOX uses a public `-I` isolated subprocess worker to execute
-**three real scoped Alva ComponentHost operations** checking observer
-samples, session lifecycle and observer-error evidence. After Stop, an
-opted-in user also receives `alva-diagnostics.json` automatically.
-Without a connected platform, standalone observation, reports,
-comparison and ordinary `ai-handoff.json` continue as normal.
+> **Release status:** v0.3.0 is a tested release candidate in [Draft PR #7](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/pull/7), **not yet an official stable GitHub Release**. The current repository `main` remains separate until this PR is accepted. Windows/Linux automated tests and frozen-EXE startup checks have passed; manual Windows update/uninstall testing and a real private-Alva installation test are still outstanding.
 
-The private Alva package is **never bundled, downloaded or installed**
-by the public EXE. Its API/commit provenance must be verified separately.
-No automatic diagnosis of arbitrary native source-code root causes is
-claimed. See [v0.3 external Alva protocol](docs/ALVA_EXTERNAL_RELEASE_V030.md).
+## Download and start (Windows x64)
 
-## Retro desktop v0.2 — language, community and clean portable maintenance
+1. Open the [GitHub Actions builds](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/actions) for this candidate. In a **successful** *BLACK.BOX Universal - Shell QA and Windows portable* run, download the `BLACK.BOX-Universal-Windows` artifact. An official [Releases page](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/releases) will be used once the release is published.
+2. Extract the **entire** `BLACK.BOX-Universal` directory. Do not take `BLACK.BOX-Universal.exe` out of that folder: its `_internal` files and the maintenance EXE are required.
+3. Double-click **`BLACK.BOX-Universal.exe`**. No account, terminal, or administrator elevation is requested for ordinary accessible processes.
+4. Use **RU / ENG** at the bottom of the left sidebar to change interface language. The preference is saved.
 
-The next version adds compact **GITHUB / E-MAIL / RU / ENG** buttons in the
-lower left sidebar and **CHECK UPDATES** in the upper toolbar, integrated
-with the existing Windows 95 + peach/lilac theme.
+The app is **portable**: it does not need a Windows installer or install a background service. Protected or elevated processes may be inaccessible under ordinary user rights.
 
-- GitHub opens the public repository; E-MAIL starts a local message to
-  `jumonjescu@mail.ru`. No report is transmitted by these buttons.
-- RU/ENG switches interface labels, menus, page titles, tips and graph text
-  immediately, with locally remembered preference; raw observer evidence
-  and JSON field names remain untranslated.
-- The update indicator is **green only for a newer official GitHub Release**
-  with an authenticated asset digest `sha256:...`. Checking metadata at
-  startup can be disabled under Settings; it contacts GitHub but never uploads
-  logs/process identifiers. Download/install needs user confirmation.
-- Updating checks size, SHA-256 and ZIP paths before invoking the separate
-  `BLACK.BOX-Maintenance.exe`. After the main EXE closes, the old portable
-  directory is replaced, kept logs are transferred, and the old version is
-  removed. An interrupted update has rollback protection.
-- **Create Desktop Shortcut** builds a real Windows `.lnk` pointing to this
-  app, using its original pixel-retro icon.
-- **Uninstall Application** asks for confirmation, closes the app and removes
-  the portable directory. `logs/`, `sessions/` and `reports/` inside it
-  are moved into Documents; existing external session evidence is retained.
+## Features
 
-**Important:** GitHub Actions artifact builds are *not* release updates.
-The updater will show a green indicator only when the maintainer publishes
-a newer `vX.Y.Z` GitHub Release. The private Alva library is not included.
-Portable uninstall and in-place update need additional manual Windows
-acceptance; CI runs include unit/fault-injection and frozen EXE smoke.
+| Screen / feature | What it does |
+| --- | --- |
+| **01 — Overview** | Current target, process CPU %, selected process RSS memory, target + visible child-process count, number of samples, live CPU/memory graph, Start / Stop controls and recent observer messages. |
+| **02 — Processes** | Refresh the OS process list, search by process name or PID, choose a row and **Attach**. A double-click can also attach. Attaching alone does **not** start recording. |
+| **03 — Event Log** | Local BLACK.BOX observer events such as process selection, start/stop, unavailable process or sampling/storage errors. **Not** the application's internal application log or Python stack trace. |
+| **04 — Reports** | Show a JSON snapshot of current observations, explicitly save a snapshot, and **compare two saved session directories** (before/after CPU, RSS, sample count, children and elapsed time). Comparison does not prove a regression. |
+| **05 — Alva Lab** | Check or connect a separately authorized Alva Python installation, inspect scoped diagnostic results, or disconnect it. Alva is optional and never installed by BLACK.BOX. |
+| **06 — Settings** | Set sampling to **1 / 2 / 5 seconds**; enable/disable the GitHub Releases check at startup; create a Windows desktop shortcut; request portable app uninstallation. |
+| **Sidebar / toolbar** | **GITHUB** opens this repository; **E-MAIL** opens a draft to `jumonjescu@mail.ru`; **RU / ENG** changes UI language. **Check Updates** checks official GitHub Releases. |
 
-Detailed behavior and safety rules:
-[feedback, updating and uninstalling](docs/UPDATES_FEEDBACK_UNINSTALL.md).
+### Metrics actually collected
 
-## Integrated retro desktop — GUI + Alva-provided core
+BLACK.BOX uses the read-only `psutil` process adapter. Each recorded sample may contain:
 
-A real, original desktop shell inspired by early Windows system windows and
-warm pastel pixel illustration. Its six screens are **Overview, Processes,
-Event Log, Reports, Alva Lab, Settings**. Process selection, monitoring,
-charts, persistent SQLite and session comparison are connected to the
-standalone observer originally contributed through PR #1. The optional
-Alva consumer bridge from PR #2 is available only through an explicit
-CHECK button; it never enables private Alva by itself.
+- Elapsed time, **CPU %** and **RSS resident memory** of the selected root process.
+- Thread count and **number of child processes** (if accessible).
+- Bytes read/written via OS **process I/O counters** (if supported/accessible).
+- Explicit observer failure states such as `ACCESS_DENIED`, `PROCESS_EXITED`, `PID_REUSED`, `SAMPLE_UNAVAILABLE` and `STORAGE_ERROR`.
 
-**For users on Windows:** once a GitHub Actions run has passed its release
-checks, download the BLACK.BOX-Universal-Windows artifact, extract the
-whole directory and double-click BLACK.BOX-Universal.exe. No Python, Git,
-PowerShell or local AI is required for running the portable app.
+The CPU/memory graph is based on actual samples; unavailable metrics are not fabricated. The interface keeps a bounded recent history while each sample is committed to local SQLite. **RSS is the selected process's memory, not a proven total for every child process.**
 
-**From source on Windows:** double-click Run-BLACK.BOX-Universal.bat
-(Python 3.11+ must already be installed). The script installs the public
-observer package into an isolated virtual environment and launches the GUI.
+## First observation: 6 steps
 
-**In-app workflow:** Processes → choose a PID → Attach → Start Observing →
-Stop Observing. Stop automatically finalizes a **new** session in
-Documents/BLACK.BOX Universal/sessions with session.sqlite3, report.json,
-report.html and ai-handoff.json. A separate manual JSON export is available.
-Reports also lets the user select two saved session folders for comparison.
-All results stay local. Private target source code and documents are not read.
+1. Open **02 PROCESSES**, press **REFRESH**, search by name or PID and select your program.
+2. Press **ATTACH SELECTED PROCESS** (or double-click it). BLACK.BOX checks whether the process is accessible.
+3. Return to **01 OVERVIEW** and press **START OBSERVING**. A new session folder and SQLite database are created.
+4. Use the target program normally. Observe the live indicators and the **03 EVENT LOG**.
+5. Press **STOP OBSERVING**. BLACK.BOX finalizes the session and generates HTML, JSON and an offline AI handoff automatically.
+6. Open **04 REPORTS** for a snapshot, or **COMPARE TWO SESSIONS** and select two prior session folders.
 
-**Important:** ai-handoff.json is the public offline evidence format,
-**not** proof of an actual private Alva invocation. Alva Lab offers an
-explicit, optional platform check; it returns UNAVAILABLE when Alva is
-absent. No platform binaries or source are redistributed.
+If the observed program closes, its PID changes or access is denied, BLACK.BOX records the observer failure instead of claiming that the target application was diagnosed.
 
-## Quick start (Python 3.11+)
+### Session files and location
 
-Install from a local checked-out copy, with separately acquired `psutil` for recording (no network used **during execution**):
+Default Windows directory:
+
+`%USERPROFILE%\Documents\BLACK.BOX Universal\sessions\session-<unique-id>`
+
+| File | Contents |
+| --- | --- |
+| `session.sqlite3` | Durable timestamped sample series, session metadata and recorded observer error codes (SQLite WAL storage). |
+| `report.json` | Session state, start/end time, number of samples, peak RSS, peak CPU, child count and observer errors. |
+| `report.html` | Browser-readable version of the process observation report. |
+| `ai-handoff.json` | Small, **untrusted** evidence summary suitable for manually giving to a developer or AI chat. `permission_to_act=false`; it is **not** an automatic ChatGPT connection. |
+| `alva-diagnostics.json` | **Optional:** bounded scoped Alva diagnostic outcome, only after a user has connected a separate Alva environment. |
+
+The Reports screen also offers an **explicit** JSON snapshot export to a location you select. Snapshots and saved sessions may contain process names, PIDs or paths: **review before sharing**.
+
+## Alva: private platform, optional integration
+
+BLACK.BOX Universal has its **own public observation core** (process sampling, SQLite and basic reports). It also provides an integration with **Alva**, a **separate, private Python developer/diagnostics platform** maintained at [jumonja-maker/Alva](https://github.com/jumonja-maker/Alva) (access required).
+
+**Important distribution distinction:**
+
+- The public BLACK.BOX source and Windows EXE **do not include the private Alva package, source code or wheel**, and cannot silently install it.
+- Authorized users may separately install Alva in a trusted Python **3.11+** environment. BLACK.BOX is fully functional without it.
+- The Alva integration targets a **preview API**, pinned in the current engineering contract to commit `a44297c5408628d9447bbf7db394b95ebd33fa20`. Selecting Python or receiving an API response **does not verify** the installed package's Git provenance or redistribution rights.
+
+### Connect an authorized Alva installation
+
+1. Obtain Alva access/installation permission separately and install it **outside the public BLACK.BOX directory** in its own Python environment.
+2. Launch BLACK.BOX and open **05 ALVA LAB**.
+3. Click **CONNECT EXTERNAL ALVA** and select the `python.exe` belonging to that environment, for example `C:\path\to\authorized-env\Scripts\python.exe`. Only select a Python interpreter you trust.
+4. BLACK.BOX starts a small **public** local worker with that interpreter (`python -I`, no tunnel, server or PowerShell). A successful check enables use of the connection; **DISCONNECT** disables subsequent calls.
+5. Record a session and press **STOP**. With Alva connected, the worker checks three fixed boundaries using Alva's **`Component`**, **`ComponentHost`**, scoped permissions, **`invoke_with_diagnostics`** and checked adapter call: **samples**, **session lifecycle** and **observer errors**. Results are saved locally to `alva-diagnostics.json`.
+
+Only bounded summary counters/flags are sent to that worker; **not** raw events, target PID/name, absolute target paths, documents, credentials or process memory. A failed/absent Alva installation does not disable standalone monitoring.
+
+**Alva does not automatically reveal the failing line of code in an arbitrary third-party EXE.** Its scoped diagnostic result verifies BLACK.BOX's own component boundaries, **not** the observed program's internal execution or the true root cause. Genuine execution with the pinned private Alva package still requires separately documented acceptance testing.
+
+See [Alva setup and exact contracts](docs/ALVA_EXTERNAL_RELEASE_V030.md) and [licensing](docs/LICENSING.md).
+
+## Updates, shortcut, uninstall
+
+**Updates:** click **CHECK UPDATES** on the upper toolbar. The button turns **green only if an official newer GitHub Release** has a matching approved Windows ZIP and a verifiable SHA-256 digest. Checks run at startup by default (disable in Settings). Downloads/installation require confirmation; the helper verifies the archive, replaces previous application files after the GUI closes, preserves local data and attempts to clean up the previous version. **CI artifacts and Draft PRs are not updates**; no green indicator is expected until an actual later Release exists.
+
+**Shortcut:** in **Settings → CREATE DESKTOP SHORTCUT**. Creates a Windows `.lnk` pointing to the portable EXE. If the icon appears generic, it does not affect monitoring.
+
+**Uninstall:** in **Settings → UNINSTALL APPLICATION**, confirm removal. A separate `BLACK.BOX-Maintenance.exe` waits for the main process to exit, removes the portable application directory and moves any `logs/`, `sessions/` or `reports/` inside it to a preserved folder under the user's Documents. Existing sessions in the default Documents location are **not deleted**. This is **portable-folder removal**, not registration in Windows “Installed Apps.” Manual physical-Windows update/uninstall acceptance is still pending.
+
+[Update and removal details](docs/UPDATES_FEEDBACK_UNINSTALL.md)
+
+## Source and developer CLI (optional)
+
+Windows source users with Python 3.11+ can double-click `Run-BLACK.BOX-Universal.bat`. It creates a project virtual environment, installs the public dependencies and starts the GUI. Alternatively:
 
 ```sh
-python -m pip install -e '.[process]'
+python -m pip install -r requirements.txt
+python -m pip install -e .
+python app.py
+```
+
+The core also has a separate Python CLI (not required for normal Windows users):
+
+```sh
 python -m blackbox_rep_alva list
-mkdir -p sessions
-python -m blackbox_rep_alva record --pid 1234 --output sessions --duration 5 --interval 0.5
-python -m blackbox_rep_alva summary sessions/session-<ID>
-python -m blackbox_rep_alva export sessions/session-<ID>
-python -m blackbox_rep_alva handoff sessions/session-<ID>
-python -m blackbox_rep_alva compare sessions/session-<ID1> sessions/session-<ID2>
-python -m blackbox_rep_alva alva-check
+python -m blackbox_rep_alva record --pid 1234 --output sessions --duration 10 --interval 0.5
+python -m blackbox_rep_alva summary sessions/session-<id>
+python -m blackbox_rep_alva compare sessions/session-<id1> sessions/session-<id2>
 ```
 
-The `record` command creates **a new session directory** and prints its exact path. `export` writes a new `report.json` and `report.html` inside that session; re-export currently refuses overwrite. `handoff` is an **untrusted**, evidence-only structured packet; `permission_to_act=false` is not an AI command.
+For CLI recording, `sessions` must already exist. The `export`, `handoff` and `alva-check` CLI commands are also available; see `python -m blackbox_rep_alva --help`. Run tests with `python -m unittest discover -s tests -v`.
 
-## Independence and safety
+## Privacy, limitations and project status
 
-- No AI, cloud, server, account or network listener needed for process observation. The optional GitHub Releases version check (enabled by default) uses an outbound HTTPS metadata request; it can be disabled in Settings and never uploads reports. Runtime writes only in an explicitly selected local output directory.
-- No injection, remote execution, service installation, process signals, termination, configuration mutation, or reading target document content.
-- `psutil` is an optional external process-observation library; `Alva` is a **separate optional PREVIEW dependency**, loaded exclusively through `alva-check` (when explicitly installed by an authorized developer).
-- A process's PID can be recycled. Binding includes its `create_time`. Access denied / process exit are explicit failures, not fake zero metrics.
-- RSS rise is **not** proof of memory leak. A stalled process cannot be inferred solely from missing observations.
-- SQLite is durable per committed sample (`WAL` and `synchronous=FULL`); a sudden kill can leave the session incomplete. Reports read the database without writing it.
-- Do **not** redistribute the private Alva source or wheel from this public repository. See `docs/ALVA_INTEGRATION.md` and `docs/LICENSING.md`.
+- **Local-first:** no cloud account, log upload, tunnel, debugger injection, target modification or background service for observation. The optional update check contacts GitHub for public release metadata only. GitHub/email buttons open the user's browser/email app; they do not send diagnostics.
+- **Read-only scope:** ordinary accessible processes only. BLACK.BOX does **not** automatically read application source code, passwords, documents, stack traces or arbitrary internal exception logs; it does **not** prove leaks, defects or root causes from resource metrics.
+- **Alva licensing:** new BLACK.BOX code is [MIT licensed](LICENSE); private Alva is **not relicensed or redistributed**. PySide6, psutil and other packaged dependencies have separate license obligations to review before final release.
+- **Quality:** the v0.3.0 RC passed **49 Windows and 49 Linux automated tests** plus frozen Windows GUI/helper startup smoke on [Actions run #39822604822](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/actions/runs/39822604822). **Real private-Alva integration, end-user update/uninstall and broad Windows compatibility have not been signed off.**
 
-## Tests
-
-```sh
-PYTHONPATH=src python -m unittest discover -s tests -v
-PYTHONPATH=src python -m blackbox_rep_alva --help
-```
-
-See `docs/ARCHITECTURE.md`, `docs/DIAGNOSTIC_CONTRACT.md`, `docs/ALVA_INTEGRATION.md`, `docs/PRODUCT_SCOPE.md`, `docs/LICENSING.md`, `docs/QA_EVIDENCE.md`.
-
-## Current release truth
-
-This is a working **combined CLI + GUI candidate** in a Draft branch. Cross-platform GUI unit tests, real Windows frozen EXE CI, broad multi-app compatibility, remote/privileged observation, true per-task instrumentation, application-specific root-cause attribution, and a stable Alva consumer contract each require separate verified acceptance; do not treat the existence of tests as passing results. A process adapter cannot expose application internals without their opt-in telemetry. The source project `jumonja-maker/Alva` is private, `0.0.1.dev0` PREVIEW at pinned commit `a44297c5408628d9447bbf7db394b95ebd33fa20` (2026-10-22); this repository does not ship it.
+**Repository:** [BlackBox Rep. Alva](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-) · **Feedback:** [jumonjescu@mail.ru](mailto:jumonjescu@mail.ru) · [Architecture](docs/ARCHITECTURE.md) · [Release gates](docs/RELEASE_GATES.md)
