@@ -1,8 +1,8 @@
 """Qt observer facade over Alva's public BLACK.BOX process-recording core.
 
 The one authoritative process sampler is blackbox_rep_alva.probe.PsutilProbe.
-Durable observations go to its SessionStore; stop produces its JSON, HTML and
-AI Handoff. The visual shell never imports or distributes private Alva code.
+Durable observations go to its SessionStore; Stop produces JSON and HTML reports
+for human readers. The visual shell never distributes private Alva code.
 """
 from __future__ import annotations
 
@@ -15,7 +15,6 @@ import tempfile
 from typing import Any
 
 from blackbox_rep_alva.contracts import ObserverError, event
-from blackbox_rep_alva.handoff import build_handoff
 from blackbox_rep_alva.probe import PsutilProbe, list_processes
 from blackbox_rep_alva.report import write_report
 from blackbox_rep_alva.storage import SessionStore
@@ -52,12 +51,6 @@ def _default_sessions_root() -> Path:
     return Path.home() / "Documents" / "BLACK.BOX Universal" / "sessions"
 
 
-def _write_handoff(path: Path, packet: dict) -> None:
-    with path.open("x", encoding="utf-8") as out:
-        json.dump(packet, out, ensure_ascii=False, indent=2, allow_nan=False)
-        out.write("\n")
-
-
 class ReadOnlyProbe:
     """A durable recording per explicit Start; all GUI views are read-only."""
 
@@ -72,7 +65,6 @@ class ReadOnlyProbe:
         self.session_folder: Path | None = None
         self.session_state = "NO_SESSION"
         self.report_result: dict | None = None
-        self.handoff_result: dict | None = None
         self.last_error: str | None = None
         self.history: deque[dict] = deque(maxlen=3600)
         self.events: deque[dict] = deque(maxlen=300)
@@ -95,7 +87,6 @@ class ReadOnlyProbe:
         self.session_folder = None
         self.session_state = "NO_SESSION"
         self.report_result = None
-        self.handoff_result = None
         self.last_error = None
         self.history.clear()
         self.events.clear()
@@ -122,7 +113,6 @@ class ReadOnlyProbe:
         self.session_folder = store.folder
         self.session_state = "RECORDING"
         self.report_result = None
-        self.handoff_result = None
         self.last_error = None
         self.history.clear()
         self.events.clear()
@@ -155,9 +145,7 @@ class ReadOnlyProbe:
             return
         try:
             self.report_result = write_report(self.session_folder)
-            self.handoff_result = build_handoff(self.session_folder)
-            _write_handoff(self.session_folder / "ai-handoff.json", self.handoff_result)
-            self._event("EVIDENCE_SAVED", "SQLite, HTML, JSON, AI Handoff")
+            self._event("EVIDENCE_SAVED", "SQLite, HTML, JSON")
         except (ObserverError, OSError, ValueError, TypeError):
             self.last_error = "REPORT_UNAVAILABLE"
             self._event("REPORT_UNAVAILABLE", "SQLite data retained")
@@ -211,7 +199,6 @@ class ReadOnlyProbe:
             "sample_count": len(self.history), "recent_samples": list(self.history),
             "recent_events": list(self.events),
             "report_generated": self.report_result is not None,
-            "handoff_generated": self.handoff_result is not None,
             "limitations": [
                 "Only process/system sampling, not internal app tracing.",
                 "Memory growth alone does not prove a memory leak.",
