@@ -64,9 +64,10 @@ def run(kind,seconds=3,ready=None,event_config=None):
             while time.monotonic()<end:value=(value*1664525+1013904223)&0xffffffff
         elif kind in ("stable-memory","growing-memory","released-memory"):
             if kind!="growing-memory":held.append(bytearray(8*1024*1024))
+            release_at=time.monotonic()+seconds/2
             while time.monotonic()<end:
                 if kind=="growing-memory":held.append(bytearray(256*1024))
-                elif kind=="released-memory":held.clear()
+                elif kind=="released-memory" and time.monotonic()>=release_at:held.clear()
                 time.sleep(.1)
         elif kind=="io":
             with tempfile.TemporaryFile() as f:

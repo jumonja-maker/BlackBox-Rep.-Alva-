@@ -36,7 +36,7 @@ rollback is made. BLACK.BOX does not terminate the observed application.
 | Electron instrumentation | generated CJS client | Node event protocol tested; Electron contentTracing hook uses explicit application integration |
 | Source-linked interval evidence | casebook.py, research_panel.py | indexed interval queries, paging, linked operation boundaries |
 | Timeline selection/zoom and large history paging | EvidenceTimeline, evidence_page | Qt event and SQL paging tests |
-| Exact all-run action statistics | action_statistics | 101-run regression; no old twenty-run summary cap |
+| Exact all-run action statistics | action_statistics | 101-run regression; stored warm-up exclusion; no old twenty-run summary cap |
 | Experiment comparison | compare_cases | workload/profile/environment/privilege mismatch flags; no causal speedup claim |
 | Observer resource/coverage data | ResearchSession._health | real CPU/RSS/IO observations; missing loss counters remain NULL |
 | Streaming HTML/JSON/CSV and portable ZIP | export_case | real roundtrip, checksums, adversarial HTML/ZIP tests |
@@ -58,6 +58,11 @@ Export omits raw artifacts by default and declares every omission. Structured
 events and paths can still contain sensitive data. CSV formula prefixes are
 escaped; original values remain in JSON/SQLite. Hashes establish integrity
 relative to the manifest, not authenticity or correctness.
+
+The original application-event spool is also sensitive and is omitted unless
+raw export is selected. It can retain bytes not yet indexed under overload.
+Package completeness describes included files; the manifest separately retains
+recording state and capture health and never equates unknown loss with zero.
 
 ## Repeatable commands
 
@@ -89,3 +94,9 @@ roundtrip does not depend on internet access. Normal update preferences remain
 unchanged. The frozen smoke has a bounded deadline and writes its last stage
 and any Python traceback into CI diagnostics; a blocking error dialog cannot
 silently count as a passing smoke.
+
+At Stop, the application reader freezes a byte boundary and drains at most
+1 MiB / two seconds. Remaining bytes, a partial line, discontinuities, rejected
+events or reported client loss produce explicit incomplete research coverage.
+Failure of this cooperative source does not terminate base sampling. A missing
+source loss counter remains NULL until a valid event reports it.

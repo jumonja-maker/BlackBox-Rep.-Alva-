@@ -221,6 +221,7 @@ def compare_cases(first, second):
     required=("scenario","workload","profile","interval_ms")
     ca,cb=a.get("experiment",{}),b.get("experiment",{})
     reasons=[k for k in required if not ca.get(k) or ca.get(k)!=cb.get(k)]
+    if ca.get("warmup_count",0)!=cb.get("warmup_count",0):reasons.append("warmup_count")
     if a.get("environment") != b.get("environment"):
         reasons.append("environment")
     if a.get("capabilities",{}).get("privilege")!=b.get("capabilities",{}).get("privilege"):
@@ -238,8 +239,9 @@ def compare_cases(first, second):
         "speedup_proven":False,"causal_link_proven":False}
 
 
-def action_statistics(folder, *, warmup_count=0):
+def action_statistics(folder, *, warmup_count=None):
     """Exact SQLite quantiles; all runs remain stored, no Python history list."""
+    if warmup_count is None:warmup_count=context(folder).get("experiment",{}).get("warmup_count",0)
     if type(warmup_count) is not int or not 0<=warmup_count<=10000:raise ValueError("INVALID_WARMUP_COUNT")
     with closing(readonly(Path(folder)/"research.sqlite3")) as db:
         total=db.execute("SELECT count(*) FROM action_runs").fetchone()[0]
@@ -335,20 +337,30 @@ def export_case(folder, destination, *, include_sensitive=False, cancel=None):
                 if not p["has_more"]:break
         omitted=[]
         raw=folder/"artifacts"
+        raw_files=[]
         if raw.is_dir() and not raw.is_symlink():
             for f in sorted(raw.iterdir()):
-                if not f.is_file() or f.is_symlink():continue
-                if include_sensitive:
-                    (staging/"artifacts").mkdir(exist_ok=True)
-                    with f.open("rb") as src,(staging/"artifacts"/f.name).open("xb") as dst:
-                        for data in iter(lambda:src.read(1024*1024),b""):
-                            _check_cancel(cancel);dst.write(data)
-                else:omitted.append("artifacts/"+f.name)
+                if f.is_file() and not f.is_symlink():raw_files.append((f,"artifacts/"+f.name))
+        app_log=folder/"application-events.jsonl"
+        if app_log.is_file() and not app_log.is_symlink():raw_files.append((app_log,"application-events.jsonl"))
+        for f,name in raw_files:
+            if include_sensitive:
+                target=staging/name;target.parent.mkdir(exist_ok=True)
+                with f.open("rb") as src,target.open("xb") as dst:
+                    remaining=os.fstat(src.fileno()).st_size
+                    while remaining:
+                        _check_cancel(cancel);data=src.read(min(1024*1024,remaining))
+                        if not data:raise ValueError("RAW_SOURCE_TRUNCATED_DURING_EXPORT")
+                        dst.write(data);remaining-=len(data)
+            else:omitted.append(name)
         for f in sorted(staging.rglob("*")):
             if f.is_file():entries.append({"name":f.relative_to(staging).as_posix(),
                 "size":f.stat().st_size,"sha256":_hash(f,cancel)})
         manifest={"schema_version":1,"kind":"BLACKBOX_RESEARCH_PACKAGE",
             "files":entries,"omitted":omitted,"complete_package":not omitted,
+            "recording_state":meta.get("state"),"capture_health":meta.get("capture_health"),
+            "coverage_assessment":"SOURCE_SPECIFIC_UNKNOWN_LOSS_IS_NOT_ZERO",
+            "raw_source_policy":"BYTE_BOUNDARY_AT_EXPORT_NOT_TIME_ALIGNED",
             "csv_policy":"FORMULA_PREFIXES_ESCAPED_RAW_VALUES_IN_SQLITE_AND_JSON",
             "integrity_is_not_authenticity":True,"sensitive_artifacts_included":include_sensitive}
         (staging/"manifest.json").write_text(compact(manifest),encoding="utf-8")

@@ -59,6 +59,8 @@ class ResearchPanel(QWidget):
             label=QLabel();self._labels.append((label,en,ru));context.addWidget(label,i,0);context.addWidget(field,i,1)
         self.budget=QSpinBox();self.budget.setRange(16,1048576);self.budget.setValue(1024);self.budget.setSuffix(" MiB")
         label=QLabel();self._labels.append((label,"Session disk budget","Бюджет записи на диске"));context.addWidget(label,3,0);context.addWidget(self.budget,3,1)
+        self.warmups=QSpinBox();self.warmups.setRange(0,10000)
+        label=QLabel();self._labels.append((label,"Warm-up repetitions to exclude","Исключить разогревочные повторы"));context.addWidget(label,4,0);context.addWidget(self.warmups,4,1)
         layout.addLayout(context)
         buttons=QGridLayout();self.buttons=[];self.by_action={}
         entries=(("Context / capabilities","Контекст / доступность",self.inspect),
@@ -129,7 +131,7 @@ class ResearchPanel(QWidget):
         try:return self.bridge.send(op,**args)
         except (RuntimeError,ValueError) as exc:self.details.setPlainText(str(exc))
     def configure(self):
-        self.send("configure",scenario=self.scenario.text(),workload=self.workload.text(),target_version=self.version.text(),budget_mb=self.budget.value())
+        self.send("configure",scenario=self.scenario.text(),workload=self.workload.text(),target_version=self.version.text(),budget_mb=self.budget.value(),warmup_count=self.warmups.value())
     def inspect(self):self.send("inspect")
     def prepare(self):
         if self.preparation_dialog is not None:

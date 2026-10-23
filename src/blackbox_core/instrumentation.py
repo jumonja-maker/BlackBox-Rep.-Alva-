@@ -85,7 +85,7 @@ class EventTail:
         self.invalid = 0
         self.last_seq = {}
         self.ready = False
-        self.client_dropped = 0
+        self.client_dropped = None
         self.discontinuities = 0
         self.file_identity = None
 
@@ -152,7 +152,7 @@ class EventTail:
                 r.pop("token")
                 dropped = r.get("client_dropped")
                 if type(dropped) is int and dropped >= 0:
-                    self.client_dropped = max(self.client_dropped, dropped)
+                    self.client_dropped = max(self.client_dropped or 0, dropped)
                 if r["kind"] == "blackbox.ready":
                     self.ready = True
                 result.append(r)

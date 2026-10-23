@@ -115,6 +115,32 @@ class CaseTests(unittest.TestCase):
         facts=episode(self.folder,0,60000)["facts"]
         self.assertEqual(facts[-1]["classification"],"APPLICATION_REPORTED_OPERATION")
         self.assertGreaterEqual(facts[-1]["duration_ns"],0);self.assertEqual(len(facts[-1]["evidence_refs"]),2)
+    def test_stop_retains_events_emitted_after_last_sample(self):
+        writer=EventWriter(self.session.tail.path,self.session.tail.token)
+        writer.emit("blackbox.ready")
+        with writer.operation("Final operation"):pass
+        self.session.stop()
+        rows=evidence_page(self.folder)["rows"]
+        self.assertIn("operation.end",[r["kind"] for r in rows])
+        health=context(self.folder)["capture_health"]
+        self.assertEqual(health["application_unread_bytes_at_stop"],0)
+        self.assertTrue(health["application_event_ready"])
+    def test_partial_final_line_is_reported_as_unconfirmed(self):
+        self.session.tail.path.write_bytes(b'{"incomplete":')
+        self.session.stop()
+        health=context(self.folder)["capture_health"]
+        self.assertEqual(health["application_partial_line_bytes"],14)
+        self.assertFalse(health["application_event_ready"])
+        self.assertIsNone(health["app_client_dropped"])
+        self.assertEqual(context(self.folder)["state"],"INCOMPLETE")
+    def test_bad_application_source_does_not_stop_other_sensors(self):
+        self.session.tail.path.mkdir()
+        count=self.session.probe.total_samples
+        self.session.tick()
+        self.assertTrue(self.session.probe.active)
+        self.assertGreater(self.session.probe.total_samples,count)
+        self.assertIn("INVALID_APPLICATION_EVENT_FILE",self.session.app_source_error)
+        self.assertIn("application.source_failed",[r["kind"] for r in evidence_page(self.folder)["rows"]])
     def test_export_requires_stop(self):
         with self.assertRaisesRegex(ValueError,"STOP_RECORDING"):export_case(self.folder,self.root/"out.zip")
     def test_export_roundtrip_and_html_escaping(self):
@@ -147,6 +173,17 @@ class CaseTests(unittest.TestCase):
         self.session.stop();dest=self.root/"out.zip"
         export_case(self.folder,dest,include_sensitive=True)
         with zipfile.ZipFile(dest) as z:self.assertEqual(z.read("artifacts/snapshot.dmp"),b"private")
+    def test_raw_application_spool_is_omitted_unless_explicitly_included(self):
+        EventWriter(self.session.tail.path,self.session.tail.token).emit("blackbox.ready")
+        self.session.stop()
+        first=export_case(self.folder,self.root/"minimal.zip")["manifest"]
+        self.assertIn("application-events.jsonl",first["omitted"])
+        self.assertFalse(first["complete_package"])
+        full=self.root/"full.zip"
+        export_case(self.folder,full,include_sensitive=True)
+        with zipfile.ZipFile(full) as z:
+            self.assertEqual(z.read("application-events.jsonl"),self.session.tail.path.read_bytes())
+        self.assertEqual(verify_package(full)["manifest"]["recording_state"],"COMPLETED")
     def test_active_owner_prevents_recovery(self):
         with self.assertRaisesRegex(ValueError,"OWNER_STILL_ACTIVE"):recover_case(self.folder,self.root/"recovered")
     def test_recovery_preserves_original_and_marks_incomplete(self):
@@ -170,6 +207,10 @@ class CaseTests(unittest.TestCase):
         self.assertEqual(result["duration_ms"]["p95"],95)
         warmed=action_statistics(self.folder,warmup_count=1)
         self.assertEqual(warmed["repeats"],100);self.assertEqual(warmed["duration_ms"]["minimum"],1)
+        experiment=context(self.folder)["experiment"]
+        self.session.book.set_context("experiment",{**experiment,"warmup_count":1})
+        stored=action_statistics(self.folder)
+        self.assertEqual(stored["warmups_excluded"],1);self.assertEqual(stored["repeats"],100)
     def test_evidence_backwards_page(self):
         for n in range(220):self.session.book.put("fixture",{"n":n})
         first=evidence_page(self.folder,limit=100);second=evidence_page(self.folder,after_id=first["next_id"],limit=100)

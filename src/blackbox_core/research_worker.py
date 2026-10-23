@@ -28,10 +28,11 @@ class ResearchSession:
         self.runtime_trace=None
         self.cancel=Event()
         self.interval_ms=1000;self.native_enabled=False
-        self.context={"scenario":"","workload":"","target_version":"","profile":"STANDARD","interval_ms":1000}
+        self.context={"scenario":"","workload":"","target_version":"","profile":"STANDARD","interval_ms":1000,"warmup_count":0}
         self.budget_bytes=1024**3;self.last_health=0;self.native_at=0
         self.last_command=None;self.command_latency_ms=None
         self.last_app_health=None
+        self.app_source_error=None
         self.research_state="NO_SESSION";self.research_error=None
         try:
             import psutil
@@ -52,7 +53,7 @@ class ResearchSession:
         p=self.probe
         data=p.snapshot()
         data["recent_samples"]=data["recent_samples"][-360:]
-        data.update(name=p.name,pid=p.pid,last_error=p.last_error,
+        data.update(name=p.name,pid=p.pid,last_error=p.last_error or self.research_error,
             action_ready=p.actions.ready_to_start(),
             detail_enabled=p.detailed_capture is not None,incident_enabled=p.incident_capture is not None,
             detail_status=p.detailed_capture.status if p.detailed_capture is not None else "DISABLED",
@@ -61,6 +62,7 @@ class ResearchSession:
             wpr_active=bool(self.wpr and self.wpr.active),
             eventpipe_active=bool(self.runtime_trace and self.runtime_trace.process is not None),
             app_ready=bool(self.tail and self.tail.ready),
+            app_source_error=self.app_source_error,
             helper_pid=os.getpid(),last_command=self.last_command,
             research_state=self.research_state,research_error=self.research_error,
             command_latency_ms=self.command_latency_ms)
@@ -115,17 +117,52 @@ class ResearchSession:
             if self.runtime_trace:
                 result=self.runtime_trace.poll()
                 if result:self.book.put("eventpipe.stopped",result,source="EVENTPIPE_DOTNET_TRACE",quality=result["status"])
-            if self.tail:
-                for r in self.tail.poll():
-                    # Source clocks are retained, not silently equated to ours.
-                    self.book.put(r["kind"],r,source="APPLICATION_EVENT",
-                        quality="APP_SUPPLIED_UNAUTHENTICATED",tid=r["tid"] if r.get("tid_kind","OS_NATIVE")=="OS_NATIVE" else None,
-                        operation_id=r.get("operation_id"))
+            self._application_events()
             if self.native_enabled and time.monotonic()-self.native_at>=2:
                 self.capture_native()
             if time.monotonic()-self.last_health>=5:
                 self.last_health=time.monotonic();self._health()
         if not p.active and self.book:self.stop(p.session_state)
+
+    def _application_events(self, max_bytes=65536):
+        if not self.book or not self.tail or self.app_source_error:return
+        try:
+            rows=self.tail.poll(max_bytes=max_bytes)
+        except (OSError,ValueError) as exc:
+            # One unusable cooperative source must not end the base recorder.
+            self.app_source_error=(type(exc).__name__+": "+str(exc))[:300]
+            self.tail.ready=False
+            self.book.put("application.source_failed",{"error":self.app_source_error},
+                          source="APPLICATION_EVENT_READER",quality="SOURCE_FAILED")
+            return
+        for r in rows:
+            # Source clocks are retained, not silently equated to ours.
+            self.book.put(r["kind"],r,source="APPLICATION_EVENT",
+                quality="APP_SUPPLIED_UNAUTHENTICATED",tid=r["tid"] if r.get("tid_kind","OS_NATIVE")=="OS_NATIVE" else None,
+                operation_id=r.get("operation_id"))
+
+    def _drain_application_events(self):
+        if not self.tail:return {}
+        t=self.tail;cutoff=None
+        if not self.app_source_error:
+            try:
+                if not t.path.exists():cutoff=0
+                elif t.path.is_symlink() or not t.path.is_file():raise ValueError("INVALID_APPLICATION_EVENT_FILE")
+                else:cutoff=t.path.stat().st_size
+                # Freeze the byte boundary. The target may continue emitting;
+                # never wait for it or drain an infinite live file at Stop.
+                deadline=time.monotonic()+2;budget=1024*1024
+                while cutoff is not None and t.offset<cutoff and budget>0 and time.monotonic()<deadline:
+                    n=min(65536,cutoff-t.offset,budget);before=t.offset
+                    self._application_events(n);budget-=max(0,t.offset-before)
+                    if t.offset<=before or self.app_source_error:break
+            except (OSError,ValueError) as exc:
+                self.app_source_error=(type(exc).__name__+": "+str(exc))[:300];t.ready=False
+        return {"application_source_error":self.app_source_error,
+            "application_stop_byte_boundary":cutoff,
+            "application_unread_bytes_at_stop":max(0,cutoff-t.offset) if cutoff is not None else None,
+            "application_partial_line_bytes":len(t.pending),
+            "application_source_discontinuities":t.discontinuities}
 
     def capture_native(self):
         import psutil
@@ -148,6 +185,11 @@ class ResearchSession:
 
     def stop(self, reason="USER_STOPPED"):
         p=self.probe;errors=[]
+        app_coverage=self._drain_application_events() if self.book else {}
+        if self.tail and (self.app_source_error or self.tail.invalid or self.tail.client_dropped or
+                self.tail.discontinuities or app_coverage.get("application_unread_bytes_at_stop") or
+                app_coverage.get("application_partial_line_bytes")):
+            errors.append("APPLICATION_EVENT_COVERAGE_INCOMPLETE")
         if self.runtime_trace:
             result=self.runtime_trace.stop()
             if result and self.book:self.book.put("eventpipe.stopped",result,source="EVENTPIPE_DOTNET_TRACE",quality=result["status"])
@@ -165,6 +207,7 @@ class ResearchSession:
             try:
                 book.sync_legacy()
                 book.set_context("capture_health",{"finalization_errors":errors,
+                    **app_coverage,
                     "application_event_ready":bool(self.tail and self.tail.ready),
                     "app_invalid_lines":self.tail.invalid if self.tail else None,
                     "app_client_dropped":self.tail.client_dropped if self.tail else None,
@@ -176,7 +219,7 @@ class ResearchSession:
                 self.research_state="FINALIZATION_UNCONFIRMED"
                 self.research_error="RESEARCH_FINALIZATION_UNCONFIRMED"
                 book.db.close();raise
-        return {"state":p.session_state,"errors":errors}
+        return {"state":self.research_state,"base_recording_state":p.session_state,"errors":errors}
 
     def command(self, command):
         op=command.get("op");a=command.get("args",{})
@@ -192,6 +235,10 @@ class ResearchSession:
             if self.probe.active:raise ValueError("STOP_BEFORE_RECONFIGURING")
             for key in ("scenario","workload","target_version","profile"):
                 if key in a:self.context[key]=str(a[key])[:256]
+            if "warmup_count" in a:
+                n=a["warmup_count"]
+                if type(n) is not int or not 0<=n<=10000:raise ValueError("INVALID_WARMUP_COUNT")
+                self.context["warmup_count"]=n
             if "budget_mb" in a:
                 n=a["budget_mb"]
                 if type(n) is not int or not 16<=n<=1024*1024:raise ValueError("INVALID_DISK_BUDGET")
@@ -209,6 +256,7 @@ class ResearchSession:
             self.probe.start()
             self.probe._store.v2.max_bytes=self.budget_bytes
             self.native_enabled=False;self.runtime_trace=None;self.wpr=None
+            self.app_source_error=None
             self.research_state="RECORDING";self.research_error=None
             try:
                 self.book=CaseBook(self.probe.session_folder,self.probe.pid,self.probe._core.created,

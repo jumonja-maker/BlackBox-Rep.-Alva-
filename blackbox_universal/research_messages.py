@@ -12,6 +12,7 @@ MESSAGES={
  "UNSUPPORTED_PLATFORM":("This sensor requires Windows. Use available sources or open the recording on Windows.","Этот датчик требует Windows. Используйте доступные источники или откройте запись в Windows."),
  "INVALID_RESEARCH_PATH":("Choose a folder containing a BLACK.BOX research.sqlite3 recording.","Выберите папку исследования BLACK.BOX с файлом research.sqlite3."),
  "ACCESS_DENIED":("This source was denied access. Check the selected target and required privileges.","Источник получил отказ доступа. Проверьте выбранную программу и необходимые права."),
+ "APPLICATION_EVENT_COVERAGE_INCOMPLETE":("Some application events could not be confirmed. Inspect capture_health for unread bytes, partial lines and source failures; the base recording is retained.","Часть событий приложения не подтверждена. Откройте capture_health: там указаны недочитанные байты, незавершённые строки и отказы источника. Базовая запись сохранена."),
 }
 
 

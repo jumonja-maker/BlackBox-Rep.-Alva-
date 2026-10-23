@@ -34,7 +34,8 @@ def main(argv=None):
             while session.probe.active and time.monotonic()<end:
                 session.tick();time.sleep(min(a.interval,max(0,end-time.monotonic())))
         finally:session.stop()
-        result={"folder":str(session.probe.session_folder),"state":session.probe.session_state,
+        result={"folder":str(session.probe.session_folder),"state":session.research_state,
+                "base_recording_state":session.probe.session_state,"error":session.research_error,
                 "wall_seconds_requested":a.seconds,"samples":session.probe.total_samples}
     elif a.command=="export":result=export_case(a.session,a.destination,include_sensitive=a.raw)
     elif a.command=="verify":result=verify_package(a.package)
