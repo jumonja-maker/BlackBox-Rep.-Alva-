@@ -75,7 +75,17 @@ class ReadOnlyProbe:
         self.actions = ActionCycle()
         self.incident_capture: IncidentCapture | None = None
         self.detailed_capture: DetailedCapture | None = None
+        # Retain ownership of a worker whose blocking OS call outlived stop().
+        self._pending_detailed: DetailedCapture | None = None
         self._recording_origin_ns: int | None = None
+
+    def _reap_detailed(self) -> None:
+        """Never rebind a session while its previous sensor still owns SQLite."""
+        pending = self._pending_detailed
+        if pending is not None:
+            if not pending.stop(timeout=0):
+                raise RuntimeError("DETAILED_CAPTURE_STOP_PENDING")
+            self._pending_detailed = None
 
     def _event(self, code: str, detail: str = "") -> None:
         entry = {"timestamp_utc": utc_stamp(), "code": code,
@@ -96,6 +106,7 @@ class ReadOnlyProbe:
     def attach(self, pid: int) -> None:
         if self.active:
             raise RuntimeError("Stop observation before switching targets.")
+        self._reap_detailed()
         core = PsutilProbe(pid)
         self._core = core
         self.pid = pid
@@ -119,6 +130,7 @@ class ReadOnlyProbe:
         self._event("PROCESS_SELECTED", f"{self.name} · PID {pid}")
 
     def start(self) -> None:
+        self._reap_detailed()
         if self.pid is None:
             raise RuntimeError("Choose an accessible process first.")
         if self.active:
@@ -164,8 +176,11 @@ class ReadOnlyProbe:
         }.get(reason, "INTERRUPTED")
         # Separate sidecar worker is owned by this recording and stopped first.
         if self.detailed_capture is not None:
-            if not self.detailed_capture.stop(timeout=0.5):
+            capture = self.detailed_capture
+            if not capture.stop(timeout=0.5):
+                self._pending_detailed = capture
                 self.last_error = "DETAILED_CAPTURE_STOP_PENDING"
+            self.detailed_capture = None
         # Close a partially captured CPU episode as incomplete, not successful.
         if self.incident_capture is not None:
             for finding in self.incident_capture.stop(
@@ -273,6 +288,7 @@ class ReadOnlyProbe:
         if type(enabled) is not bool or not self.active or self._store is None:
             raise RuntimeError("DETAILED_CAPTURE_REQUIRES_RECORDING")
         if enabled:
+            self._reap_detailed()
             if self.detailed_capture is None:
                 if self._core is None or self._recording_origin_ns is None:
                     raise RuntimeError("DETAILED_TARGET_MISSING")
@@ -284,7 +300,11 @@ class ReadOnlyProbe:
                 self._event("DETAILED_CAPTURE_ENABLED",
                             "Opt-in v2 sidecar; psutil process/threads/children")
         elif self.detailed_capture is not None:
-            stopped = self.detailed_capture.stop(timeout=0.5)
+            capture = self.detailed_capture
+            stopped = capture.stop(timeout=0.5)
+            if not stopped:
+                self._pending_detailed = capture
+                self.last_error = "DETAILED_CAPTURE_STOP_PENDING"
             self._event("DETAILED_CAPTURE_DISABLED",
                         "Stopped" if stopped else "Stop pending")
             self.detailed_capture = None
