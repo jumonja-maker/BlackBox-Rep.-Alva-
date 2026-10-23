@@ -51,6 +51,23 @@ def main(argv: list[str] | None = None) -> int:
                     raise RuntimeError("SMOKE_HUMAN_REPORT_MISSING")
             if (folder / "ai-handoff.json").exists():
                 raise RuntimeError("SMOKE_AI_HANDOFF_FORBIDDEN")
+            # Exercise the actual bundled Investigation Engine + Qt worker.
+            # A green desktop startup alone cannot prove the module is packed.
+            from blackbox_universal.investigation_worker import InvestigationWorker
+            probe_markers = []
+            smoke_worker = InvestigationWorker(folder, "EN")
+            smoke_worker.result_ready.connect(
+                lambda packet, error: probe_markers.append((packet, error)))
+            smoke_worker.run()
+            if len(probe_markers) != 1 or probe_markers[0][1]:
+                raise RuntimeError("SMOKE_INVESTIGATION_WORKER_FAILED")
+            packet = probe_markers[0][0]
+            if not isinstance(packet, dict) or packet.get("result", {}).get("schema_version") != 2:
+                raise RuntimeError("SMOKE_INVESTIGATION_SCHEMA_FAILED")
+            if not Path(packet["json"]).is_file() or not Path(packet["html"]).is_file():
+                raise RuntimeError("SMOKE_INVESTIGATION_REPORT_MISSING")
+            if "Root cause: UNKNOWN" not in Path(packet["html"]).read_text(encoding="utf-8"):
+                raise RuntimeError("SMOKE_INVESTIGATION_CLAIM_UNSAFE")
             html = (folder / "report.html").read_text(encoding="utf-8")
             if "Application root cause not determined" not in html:
                 raise RuntimeError("SMOKE_REPORT_NOT_HUMAN_READABLE")
