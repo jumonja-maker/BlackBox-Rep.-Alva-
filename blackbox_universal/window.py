@@ -1215,7 +1215,9 @@ class UniversalWindow(QMainWindow):
         if core is None or folder is None:
             self._complete_base_stop("SAMPLE_UNAVAILABLE")
             return
-        worker = BaseSampleWorker(core, folder, self)
+        worker = BaseSampleWorker(
+            core, folder, self,
+            requested_interval_ms=self._timer.interval())
         self._base_sample_worker = worker
         self._base_sample_error = None
         worker.result_ready.connect(self._base_sample_ready)
@@ -1233,7 +1235,11 @@ class UniversalWindow(QMainWindow):
             self._base_sample_error = "INVALID_DATA"
             return
         try:
-            self.probe.accept_background_sample(payload["sample"], payload["seq"])
+            self.probe.accept_background_sample(
+                payload["sample"], payload["seq"],
+                requested_interval_ms=payload["requested_interval_ms"],
+                worker_timing=payload["worker_timing"],
+                received_ns=time.monotonic_ns())
         except (ObserverError, ActionError, KeyError, TypeError, ValueError):
             self._base_sample_error = "STORAGE_ERROR"
         self._update_all()
