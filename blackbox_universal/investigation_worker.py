@@ -6,6 +6,7 @@ changed; separate v2 investigation JSON and HTML are exclusive-created.
 from __future__ import annotations
 
 import json
+from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
 import sqlite3
@@ -25,8 +26,8 @@ def read_user_markers(folder: Path, *, start_ms: int | None = None,
         raise InvestigationError("SESSION_UNAVAILABLE")
     markers: list[dict] = []
     try:
-        with sqlite3.connect(db_path.resolve().as_uri() + "?mode=ro",
-                             uri=True, timeout=1) as connection:
+        with closing(sqlite3.connect(db_path.resolve().as_uri() + "?mode=ro",
+                                     uri=True, timeout=1)) as connection:
             connection.execute("PRAGMA query_only=ON")
             for (blob,) in connection.execute(
                     "SELECT data FROM events ORDER BY seq LIMIT 10000"):
@@ -58,8 +59,8 @@ def latest_bounded_interval(folder: Path) -> tuple[int, int, int]:
     """Return latest 4096 sample boundaries and total sample count."""
     path = folder / "session.sqlite3"
     try:
-        with sqlite3.connect(path.resolve().as_uri() + "?mode=ro",
-                             uri=True, timeout=1) as connection:
+        with closing(sqlite3.connect(path.resolve().as_uri() + "?mode=ro",
+                                     uri=True, timeout=1)) as connection:
             connection.execute("PRAGMA query_only=ON")
             total = connection.execute("SELECT count(*) FROM samples").fetchone()[0]
             points = [r[0] for r in connection.execute(
