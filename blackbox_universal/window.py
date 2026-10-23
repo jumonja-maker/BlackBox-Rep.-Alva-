@@ -1149,7 +1149,10 @@ class UniversalWindow(QMainWindow):
         self.action_repeat_btn.setEnabled(running and current_action == "COMPLETED")
         self.action_begin_btn.setEnabled(running and self.probe.actions.ready_to_start())
         self.action_end_btn.setEnabled(running and current_action == "RUNNING")
-        self.action_state_label.setText(self._t("Action state") + ": " + current_action)
+        repeat_count = len(self.probe.actions.completed)
+        self.action_state_label.setText(
+            self._t("Action state") + ": " + current_action +
+            (f" · {repeat_count} " + self._t("completed repeats") if repeat_count else ""))
         self.investigate_current_btn.setEnabled(
             not running and not self._investigation_busy and
             self.probe.session_folder is not None and
