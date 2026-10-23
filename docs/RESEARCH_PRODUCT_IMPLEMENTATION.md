@@ -1,6 +1,6 @@
 # BLACK.BOX research product — implementation and acceptance
 
-This is one additive patch preserving PR17 through `32f38da4aaadf466379fbeaa85ea4ebf8141bb75`.
+This is one additive patch preserving PR17 through `a3b0bee1f6c51980b9263ea2dce4ea279b44900f`.
 It preserves that branch's work, main's five pages and legacy schema1 recordings.
 The original BB-DI-001 matrix is not rewritten or signed off by this document.
 
@@ -27,6 +27,7 @@ rollback is made. BLACK.BOX does not terminate the observed application.
 | Isolated capture and GUI ownership | research_bridge.py, research_worker.py, app.py | source and frozen `--research-e2e`; GUI tests |
 | Standard/admin capability reporting, explicit elevation | windows_research.py, research_panel.py | Windows native tests; token-specific evidence in E2E |
 | Real HWND response checks | windows_research.py | controlled native window fixture |
+| Continuous HWND/WCT and incident policy controls | windows_observer.py, ResearchBridge | upstream native acceptance plus real isolated GUI forwarding |
 | Real asynchronous WCT | windows_research.py | current-thread and controlled mutex fixture; denied/unsupported states retained |
 | Explicit minidump | windows_research.py | actual owned child dump; MDMP signature |
 | Explicit named ETW/WPR | WprCapture | real WPR roundtrip when runner supports the source |
@@ -83,6 +84,13 @@ fixture or generating many synthetic rows never certifies endurance. The
 ordinary frozen smoke remains separate from the new frozen action/client/
 incident/evidence/export/verification/repeat/comparison roundtrip. Neither
 roundtrip alone signs off every original BB-DI-001 requirement.
+
+The upstream `--deep-smoke --qa-output DIRECTORY` is also preserved and adapted
+to the production isolated owner. It records three real actions against the
+owned Qt/CPU fixture, cumulative TID CPU, an automatic incident, interval analysis
+and privacy-selected export. Both source and frozen CI run it. Success is written
+after the helper exits. Continuous WindowCapture and the explicit Windows/WCT
+snapshot do not start duplicate periodic samplers.
 
 CI results must be attributed to the exact commit SHA. Native source skips,
 optional missing tools, alternate Windows token testing and long endurance

@@ -12,6 +12,16 @@ from PySide6.QtCore import QObject,QProcess,QProcessEnvironment,QTimer,Signal
 from .monitor import ReadOnlyProbe
 
 
+class WindowCaptureProxy:
+    def __init__(self,bridge):self.bridge=bridge
+    def snapshot(self):
+        return self.bridge.data.get("window_capture_status","UNKNOWN"),self.bridge.data.get("observed_windows",[])
+    @property
+    def selected_hwnd(self):return self.bridge.data.get("selected_hwnd")
+    @selected_hwnd.setter
+    def selected_hwnd(self,hwnd):self.bridge.send("select_window",hwnd=hwnd)
+
+
 class ResearchBridge(QObject):
     updated=Signal()
     result_ready=Signal(str,object,str)
@@ -25,6 +35,7 @@ class ResearchBridge(QObject):
             setattr(self,key,getattr(empty,key))
         self.actions=SimpleNamespace(state="IDLE",completed=[],ready_to_start=lambda:False)
         self.detailed_capture=None;self.incident_capture=None
+        self.window_capture=None;self._window_proxy=WindowCaptureProxy(self)
         self.data=empty.snapshot();self.capabilities={};self._queue=[];self._pending={}
         self.closing=False;self.last_response=time.monotonic();self._stop_deadline=None
         self.process=QProcess(self)
@@ -107,8 +118,9 @@ class ResearchBridge(QObject):
         self.last_elapsed_ms=int(self.history[-1]["seconds"]*1000) if self.history else None
         self.actions=SimpleNamespace(state=data.get("action_state","IDLE"),completed=data.get("completed_actions",[]),
                                      ready_to_start=lambda:bool(self.data.get("action_ready")))
-        self.detailed_capture=True if data.get("detail_enabled") else None
+        self.detailed_capture=SimpleNamespace(samples=data.get("detail_sample_count",0)) if data.get("detail_enabled") else None
         self.incident_capture=True if data.get("incident_enabled") else None
+        self.window_capture=self._window_proxy if data.get("window_capture_enabled") else None
         self.report_result=data.get("report_result");self.capabilities=data.get("capabilities",{})
         self.last_error=data.get("last_error") or self.last_error
 
@@ -124,7 +136,8 @@ class ResearchBridge(QObject):
     def finish_action(self):return self.send("end")
     def mark_problem(self,note=""):return self.send("mark",note=note)
     def set_detailed_capture(self,enabled):return self.send("detailed",enabled=enabled)
-    def set_incident_capture(self,enabled):return self.send("incidents",enabled=enabled)
+    def set_incident_capture(self,enabled,**args):return self.send("incidents",enabled=enabled,**args)
+    def set_window_capture(self,enabled):return self.send("windows",enabled=enabled)
 
     def shutdown(self):
         if self.alive and not self.closing:

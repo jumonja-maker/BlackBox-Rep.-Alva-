@@ -21,6 +21,7 @@ from blackbox_core.probe import PsutilProbe, list_processes
 from blackbox_core.report import write_report
 from blackbox_core.storage import SessionStore
 from blackbox_core.sampling_health import MonotonicSampleCadence, BaseWorkerTiming
+from blackbox_core.windows_observer import WindowCapture
 
 
 def utc_stamp() -> str:
@@ -87,10 +88,16 @@ class ReadOnlyProbe:
         # Retain ownership of a worker whose blocking OS call outlived stop().
         self._pending_detailed: DetailedCapture | None = None
         self._pending_v2 = None
+        self.window_capture = None
+        self._pending_windows = None
         self._recording_origin_ns: int | None = None
 
     def _reap_detailed(self) -> None:
         """Never rebind a session while its previous sensor still owns SQLite."""
+        if self._pending_windows is not None:
+            if not self._pending_windows.stop(timeout=0):
+                raise RuntimeError("WINDOW_SENSOR_STOP_PENDING")
+            self._pending_windows=None
         if self._pending_v2 is not None:
             if self._pending_v2.thread.is_alive():
                 raise RuntimeError("SCHEMA2_WRITER_STOP_PENDING")
@@ -116,6 +123,15 @@ class ReadOnlyProbe:
                 self.events.append({"timestamp_utc": utc_stamp(),
                                     "code": "STORAGE_ERROR",
                                     "detail": "Event persistence unavailable"})
+
+    def _optional_sensor_error(self, sensor_id: str, code: str) -> None:
+        if self._store is not None and self._store.v2 is not None:
+            try:
+                self._store.v2.submit("error",{"time_ns":time.monotonic_ns(),
+                                              "sensor_id":sensor_id,"code":code})
+            except ObserverError:
+                # A failed optional sink must not prevent primary shutdown.
+                self.last_error="STORAGE_ERROR"
 
     def attach(self, pid: int) -> None:
         if self.active:
@@ -144,6 +160,7 @@ class ReadOnlyProbe:
         self.actions = ActionCycle()
         self.incident_capture = None
         self.detailed_capture = None
+        self.window_capture = None
         self._recording_origin_ns = None
         self._event("PROCESS_SELECTED", f"{self.name} · PID {pid}")
 
@@ -193,6 +210,7 @@ class ReadOnlyProbe:
         self.actions = ActionCycle()
         self.incident_capture = None
         self.detailed_capture = None
+        self.window_capture = None
         # PsutilProbe computes each elapsed_ms from its own monotonic origin.
         self._recording_origin_ns = core.origin_ns
         self.active = True
@@ -210,14 +228,14 @@ class ReadOnlyProbe:
             "STORAGE_ERROR": "STORAGE_ERROR",
         }.get(reason, "INTERRUPTED")
         # Separate sidecar worker is owned by this recording and stopped first.
+        if self.window_capture is not None:
+            self.set_window_capture(False)
         if self.detailed_capture is not None:
             capture = self.detailed_capture
             if not capture.stop(timeout=0.5):
                 self._pending_detailed = capture
                 self.last_error = "DETAILED_CAPTURE_STOP_PENDING"
-                if self._store.v2 is not None:
-                    self._store.v2.submit("error", {"time_ns":time.monotonic_ns(),
-                        "sensor_id":"PSUTIL_DETAILED","code":"DETAILED_CAPTURE_STOP_PENDING"})
+                self._optional_sensor_error("PSUTIL_DETAILED","DETAILED_CAPTURE_STOP_PENDING")
                 capture.session_writer = None
             self.detailed_capture = None
         # Close a partially captured CPU episode as incomplete, not successful.
@@ -489,21 +507,36 @@ class ReadOnlyProbe:
             if not stopped:
                 self._pending_detailed = capture
                 self.last_error = "DETAILED_CAPTURE_STOP_PENDING"
-                if self._store.v2 is not None:
-                    self._store.v2.submit("error", {"time_ns":time.monotonic_ns(),
-                        "sensor_id":"PSUTIL_DETAILED","code":"DETAILED_CAPTURE_STOP_PENDING"})
+                self._optional_sensor_error("PSUTIL_DETAILED","DETAILED_CAPTURE_STOP_PENDING")
                 capture.session_writer = None
             self._event("DETAILED_CAPTURE_DISABLED",
                         "Stopped" if stopped else "Stop pending")
             self.detailed_capture = None
 
-    def set_incident_capture(self, enabled: bool) -> None:
+    def set_window_capture(self, enabled: bool) -> None:
+        if type(enabled) is not bool or not self.active or self._store is None:
+            raise RuntimeError("WINDOW_CAPTURE_REQUIRES_RECORDING")
+        if enabled:
+            self._reap_detailed()
+            if self.window_capture is None:
+                cap=WindowCapture(self.pid,self._core.created,self._store.v2)
+                cap.start()
+                self.window_capture=cap
+        elif self.window_capture is not None:
+            cap=self.window_capture
+            if not cap.stop(timeout=.05):
+                self._pending_windows=cap
+                self._optional_sensor_error("WIN32_WCT","WINDOW_SENSOR_STOP_PENDING")
+                cap.writer=None
+            self.window_capture=None
+
+    def set_incident_capture(self, enabled: bool, *, policy: dict | None = None) -> None:
         """Explicit, local-only opt in; never enables system tracing or dumps."""
         if type(enabled) is not bool or not self.active or self._store is None:
             raise RuntimeError("INCIDENT_CAPTURE_REQUIRES_RECORDING")
         if enabled:
             if self.incident_capture is None:
-                self.incident_capture = IncidentCapture()
+                self.incident_capture = IncidentCapture(**(policy or {}))
                 self._event("INCIDENT_CAPTURE_ENABLED", "CPU + sampling gap only")
         elif self.incident_capture is not None:
             for boundary in self.incident_capture.stop(

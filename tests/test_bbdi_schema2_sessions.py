@@ -58,6 +58,17 @@ def synthetic_history(folder,count=100001):
 
 
 class Schema2ContractTests(unittest.TestCase):
+    def test_schema2_sink_failure_cannot_prevent_primary_shutdown(self):
+        with tempfile.TemporaryDirectory() as temp:
+            p=ReadOnlyProbe(Path(temp));p.attach(os.getpid());p.start();p.tick()
+            p._store.v2.failure="TEST_ONLY_INJECTED_STORAGE_FAILURE"
+            p._optional_sensor_error("TEST_ONLY","INJECTED")
+            p.stop()
+            self.assertFalse(p.active)
+            self.assertEqual(p.session_state,"STORAGE_ERROR")
+            with closing(sqlite3.connect(p.session_folder/"session.sqlite3")) as db:
+                self.assertEqual(db.execute("SELECT exit_code FROM metadata").fetchone()[0],"STORAGE_ERROR")
+
     def test_real_standard_and_detailed_records_share_identity_and_clock(self):
         with tempfile.TemporaryDirectory() as temp:
             p=ReadOnlyProbe(Path(temp))

@@ -7,6 +7,8 @@ import sqlite3
 import tempfile
 import time
 import unittest
+import sys
+import traceback
 
 os.environ.setdefault("QT_QPA_PLATFORM","offscreen")
 from PySide6.QtCore import QTimer,QCoreApplication,QEvent
@@ -25,6 +27,8 @@ class IsolatedGuiTests(unittest.TestCase):
             self.app.processEvents();time.sleep(.005)
         return condition()
     def setUp(self):
+        self.callback_errors=[];self.previous_hook=sys.excepthook
+        sys.excepthook=lambda kind,value,tb:self.callback_errors.append("".join(traceback.format_exception(kind,value,tb)))
         self.temp=tempfile.TemporaryDirectory()
         self.window=UniversalWindow(isolated=True,output_root=Path(self.temp.name),allow_update_check=False)
         self.window._timer.stop()
@@ -32,9 +36,12 @@ class IsolatedGuiTests(unittest.TestCase):
         self.assertTrue(self.drain(lambda:self.window.probe.pid==os.getpid() and not self.window.probe.pending),
                         self.window.probe.last_error)
     def tearDown(self):
-        self.window.close()
-        self.assertTrue(self.drain(lambda:not self.window.probe.alive,seconds=15))
-        self.window.deleteLater();self.app.processEvents();self.temp.cleanup()
+        try:
+            self.window.close()
+            self.assertTrue(self.drain(lambda:not self.window.probe.alive,seconds=15))
+            self.window.deleteLater();self.app.processEvents();self.temp.cleanup()
+            self.assertEqual(self.callback_errors,[],"Qt callback exception must fail GUI acceptance")
+        finally:sys.excepthook=self.previous_hook
     def start_recording(self):
         self.window._start()
         self.assertTrue(self.drain(lambda:self.window.probe.active and self.window.probe.total_samples>=1 and not self.window.probe.pending))
@@ -85,6 +92,16 @@ class IsolatedGuiTests(unittest.TestCase):
         self.window.research_toggle.setChecked(True);self.window.resize(1020,850);self.window.show()
         self.app.processEvents()
         self.assertLessEqual(self.window.research_panel.width(),self.window.stack.currentWidget().viewport().width())
+    def test_upstream_window_controls_and_policy_reach_isolated_owner(self):
+        self.start_recording();bridge=self.window.probe
+        self.window.cpu_trigger_threshold.setValue(12.5);self.window.cpu_trigger_duration.setValue(333)
+        self.window.auto_capture_btn.click()
+        self.assertTrue(self.drain(lambda:bridge.data.get("incident_policy")=={"threshold":12.5,"min_duration_ms":333} and not bridge.pending))
+        self.window.window_capture_btn.click()
+        self.assertTrue(self.drain(lambda:bridge.window_capture is not None and not bridge.pending))
+        self.assertIsInstance(bridge.window_capture.snapshot()[0],str)
+        self.window.window_capture_btn.click()
+        self.assertTrue(self.drain(lambda:bridge.window_capture is None and not bridge.pending))
 
 
 if __name__=="__main__":unittest.main()

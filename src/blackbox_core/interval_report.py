@@ -43,6 +43,9 @@ def human_html(report,threads):
     rows="".join("<tr>"+"".join("<td>"+safe(r.get(key))+"</td>" for key in (
         "tid","segment_start_seq","cpu_seconds","cpu_percent","peak_cpu_percent",
         "observed_presence_percent"))+"</tr>" for r in threads.get("top_threads",()))
+    native="".join("<tr>"+"".join("<td>"+safe(row[key])+"</td>" for key in
+        ("source_kind","event_type","measurement_status","count"))+"</tr>"
+        for row in report.get("native_windows_observations",{}).get("counts",()))
     charts=[]
     lo,hi=report["selected_interval_ns"]
     for key,points in report["timeline"]["tracks"].items():
@@ -79,6 +82,8 @@ def human_html(report,threads):
         "Presence is the fraction of observed snapshots, not continuous lifetime. Hidden segments: "+
         safe(threads.get("omitted_from_top"))+"</p><table><tr><th>TID</th><th>Segment</th><th>CPU seconds</th>"
         "<th>Mean CPU %</th><th>Peak CPU %</th><th>Observed presence %</th></tr>"+rows+"</table>"
+        "<h2>Windows / WCT</h2><p>Recorded producer observations; source file is UNVERIFIED_IMPORT.</p>"
+        "<table><tr><th>Source</th><th>Observation</th><th>Status</th><th>Count</th></tr>"+native+"</table>"
         "<h2>Что нельзя установить / Limitations</h2><p>Root cause: UNKNOWN. "
         "Memory growth is not proof of a leak; a CPU sample is not WCT or Windows UI evidence. "
         "TID reuse cannot be excluded. Bounds exclude partial counter pairs; activity between samples is unknown.</p>"
@@ -152,7 +157,11 @@ def export_interval(folder: Path,output: Path,*,interval=None,series=None,instan
                         # Raw detail is opt-in. Arbitrary strings in imported
                         # JSON never affect the reader-assigned trust class.
                         if not include_notes:
-                            event.pop("detail",None)
+                            detail=event.pop("detail",{})
+                            if event.get("source_kind") in ("WIN32","WCT"):
+                                event["detail"]={k:detail[k] for k in ("check","wct","window",
+                                    "consecutive_timeouts","first_timeout_ns","last_responsive_ns",
+                                    "onset_exact","duration_is_observation_bound") if k in detail}
                         elif "detail" in event:
                             # Explicitly selected user notes, not arbitrary
                             # imported command lines, titles or environment.
@@ -164,6 +173,15 @@ def export_interval(folder: Path,output: Path,*,interval=None,series=None,instan
                             if "detail" in event:
                                 for key in ("pid","pid_creation_time"):
                                     event["detail"].pop(key,None)
+                            def strip_ids(value):
+                                if isinstance(value,dict):
+                                    return {k:strip_ids(v) for k,v in value.items() if k not in
+                                            ("pid","tid","hwnd","pid_creation_time")}
+                                if isinstance(value,list):
+                                    return [strip_ids(v) for v in value]
+                                return value
+                            if "detail" in event:
+                                event["detail"]=strip_ids(event["detail"])
                         stream.write(json.dumps(event,ensure_ascii=False,allow_nan=False)+"\n")
                         event_count+=1
                     if not page["has_more"]:

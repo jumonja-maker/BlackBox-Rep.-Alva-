@@ -6,6 +6,13 @@ are NEVER translated: only interface chrome and explanatory text.
 from __future__ import annotations
 
 RU = {
+"CPU trigger threshold (% of one logical CPU)":"Порог CPU (% одного логического ядра)",
+"CPU trigger sustained duration (ms)":"Минимальная длительность CPU (мс)",
+"WINDOW TIMEOUT / WCT: OFF":"ОКНА / WCT: ВЫКЛ",
+"WINDOW TIMEOUT / WCT: ON":"ОКНА / WCT: ВКЛ",
+"Window responsiveness":"Отзывчивость окон",
+"Window responsiveness: not recorded":"Отзывчивость окон: не записывается",
+"Probe up to 4 windows":"Проверять до 4 окон",
 "Recorded process tree":"История дерева процессов",
 "NEXT PROCESS PAGE":"СЛЕДУЮЩИЕ ПРОЦЕССЫ",
 "Session event timeline":"Шкала событий сеанса",

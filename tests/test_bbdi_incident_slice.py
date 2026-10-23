@@ -131,12 +131,8 @@ class PersistedIncidentTests(unittest.TestCase):
                 window._stop()
                 self.assertFalse(window.auto_capture_btn.isEnabled())
             finally:
-                window.close()
-                import time
-                deadline=time.monotonic()+10
-                while window._report_worker is not None and time.monotonic()<deadline:
-                    app.processEvents();time.sleep(.005)
-                self.assertIsNone(window._report_worker)
+                from qt_test_support import close_and_drain
+                close_and_drain(window,app)
 
 
 if __name__ == "__main__":

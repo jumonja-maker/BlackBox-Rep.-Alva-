@@ -25,7 +25,7 @@ from blackbox_core.sampling_health import BusyTickTracker
 from PySide6.QtCore import Qt, QTimer, QThread, Signal, QSettings, QUrl
 from PySide6.QtGui import QAction, QDesktopServices, QIcon
 from PySide6.QtWidgets import (
-    QAbstractItemView, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFrame,
+    QAbstractItemView, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QSpinBox, QFileDialog, QFrame,
     QGridLayout, QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit,
     QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QPushButton,
     QScrollArea, QStackedWidget, QTableWidget, QTableWidgetItem,
@@ -146,6 +146,7 @@ class UniversalWindow(QMainWindow):
         self._interval_folder = None
         self._interval_process = 1
         self._interval_export_worker = None
+        self._interval_export_result = None
         self._report_error: str | None = None
         self._pending_base_stop: str | None = None
         self._base_sample_error: str | None = None
@@ -443,6 +444,16 @@ class UniversalWindow(QMainWindow):
             "Stored in independent v2 SQLite sidecar. No stacks or wait chains.")
         self.detailed_capture_btn.clicked.connect(self._toggle_detailed_capture)
         status.content.addWidget(self.detailed_capture_btn)
+        self.window_capture_btn = _button("WINDOW TIMEOUT / WCT: OFF")
+        self.window_capture_btn.clicked.connect(self._toggle_window_capture)
+        status.content.addWidget(self.window_capture_btn)
+        self.window_capture_status = _label("Window responsiveness: not recorded","caption")
+        self.window_capture_status.setTextFormat(Qt.TextFormat.PlainText)
+        status.content.addWidget(self.window_capture_status)
+        self.window_selector = QComboBox()
+        self.window_selector.setAccessibleName("Target HWND / Окно цели")
+        self.window_selector.currentIndexChanged.connect(self._select_target_window)
+        status.content.addWidget(self.window_selector)
         action_controls = QGridLayout()
         self.action_prepare_btn = _button("PREPARE ACTION")
         self.action_prepare_btn.clicked.connect(self._prepare_action)
@@ -780,6 +791,18 @@ class UniversalWindow(QMainWindow):
                                         seconds * 1000)
         self.interval_combo.currentIndexChanged.connect(self._change_interval)
         setting.content.addWidget(self.interval_combo)
+        trigger_controls=QGridLayout()
+        trigger_controls.addWidget(_label("CPU trigger threshold (% of one logical CPU)"),0,0)
+        self.cpu_trigger_threshold=QDoubleSpinBox()
+        self.cpu_trigger_threshold.setRange(.1,6400)
+        self.cpu_trigger_threshold.setValue(85.)
+        trigger_controls.addWidget(self.cpu_trigger_threshold,0,1)
+        trigger_controls.addWidget(_label("CPU trigger sustained duration (ms)"),1,0)
+        self.cpu_trigger_duration=QSpinBox()
+        self.cpu_trigger_duration.setRange(0,60000)
+        self.cpu_trigger_duration.setValue(3000)
+        trigger_controls.addWidget(self.cpu_trigger_duration,1,1)
+        setting.content.addLayout(trigger_controls)
         setting.content.addWidget(_label(
             "This controls process sampling frequency. Longer intervals reduce "
             "overhead but can miss short-lived activity.", "caption"))
@@ -845,6 +868,7 @@ class UniversalWindow(QMainWindow):
                     self.target_binding_title, self.target_binding_detail,
                     self.investigation_info, self.action_state_label}
         changing.add(self.interval_summary)
+        changing.add(self.window_capture_status)
         from PySide6.QtWidgets import QLabel
         for label in self.findChildren(QLabel):
             if label in changing or label.objectName() == "metricValue":
@@ -865,6 +889,12 @@ class UniversalWindow(QMainWindow):
             if button in (self.github_button, self.email_button):
                 button.setToolTip(self._t(
                     "GitHub repository" if button is self.github_button else "Send feedback"))
+        for checkbox in self.findChildren(QCheckBox):
+            original=checkbox.property("bb_english")
+            if original is None:
+                original=checkbox.text()
+                checkbox.setProperty("bb_english",original)
+            checkbox.setText(self._t(str(original)))
         for action in self.findChildren(QAction):
             original = action.property("bb_english")
             if original is None:
@@ -1501,10 +1531,14 @@ class UniversalWindow(QMainWindow):
         result=packet["interval"]
         coverage=result["coverage"]
         metrics=result["metrics"]
+        cpu_peak=metrics["cpu_interval_percent"]["max"]
+        rss_peak=metrics["rss_bytes"]["max"]
+        cpu_text=f"{cpu_peak:.1f}" if cpu_peak is not None else "UNAVAILABLE"
+        rss_text=f"{rss_peak/1048576:.2f}" if rss_peak is not None else "UNAVAILABLE"
         self.interval_summary.setText(
             self._t("Observed / support / limits")+f"\n{result['series']} · "
             f"{coverage['selected_samples']}/{coverage['total_samples']} samples · "
-            f"CPU peak {metrics['cpu_interval_percent']['max']} % · RSS peak {metrics['rss_bytes']['max']} bytes\n"
+            f"CPU peak {cpu_text} % / 1 CPU · RSS peak {rss_text} MiB\n"
             f"gaps={coverage['spacing_gap_pairs']} · errors={coverage['sensor_error_records']} · "
             "Root cause: UNKNOWN · UNVERIFIED_IMPORT · "+" / ".join(result["warnings"]))
         self.session_timeline.set_interval(result)
@@ -1621,6 +1655,7 @@ class UniversalWindow(QMainWindow):
         worker.start()
 
     def _session_export_ready(self,packet,error):
+        self._interval_export_result=packet if not error else {"error":error}
         if error:
             self.interval_summary.setText(error+" · "+self._t("Source files were not changed."))
         else:
@@ -1694,7 +1729,32 @@ class UniversalWindow(QMainWindow):
         self.mark_problem_btn.setEnabled(running and not stopping and
                                          self.probe.last_elapsed_ms is not None)
         self.auto_capture_btn.setEnabled(running and not stopping)
+        self.cpu_trigger_threshold.setEnabled(self.probe.incident_capture is None)
+        self.cpu_trigger_duration.setEnabled(self.probe.incident_capture is None)
         self.detailed_capture_btn.setEnabled(running and not stopping)
+        self.window_capture_btn.setEnabled(running and not stopping)
+        cap=self.probe.window_capture
+        self.window_capture_btn.setText(self._t("WINDOW TIMEOUT / WCT: ON" if cap else "WINDOW TIMEOUT / WCT: OFF"))
+        if cap:
+            state,windows=cap.snapshot()
+            self.window_capture_status.setText(self._t("Window responsiveness")+": "+state)
+            entries=[(f"HWND {w['hwnd']} · TID {w['tid']} · "+
+                       ("VISIBLE" if w["visible"] else "HIDDEN"),w["hwnd"]) for w in windows]
+            current=[(self.window_selector.itemText(i),self.window_selector.itemData(i))
+                     for i in range(self.window_selector.count())]
+            if [(self._t("Probe up to 4 windows"),None),*entries]!=current:
+                selected_hwnd=self.window_selector.currentData()
+                self.window_selector.blockSignals(True)
+                self.window_selector.clear()
+                self.window_selector.addItem(self._t("Probe up to 4 windows"),None)
+                for label,hwnd in entries:
+                    self.window_selector.addItem(label,hwnd)
+                index=self.window_selector.findData(selected_hwnd)
+                self.window_selector.setCurrentIndex(max(0,index))
+                self.window_selector.blockSignals(False)
+        else:
+            self.window_capture_status.setText(self._t("Window responsiveness: not recorded"))
+        self.window_selector.setEnabled(cap is not None)
         folder_for_threads = self.probe.session_folder
         self.thread_detail_refresh.setEnabled(
             self._thread_detail_worker is None and folder_for_threads is not None
@@ -1801,12 +1861,27 @@ class UniversalWindow(QMainWindow):
                 "Detailed sampling unavailable"))
         self._update_all()
 
+    def _toggle_window_capture(self):
+        if self._report_worker is not None or self._pending_base_stop is not None:
+            return
+        try:
+            self.probe.set_window_capture(self.probe.window_capture is None)
+        except (ObserverError,RuntimeError,ValueError):
+            self.window_capture_status.setText("WINDOW_CAPTURE_UNAVAILABLE")
+        self._update_all()
+
+    def _select_target_window(self,index):
+        if self.probe.window_capture:
+            self.probe.window_capture.selected_hwnd=self.window_selector.itemData(index)
+
     def _toggle_incident_capture(self) -> None:
         if self._report_worker is not None or self._pending_base_stop is not None:
             return
         try:
             self.probe.set_incident_capture(
-                self.probe.incident_capture is None)
+                self.probe.incident_capture is None,policy={
+                    "threshold":self.cpu_trigger_threshold.value(),
+                    "min_duration_ms":self.cpu_trigger_duration.value()})
         except (ObserverError, RuntimeError, ValueError):
             QMessageBox.warning(self, "BLACK.BOX", self._t(
                 "Automatic incident capture unavailable"))

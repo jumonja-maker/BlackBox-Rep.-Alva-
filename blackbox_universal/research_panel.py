@@ -68,7 +68,7 @@ class ResearchPanel(QWidget):
             ("Prepare my application","Подготовить мою программу",self.prepare),
             ("Verify native PDB…","Проверить native PDB…",self.symbols),
             ("Inspect dump stacks…","Разобрать стеки дампа…",self.inspect_dump),
-            ("Windows observation","Windows-наблюдение",self.native),
+            ("Windows snapshot","Снимок Windows / WCT",self.native),
             ("ETW recording","Запись ETW",self.etw),
             ("EventPipe 10 s","EventPipe 10 с",lambda:self.send("eventpipe",seconds=10)),
             ("Capture minidump","Снять минидамп",self.dump),
@@ -122,7 +122,7 @@ class ResearchPanel(QWidget):
         ready=self.tr("Control event received","Проверочное событие получено") if data.get("app_ready") else self.tr("Waiting for application event","Ожидается событие приложения")
         self.status.setText(mode_text+" · "+ready+" · "+(self.bridge.last_error or ""))
         caps=data.get("capabilities",{})
-        for name,key in (("Windows observation","hwnd"),("ETW recording","etw_wpr"),
+        for name,key in (("Windows snapshot","hwnd"),("ETW recording","etw_wpr"),
                          ("EventPipe 10 s","dotnet_trace"),("Capture minidump","minidump")):
             status=caps.get(key,"UNKNOWN")
             self.by_action[name].setEnabled(status not in ("UNSUPPORTED_PLATFORM","TOOL_UNAVAILABLE"))

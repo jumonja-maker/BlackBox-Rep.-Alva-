@@ -52,10 +52,15 @@ class ResearchSession:
     def snapshot(self):
         p=self.probe
         data=p.snapshot()
+        state,windows=p.window_capture.snapshot() if p.window_capture is not None else ("DISABLED",[])
         data["recent_samples"]=data["recent_samples"][-360:]
         data.update(name=p.name,pid=p.pid,last_error=p.last_error or self.research_error,
             action_ready=p.actions.ready_to_start(),
             detail_enabled=p.detailed_capture is not None,incident_enabled=p.incident_capture is not None,
+            incident_policy={"threshold":p.incident_capture.threshold,"min_duration_ms":p.incident_capture.min_duration_ms} if p.incident_capture is not None else None,
+            detail_sample_count=p.detailed_capture.samples if p.detailed_capture is not None else 0,
+            window_capture_enabled=p.window_capture is not None,window_capture_status=state,
+            observed_windows=windows,selected_hwnd=p.window_capture.selected_hwnd if p.window_capture else None,
             detail_status=p.detailed_capture.status if p.detailed_capture is not None else "DISABLED",
             report_result=p.report_result,capabilities=capabilities(),
             experiment_context=self.context,native_enabled=self.native_enabled,
@@ -118,8 +123,6 @@ class ResearchSession:
                 result=self.runtime_trace.poll()
                 if result:self.book.put("eventpipe.stopped",result,source="EVENTPIPE_DOTNET_TRACE",quality=result["status"])
             self._application_events()
-            if self.native_enabled and time.monotonic()-self.native_at>=2:
-                self.capture_native()
             if time.monotonic()-self.last_health>=5:
                 self.last_health=time.monotonic();self._health()
         if not p.active and self.book:self.stop(p.session_state)
@@ -293,7 +296,23 @@ class ResearchSession:
                 self.probe.detailed_capture.max_bytes=self.budget_bytes
             self.book.set_context("configuration_changed",True)
             return result
-        if op=="incidents":return self.probe.set_incident_capture(bool(a["enabled"]))
+        if op=="incidents":
+            result=self.probe.set_incident_capture(bool(a["enabled"]),policy=a.get("policy"))
+            if self.book:
+                self.book.put("observer.incident_policy",{"enabled":bool(a["enabled"]),"policy":a.get("policy")})
+                self.book.set_context("configuration_changed",True)
+            return result
+        if op=="windows":
+            result=self.probe.set_window_capture(bool(a["enabled"]))
+            if self.book:self.book.set_context("configuration_changed",True)
+            return result
+        if op=="select_window":
+            cap=self.probe.window_capture
+            if cap is None:raise ValueError("WINDOW_CAPTURE_REQUIRES_RECORDING")
+            hwnd=a.get("hwnd")
+            if hwnd is not None and (type(hwnd) is not int or not any(w["hwnd"]==hwnd for w in cap.snapshot()[1])):
+                raise ValueError("WINDOW_NO_LONGER_AVAILABLE")
+            cap.selected_hwnd=hwnd;return {"hwnd":hwnd}
         if op=="inspect":return inspect_target(self.probe.pid)
         if op=="symbols":
             import psutil
@@ -315,9 +334,10 @@ class ResearchSession:
             return result
         if op=="native":
             if not self.book:raise ValueError("START_RECORDING_FIRST")
-            self.native_enabled=bool(a.get("enabled",True))
             self.book.set_context("configuration_changed",True)
-            return self.capture_native() if self.native_enabled else {"enabled":False}
+            # Continuous HWND/WCT observation is owned by WindowCapture.
+            # This explicit snapshot must not start a second periodic sampler.
+            return self.capture_native()
         if op=="wpr":
             if not self.book:raise ValueError("START_RECORDING_FIRST")
             artifacts=self.probe.session_folder/"artifacts";artifacts.mkdir(exist_ok=True)
