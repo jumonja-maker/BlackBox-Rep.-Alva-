@@ -3,6 +3,7 @@
 Only CPU and sampling-gap triggers; not Windows native hang or full M-023.
 """
 from __future__ import annotations
+from contextlib import closing
 
 import json
 import os
@@ -97,7 +98,7 @@ class PersistedIncidentTests(unittest.TestCase):
                 self.assertIsNone(probe.incident_capture)
             finally:
                 probe.stop()
-            with sqlite3.connect(probe.session_folder / "session.sqlite3") as connection:
+            with closing(sqlite3.connect(probe.session_folder / "session.sqlite3")) as connection:
                 records = [json.loads(row[0]) for row in connection.execute(
                     "SELECT data FROM events ORDER BY seq")]
             starts = [row for row in records
