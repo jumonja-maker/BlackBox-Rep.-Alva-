@@ -74,6 +74,8 @@ class ReadOnlyProbe:
         self.last_error: str | None = None
         self.history: deque[dict] = deque(maxlen=3600)
         self.total_samples = 0
+        self.busy_timer_callbacks = 0
+        self.busy_timer_episodes = 0
         self.last_elapsed_ms: int | None = None
         self.events: deque[dict] = deque(maxlen=300)
         self.actions = ActionCycle()
@@ -125,6 +127,8 @@ class ReadOnlyProbe:
         self.last_error = None
         self.history.clear()
         self.total_samples = 0
+        self.busy_timer_callbacks = 0
+        self.busy_timer_episodes = 0
         self.last_elapsed_ms = None
         self.events.clear()
         self.actions = ActionCycle()
@@ -164,6 +168,8 @@ class ReadOnlyProbe:
         self.last_error = None
         self.history.clear()
         self.total_samples = 0
+        self.busy_timer_callbacks = 0
+        self.busy_timer_episodes = 0
         self.last_elapsed_ms = None
         self.events.clear()
         self.actions = ActionCycle()
@@ -282,6 +288,27 @@ class ReadOnlyProbe:
     def accept_background_sample(self, sample, seq: int) -> dict:
         """Commit worker result to GUI-facing cache AFTER SQLite commit."""
         return self._accept_persisted_sample(sample, seq)
+
+    def record_busy_timer_gap(self, observation: dict) -> None:
+        """Persist only observed GUI-busy timer callbacks, never OS outages.
+
+        This is a synchronous durability acknowledgement on the Qt owner
+        thread; if it fails the caller MUST stop with a storage failure.
+        """
+        if not self.active or self._store is None:
+            raise ObserverError("STORAGE_ERROR", "storage")
+        if (type(observation) is not dict or
+                observation.get("code") != "BASE_TIMER_CALLBACK_SKIPPED_BUSY" or
+                type(observation.get("missed_callback_count")) is not int or
+                observation["missed_callback_count"] <= 0):
+            raise ObserverError("INVALID_DATA", "storage")
+        self._store.write_event(observation)
+        self.busy_timer_callbacks += observation["missed_callback_count"]
+        self.busy_timer_episodes += 1
+        self.events.append({"timestamp_utc": utc_stamp(),
+                            "code": "BASE_TIMER_CALLBACK_SKIPPED_BUSY",
+                            "detail": (str(observation["missed_callback_count"]) +
+                                       " observed busy callbacks; NOT OS missed samples")})
 
     def record_background_failure(self, code: str) -> None:
         """Persist a failed async sample with the original observer semantics."""
@@ -447,6 +474,9 @@ class ReadOnlyProbe:
             "session_state": self.session_state,
             "session_folder": str(self.session_folder) if self.session_folder else None,
             "sample_count": self.total_samples, "recent_samples": list(self.history),
+            "observed_busy_timer_callbacks": self.busy_timer_callbacks,
+            "observed_busy_timer_episodes": self.busy_timer_episodes,
+            "busy_timer_limitations": "QT_COALESCED_CALLBACKS_NOT_COUNTED",
             "action_state": self.actions.state,
             "completed_actions": self.actions.completed[-20:],
             "recent_events": list(self.events),
