@@ -871,7 +871,7 @@ class UniversalWindow(QMainWindow):
             self.file_description.setToolTip("")
             return
         units = f"{item.size_bytes:,} bytes"
-        kind = item.kind
+        kind = self._t(item.kind)
         architecture = f" · {item.architecture}" if item.architecture else ""
         details = f"{kind}{architecture} · {units} · {item.modified_utc}"
         if item.executable_target:
@@ -1142,7 +1142,7 @@ class UniversalWindow(QMainWindow):
     def _about(self) -> None:
         QMessageBox.about(
             self, "BLACK.BOX Universal",
-            "BLACK.BOX Universal v0.3.2 — independent process observer.\n\n"
+            "BLACK.BOX Universal v0.3.3 — process and file inspection.\n\n"
             "Offline monitoring, human-readable HTML and JSON reports: available.\n"
             "Diagnostics use local operating-system observations.\n"
             "Windows ETW and crash dump collection: NOT IMPLEMENTED.\n\n"
