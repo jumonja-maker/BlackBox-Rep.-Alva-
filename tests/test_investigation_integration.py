@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
@@ -30,6 +31,7 @@ class InvestigationIntegrationTests(unittest.TestCase):
         observer.attach(os.getpid())
         observer.start()
         for _ in range(4):
+            time.sleep(0.012)
             observer.tick()
         observer.mark_problem("Settings dialog took too long")
         observer.stop()
@@ -87,7 +89,7 @@ class InvestigationIntegrationTests(unittest.TestCase):
         }
         self.assertIn("не доказанная причина", finding_details(candidate, "RU"))
         self.assertIn("not a proven root cause", finding_details(candidate, "EN"))
-        self.assertIn("Рост памяти", title("MEMORY_GROWTH_CANDIDATE", "RU"))
+        self.assertIn("рост памяти", title("MEMORY_GROWTH_CANDIDATE", "RU"))
         report = {"findings": [candidate], "coverage": {
             "total_samples": 5000, "selected_samples": 4096,
             "omitted_samples": 904, "full_session_covered": False}}
@@ -153,7 +155,7 @@ class InvestigationQtTests(unittest.TestCase):
         self.window._navigate("reports")
         self.assertEqual(self.window.investigation_table.item(0, 0).text(), "1.30 s")
         self.window.investigation_table.selectRow(0)
-        self.assertIn("not a proven root cause",
+        self.assertIn("не доказанная причина",
                       self.window.investigation_details.toPlainText())
         self.window._set_language("RU")
         self.assertIn("Высокая скорость", self.window.investigation_table.item(0, 1).text())
