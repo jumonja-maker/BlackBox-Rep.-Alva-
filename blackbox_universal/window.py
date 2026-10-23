@@ -1193,6 +1193,8 @@ class UniversalWindow(QMainWindow):
         self._update_all()
 
     def _stop(self) -> None:
+        if not self.probe.active or self._report_worker is not None:
+            return  # idempotent: never overwrite a previously saved report
         # A worker may still hold the independent sample-writing SQLite
         # connection. Do not close the owner store or export a partial report.
         if self._base_sample_worker is not None:
@@ -1203,7 +1205,7 @@ class UniversalWindow(QMainWindow):
 
     def _complete_base_stop(self, reason: str) -> None:
         """Close GUI-owned SQLite, then build reports on a separate QThread."""
-        if self._report_worker is not None:
+        if self._report_worker is not None or not self.probe.active:
             return
         self._pending_base_stop = None
         # Stop owns the original SessionStore connection created in Qt.
@@ -1236,8 +1238,9 @@ class UniversalWindow(QMainWindow):
         self._report_worker = None
         if worker is not None:
             worker.deleteLater()
-        if self._report_error is not None:
-            self.probe.complete_report(None, self._report_error)
+        if self._report_error is not None or self.probe.report_result is None:
+            self.probe.complete_report(
+                None, self._report_error or "REPORT_UNAVAILABLE")
         self._report_error = None
         self._set_report_status(
             "saved" if self.probe.report_result is not None else "unavailable")
