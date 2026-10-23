@@ -312,6 +312,9 @@ class ReadOnlyProbe:
         A failed gap event leaves the recording in storage-error state; it
         never fabricates an OS-missed-sample count.
         """
+        if (not self.active or self._store is None or
+                type(seq) is not int or seq != self.total_samples + 1):
+            raise ObserverError("INVALID_DATA", "storage")
         gap = None
         if requested_interval_ms is not None:
             try:
