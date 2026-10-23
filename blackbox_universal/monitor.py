@@ -15,6 +15,7 @@ from typing import Any
 
 from blackbox_core.actions import ActionCycle, ActionError
 from blackbox_core.incidents import IncidentCapture
+from blackbox_core.detailed_capture import DetailedCapture, DetailSensorError
 from blackbox_core.contracts import ObserverError, event
 from blackbox_core.probe import PsutilProbe, list_processes
 from blackbox_core.report import write_report
@@ -73,6 +74,7 @@ class ReadOnlyProbe:
         self.events: deque[dict] = deque(maxlen=300)
         self.actions = ActionCycle()
         self.incident_capture: IncidentCapture | None = None
+        self.detailed_capture: DetailedCapture | None = None
         self._recording_origin_ns: int | None = None
 
     def _event(self, code: str, detail: str = "") -> None:
@@ -112,6 +114,7 @@ class ReadOnlyProbe:
         self.events.clear()
         self.actions = ActionCycle()
         self.incident_capture = None
+        self.detailed_capture = None
         self._recording_origin_ns = None
         self._event("PROCESS_SELECTED", f"{self.name} · PID {pid}")
 
@@ -143,6 +146,7 @@ class ReadOnlyProbe:
         self.events.clear()
         self.actions = ActionCycle()
         self.incident_capture = None
+        self.detailed_capture = None
         # PsutilProbe computes each elapsed_ms from its own monotonic origin.
         self._recording_origin_ns = int(core.start * 1_000_000_000)
         self.active = True
@@ -158,6 +162,10 @@ class ReadOnlyProbe:
             "ACCESS_DENIED": "ACCESS_DENIED", "SAMPLE_UNAVAILABLE": "SAMPLE_UNAVAILABLE",
             "STORAGE_ERROR": "STORAGE_ERROR",
         }.get(reason, "INTERRUPTED")
+        # Separate sidecar worker is owned by this recording and stopped first.
+        if self.detailed_capture is not None:
+            if not self.detailed_capture.stop(timeout=0.5):
+                self.last_error = "DETAILED_CAPTURE_STOP_PENDING"
         # Close a partially captured CPU episode as incomplete, not successful.
         if self.incident_capture is not None:
             for finding in self.incident_capture.stop(
@@ -259,6 +267,27 @@ class ReadOnlyProbe:
         self._store.write_event(data)
         self.events.append({"timestamp_utc": utc_stamp(), "code": data["event"],
                             "detail": f'{data["session_elapsed_ms"]} ms · action {data["action_id"][:8]}'})
+
+    def set_detailed_capture(self, enabled: bool) -> None:
+        """Explicit opt-in; detailed probes never run on the Qt event loop."""
+        if type(enabled) is not bool or not self.active or self._store is None:
+            raise RuntimeError("DETAILED_CAPTURE_REQUIRES_RECORDING")
+        if enabled:
+            if self.detailed_capture is None:
+                if self._core is None or self._recording_origin_ns is None:
+                    raise RuntimeError("DETAILED_TARGET_MISSING")
+                capture = DetailedCapture(
+                    self._store.folder, self.pid, self._core.created,
+                    self._recording_origin_ns)
+                capture.start()
+                self.detailed_capture = capture
+                self._event("DETAILED_CAPTURE_ENABLED",
+                            "Opt-in v2 sidecar; psutil process/threads/children")
+        elif self.detailed_capture is not None:
+            stopped = self.detailed_capture.stop(timeout=0.5)
+            self._event("DETAILED_CAPTURE_DISABLED",
+                        "Stopped" if stopped else "Stop pending")
+            self.detailed_capture = None
 
     def set_incident_capture(self, enabled: bool) -> None:
         """Explicit, local-only opt in; never enables system tracing or dumps."""
