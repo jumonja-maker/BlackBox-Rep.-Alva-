@@ -63,7 +63,7 @@ class ResearchPanel(QWidget):
         buttons=QGridLayout();self.buttons=[];self.by_action={}
         entries=(("Context / capabilities","Контекст / доступность",self.inspect),
             ("Apply context","Применить контекст",self.configure),
-            ("Prepare my application","Подготовить мою программу",lambda:self.send("prepare_client")),
+            ("Prepare my application","Подготовить мою программу",self.prepare),
             ("Verify native PDB…","Проверить native PDB…",self.symbols),
             ("Inspect dump stacks…","Разобрать стеки дампа…",self.inspect_dump),
             ("Windows observation","Windows-наблюдение",self.native),
@@ -100,6 +100,7 @@ class ResearchPanel(QWidget):
         self.table.setMinimumHeight(180);self.table.itemSelectionChanged.connect(self.show_evidence);layout.addWidget(self.table)
         self.details=QPlainTextEdit();self.details.setReadOnly(True);self.details.setMinimumHeight(150);layout.addWidget(self.details)
         self.folder=None
+        self.preparation_dialog=None
         if hasattr(self.bridge,"result_ready"):
             self.bridge.result_ready.connect(self.receive)
             self.bridge.updated.connect(self.refresh)
@@ -130,6 +131,13 @@ class ResearchPanel(QWidget):
     def configure(self):
         self.send("configure",scenario=self.scenario.text(),workload=self.workload.text(),target_version=self.version.text(),budget_mb=self.budget.value())
     def inspect(self):self.send("inspect")
+    def prepare(self):
+        if self.preparation_dialog is not None:
+            self.preparation_dialog.raise_();return
+        from .preparation_dialog import PreparationDialog
+        self.preparation_dialog=PreparationDialog(self)
+        self.preparation_dialog.destroyed.connect(lambda:setattr(self,"preparation_dialog",None))
+        self.preparation_dialog.show()
     def symbols(self):
         pdb,_=QFileDialog.getOpenFileName(self,self.tr("Matching native PDB","Подходящий native PDB"),"","PDB (*.pdb)")
         if pdb:self.send("symbols",pdb=pdb)

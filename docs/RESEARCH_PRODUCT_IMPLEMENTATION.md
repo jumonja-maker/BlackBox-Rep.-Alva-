@@ -32,7 +32,7 @@ rollback is made. BLACK.BOX does not terminate the observed application.
 | Explicit named ETW/WPR | WprCapture | real WPR roundtrip when runner supports the source |
 | Optional EventPipe collection | runtime_trace.py | local installed dotnet-trace required; bounded subprocess lifecycle |
 | Native PDB identity and offline stacks | symbols.py | actual DbgHelp identity; optional local CDB |
-| Preparation and receipt verification | preparation.py, instrumentation.py | real standalone Python, C#, C++ and Node clients where toolchains exist |
+| Preparation wizard and receipt verification | preparation_dialog.py, preparation.py, instrumentation.py | real standalone Python, C#, C++ and Node clients; actual selected-PID ready receipt and dialog lifecycle |
 | Electron instrumentation | generated CJS client | Node event protocol tested; Electron contentTracing hook uses explicit application integration |
 | Source-linked interval evidence | casebook.py, research_panel.py | indexed interval queries, paging, linked operation boundaries |
 | Timeline selection/zoom and large history paging | EvidenceTimeline, evidence_page | Qt event and SQL paging tests |
@@ -41,7 +41,7 @@ rollback is made. BLACK.BOX does not terminate the observed application.
 | Observer resource/coverage data | ResearchSession._health | real CPU/RSS/IO observations; missing loss counters remain NULL |
 | Streaming HTML/JSON/CSV and portable ZIP | export_case | real roundtrip, checksums, adversarial HTML/ZIP tests |
 | Recovery without source modification | recover_case | original hash preserved, active owner rejection |
-| Bilingual errors and compact existing pages | research_messages.py, ResearchPanel | RU/EN UI checks; still exactly five pages |
+| Bilingual errors and compact existing pages | research_messages.py, ResearchPanel | RU/EN UI checks; minimum-width Reports controls fit; still exactly five pages |
 | Controlled reproducible applications | research_fixtures.py | 12 actual behaviours, including native Windows fixtures |
 
 ## Deliberate evidence boundaries
@@ -83,3 +83,9 @@ CI results must be attributed to the exact commit SHA. Native source skips,
 optional missing tools, alternate Windows token testing and long endurance
 runs must remain explicit in the final validation report. No merge/release is
 performed by this patch.
+
+QA source/frozen entry points disable scheduled update checks so the research
+roundtrip does not depend on internet access. Normal update preferences remain
+unchanged. The frozen smoke has a bounded deadline and writes its last stage
+and any Python traceback into CI diagnostics; a blocking error dialog cannot
+silently count as a passing smoke.

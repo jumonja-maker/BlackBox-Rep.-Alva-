@@ -112,7 +112,7 @@ class UniversalWindow(QMainWindow):
         ("settings", "05  SETTINGS"),
     )
 
-    def __init__(self, *, isolated=False, output_root=None):
+    def __init__(self, *, isolated=False, output_root=None, allow_update_check=True):
         super().__init__()
         self.setWindowTitle("BLACK.BOX Universal | Retro Workstation")
         self.setMinimumSize(1020, 690)
@@ -172,7 +172,7 @@ class UniversalWindow(QMainWindow):
         # Production Qt ticks NEVER call the synchronous ReadOnlyProbe.tick().
         self._timer.timeout.connect(self._request_background_sample)
         self._timer.start(1000)
-        if self._prefs.value("check_updates_at_start", True, type=bool):
+        if allow_update_check and self._prefs.value("check_updates_at_start", True, type=bool):
             QTimer.singleShot(1800, self._automatic_update_check)
 
     def _build(self) -> None:
@@ -691,34 +691,34 @@ class UniversalWindow(QMainWindow):
         self.report_status_label = _label(
             "Local evidence will be saved after Stop.", "caption")
         content.addWidget(self.report_status_label)
-        controls = QHBoxLayout()
+        controls = QGridLayout()
         self.open_report_button = _button("▣  OPEN HTML REPORT")
         self.open_report_button.clicked.connect(self._open_saved_report)
-        controls.addWidget(self.open_report_button)
+        controls.addWidget(self.open_report_button,0,0)
         self.session_location = _label("No persisted session yet", "caption")
-        controls.addWidget(self.session_location, 1)
+        controls.addWidget(self.session_location,1,0,1,2)
         compare_button = _button("≍  COMPARE TWO SESSIONS")
         compare_button.clicked.connect(self._compare_sessions)
-        controls.addWidget(compare_button)
+        controls.addWidget(compare_button,0,1)
         content.addLayout(controls)
 
-        investigation_actions = QHBoxLayout()
+        investigation_actions = QGridLayout()
         self.investigate_current_btn = _button("◈  INVESTIGATE SESSION", "primary")
         self.investigate_current_btn.clicked.connect(
             lambda: self._begin_investigation(choose=False))
-        investigation_actions.addWidget(self.investigate_current_btn)
+        investigation_actions.addWidget(self.investigate_current_btn,0,0)
         self.investigate_saved_btn = _button("▣  INVESTIGATE SAVED…")
         self.investigate_saved_btn.clicked.connect(
             lambda: self._begin_investigation(choose=True))
-        investigation_actions.addWidget(self.investigate_saved_btn)
+        investigation_actions.addWidget(self.investigate_saved_btn,0,1)
         self.investigate_interval_btn = _button("◫  INVESTIGATE INTERVAL…")
         self.investigate_interval_btn.setObjectName("investigateInterval")
         self.investigate_interval_btn.clicked.connect(self._select_investigation_interval)
-        investigation_actions.addWidget(self.investigate_interval_btn)
+        investigation_actions.addWidget(self.investigate_interval_btn,1,0)
         self.open_investigation_btn = _button("▣  OPEN INVESTIGATION HTML")
         self.open_investigation_btn.setEnabled(False)
         self.open_investigation_btn.clicked.connect(self._open_investigation_html)
-        investigation_actions.addWidget(self.open_investigation_btn)
+        investigation_actions.addWidget(self.open_investigation_btn,1,1)
         content.addLayout(investigation_actions)
         self.investigation_info = _label(
             "Run a separate, read-only analysis of a completed session.", "caption")

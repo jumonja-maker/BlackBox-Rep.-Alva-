@@ -7,6 +7,12 @@ from pathlib import Path
 import sys
 import tempfile
 
+
+def _qa_checkpoint(stage: str) -> None:
+    if "--smoke" in sys.argv:
+        Path("blackbox-smoke-progress.json").write_text(
+            __import__("json").dumps({"stage": stage, "pid": os.getpid()}), encoding="utf-8")
+
 # Dispatch before importing Qt. The same packaged EXE owns the session child.
 if __name__ == "__main__" and "--research-worker" in sys.argv:
     worker_parser = argparse.ArgumentParser()
@@ -33,13 +39,17 @@ def main(argv: list[str] | None = None) -> int:
     options = parser.parse_args(argv)
     if options.smoke:
         os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        _qa_checkpoint("QT_START")
     app = QApplication.instance() or QApplication(sys.argv[:1])
     app.setApplicationName("BLACK.BOX Universal")
     app.setOrganizationName("BlackBox")
     set_retro_theme(app)
     window = UniversalWindow(isolated=True,
-        output_root=options.research_e2e / "sessions" if options.research_e2e else None)
+        output_root=options.research_e2e / "sessions" if options.research_e2e else None,
+        allow_update_check=not (options.smoke or options.research_e2e))
     window.show()
+    if options.smoke:
+        _qa_checkpoint("WINDOW_SHOWN")
     if options.attach_pid:
         QTimer.singleShot(0, lambda: window._attach_pid(options.attach_pid))
     if options.research_e2e:
@@ -57,9 +67,11 @@ def main(argv: list[str] | None = None) -> int:
             probe = ReadOnlyProbe(output_root=Path(temp))
             probe.attach(os.getpid())
             probe.start()
+            _qa_checkpoint("PROBE_STARTED")
             if probe.tick() is None:
                 raise RuntimeError("SMOKE_PROCESS_SAMPLE_MISSING")
             probe.stop()
+            _qa_checkpoint("PROBE_STOPPED")
             folder = probe.session_folder
             if folder is None or probe.last_error:
                 raise RuntimeError("SMOKE_SESSION_FAILED")
@@ -76,6 +88,7 @@ def main(argv: list[str] | None = None) -> int:
             smoke_worker.result_ready.connect(
                 lambda packet, error: probe_markers.append((packet, error)))
             smoke_worker.run()
+            _qa_checkpoint("INVESTIGATION_RETURNED")
             if len(probe_markers) != 1 or probe_markers[0][1]:
                 raise RuntimeError("SMOKE_INVESTIGATION_WORKER_FAILED")
             packet = probe_markers[0][0]
@@ -89,8 +102,29 @@ def main(argv: list[str] | None = None) -> int:
             if "Application root cause not determined" not in html:
                 raise RuntimeError("SMOKE_REPORT_NOT_HUMAN_READABLE")
         QTimer.singleShot(280, window.close)
-    return app.exec()
+        _qa_checkpoint("EVENT_LOOP_CLOSE_SCHEDULED")
+    result = app.exec()
+    if options.smoke:
+        _qa_checkpoint("EXIT_" + str(result))
+    return result
 
 
 if __name__ == "__main__":
+    if "--smoke" in sys.argv or "--research-e2e" in sys.argv:
+        # A windowed PyInstaller failure otherwise opens a blocking error
+        # dialog on the headless runner. QA must retain the real traceback and
+        # return failure, never certify a hanging binary as a successful build.
+        import traceback
+        def qa_error(kind, value, tb):
+            Path("blackbox-qa-error.txt").write_text(
+                "".join(traceback.format_exception(kind, value, tb)), encoding="utf-8")
+            app = QApplication.instance()
+            if app is not None:
+                app.exit(1)
+        sys.excepthook = qa_error
+        try:
+            raise SystemExit(main())
+        except Exception:
+            qa_error(*sys.exc_info())
+            raise SystemExit(1)
     raise SystemExit(main())

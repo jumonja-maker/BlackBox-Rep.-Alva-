@@ -9,7 +9,7 @@ import time
 import unittest
 
 os.environ.setdefault("QT_QPA_PLATFORM","offscreen")
-from PySide6.QtCore import QTimer
+from PySide6.QtCore import QTimer,QCoreApplication,QEvent
 from PySide6.QtWidgets import QApplication
 from blackbox_universal.window import UniversalWindow
 
@@ -26,7 +26,7 @@ class IsolatedGuiTests(unittest.TestCase):
         return condition()
     def setUp(self):
         self.temp=tempfile.TemporaryDirectory()
-        self.window=UniversalWindow(isolated=True,output_root=Path(self.temp.name))
+        self.window=UniversalWindow(isolated=True,output_root=Path(self.temp.name),allow_update_check=False)
         self.window._timer.stop()
         self.window.probe.attach(os.getpid())
         self.assertTrue(self.drain(lambda:self.window.probe.pid==os.getpid() and not self.window.probe.pending),
@@ -66,6 +66,25 @@ class IsolatedGuiTests(unittest.TestCase):
         self.assertEqual(self.window.research_panel.load.text(),"Показать интервал")
         self.window._set_language("EN")
         self.assertEqual(self.window.research_panel.load.text(),"Load interval")
+    def test_preparation_wizard_requires_actual_control_event(self):
+        self.start_recording();panel=self.window.research_panel;panel.prepare()
+        dialog=panel.preparation_dialog
+        self.assertTrue(self.drain(lambda:not self.window.probe.pending))
+        self.assertFalse(self.window.probe.data.get("app_ready"))
+        dialog.generate.click()
+        self.assertTrue(self.drain(lambda:dialog.packet is not None))
+        from blackbox_core.instrumentation import EventWriter
+        writer=EventWriter(dialog.packet["event_path"],dialog.packet["token"])
+        self.assertTrue(writer.emit("blackbox.ready"))
+        self.assertTrue(self.drain(lambda:self.window.probe.data.get("app_ready")))
+        self.assertIn("received",dialog.verification.text())
+        dialog.close();QCoreApplication.sendPostedEvents(None,QEvent.Type.DeferredDelete)
+        self.assertIsNone(panel.preparation_dialog)
+    def test_reports_fit_minimum_window_width_in_russian(self):
+        self.window._set_language("RU");self.window._navigate("reports")
+        self.window.research_toggle.setChecked(True);self.window.resize(1020,850);self.window.show()
+        self.app.processEvents()
+        self.assertLessEqual(self.window.research_panel.width(),self.window.stack.currentWidget().viewport().width())
 
 
 if __name__=="__main__":unittest.main()
