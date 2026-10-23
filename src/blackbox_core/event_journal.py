@@ -122,6 +122,14 @@ class BoundedEventJournal:
                     task.done.set()
                 self._tasks.task_done()
 
+    def _await(self, task: _JournalTask) -> None:
+        """Never hang forever waiting for an already-dead worker's ack."""
+        while not task.done.wait(0.25):
+            if not self._worker.is_alive():
+                raise ObserverError("STORAGE_ERROR", "storage")
+        if task.failure or self._failure:
+            raise ObserverError("STORAGE_ERROR", "storage")
+
     def enqueue(self, payload: str, *, durable: bool) -> None:
         if self._closed or self._failure or not self._worker.is_alive():
             raise ObserverError("STORAGE_ERROR", "storage")
@@ -131,9 +139,7 @@ class BoundedEventJournal:
         except Full:
             raise ObserverError("STORAGE_ERROR", "storage") from None
         if durable:
-            task.done.wait()  # never return a speculative ActionCycle commit
-            if task.failure or self._failure:
-                raise ObserverError("STORAGE_ERROR", "storage")
+            self._await(task)  # never return a speculative ActionCycle commit
 
     def flush(self) -> None:
         """Wait for an ordered, durable barrier before SessionStore.finish."""
@@ -147,9 +153,7 @@ class BoundedEventJournal:
         task = _JournalTask(None)
         # Finish must not skip accepted events if the bounded queue is full.
         self._tasks.put(task)
-        task.done.wait()
-        if task.failure or self._failure:
-            raise ObserverError("STORAGE_ERROR", "storage")
+        self._await(task)
 
     def close(self) -> None:
         if self._closed:
