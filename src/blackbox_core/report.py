@@ -30,6 +30,8 @@ def summarize(folder: Path) -> dict:
             actions, completed_total, malformed_actions = [], 0, 0
             experiments = ExperimentAccumulator()
             incident_count, incident_preview, sampling_gaps = 0, [], 0
+            busy_ticks, busy_episodes, bad_busy_events = 0, 0, 0
+            truncated_busy_episodes = 0
             for entry in db.execute("SELECT data FROM events ORDER BY seq"):
                 record = json.loads(entry["data"])
                 if type(record) is not dict:
@@ -37,6 +39,18 @@ def summarize(folder: Path) -> dict:
                 experiments.observe(record)
                 if record.get("kind") == "sampling_gap" and record.get("code") == "SAMPLING_GAP_OBSERVED":
                     sampling_gaps += 1
+                if (record.get("kind") == "sampling_gap" and
+                        record.get("code") == "BASE_TIMER_CALLBACK_SKIPPED_BUSY"):
+                    missed = record.get("missed_callback_count")
+                    if (type(missed) is int and 1 <= missed <= 1_000_000 and
+                            record.get("source") == "QT_TIMER_SCHEDULER" and
+                            record.get("verification_class") == "OBSERVED_GUI_CALLBACK_ONLY"):
+                        busy_ticks += missed
+                        busy_episodes += 1
+                        if record.get("count_truncated") is True:
+                            truncated_busy_episodes += 1
+                    else:
+                        bad_busy_events += 1
                 if (record.get("kind") == "incident_boundary" and
                         record.get("code") == "AUTO_INCIDENT_COMPLETED"):
                     # Imported event strings cannot attest OS responsiveness.
@@ -94,6 +108,12 @@ def summarize(folder: Path) -> dict:
                 "automatic_incident_preview": incident_preview,
                 "automatic_incidents_omitted": max(0, incident_count-len(incident_preview)),
                 "sampling_gap_count": sampling_gaps,
+                "observed_busy_timer_callbacks": busy_ticks,
+                "observed_busy_timer_episodes": busy_episodes,
+                "invalid_busy_timer_events": bad_busy_events,
+                "truncated_busy_timer_episodes": truncated_busy_episodes,
+                "busy_timer_coverage": "OBSERVED_QT_CALLBACK_ONLY",
+                "busy_timer_limitations": "QT_COALESCED_CALLBACKS_NOT_COUNTED",
                 "automatic_event_provenance": "UNVERIFIED_STORED_EXTERNAL_COUNTERS",
                 "root_cause": "UNKNOWN", "root_cause_confidence": "UNKNOWN",
                 "execution_attested": False,
@@ -259,6 +279,8 @@ def _human_html(report: dict) -> str:
         metric("RAM RSS (макс.) / Peak RSS", report["peak_rss_bytes"], "bytes") +
         metric("Дочерние процессы / Max children", report["max_children"]) +
         metric("Длительность / Elapsed", report["elapsed_ms"], "ms") +
+        metric("Занятый сборщик / Busy timer callbacks",
+               report.get("observed_busy_timer_callbacks")) +
         "</div><h2>Сеанс / Session</h2><div class='grid'>" +
         metric("Начало UTC / Started", report["started_utc"]) +
         metric("Конец UTC / Ended", report["ended_utc"]) +
@@ -281,6 +303,16 @@ def _human_html(report: dict) -> str:
         "<h2>Углублённые данные / Detailed process capture (opt-in)</h2>" +
         detail_html +
         "<h2>Потоки / Per-thread CPU (derived)</h2>" + thread_html +
+        "<h2>Пропущенные такты GUI / Skipped timer callbacks</h2>"
+        "<p>Count: " + safe(report.get("observed_busy_timer_callbacks")) +
+        " · episodes: " + safe(report.get("observed_busy_timer_episodes")) +
+        " · invalid events: " + safe(report.get("invalid_busy_timer_events")) +
+        " · truncated episodes: " + safe(report.get("truncated_busy_timer_episodes")) +
+        ". Only delivered Qt timer callbacks rejected by a busy sample worker "
+        "are counted. Coalesced callbacks and actual OS sample gaps are NOT "
+        "measured by this counter. / Учтены только доставленные вызовы таймера "
+        "при занятом сборщике. Пропущенные Qt вызовы и реальные пропуски "
+        "измерений ОС неизвестны.</p>"
         "<h2>Автоинциденты / Automatic incidents (opt-in)</h2>"
         "<p>Stored external-counter observations only. CPU threshold and "
         "sampling gaps are not evidence of a Windows hang or internal defect."
