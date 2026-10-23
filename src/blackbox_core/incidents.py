@@ -27,6 +27,7 @@ class IncidentCapture:
         self._last_time = None
         self._cpu_since = None
         self._active = None
+        self._requires_rearm = False
         self._next_allowed_ms = 0
         self.incidents = 0
         self.buffer_evictions = 0
@@ -64,7 +65,8 @@ class IncidentCapture:
                 self._cpu_since = elapsed_ms
         else:
             self._cpu_since = None
-        if self._active is None and self.incidents < self.max_incidents and (
+            self._requires_rearm = False
+        if self._active is None and not self._requires_rearm and self.incidents < self.max_incidents and (
                 self._cpu_since is not None and
                 elapsed_ms-self._cpu_since >= self.min_duration_ms and
                 elapsed_ms >= self._next_allowed_ms):
@@ -95,6 +97,7 @@ class IncidentCapture:
     def _complete(self, seq: int, time: int, *, status: str) -> dict:
         current = self._active
         self._active = None
+        self._requires_rearm = True
         self.incidents += 1
         self._next_allowed_ms = time + self.cooldown_ms
         return {
