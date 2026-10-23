@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
 )
 
 from .monitor import ReadOnlyProbe, available_processes, save_snapshot
+from .investigation_worker import InvestigationWorker
 from .file_targets import InspectedFile, inspect_file, find_running_executable
 from .i18n import translate
 from .releases import (Release, NoOfficialRelease, check_latest_release, stage_release,
@@ -117,6 +118,11 @@ class UniversalWindow(QMainWindow):
         self._available_release = None
         self._maintenance_launching = False
         self._pending_update_stage = None
+        self._investigation_worker = None
+        self._investigation_retry = None
+        self._investigation_html: Path | None = None
+        self._investigation_result: dict | None = None
+        self._investigation_busy = False
         icon_dir = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent.parent))
         icon_file = icon_dir / "assets" / "blackbox.png"
         if icon_file.is_file():
@@ -387,6 +393,9 @@ class UniversalWindow(QMainWindow):
         self.stop_btn = _button("■  STOP OBSERVING")
         self.stop_btn.clicked.connect(self._stop)
         status.content.addWidget(self.stop_btn)
+        self.mark_problem_btn = _button("⚑  MARK PROBLEM")
+        self.mark_problem_btn.clicked.connect(self._mark_problem)
+        status.content.addWidget(self.mark_problem_btn)
         middle.addWidget(status, 4)
         content.addLayout(middle)
 
@@ -522,6 +531,24 @@ class UniversalWindow(QMainWindow):
         compare_button.clicked.connect(self._compare_sessions)
         controls.addWidget(compare_button)
         content.addLayout(controls)
+
+        investigation_actions = QHBoxLayout()
+        self.investigate_current_btn = _button("◈  INVESTIGATE SESSION", "primary")
+        self.investigate_current_btn.clicked.connect(
+            lambda: self._begin_investigation(choose=False))
+        investigation_actions.addWidget(self.investigate_current_btn)
+        self.investigate_saved_btn = _button("▣  INVESTIGATE SAVED…")
+        self.investigate_saved_btn.clicked.connect(
+            lambda: self._begin_investigation(choose=True))
+        investigation_actions.addWidget(self.investigate_saved_btn)
+        self.open_investigation_btn = _button("▣  OPEN INVESTIGATION HTML")
+        self.open_investigation_btn.setEnabled(False)
+        self.open_investigation_btn.clicked.connect(self._open_investigation_html)
+        investigation_actions.addWidget(self.open_investigation_btn)
+        content.addLayout(investigation_actions)
+        self.investigation_info = _label(
+            "Run a separate, read-only analysis of a completed session.", "caption")
+        content.addWidget(self.investigation_info)
         content.addWidget(_label(
             "Automatic SQLite, HTML and JSON session reports are saved "
             "when you press STOP. Manual JSON exports are optional. "
@@ -596,7 +623,8 @@ class UniversalWindow(QMainWindow):
                     self.live_badge, self.toolbar_state, self.clock,
                     self.session_location, self.process_count,
                     self.report_status_label, self.file_description,
-                    self.target_binding_title, self.target_binding_detail}
+                    self.target_binding_title, self.target_binding_detail,
+                    self.investigation_info}
         from PySide6.QtWidgets import QLabel
         for label in self.findChildren(QLabel):
             if label in changing or label.objectName() == "metricValue":
@@ -647,6 +675,7 @@ class UniversalWindow(QMainWindow):
             else "Check GitHub Releases when the app starts")
         self.chart.set_language(language)
         self._refresh_report_status()
+        self._refresh_investigation_info()
         self.lang_ru.setProperty("active", language == "RU")
         self.lang_en.setProperty("active", language == "EN")
         for button in (self.lang_ru, self.lang_en):
@@ -1015,6 +1044,10 @@ class UniversalWindow(QMainWindow):
                                 "Choose a running, accessible process first.")
             return
         self._set_report_status("recording")
+        self._investigation_result = None
+        self._investigation_html = None
+        self.open_investigation_btn.setEnabled(False)
+        self._refresh_investigation_info()
         self._update_all()
 
     def _stop(self) -> None:
@@ -1041,6 +1074,12 @@ class UniversalWindow(QMainWindow):
         running = self.probe.active
         self.start_btn.setEnabled(selected and not running)
         self.stop_btn.setEnabled(running)
+        self.mark_problem_btn.setEnabled(running and self.probe.last_elapsed_ms is not None)
+        self.investigate_current_btn.setEnabled(
+            not running and not self._investigation_busy and
+            self.probe.session_folder is not None and
+            (self.probe.session_folder / "session.sqlite3").is_file())
+        self.investigate_saved_btn.setEnabled(not self._investigation_busy)
         current = self.probe.last
         self.card_cpu.set_readout(
             f'{current["cpu_pct"]:.1f}%' if self.probe.history and current["cpu_pct"] is not None else "—",
@@ -1104,6 +1143,127 @@ class UniversalWindow(QMainWindow):
         # Translate the fixed phrase before appending the actual identifier.
         prefix = detail.rsplit(" · PID ", 1)[0]
         self.target_binding_detail.setText(self._t(prefix) + f" · PID {pid}")
+
+    def _mark_problem(self) -> None:
+        if not self.probe.active or self.probe.last_elapsed_ms is None:
+            return
+        note, ok = QInputDialog.getText(
+            self, self._t("Mark a problem"), self._t(
+                "What just went wrong? (optional note)"))
+        if not ok:
+            return
+        try:
+            self.probe.mark_problem(note)
+        except (RuntimeError, ValueError, ObserverError):
+            QMessageBox.warning(self, "BLACK.BOX", self._t(
+                "Unable to mark this point. The session was not changed."))
+            return
+        self._update_all()
+
+    def _begin_investigation(
+            self, choose: bool = False,
+            folder: Path | None = None,
+            interval: tuple[int, int] | None = None) -> None:
+        if self._investigation_worker is not None or self._investigation_busy:
+            return
+        if folder is None:
+            if choose:
+                name = QFileDialog.getExistingDirectory(
+                    self, self._t("Choose saved BLACK.BOX session"))
+                if not name:
+                    return
+                folder = Path(name)
+            else:
+                folder = self.probe.session_folder
+        if folder is None or self.probe.active and folder == self.probe.session_folder:
+            QMessageBox.information(self, "BLACK.BOX", self._t(
+                "Stop the recording or choose a completed saved session."))
+            return
+        self._investigation_busy = True
+        self._investigation_result = None
+        self._investigation_html = None
+        self._refresh_investigation_info()
+        self._investigation_worker = InvestigationWorker(
+            folder, self.language, interval=interval, parent=self)
+        self._investigation_worker.result_ready.connect(self._investigation_ready)
+        self._investigation_worker.finished.connect(self._investigation_finished)
+        self._investigation_worker.start()
+        self._update_all()
+
+    def _investigation_ready(self, payload: object, error: str) -> None:
+        if error:
+            self._investigation_result = {"error": error}
+            QMessageBox.warning(self, self._t("Investigation unavailable"),
+                                self._t("Analysis could not be completed.") +
+                                "\\n" + error)
+            return
+        if type(payload) is not dict:
+            return
+        if "long_session" in payload:
+            lo, hi, total = payload["long_session"]
+            question = self._t(
+                "This session is long. Analyze only the latest 4096 measurements?") + (
+                    f"\\n{total} samples · {lo}–{hi} ms")
+            if QMessageBox.question(
+                    self, "BLACK.BOX", question,
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No) == QMessageBox.StandardButton.Yes:
+                self._investigation_retry = (
+                    Path(payload["session"]), (lo, hi))
+            return
+        report = payload.get("result")
+        if type(report) is not dict:
+            return
+        self._investigation_result = report
+        self._investigation_html = Path(payload["html"])
+        self.open_investigation_btn.setEnabled(True)
+        self._navigate("reports")
+        self.report_preview.setPlainText(json.dumps(
+            {
+                "investigation_schema": report.get("schema_version"),
+                "findings": report.get("findings", [])[:32],
+                "warnings": report.get("warnings", []),
+                "coverage": report.get("coverage"),
+                "root_cause": "UNKNOWN / NOT PROVEN",
+                "saved_json": payload["json"],
+                "saved_html": payload["html"]
+            }, ensure_ascii=False, indent=2))
+        if Path(payload["session"]) == self.probe.session_folder:
+            self.probe.events.append({
+                "timestamp_utc": datetime.now().isoformat(timespec="seconds"),
+                "code": "INVESTIGATION_READY",
+                "detail": f"{len(report.get('findings', []))} findings · local analysis only"})
+            self._update_event_table()
+
+    def _investigation_finished(self) -> None:
+        self._investigation_worker = None
+        self._investigation_busy = False
+        self._refresh_investigation_info()
+        self._update_all()
+        if self._investigation_retry:
+            folder, interval = self._investigation_retry
+            self._investigation_retry = None
+            QTimer.singleShot(0, lambda: self._begin_investigation(
+                folder=folder, interval=interval))
+
+    def _refresh_investigation_info(self) -> None:
+        if self._investigation_busy:
+            status = "Investigating the saved session offline…"
+        elif self._investigation_result and "error" in self._investigation_result:
+            status = "Investigation failed; original session files are untouched."
+        elif self._investigation_result:
+            count = len(self._investigation_result.get("findings", []))
+            status = self._t("Investigation complete") + f" · {count} " + self._t("findings")
+            self.investigation_info.setText(status)
+            return
+        else:
+            status = "Run a separate, read-only analysis of a completed session."
+        self.investigation_info.setText(self._t(status))
+
+    def _open_investigation_html(self) -> None:
+        page = self._investigation_html
+        if page and page.is_file() and not page.is_symlink():
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(page)))
 
     def _update_event_table(self) -> None:
         events = list(reversed(self.probe.events))
@@ -1204,6 +1364,12 @@ class UniversalWindow(QMainWindow):
             "No cloud upload, tunneling, process injection or admin escalation.")
 
     def closeEvent(self, event) -> None:
+        if self._investigation_worker is not None and self._investigation_worker.isRunning():
+            event.ignore()
+            QMessageBox.information(
+                self, "BLACK.BOX", self._t(
+                    "Investigation is finishing; please close the window again afterwards."))
+            return
         if self._update_worker is not None and self._update_worker.isRunning():
             event.ignore()
             QMessageBox.information(
