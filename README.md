@@ -1,13 +1,13 @@
 # BLACK.BOX Universal
 
-**A focused, portable Windows process observer.**
+**A portable Windows process and application-file inspector.**
 
-[**Download for Windows x64 — v0.3.2**](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/releases/download/v0.3.2/BLACK.BOX-Universal-Windows.zip) · [Releases](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/releases) · [Русская версия](README.ru.md)
+[**Download for Windows x64 — v0.3.3**](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/releases/download/v0.3.3/BLACK.BOX-Universal-Windows.zip) · [Releases](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/releases) · [Русская версия](README.ru.md)
 
 [![Windows/Linux QA](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/actions/workflows/shell-qa.yml/badge.svg?branch=main)](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/actions/workflows/shell-qa.yml)
-![Version](https://img.shields.io/badge/version-0.3.2-40766c) ![Windows](https://img.shields.io/badge/platform-Windows%20x64-40766c) ![MIT](https://img.shields.io/badge/license-MIT-40766c)
+![Version](https://img.shields.io/badge/version-0.3.3-40766c) ![Windows](https://img.shields.io/badge/platform-Windows%20x64-40766c) ![MIT](https://img.shields.io/badge/license-MIT-40766c)
 
-BLACK.BOX Universal monitors **one process you select**, captures operating-system measurements, and saves sessions as local SQLite, JSON, and HTML files. It does not inject code, modify the target program, or require a service, account, cloud server, subscription, or separately installed Python.
+BLACK.BOX Universal lets you **select a running process or choose an application file**. It records operating-system measurements from a running process and saves sessions as local SQLite, JSON, and HTML files. File selection itself only reads file metadata. It does not inject code, modify the target program, or require a service, account, cloud server, subscription, or separately installed Python.
 
 > **Important:** BLACK.BOX provides observational evidence, not proof of an application's internal root cause. High CPU, rising memory, or a process exiting do not, on their own, establish why it failed.
 
@@ -15,8 +15,8 @@ BLACK.BOX Universal monitors **one process you select**, captures operating-syst
 
 1. Download the [latest Windows ZIP](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/releases/latest) and **extract it completely** to a writable directory.
 2. Double-click **`BLACK.BOX-Universal.exe`**.
-3. Open **Processes**, find a running application (for example, Notepad), select its row, then click **Attach**.
-4. Go to **Overview**, click **Start**, interact with the selected application, then click **Stop**.
+3. Open **Processes**. Either select a running application from the list and click **Attach**, or click **Select Application File** to choose an EXE (or another file).
+4. If you chose an EXE, click **Find Running EXE** to attach to an already running instance, or **Launch Selected EXE** and explicitly approve starting the file. Then go to **Overview**, click **Start**, interact with the application, and click **Stop**.
 5. In **Reports**, examine the recorded data, open the saved HTML, export a snapshot, or compare two sessions.
 
 **Why two EXE files?**
@@ -33,12 +33,20 @@ Keep the entire `_internal` folder and the other extracted files. The main EXE i
 | Tab | Capabilities |
 | --- | --- |
 | **Overview** | CPU usage, RSS for the **selected process**, other accessible counters, graphs, Start/Stop, recording status. |
-| **Processes** | Find and filter accessible running processes by name or PID; attach only after an explicit selection. |
+| **Processes** | Select by name/PID **or choose an application file**. Match a running EXE by its full path, or launch a selected EXE only after explicit confirmation. |
 | **Event Log** | Local observation messages; session start/stop events are persisted in SQLite. |
 | **Reports** | Current snapshot, `report.json`, readable offline `report.html`, manual export and session comparison. |
 | **Settings** | RU/EN interface, 1/2/5-second sampling intervals, update checks, desktop shortcut, feedback and removal. |
 
 Some counters are inaccessible for protected processes or unavailable on a particular system. Missing values are displayed as **unknown**, not misleading zeros. RSS describes the selected process; it is **not** the summed memory usage of a complete process tree.
+
+### What happens when I select a file?
+
+- **EXE:** BLACK.BOX reads file metadata and PE architecture, and can find a currently running instance **by exact executable path**, not a guessed filename. You can also choose to start the EXE yourself; starting it from BLACK.BOX requires a separate confirmation.
+- **DLL, SYS, MSI, COM, BAT, CMD, PS1, PY, JAR, and other files:** display **read-only metadata** (type, size, modification time and, where possible, PE architecture). These are not stand-alone running processes and BLACK.BOX does not silently run them.
+- A SHA-256 checksum is calculated **locally** for files up to 16 MiB; larger files are not hashed in the GUI. Choosing or inspecting any file never executes it.
+
+**File inspection is not malware scanning, static code analysis, or active application debugging.** Live CPU/RSS/I/O monitoring requires a running, accessible process.
 
 ### Where does my data go?
 
@@ -66,7 +74,7 @@ See [Updates and maintenance](docs/UPDATES_FEEDBACK_UNINSTALL.md).
 
 BLACK.BOX is **not** a PC cleaner, antivirus, automatic repair utility, crash-dump analyzer, or debugger of arbitrary third-party code. This build does not collect Windows ETW traces or internal call stacks. OS counters cannot prove internal program faults.
 
-**v0.3.2 automated QA:** [GitHub Actions run #39872624116](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/actions/runs/39872624116) passed **53 tests on Windows and 53 on Linux**, built the Windows executable, and passed frozen-EXE startup/smoke checks for commit [`6c8d9478`](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/commit/6c8d94785492e4373a80720b7812871b94856241). Manual clean-Windows, update/rollback, antivirus and code-signing acceptance are **not established by these tests**. Distributed EXEs are currently unsigned; third-party package license notices also require final review.
+**Baseline QA for v0.3.2:** [GitHub Actions run #39872624116](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/actions/runs/39872624116) passed **new file-selection and existing process tests on Windows and Linux**, built the Windows executable, and passed frozen-EXE startup/smoke checks for commit [`6c8d9478`](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/commit/6c8d94785492e4373a80720b7812871b94856241). The newer v0.3.3 source, PE file picker, and packaged executable are subject to [current main CI](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/actions?query=branch%3Amain). Manual clean-Windows, update/rollback, antivirus and code-signing acceptance are **not established by these tests**. Distributed EXEs are currently unsigned; third-party package license notices also require final review.
 
 ## Developing from source
 
@@ -102,7 +110,7 @@ It also supports `export`. The desktop GUI is the normal user interface.
 
 ```text
 app.py                       GUI entry point and smoke test
-blackbox_universal/          Qt desktop shell, observer, updates, maintenance
+blackbox_universal/          Qt shell, file picker, observer, updates, maintenance
 src/blackbox_core/           Read-only process sampling, SQLite, reports, CLI
 tests/                      Automated tests
 tools/                      Windows icon creation and EXE resource verification

@@ -146,7 +146,7 @@ jobs:
           retention-days: 14
 
 
-# Independent v0.3.2 release is published after Windows/Linux tests.
+# Release v0.3.3 is published after Windows/Linux tests and Windows EXE smoke.
   publish-updater-test:
     name: Publish independent BLACK.BOX release
     needs: [linux-tests, windows-portable]
@@ -163,14 +163,14 @@ jobs:
         with:
           name: BLACKBOX-INDEPENDENT-WINDOWS-QA
           path: verified-portable
-      - name: Publish verified standalone v0.3.2
+      - name: Publish verified file-picker v0.3.3
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           VERSION="$(python -c 'from blackbox_universal import __version__; print(__version__)')"
-          if [[ "$VERSION" != "0.3.2" ]]; then
+          if [[ "$VERSION" != "0.3.3" ]]; then
             echo "No owner-authorized test release for v$VERSION"
             exit 0
           fi
@@ -183,23 +183,24 @@ jobs:
           fi
           sha256sum "$ZIP" > "$ZIP.sha256"
           cat > release-notes.md <<'EOF'
-          BLACK.BOX Universal v0.3.2 — independent Windows desktop release.
+          BLACK.BOX Universal v0.3.3 — Windows process and file picker.
 
-          Removed external platform adapters, integration workers and unused setup.
-          This is a local, independent observer of user-selected Windows processes.
-          No separately installed Python, service or account is required.
-          Portable ZIP includes executable, libraries and maintenance helper.
-          Existing 0.3.0 and 0.3.1 installs can update via Check Updates.
+          Select an application file directly from the Processes page. Read
+          offline metadata for EXE, DLL, MSI, SYS, COM, BAT, CMD, PS1, PY,
+          JAR and other files. A valid EXE can be matched by its full running
+          process path; user-confirmed EXE launch is optional and NEVER automatic.
+          Only running processes support CPU/RSS/I/O observation.
+          SHA-256 is calculated locally for selected files up to 16 MiB.
+          No automatic script, MSI or DLL execution is implemented.
 
-          The program records CPU, RSS, process counts, local events, and
-          durable SQLite/JSON/HTML reports. It cannot prove the internal cause
-          of arbitrary external application failures.
-          End-user upgrade/rollback, antivirus and dependency licensing
-          acceptance still require manual validation.
+          Portable standalone Windows app with no external platform runtime.
+          The prior process monitoring, SQLite/JSON/HTML, 5 pages, Russian/English
+          UI and maintenance remain. Manual end-user update/antivirus/AV and
+          code-signing checks are distinct from CI.
           EOF
           gh release create "$TAG" "$ZIP" "$ZIP.sha256" \
             --target "$GITHUB_SHA" \
-            --title "BLACK.BOX Universal v0.3.2 — independent Windows app" \
+            --title "BLACK.BOX Universal v0.3.3 — file selection and EXE attach" \
             --notes-file release-notes.md --latest
           echo "Published $TAG from $GITHUB_SHA after Windows + Linux QA"
 
