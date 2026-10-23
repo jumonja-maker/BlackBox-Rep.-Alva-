@@ -14,6 +14,7 @@ import time
 from typing import Any
 
 from blackbox_core.actions import ActionCycle, ActionError
+from blackbox_core.incidents import IncidentCapture
 from blackbox_core.contracts import ObserverError, event
 from blackbox_core.probe import PsutilProbe, list_processes
 from blackbox_core.report import write_report
@@ -71,6 +72,7 @@ class ReadOnlyProbe:
         self.last_elapsed_ms: int | None = None
         self.events: deque[dict] = deque(maxlen=300)
         self.actions = ActionCycle()
+        self.incident_capture: IncidentCapture | None = None
         self._recording_origin_ns: int | None = None
 
     def _event(self, code: str, detail: str = "") -> None:
@@ -109,6 +111,7 @@ class ReadOnlyProbe:
         self.last_elapsed_ms = None
         self.events.clear()
         self.actions = ActionCycle()
+        self.incident_capture = None
         self._recording_origin_ns = None
         self._event("PROCESS_SELECTED", f"{self.name} · PID {pid}")
 
@@ -139,6 +142,7 @@ class ReadOnlyProbe:
         self.last_elapsed_ms = None
         self.events.clear()
         self.actions = ActionCycle()
+        self.incident_capture = None
         # PsutilProbe computes each elapsed_ms from its own monotonic origin.
         self._recording_origin_ns = int(core.start * 1_000_000_000)
         self.active = True
@@ -154,6 +158,15 @@ class ReadOnlyProbe:
             "ACCESS_DENIED": "ACCESS_DENIED", "SAMPLE_UNAVAILABLE": "SAMPLE_UNAVAILABLE",
             "STORAGE_ERROR": "STORAGE_ERROR",
         }.get(reason, "INTERRUPTED")
+        # Close a partially captured CPU episode as incomplete, not successful.
+        if self.incident_capture is not None:
+            for finding in self.incident_capture.stop(
+                    elapsed_ms=self.last_elapsed_ms or 0,
+                    sample_seq=self.total_samples or 1):
+                try:
+                    self._store.write_event(finding)
+                except ObserverError:
+                    self.last_error = "STORAGE_ERROR"
         # Preserve an explicit incomplete interval, not a fictional complete action.
         try:
             self.actions.abort(self._persist_action,
@@ -187,6 +200,24 @@ class ReadOnlyProbe:
         try:
             sample = self._core.sample()
             self._store.write_sample(sample)
+            if self.incident_capture is not None:
+                try:
+                    boundaries = self.incident_capture.observe(
+                        elapsed_ms=sample.elapsed_ms,
+                        sample_seq=self.total_samples + 1,
+                        cpu_percent=sample.cpu_percent)
+                    for boundary in boundaries:
+                        try:
+                            self._store.write_event(boundary)
+                            self.events.append({
+                                "timestamp_utc": utc_stamp(),
+                                "code": boundary["code"],
+                                "detail": "Automatic external-counter observation; no proven cause"})
+                        except ObserverError:
+                            # A noncritical sensor failure cannot abort base samples.
+                            self.last_error = "INCIDENT_STORAGE_ERROR"
+                except ValueError:
+                    self.last_error = "INCIDENT_SENSOR_UNAVAILABLE"
             self.actions.advance(self._persist_action)
             record = {
                 "at": utc_stamp(),
@@ -228,6 +259,22 @@ class ReadOnlyProbe:
         self._store.write_event(data)
         self.events.append({"timestamp_utc": utc_stamp(), "code": data["event"],
                             "detail": f'{data["session_elapsed_ms"]} ms · action {data["action_id"][:8]}'})
+
+    def set_incident_capture(self, enabled: bool) -> None:
+        """Explicit, local-only opt in; never enables system tracing or dumps."""
+        if type(enabled) is not bool or not self.active or self._store is None:
+            raise RuntimeError("INCIDENT_CAPTURE_REQUIRES_RECORDING")
+        if enabled:
+            if self.incident_capture is None:
+                self.incident_capture = IncidentCapture()
+                self._event("INCIDENT_CAPTURE_ENABLED", "CPU + sampling gap only")
+        elif self.incident_capture is not None:
+            for boundary in self.incident_capture.stop(
+                    elapsed_ms=self.last_elapsed_ms or 0,
+                    sample_seq=self.total_samples or 1):
+                self._store.write_event(boundary)
+            self.incident_capture = None
+            self._event("INCIDENT_CAPTURE_DISABLED")
 
     def prepare_action(self, *, baseline_ms: int | None = None) -> dict:
         if not self.active or self._core is None:
