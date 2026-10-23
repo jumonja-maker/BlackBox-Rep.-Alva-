@@ -77,7 +77,7 @@ Status rules: **PASS** needs actual user-facing integration, automated tests and
 | M-063 | PARTIAL | src/blackbox_core/detailed_capture.py; tests/test_bbdi_detailed_slice.py | Thread/child/size limits; 8h performance not verified |
 | M-064 | NOT-IMPLEMENTED | — | Required full capability not present; see original order |
 | M-065 | NOT-IMPLEMENTED | — | Required full capability not present; see original order |
-| M-066 | PARTIAL | blackbox_universal/base_sample_worker.py; src/blackbox_core/sampling_health.py; src/blackbox_core/event_journal.py; tests/test_bbdi_monotonic_cadence.py; tests/test_bbdi_sampling_health.py | Bounded event FIFO, Qt sampling worker, real adjacent-snapshot spacing and worker timing, but still no OS missed-sample attestation, unified owner, deadlines, hard quota or full async stop |
+| M-066 | PARTIAL | blackbox_universal/base_sample_worker.py; blackbox_universal/report_worker.py; blackbox_universal/window.py; src/blackbox_core/event_journal.py; tests/test_bbdi_report_worker.py | Qt periodic sampling, event INSERT and JSON/HTML report run in workers; original schema1 stop/finish and synchronous command acknowledgements can still block Qt, no hard deadlines |
 | M-067 | NOT-IMPLEMENTED | — | Required full capability not present; see original order |
 | M-068 | NOT-IMPLEMENTED | — | Required full capability not present; see original order |
 | M-069 | NOT-IMPLEMENTED | — | Required full capability not present; see original order |
@@ -141,6 +141,12 @@ Status rules: **PASS** needs actual user-facing integration, automated tests and
 | FIX-11 | NOT-RUN | — | No independent full-scenario Windows/EXE acceptance evidence for this exact item |
 | FIX-12 | NOT-RUN | — | No independent full-scenario Windows/EXE acceptance evidence for this exact item |
 
+## Qt background report generation (still PARTIAL)
+
+- `blackbox_universal/report_worker.py`, `blackbox_universal/monitor.py` and `window.py`: after the **original Qt-owned SessionStore** is safely finished and closed, generate JSON/HTML on an owned QThread with its own read-only SQLite connection; never pass live owner SQLite connections into workers.
+- UI prevents reattach/restart, explicit action entry, current-session Investigation and report opening while pending; window close defers instead of destroying live workers. Report failures remain distinct from session result; direct CLI synchronous Stop unchanged.
+- `tests/test_bbdi_report_worker.py` plus compatibility test updates. See `docs/BB_DI_001_ASYNC_REPORT_OWNERSHIP.md`: SQLite session finish and queue-flush still occur on GUI owner and can block, so **M-027/M-066 stay PARTIAL**, not accepted.
+
 ## Monotonic sample spacing and worker timing (still PARTIAL)
 
 - `MonotonicSampleCadence` now checks actual elapsed time **between accepted snapshots** against the requested interval held when each worker was created, excludes interval-change boundaries, and durably saves source-qualified `EXTENDED_MONOTONIC_SAMPLE_SPACING` only when spacing exceeds a conservative threshold. No numeric OS-missed-sample count is inferred.
@@ -188,7 +194,7 @@ Status rules: **PASS** needs actual user-facing integration, automated tests and
 ## Release blockers / next implementation order
 
 1. Complete schema2 contracts, provenance/status/capability vocabulary, monotonic↔UTC mapping and V1 read-only/V2 readers with atomic lifecycle.
-2. Finish fully async UI actions/acknowledgements, owner-managed session writer across samples/events/finish and reports, stop/join OS deadlines and resource quotas. Observed Qt busy callbacks, monotonic adjacent snapshot spacing and bounded worker timing are recorded, but the count of OS missed samples and Qt-coalesced callbacks remains unknown.
+2. Finish fully async UI actions/acknowledgements, owner-managed session writer across samples/events/finish, stop/join OS deadlines and resource quotas. JSON/HTML report generation now runs off Qt after original schema1 close; original session finish and journal barriers still run synchronously. Observed Qt busy callbacks, monotonic adjacent snapshot spacing and bounded worker timing are recorded, but the count of OS missed samples and Qt-coalesced callbacks remains unknown.
 3. Extend the **new bounded adjacent-snapshot TID CPU%** to selected full-session intervals, per-field quality, tree/history, charts, CSV and compare. Existing table/HTML/JSON only covers a recent bounded window; TID birth identity is unverified.
 4. Add real bounded Windows HWND responsiveness and WCT with positive/negative Windows fixtures and explicit unsupported/denied states; opt-in ETW where capable.
 5. Build complete evidence-led Investigation/compare/timeline/experiment history; 8h Standard, 1h Detailed, 12 fixtures, AC-01..36.
