@@ -150,6 +150,12 @@ class QtEventJournalTests(unittest.TestCase):
                 window.probe.actions.cool_down_ms = 0
                 window.probe.tick()
                 window._stop()
+                for _ in range(500):
+                    app.processEvents()
+                    if window._report_worker is None:
+                        break
+                    __import__("time").sleep(0.01)
+                self.assertIsNone(window._report_worker)
                 folder = window.probe.session_folder
                 events = saved_events(folder)
                 codes = [e.get("event") for e in events
@@ -167,6 +173,11 @@ class QtEventJournalTests(unittest.TestCase):
                 self.assertTrue((folder / "report.html").is_file())
                 app.processEvents()
             finally:
+                for _ in range(500):
+                    app.processEvents()
+                    if window._report_worker is None:
+                        break
+                    __import__("time").sleep(0.01)
                 window.close()
 
 
