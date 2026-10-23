@@ -1218,13 +1218,12 @@ class UniversalWindow(QMainWindow):
         if type(payload) is not dict:
             self._base_sample_error = "SAMPLE_UNAVAILABLE"
             return
-        if (payload.get("folder") != str(self.probe.session_folder)
-                or self._pending_base_stop == "UI_CLOSED" and self.probe.pid is None):
+        if payload.get("folder") != str(self.probe.session_folder):
             self._base_sample_error = "INVALID_DATA"
             return
         try:
             self.probe.accept_background_sample(payload["sample"], payload["seq"])
-        except (ObserverError, KeyError, TypeError, ValueError):
+        except (ObserverError, ActionError, KeyError, TypeError, ValueError):
             self._base_sample_error = "STORAGE_ERROR"
         self._update_all()
 
@@ -1237,8 +1236,9 @@ class UniversalWindow(QMainWindow):
         self._base_sample_error = None
         stop_reason = self._pending_base_stop
         if code:
-            # Worker error is not a normal user stop; persist an explicit
-            # lifecycle cause after its SQLite connection has been closed.
+            # Failed samples are preserved as observer_error evidence just as
+            # in the former synchronous tick path.
+            self.probe.record_background_failure(code)
             self._complete_base_stop(
                 code if code in ("PROCESS_EXITED", "PID_REUSED",
                                  "ACCESS_DENIED", "SAMPLE_UNAVAILABLE",
