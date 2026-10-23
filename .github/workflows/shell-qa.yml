@@ -146,7 +146,7 @@ jobs:
           retention-days: 14
 
 
-# Release v0.3.3 is published after Windows/Linux tests and Windows EXE smoke.
+# Release v0.3.4 is published after Windows/Linux tests and Windows EXE smoke.
   publish-updater-test:
     name: Publish independent BLACK.BOX release
     needs: [linux-tests, windows-portable]
@@ -163,14 +163,14 @@ jobs:
         with:
           name: BLACKBOX-INDEPENDENT-WINDOWS-QA
           path: verified-portable
-      - name: Publish verified file-picker v0.3.3
+      - name: Publish verified file-picker v0.3.4
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           VERSION="$(python -c 'from blackbox_universal import __version__; print(__version__)')"
-          if [[ "$VERSION" != "0.3.3" ]]; then
+          if [[ "$VERSION" != "0.3.4" ]]; then
             echo "No owner-authorized test release for v$VERSION"
             exit 0
           fi
@@ -183,24 +183,22 @@ jobs:
           fi
           sha256sum "$ZIP" > "$ZIP.sha256"
           cat > release-notes.md <<'EOF'
-          BLACK.BOX Universal v0.3.3 — Windows process and file picker.
+          BLACK.BOX Universal v0.3.4 — visible process attachment.
 
-          Select an application file directly from the Processes page. Read
-          offline metadata for EXE, DLL, MSI, SYS, COM, BAT, CMD, PS1, PY,
-          JAR and other files. A valid EXE can be matched by its full running
-          process path; user-confirmed EXE launch is optional and NEVER automatic.
-          Only running processes support CPU/RSS/I/O observation.
-          SHA-256 is calculated locally for selected files up to 16 MiB.
-          No automatic script, MSI or DLL execution is implemented.
-
-          Portable standalone Windows app with no external platform runtime.
-          The prior process monitoring, SQLite/JSON/HTML, 5 pages, Russian/English
-          UI and maintenance remain. Manual end-user update/antivirus/AV and
-          code-signing checks are distinct from CI.
+          The Current Session panel now confirms which exact process instance
+          (PID) was selected, changes its message when live observation starts,
+          and shows whether observation ended and a report was saved.
+          Russian and English are both supported. Status is hidden when no
+          running process has been explicitly selected.
+          Preserves direct EXE file selection, safe offline file metadata,
+          standalone monitoring, SQLite/JSON/HTML reports and verified updater.
+          No external diagnostic runtime or hidden application launch.
+          Manual real-Windows UI/DPI, update/rollback and AV acceptance remain
+          separate from automated tests.
           EOF
           gh release create "$TAG" "$ZIP" "$ZIP.sha256" \
             --target "$GITHUB_SHA" \
-            --title "BLACK.BOX Universal v0.3.3 — file selection and EXE attach" \
+            --title "BLACK.BOX Universal v0.3.4 — selected instance status" \
             --notes-file release-notes.md --latest
           echo "Published $TAG from $GITHUB_SHA after Windows + Linux QA"
 

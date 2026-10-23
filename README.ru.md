@@ -2,10 +2,10 @@
 
 **Портативная программа мониторинга процессов и просмотра файлов приложений Windows.**
 
-[**Скачать для Windows x64 — v0.3.3**](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/releases/download/v0.3.3/BLACK.BOX-Universal-Windows.zip) · [Все версии](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/releases) · [English README](README.md)
+[**Скачать для Windows x64 — v0.3.4**](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/releases/download/v0.3.4/BLACK.BOX-Universal-Windows.zip) · [Все версии](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/releases) · [English README](README.md)
 
 [![Проверка Windows/Linux](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/actions/workflows/shell-qa.yml/badge.svg?branch=main)](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/actions/workflows/shell-qa.yml)
-![Версия](https://img.shields.io/badge/version-0.3.3-40766c) ![Windows](https://img.shields.io/badge/platform-Windows%20x64-40766c) ![MIT](https://img.shields.io/badge/license-MIT-40766c)
+![Версия](https://img.shields.io/badge/version-0.3.4-40766c) ![Windows](https://img.shields.io/badge/platform-Windows%20x64-40766c) ![MIT](https://img.shields.io/badge/license-MIT-40766c)
 
 BLACK.BOX Universal позволяет **выбрать запущенный процесс либо указать файл приложения**. У работающего процесса программа измеряет системные показатели и сохраняет сеансы в SQLite, JSON и HTML; выбор файла сам по себе ничего не запускает. Программа не изменяет наблюдаемый процесс, не внедряется в его код и не требует регистрации, подписки, собственного сервера, фоновой службы или отдельной установки Python.
 
@@ -32,7 +32,7 @@ BLACK.BOX Universal позволяет **выбрать запущенный п�
 
 | Вкладка | Возможности |
 | --- | --- |
-| **Обзор** | Использование CPU, RSS **выбранного процесса**, доступные счётчики, графики, Start/Stop, состояние записи. |
+| **Обзор** | CPU, RSS, графики, Start/Stop и подтверждение привязки к выбранному PID (подключён, наблюдается, остановлен). |
 | **Процессы** | Поиск по имени/PID или **выбор файла программы**, поиск работающего EXE по точному пути, запуск EXE только по явному подтверждению. |
 | **Журнал событий** | Сообщения наблюдателя; события начала и остановки сеанса сохраняются также в SQLite. |
 | **Отчёты** | Текущие измерения, `report.json`, читаемый без сети `report.html`, экспорт и сравнение сеансов. |
@@ -74,9 +74,9 @@ BLACK.BOX Universal позволяет **выбрать запущенный п�
 
 BLACK.BOX **не** является очистителем Windows, антивирусом, автоматическим ремонтником, анализатором дампов памяти или отладчиком чужого кода. Эта версия не собирает Windows ETW-трассы и стеки внутренних вызовов сторонних приложений. Только по CPU/RAM/I/O нельзя достоверно определить неисправный участок программы.
 
-### Насколько проверена версия 0.3.3?
+### Насколько проверена версия 0.3.4?
 
-Для **предыдущей версии 0.3.2**, коммита [`6c8d9478`](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/commit/6c8d94785492e4373a80720b7812871b94856241) [GitHub Actions #39872624116](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/actions/runs/39872624116) успешно выполнил **53 теста на Windows и 53 на Linux**, сборку EXE и проверку запуска. Новая версия 0.3.3 с выбором файлов проверяется отдельно через [актуальные GitHub Actions](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/actions?query=branch%3Amain).
+Для **предыдущей версии 0.3.2**, коммита [`6c8d9478`](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/commit/6c8d94785492e4373a80720b7812871b94856241) [GitHub Actions #39872624116](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/actions/runs/39872624116) успешно выполнил **53 теста на Windows и 53 на Linux**, сборку EXE и проверку запуска. Новая версия 0.3.4 с выбором файлов проверяется отдельно через [актуальные GitHub Actions](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/actions?query=branch%3Amain).
 
 Эти проверки **не заменяют** ручные испытания на обычной Windows: установку обновления и откат, совместимость с антивирусами, репутацию неподписанного EXE и аудит лицензионных уведомлений. Исполняемые файлы пока не имеют цифровой подписи.
 
