@@ -150,6 +150,18 @@ class DetailedCapture:
             return not self.thread.is_alive()
         return True
 
+    def _storage_bytes(self) -> int:
+        """Include live WAL and shared-memory sidecars in the disk budget.
+
+        This is a bounded check at each sample boundary, not a hard
+        per-write filesystem quota; one in-flight transaction may exceed it.
+        """
+        return sum(p.stat().st_size for p in (
+            self.path,
+            self.path.with_name(self.path.name + "-wal"),
+            self.path.with_name(self.path.name + "-shm"),
+        ) if p.exists())
+
     def _run(self) -> None:
         conn = None
         final = "STOPPED"
@@ -197,7 +209,7 @@ class DetailedCapture:
             conn.commit()
             self.status = "RUNNING"
             while not self.stop_event.is_set():
-                if self.samples >= self.max_samples or self.path.stat().st_size >= self.max_bytes:
+                if self.samples >= self.max_samples or self._storage_bytes() >= self.max_bytes:
                     final = "CAPTURE_LIMIT_REACHED"
                     break
                 try:
