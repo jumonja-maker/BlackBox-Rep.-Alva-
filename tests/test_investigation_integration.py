@@ -111,7 +111,15 @@ class InvestigationQtTests(unittest.TestCase):
         self.window._timer.stop()
 
     def tearDown(self):
+        for _ in range(500):
+            self.app.processEvents()
+            if (self.window._report_worker is None and
+                    self.window._base_sample_worker is None):
+                break
+            __import__("time").sleep(0.01)
+        self.assertIsNone(self.window._report_worker)
         self.window.close()
+        self.app.processEvents()
         self.root_patcher.stop()
         self.temp.cleanup()
 
