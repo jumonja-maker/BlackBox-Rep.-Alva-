@@ -10,6 +10,7 @@ from pathlib import Path
 import sqlite3
 from .contracts import ObserverError, bounded
 from .experiments import ExperimentAccumulator
+from .detailed_capture import summarize_detail
 from .storage import _open_ro
 
 
@@ -84,6 +85,7 @@ def summarize(folder: Path) -> dict:
                 "invalid_action_markers": malformed_actions,
                 "action_evidence": "RECORDED_USER_COMMAND_NOT_ATTESTED",
                 "experiment_summary": experiments.result(),
+                "detailed_capture": summarize_detail(folder),
                 "automatic_incident_count": incident_count,
                 "automatic_incident_preview": incident_preview,
                 "automatic_incidents_omitted": max(0, incident_count-len(incident_preview)),
@@ -128,6 +130,21 @@ def _human_html(report: dict) -> str:
         "UNKNOWN": "Unknown status / Статус неизвестен",
     }
     errors = report.get("observation_errors", {})
+    deep = report.get("detailed_capture")
+    detail_html = (
+        "<p>Detailed mode not enabled / Углублённый режим не включён.</p>"
+        if not isinstance(deep, dict) else
+        "<p>Independent v2 sidecar, read-only external counters. "
+        "No stacks, no wait chains, no OS-authenticated root cause.</p>"
+        "<div class='grid'>" +
+        metric("Detailed samples / Отсчётов", deep.get("samples")) +
+        metric("Thread records / Потоки", deep.get("thread_records")) +
+        metric("Child records / Потомки", deep.get("child_records")) +
+        metric("Peak Private Bytes", deep.get("peak_private_bytes"), "bytes") +
+        metric("Peak handles / Дескрипторы", deep.get("peak_handles")) +
+        metric("Sensor errors / Ошибки датчика", deep.get("sensor_errors")) +
+        "</div><p>Status: " + safe(deep.get("status")) + "</p>"
+    )
     incidents = report.get("automatic_incident_preview", [])
     incidents_html = "".join(
         "<tr><td>" + safe(e.get("trigger_code")) + "</td><td>" +
@@ -202,6 +219,8 @@ def _human_html(report: dict) -> str:
         "<th>Median ms</th><th>p95 ms</th><th>MAD ms</th>"
         "<th>Coverage / Warnings</th></tr></thead><tbody>" +
         experiment_html + "</tbody></table>"
+        "<h2>Углублённые данные / Detailed process capture (opt-in)</h2>" +
+        detail_html +
         "<h2>Автоинциденты / Automatic incidents (opt-in)</h2>"
         "<p>Stored external-counter observations only. CPU threshold and "
         "sampling gaps are not evidence of a Windows hang or internal defect."
