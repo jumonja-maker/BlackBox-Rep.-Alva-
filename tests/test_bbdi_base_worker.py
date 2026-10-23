@@ -7,6 +7,7 @@ SQLite while a worker still owns the transaction.
 from __future__ import annotations
 
 from contextlib import closing
+import json
 import os
 from pathlib import Path
 import sqlite3
@@ -150,6 +151,11 @@ class BackgroundQtTests(unittest.TestCase):
             self.assertEqual(db.execute(
                 "SELECT exit_code FROM metadata").fetchone()[0], "PROCESS_EXITED")
             self.assertEqual(db.execute("SELECT count(*) FROM samples").fetchone()[0], 0)
+            errors = [json.loads(row[0]) for row in db.execute(
+                "SELECT data FROM events") if json.loads(row[0]).get("kind") == "observer_error"]
+            self.assertEqual(len(errors), 1)
+            self.assertEqual(errors[0]["code"], "PROCESS_EXITED")
+            self.assertEqual(errors[0]["stage"], "sample")
 
     def test_window_close_does_not_destroy_inflight_sqlite_writer(self):
         entered, release = Event(), Event()
