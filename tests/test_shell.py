@@ -136,6 +136,46 @@ class QtShellTests(unittest.TestCase):
                 if key == "processes":
                     self.assertFalse(page.findChildren(QFrame, "notice"))
 
+    def test_selected_process_acknowledgement_matches_observation_state(self):
+        # The right side of Current Session must never claim attachment to
+        # a target before the user explicitly selects one.
+        self.window._set_language("RU")
+        self.window._update_all()
+        self.assertTrue(self.window.target_binding.isHidden())
+        self.assertEqual(self.window.target_binding_title.text(), "")
+
+        self.window.probe.attach(os.getpid())
+        self.window._update_all()
+        self.assertFalse(self.window.target_binding.isHidden())
+        self.assertEqual(self.window.target_binding_title.text(),
+                         "✓  ПРОЦЕСС ПРИВЯЗАН")
+        self.assertIn(str(os.getpid()), self.window.target_binding_detail.text())
+        self.assertIn("Готов к наблюдению",
+                      self.window.target_binding_detail.text())
+        self.assertFalse(self.window.target_binding_title.wordWrap())
+
+        self.window._start()
+        self.assertEqual(self.window.target_binding_title.text(),
+                         "●  НАБЛЮДЕНИЕ АКТИВНО")
+        self.assertIn("Запись наблюдений",
+                      self.window.target_binding_detail.text())
+        self.window._tick()
+        self.window._stop()
+        self.assertEqual(self.window.target_binding_title.text(),
+                         "✓  СЕАНС ЗАВЕРШЁН")
+        self.assertIn("Отчёт сохранён", self.window.target_binding_detail.text())
+
+        self.window._set_language("EN")
+        self.assertEqual(self.window.target_binding_title.text(),
+                         "✓  SESSION FINISHED")
+        self.assertIn("Report saved", self.window.target_binding_detail.text())
+
+        # A new target discards the old session's completion confirmation.
+        self.window.probe.attach(os.getpid())
+        self.window._update_all()
+        self.assertEqual(self.window.target_binding_title.text(),
+                         "✓  PROCESS ATTACHED")
+
     def test_real_process_picker_filter_and_attach_workflow(self):
         target = {"pid": os.getpid(),
                   "name": psutil.Process().name(),
