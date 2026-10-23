@@ -104,3 +104,36 @@ class SessionStore:
 
     def close(self) -> None:
         self.db.close()
+
+
+def write_sample_from_worker(folder: Path, sample: Sample) -> int:
+    """Append one schema-1 sample with an independent worker-owned connection.
+
+    The original SessionStore connection remains in the Qt thread for user
+    commands and lifecycle events. This single bounded transaction never
+    changes schema 1, creates a new database or uses that GUI connection.
+    """
+    path = Path(folder) / "session.sqlite3"
+    if (Path(folder).is_symlink() or path.is_symlink() or not path.is_file()):
+        raise ObserverError("STORAGE_ERROR", "storage")
+    values = sample.as_dict()
+    fields = ("elapsed_ms", "rss_bytes", "cpu_percent", "num_threads",
+              "read_bytes", "write_bytes", "children_count")
+    try:
+        with sqlite3.connect(path.resolve().as_uri() + "?mode=rw",
+                             uri=True, timeout=2) as db:
+            db.execute("BEGIN IMMEDIATE")
+            metadata = db.execute(
+                "SELECT schema_version, exit_code FROM metadata LIMIT 1"
+            ).fetchone()
+            if metadata != (1, None):
+                raise ObserverError("STORAGE_ERROR", "storage")
+            result = db.execute(
+                "INSERT INTO samples VALUES "
+                "((SELECT COALESCE(MAX(seq),0)+1 FROM samples),?,?,?,?,?,?,?)",
+                tuple(values[key] for key in fields))
+            seq = result.lastrowid
+            db.commit()
+            return seq
+    except sqlite3.Error:
+        raise ObserverError("STORAGE_ERROR", "storage") from None
