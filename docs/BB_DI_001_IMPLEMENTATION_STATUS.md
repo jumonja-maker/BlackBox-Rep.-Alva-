@@ -77,7 +77,7 @@ Status rules: **PASS** needs actual user-facing integration, automated tests and
 | M-063 | PARTIAL | src/blackbox_core/detailed_capture.py; tests/test_bbdi_detailed_slice.py | Thread/child/size limits; 8h performance not verified |
 | M-064 | NOT-IMPLEMENTED | — | Required full capability not present; see original order |
 | M-065 | NOT-IMPLEMENTED | — | Required full capability not present; see original order |
-| M-066 | PARTIAL | blackbox_universal/base_sample_worker.py; src/blackbox_core/event_journal.py; src/blackbox_core/sampling_health.py; blackbox_universal/window.py; tests/test_bbdi_sampling_health.py | Bounded event FIFO, periodic QThread and observed Qt busy callback counts; still no guaranteed missing OS sample detection, unified owner queue, hard deadlines or quota |
+| M-066 | PARTIAL | blackbox_universal/base_sample_worker.py; src/blackbox_core/sampling_health.py; src/blackbox_core/event_journal.py; tests/test_bbdi_monotonic_cadence.py; tests/test_bbdi_sampling_health.py | Bounded event FIFO, Qt sampling worker, real adjacent-snapshot spacing and worker timing, but still no OS missed-sample attestation, unified owner, deadlines, hard quota or full async stop |
 | M-067 | NOT-IMPLEMENTED | — | Required full capability not present; see original order |
 | M-068 | NOT-IMPLEMENTED | — | Required full capability not present; see original order |
 | M-069 | NOT-IMPLEMENTED | — | Required full capability not present; see original order |
@@ -141,6 +141,12 @@ Status rules: **PASS** needs actual user-facing integration, automated tests and
 | FIX-11 | NOT-RUN | — | No independent full-scenario Windows/EXE acceptance evidence for this exact item |
 | FIX-12 | NOT-RUN | — | No independent full-scenario Windows/EXE acceptance evidence for this exact item |
 
+## Monotonic sample spacing and worker timing (still PARTIAL)
+
+- `MonotonicSampleCadence` now checks actual elapsed time **between accepted snapshots** against the requested interval held when each worker was created, excludes interval-change boundaries, and durably saves source-qualified `EXTENDED_MONOTONIC_SAMPLE_SPACING` only when spacing exceeds a conservative threshold. No numeric OS-missed-sample count is inferred.
+- `BaseSampleWorker` captures monotonic brackets for external process sampling and its SQLite transaction; the Qt receiver separately bounds signal delivery. A bounded `BASE_SAMPLE_WORKER_TIMING_SUMMARY` is persisted before normal Stop; report JSON/HTML keep real snapshot spacing distinct from delivered skipped GUI callbacks and refuse malformed imported timings.
+- See `tests/test_bbdi_monotonic_cadence.py` and `docs/BB_DI_001_MONOTONIC_CADENCE.md`. **No hard OS deadline, guaranteed worker cancellation, full session schema2 or Windows frozen deep vertical E2E**; related M-027/M-066 controls remain PARTIAL.
+
 ## Bounded sampling backpressure evidence (still PARTIAL)
 
 - `src/blackbox_core/sampling_health.py`, `blackbox_universal/window.py` and `monitor.py`: deterministic, bounded count of delivered Qt timer callbacks skipped while the base sampler is in-flight, persisted **once per episode** before Stop, and exposed in live snapshots. An error persisting this observation ends the session as `STORAGE_ERROR`, not a false success.
@@ -182,7 +188,7 @@ Status rules: **PASS** needs actual user-facing integration, automated tests and
 ## Release blockers / next implementation order
 
 1. Complete schema2 contracts, provenance/status/capability vocabulary, monotonic↔UTC mapping and V1 read-only/V2 readers with atomic lifecycle.
-2. Finish fully async UI actions/acknowledgements, owner-managed session writer across samples/events/finish and reports, stop/join deadlines and worker health metrics; **observed Qt busy-callback losses are now recorded**, but actual dropped OS samples / Qt-coalesced timer callbacks remain unknown.
+2. Finish fully async UI actions/acknowledgements, owner-managed session writer across samples/events/finish and reports, stop/join OS deadlines and resource quotas. Observed Qt busy callbacks, monotonic adjacent snapshot spacing and bounded worker timing are recorded, but the count of OS missed samples and Qt-coalesced callbacks remains unknown.
 3. Extend the **new bounded adjacent-snapshot TID CPU%** to selected full-session intervals, per-field quality, tree/history, charts, CSV and compare. Existing table/HTML/JSON only covers a recent bounded window; TID birth identity is unverified.
 4. Add real bounded Windows HWND responsiveness and WCT with positive/negative Windows fixtures and explicit unsupported/denied states; opt-in ETW where capable.
 5. Build complete evidence-led Investigation/compare/timeline/experiment history; 8h Standard, 1h Detailed, 12 fixtures, AC-01..36.
