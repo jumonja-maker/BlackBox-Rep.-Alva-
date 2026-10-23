@@ -9,7 +9,7 @@ from __future__ import annotations
 from contextlib import closing
 from dataclasses import dataclass, field
 from pathlib import Path
-from queue import Full, Queue
+from queue import Empty, Full, Queue
 import sqlite3
 from threading import Event, Thread
 
@@ -93,14 +93,19 @@ class BoundedEventJournal:
                         elif task.payload is not None:
                             try:
                                 self._write_one(db, task.payload)
-                            except sqlite3.Error:
-                                db.rollback()
+                            except Exception:
+                                # Never acknowledge a runtime/storage error as
+                                # a successfully persisted user command.
+                                try:
+                                    db.rollback()
+                                except sqlite3.Error:
+                                    pass
                                 self._failure = True
                                 task.failure = True
                     finally:
                         task.done.set()
                         self._tasks.task_done()
-        except (sqlite3.Error, OSError, ValueError, TypeError):
+        except Exception:
             self._failure = True
         finally:
             self._ready.set()
@@ -109,7 +114,7 @@ class BoundedEventJournal:
             while True:
                 try:
                     task = self._tasks.get_nowait()
-                except Exception:
+                except Empty:
                     break
                 if task is not None:
                     task.failure = True
