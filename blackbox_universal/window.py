@@ -522,15 +522,15 @@ class UniversalWindow(QMainWindow):
         self.thread_detail_refresh.setObjectName("loadThreadCpu")
         self.thread_detail_refresh.clicked.connect(self._load_thread_detail)
         threads_panel.content.addWidget(self.thread_detail_refresh)
-        self.thread_detail_table = QTableWidget(0, 4)
+        self.thread_detail_table = QTableWidget(0, 5)
         self.thread_detail_table.setObjectName("threadCpuTable")
         self.thread_detail_table.setHorizontalHeaderLabels(
-            ("TID", "MEAN CPU %", "PEAK CPU %", "PAIRS"))
-        for col in (0, 1, 2):
+            ("TID", "SEGMENT", "MEAN CPU %", "PEAK CPU %", "PAIRS"))
+        for col in (0, 1, 2, 3):
             self.thread_detail_table.horizontalHeader().setSectionResizeMode(
                 col, QHeaderView.ResizeMode.ResizeToContents)
         self.thread_detail_table.horizontalHeader().setSectionResizeMode(
-            3, QHeaderView.ResizeMode.Stretch)
+            4, QHeaderView.ResizeMode.Stretch)
         self.thread_detail_table.setEditTriggers(
             QAbstractItemView.EditTrigger.NoEditTriggers)
         self.thread_detail_table.setMinimumHeight(170)
@@ -1208,7 +1208,8 @@ class UniversalWindow(QMainWindow):
         self.thread_detail_table.setRowCount(len(rows))
         for index, record in enumerate(rows):
             for column, name in enumerate(
-                    ("tid", "cpu_percent", "peak_cpu_percent", "observed_pairs")):
+                    ("tid", "segment_start_seq", "cpu_percent",
+                     "peak_cpu_percent", "observed_pairs")):
                 item = QTableWidgetItem()
                 item.setData(Qt.ItemDataRole.DisplayRole, record.get(name))
                 item.setToolTip(
