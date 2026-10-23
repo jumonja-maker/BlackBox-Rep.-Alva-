@@ -80,7 +80,10 @@ def analyze_detail_threads(folder: Path, *, max_samples: int = 128,
                     return {**empty, "status": "INVALID_DETAILED_DATA",
                             "warnings": ["INVALID_THREAD_COUNTER"]}
                 by_seq.setdefault(seq, {})[tid] = (float(user), float(system))
-            aggregates: dict[int, dict] = {}
+            # Separate observed TID lifetimes: a TID that disappears and
+            # reappears must not reuse an earlier CPU aggregate.
+            aggregates: dict[tuple[int, int], dict] = {}
+            segment_starts: dict[int, int] = {}
             previous = None
             previous_threads: dict[int, tuple[float, float]] = {}
             pair_count = 0
@@ -98,10 +101,12 @@ def analyze_detail_threads(folder: Path, *, max_samples: int = 128,
                     omitted = True
                 if threads_omitted is not None and threads_omitted > 0:
                     omitted = True
+                comparable = False
                 if previous is not None:
                     previous_seq, previous_time, previous_ok = previous
                     if (seq == previous_seq + 1 and timestamp > previous_time
                             and previous_ok and thread_status == "OK"):
+                        comparable = True
                         dt = (timestamp - previous_time) / 1_000_000_000
                         pair_count += 1
                         for tid, (user, system) in current.items():
@@ -111,14 +116,18 @@ def analyze_detail_threads(folder: Path, *, max_samples: int = 128,
                             du, ds = user - old_user, system - old_system
                             if du < 0 or ds < 0:
                                 counter_resets += 1
-                                continue  # reset or hidden TID reuse
+                                segment_starts[tid] = seq
+                                continue  # start a new segment on reset
                             delta = du + ds
                             rate = 100.0 * delta / dt
                             if not isfinite(rate):
                                 counter_resets += 1
                                 continue
-                            record = aggregates.setdefault(tid, {
-                                "tid": tid, "pid": pid, "observed_pairs": 0,
+                            segment = segment_starts.get(tid, previous_seq)
+                            record = aggregates.setdefault((tid, segment), {
+                                "tid": tid, "pid": pid,
+                                "segment_start_seq": segment,
+                                "observed_pairs": 0,
                                 "_cpu_delta": 0.0, "_elapsed": 0.0,
                                 "peak_cpu_percent": 0.0, "last_seen_seq": seq})
                             record["_cpu_delta"] += delta
@@ -129,6 +138,11 @@ def analyze_detail_threads(folder: Path, *, max_samples: int = 128,
                                 record["peak_cpu_percent"], rate)
                     else:
                         gap_count += 1
+                if comparable:
+                    segment_starts = {tid: segment_starts.get(tid, seq)
+                                      for tid in current}
+                else:
+                    segment_starts = {tid: seq for tid in current}
                 previous = (seq, timestamp, thread_status == "OK")
                 previous_threads = current
             threads = []
@@ -140,7 +154,8 @@ def analyze_detail_threads(folder: Path, *, max_samples: int = 128,
                 record["verification_class"] = "DERIVED"
                 record["tid_reuse_uncertain"] = True
                 threads.append(record)
-            threads.sort(key=lambda x: (-x["cpu_percent"], -x["peak_cpu_percent"], x["tid"]))
+            threads.sort(key=lambda x: (-x["cpu_percent"], -x["peak_cpu_percent"],
+                                        x["tid"], x["segment_start_seq"]))
             warnings = ["TID_REUSE_CANNOT_BE_EXCLUDED"]
             if omitted:
                 warnings.append("THREAD_COVERAGE_PARTIAL")
