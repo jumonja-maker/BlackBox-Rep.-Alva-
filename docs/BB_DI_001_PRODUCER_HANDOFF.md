@@ -18,6 +18,7 @@ A real durable vertical *subfeature* is implemented across first-party app code,
 - `src/blackbox_core/report.py`: reports complete user command intervals and durations in JSON/HTML, explicitly described as *recorded user actions, not OS-attested function profiling*; counts omitted previews, malformed action markers and avoids treating them as OS observation errors.
 - `tests/test_bbdi_action_slice.py`: real SQLite roundtrip, negative durability, clock/replay identity, abort, UI RU/EN/offscreen regressions.
 - Additionally, `mark_problem` now records the actual monotonic time of a user command; the preceding sample is included separately and never confused with the command moment. This is a narrow correction for AC-14, not a source of OS-attested GUI unresponsiveness.
+- The legacy Investigation adapter accepts up to a bounded 5-second **UNSAMPLED** trailing USER marker from the SQLite recorder. The public `analyze()` API keeps strict out-of-range rejection. A report warning `UNSAMPLED_USER_MARKER` records absent trailing CPU context and no artificial OS proof. This fixes a reproduced Windows-only CI regression where exact user command time arrived after the last periodic sample.
 - No fake TID samples, WCT results, ETW events, performance measurements, available caps or claim of root cause.
 
 ## Internal design for full follow-on (not implemented by this candidate)

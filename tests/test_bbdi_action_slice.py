@@ -150,6 +150,38 @@ class DurableActionTests(unittest.TestCase):
             self.assertEqual(mark["source"], "USER")
 
 
+    def test_trailing_real_user_marker_is_admitted_as_unobserved_not_os_fact(self):
+        from unittest.mock import patch
+        from blackbox_investigation import analyze_session, InvestigationError
+        from blackbox_investigation.engine import analyze
+        from blackbox_investigation.sqlite_adapter import load_session
+        from blackbox_universal.investigation_worker import read_user_markers
+        with tempfile.TemporaryDirectory() as temp:
+            probe = ReadOnlyProbe(output_root=Path(temp))
+            probe.attach(os.getpid())
+            probe.start()
+            probe.tick()
+            after = probe.last_elapsed_ms + 320
+            with patch("blackbox_universal.monitor.time.monotonic_ns",
+                       return_value=probe._recording_origin_ns + after * 1_000_000):
+                probe.mark_problem("command between two samples")
+            probe.stop()
+            markers = read_user_markers(probe.session_folder)
+            self.assertEqual(len(markers), 1)
+            self.assertEqual(markers[0]["elapsed_ms"], after)
+            result = analyze_session(probe.session_folder, user_markers=markers)
+            self.assertIn("UNSAMPLED_USER_MARKER", result["warnings"])
+            self.assertEqual(result["markers"][0]["sampling_context"],
+                             "UNSAMPLED_AFTER_LAST_OBSERVATION")
+            self.assertFalse(result["provenance"]["digest_is_attestation"])
+            self.assertFalse(any(f["code"] == "UI_UNRESPONSIVE_OBSERVED"
+                                 for f in result["findings"]))
+            # Public direct analyze remains strict for off-timeline input.
+            with self.assertRaisesRegex(InvestigationError, "MARKER_OUTSIDE_OBSERVATION"):
+                analyze(load_session(probe.session_folder)["samples"], markers=markers)
+
+
+
 class QtActionControls(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
