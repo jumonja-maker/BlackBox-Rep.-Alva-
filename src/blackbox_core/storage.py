@@ -6,6 +6,7 @@ from pathlib import Path
 from uuid import uuid4
 from datetime import datetime, timezone
 from .contracts import ObserverError, Sample, bounded
+from .event_journal import BoundedEventJournal
 
 
 def _utc() -> str:
@@ -69,6 +70,22 @@ class SessionStore:
             raise ObserverError("STORAGE_ERROR", "storage") from None
         self.seq = 0
         self.finished = False
+        self._journal: BoundedEventJournal | None = None
+
+    def enable_background_events(self, *, queue_capacity: int = 64) -> None:
+        """Delegate events to one bounded FIFO SQLite worker, opt-in only."""
+        if self._journal is not None or self.finished:
+            raise ObserverError("STORAGE_ERROR", "storage")
+        self._journal = BoundedEventJournal(
+            self.folder, capacity=queue_capacity)
+
+    def write_lifecycle_event(self, record: dict) -> None:
+        """Noncritical event: queue without a GUI wait; finish flushes it."""
+        data = bounded(record).decode("ascii")
+        if self._journal is not None:
+            self._journal.enqueue(data, durable=False)
+        else:
+            self.write_event(record)
 
     def write_sample(self, sample: Sample) -> None:
         fields = sample.as_dict()
@@ -82,7 +99,11 @@ class SessionStore:
             raise ObserverError("STORAGE_ERROR", "storage") from None
 
     def write_event(self, record: dict) -> None:
+        """Durability-acknowledged: action state MUST NOT advance before commit."""
         data = bounded(record).decode("ascii")
+        if self._journal is not None:
+            self._journal.enqueue(data, durable=True)
+            return
         try:
             self.db.execute("INSERT INTO events(data) VALUES (?)", (data,))
             self.db.commit()
@@ -95,6 +116,8 @@ class SessionStore:
         if code not in ("COMPLETED", "PROCESS_EXITED", "ACCESS_DENIED", "PID_REUSED",
                         "SAMPLE_UNAVAILABLE", "STORAGE_ERROR", "INTERRUPTED"):
             raise ObserverError("INVALID_DATA", "storage")
+        if self._journal is not None:
+            self._journal.flush()
         try:
             self.db.execute("UPDATE metadata SET ended_utc=?, exit_code=?",
                             (_utc(), code))
@@ -104,7 +127,12 @@ class SessionStore:
             raise ObserverError("STORAGE_ERROR", "storage") from None
 
     def close(self) -> None:
-        self.db.close()
+        try:
+            if self._journal is not None:
+                self._journal.close()
+                self._journal = None
+        finally:
+            self.db.close()
 
 
 def write_sample_from_worker(folder: Path, sample: Sample) -> int:
