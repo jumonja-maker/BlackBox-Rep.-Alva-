@@ -112,7 +112,7 @@ class UniversalWindow(QMainWindow):
         self.setWindowTitle("BLACK.BOX Universal | Retro Workstation")
         self.setMinimumSize(1020, 690)
         self.resize(1330, 850)
-        self.probe = ReadOnlyProbe()
+        self.probe = ReadOnlyProbe(background_events=True)
         self._prefs = QSettings("BlackBox", "BLACK.BOX Universal")
         saved_language = self._prefs.value("language", "EN")
         self.language = saved_language if saved_language in ("RU", "ENG", "EN") else "EN"
