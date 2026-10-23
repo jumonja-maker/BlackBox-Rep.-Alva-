@@ -23,7 +23,7 @@ class DetailSensorError(ValueError):
 
 
 def sample_process(pid: int, created: float, *, thread_limit: int = 256,
-                   child_limit: int = 64) -> dict:
+                   child_limit: int = 256) -> dict:
     """Snapshot cumulative counters with NULL for unavailable fields."""
     if type(pid) is not int or pid <= 0 or type(created) not in (float, int) or created <= 0:
         raise DetailSensorError("INVALID_TARGET")
@@ -91,13 +91,30 @@ def sample_process(pid: int, created: float, *, thread_limit: int = 256,
                     with child.oneshot():
                         child_mem = child.memory_info()
                         child_cpu = child.cpu_times()
-                    if abs(float(child.create_time()) - child_created) > 0.000001:
+                        child_name = child.name()[:96]
+                        child_parent = child.ppid()
+                        child_threads = child.num_threads()
+                        try:
+                            child_io = child.io_counters()
+                        except (psutil.AccessDenied, AttributeError, NotImplementedError, OSError):
+                            child_io = None
+                        try:
+                            child_handles = child.num_handles() if hasattr(child,"num_handles") else None
+                        except (psutil.AccessDenied, NotImplementedError, OSError):
+                            child_handles = None
+                    if abs(float(psutil.Process(child.pid).create_time()) - child_created) > 0.000001:
                         continue
                     descendants.append({
                         "pid": child.pid, "created": child_created,
                         "rss_bytes": int(child_mem.rss),
                         "cpu_user_s": float(child_cpu.user),
                         "cpu_system_s": float(child_cpu.system),
+                        "name": child_name, "parent_pid": child_parent,
+                        "thread_count": child_threads, "handle_count": child_handles,
+                        "read_bytes": getattr(child_io,"read_bytes",None),
+                        "write_bytes": getattr(child_io,"write_bytes",None),
+                        "read_ops": getattr(child_io,"read_count",None),
+                        "write_ops": getattr(child_io,"write_count",None),
                     })
                 except (psutil.NoSuchProcess, psutil.ZombieProcess, psutil.AccessDenied, OSError):
                     continue
@@ -105,7 +122,7 @@ def sample_process(pid: int, created: float, *, thread_limit: int = 256,
             children_status = "ACCESS_DENIED"
         except (psutil.NoSuchProcess, OSError):
             children_status = "NOT_OBSERVED"
-        if abs(float(p.create_time()) - created) > 0.000001:
+        if abs(float(psutil.Process(pid).create_time()) - created) > 0.000001:
             raise DetailSensorError("PID_REUSED")
         ended = time.monotonic_ns()
         return {
@@ -125,7 +142,7 @@ def sample_process(pid: int, created: float, *, thread_limit: int = 256,
             "thread_status": ("OK" if tids is not None else "ACCESS_DENIED_OR_UNSUPPORTED"),
             "threads_omitted": max(0, len(tids)-thread_limit) if tids is not None else None,
             "children": descendants, "children_total": children_total,
-            "children_omitted": (max(0, children_total-child_limit)
+            "children_omitted": (max(0, children_total-len(descendants))
                                  if children_total is not None else None),
             "source": "PSUTIL_EXTERNAL_COUNTERS_NOT_CAUSAL_PROOF",
             "sensor_status": {
@@ -169,6 +186,7 @@ class DetailedCapture:
         self.status = "NOT_STARTED"
         self.error: str | None = None
         self.samples = 0
+        self.session_writer = None
 
     def start(self) -> None:
         if (self.thread is not None or not self.folder.is_dir() or
@@ -308,6 +326,22 @@ class DetailedCapture:
                          *(statuses[column] for column in FIELD_STATUS_COLUMNS)))
                     conn.commit()
                     self.samples += 1
+                    if self.session_writer is not None:
+                        field_status = {
+                            "rss_bytes": statuses["rss_status"],
+                            "private_bytes": statuses["private_status"],
+                            "uss_bytes": statuses["uss_status"],
+                            "handle_count": statuses["handle_status"],
+                        }
+                        for key in ("read_bytes","write_bytes","read_ops","write_ops"):
+                            # Some platforms expose bytes without ops; each
+                            # NULL field must keep its own unavailable status.
+                            field_status[key] = ("OK" if x.get(key) is not None else
+                                statuses["io_status"] if statuses["io_status"]!="OK" else "NOT_OBSERVED")
+                        self.session_writer.submit("detail", {
+                            **x, "field_status": field_status,
+                            "requested_interval_ns": int(self.interval_s*1e9),
+                            "correlation_key": f"detail-v2:{seq}"})
                 except (DetailSensorError, KeyError, TypeError, ValueError) as exc:
                     # A generator or field validation may fail AFTER the
                     # parent process row was inserted. Never commit partial
@@ -319,6 +353,9 @@ class DetailedCapture:
                                  (time.monotonic_ns(), code))
                     conn.commit()
                     self.error = code
+                    if self.session_writer is not None:
+                        self.session_writer.submit("error", {"time_ns":time.monotonic_ns(),
+                            "sensor_id":"PSUTIL_DETAILED", "code":code})
                     if code in ("PID_REUSED", "PROCESS_EXITED", "INVALID_MONOTONIC_CLOCK"):
                         final = code
                         break

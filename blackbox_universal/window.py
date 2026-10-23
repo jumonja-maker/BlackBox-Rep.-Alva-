@@ -25,7 +25,7 @@ from blackbox_core.sampling_health import BusyTickTracker
 from PySide6.QtCore import Qt, QTimer, QThread, Signal, QSettings, QUrl
 from PySide6.QtGui import QAction, QDesktopServices, QIcon
 from PySide6.QtWidgets import (
-    QAbstractItemView, QCheckBox, QComboBox, QFileDialog, QFrame,
+    QAbstractItemView, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFrame,
     QGridLayout, QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit,
     QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QPushButton,
     QScrollArea, QStackedWidget, QTableWidget, QTableWidgetItem,
@@ -37,6 +37,8 @@ from .investigation_worker import InvestigationWorker, session_bounds
 from .thread_detail_worker import ThreadDetailWorker
 from .base_sample_worker import BaseSampleWorker
 from .report_worker import ReportWorker
+from .session_interval_worker import SessionIntervalWorker, SessionExportWorker
+from .timeline import SessionTimeline
 from .investigation_view import title as investigation_title, interval_text as investigation_interval, fact_text as investigation_facts, finding_details, summary_text
 from .file_targets import InspectedFile, inspect_file, find_running_executable
 from .i18n import translate
@@ -134,6 +136,12 @@ class UniversalWindow(QMainWindow):
         self._thread_detail_worker: ThreadDetailWorker | None = None
         self._base_sample_worker: BaseSampleWorker | None = None
         self._report_worker: ReportWorker | None = None
+        self._interval_worker = None
+        self._interval_pending = None
+        self._interval_packet = None
+        self._interval_folder = None
+        self._interval_process = 1
+        self._interval_export_worker = None
         self._report_error: str | None = None
         self._pending_base_stop: str | None = None
         self._base_sample_error: str | None = None
@@ -548,6 +556,23 @@ class UniversalWindow(QMainWindow):
         self.thread_detail_table.setMinimumHeight(170)
         threads_panel.content.addWidget(self.thread_detail_table)
         content.addWidget(threads_panel)
+        history_panel = WindowPanel("Recorded process tree", "PID + BIRTH / READ ONLY")
+        self.process_history_table = QTableWidget(0,6)
+        self.process_history_table.setHorizontalHeaderLabels(
+            ("PID","BIRTH","PARENT PID","NAME","FIRST ns","LAST / ABSENT ns"))
+        self.process_history_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        self.process_history_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.process_history_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.process_history_table.setMinimumHeight(170)
+        self.process_history_table.itemSelectionChanged.connect(self._history_process_selected)
+        history_panel.content.addWidget(self.process_history_table)
+        self.process_history_more = _button("NEXT PROCESS PAGE")
+        self.process_history_more.clicked.connect(self._next_process_page)
+        self.process_history_more.setEnabled(False)
+        history_panel.content.addWidget(self.process_history_more)
+        history_panel.content.addWidget(_label(
+            "Open a saved interval in Reports. Selecting a historic child does not change the recording target.","caption"))
+        content.addWidget(history_panel)
         return page
 
     def _build_events(self) -> QWidget:
@@ -586,6 +611,20 @@ class UniversalWindow(QMainWindow):
         self.event_investigation_table.setMaximumHeight(215)
         findings_panel.content.addWidget(self.event_investigation_table)
         content.addWidget(findings_panel)
+        timeline_events = WindowPanel("Session event timeline", "PAGED / UNVERIFIED FILE")
+        self.session_event_table = QTableWidget(0,4)
+        self.session_event_table.setHorizontalHeaderLabels(("TIME ns","CODE","SOURCE","TRUST"))
+        self.session_event_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        self.session_event_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.session_event_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.session_event_table.setMinimumHeight(170)
+        self.session_event_table.itemSelectionChanged.connect(self._session_event_selected)
+        timeline_events.content.addWidget(self.session_event_table)
+        self.session_events_more = _button("NEXT EVENT PAGE")
+        self.session_events_more.clicked.connect(self._next_event_page)
+        self.session_events_more.setEnabled(False)
+        timeline_events.content.addWidget(self.session_events_more)
+        content.addWidget(timeline_events)
         content.addWidget(_label(
             "A disappearing process or high CPU is a clue, not a proven defect.",
             "caption"))
@@ -600,12 +639,47 @@ class UniversalWindow(QMainWindow):
         save.clicked.connect(self._export)
         h.addWidget(save)
         content.addLayout(h)
+        interval_panel = WindowPanel("Investigation Summary", "FULL SELECTED INTERVAL / READ ONLY")
+        interval_actions = QGridLayout()
+        self.load_interval_current = _button("LOAD RECORDED SESSION")
+        self.load_interval_current.setObjectName("loadRecordedInterval")
+        self.load_interval_current.clicked.connect(lambda:self._load_session_interval(self.probe.session_folder))
+        interval_actions.addWidget(self.load_interval_current,0,0)
+        self.load_interval_saved = _button("OPEN SAVED SESSION…")
+        self.load_interval_saved.clicked.connect(self._choose_interval_session)
+        interval_actions.addWidget(self.load_interval_saved,0,1)
+        self.reset_interval_btn = _button("RESET RANGE / ROOT")
+        self.reset_interval_btn.clicked.connect(self._reset_session_interval)
+        interval_actions.addWidget(self.reset_interval_btn,1,0)
+        self.export_interval_btn = _button("EXPORT SELECTED INTERVAL…")
+        self.export_interval_btn.clicked.connect(self._export_session_interval)
+        self.export_interval_btn.setEnabled(False)
+        interval_actions.addWidget(self.export_interval_btn,1,1)
+        interval_panel.content.addLayout(interval_actions)
+        self.interval_summary = _label("Open a recorded session to inspect its full interval.","caption")
+        self.interval_summary.setTextFormat(Qt.TextFormat.PlainText)
+        interval_panel.content.addWidget(self.interval_summary)
+        self.session_timeline = SessionTimeline()
+        self.session_timeline.range_requested.connect(self._timeline_range_requested)
+        interval_panel.content.addWidget(self.session_timeline)
+        track_controls = QGridLayout()
+        for index,key in enumerate(SessionTimeline.TRACKS):
+            toggle = QCheckBox(key)
+            toggle.setChecked(key in self.session_timeline.visible_tracks)
+            toggle.toggled.connect(lambda enabled,k=key:self.session_timeline.set_track(k,enabled))
+            track_controls.addWidget(toggle,index//3,index%3)
+        interval_panel.content.addLayout(track_controls)
+        content.addWidget(interval_panel)
         frame = WindowPanel("Structured observation", "SCHEMA 1")
         self.report_preview = QPlainTextEdit()
         self.report_preview.setReadOnly(True)
-        self.report_preview.setMinimumHeight(375)
+        self.report_preview.setMinimumHeight(180)
         frame.content.addWidget(self.report_preview)
+        technical_toggle = QCheckBox("Technical data (legacy JSON)")
+        technical_toggle.toggled.connect(frame.setVisible)
+        content.addWidget(technical_toggle)
         content.addWidget(frame)
+        frame.setVisible(False)
         self.report_status_label = _label(
             "Local evidence will be saved after Stop.", "caption")
         content.addWidget(self.report_status_label)
@@ -749,6 +823,7 @@ class UniversalWindow(QMainWindow):
                     self.report_status_label, self.file_description,
                     self.target_binding_title, self.target_binding_detail,
                     self.investigation_info, self.action_state_label}
+        changing.add(self.interval_summary)
         from PySide6.QtWidgets import QLabel
         for label in self.findChildren(QLabel):
             if label in changing or label.objectName() == "metricValue":
@@ -1270,6 +1345,7 @@ class UniversalWindow(QMainWindow):
         worker = BaseSampleWorker(
             core, folder, self,
             requested_interval_ms=self._timer.interval())
+        worker.session_writer = self.probe._store.v2 if self.probe._store else None
         self._base_sample_worker = worker
         self._base_sample_error = None
         worker.result_ready.connect(self._base_sample_ready)
@@ -1344,12 +1420,183 @@ class UniversalWindow(QMainWindow):
         worker.finished.connect(self._thread_detail_finished)
         worker.start()
 
+    def _choose_interval_session(self):
+        folder=QFileDialog.getExistingDirectory(self,self._t("Open saved session"))
+        if folder:
+            self._load_session_interval(Path(folder))
+
+    def _load_session_interval(self,folder,interval=None,*,instance_id=1,event_cursor=(0,0),process_after=0):
+        if folder is None:
+            return
+        folder=Path(folder)
+        self._interval_folder=folder
+        self._interval_process=instance_id
+        args=(folder,interval,instance_id,event_cursor,process_after)
+        if self._interval_worker is not None:
+            self._interval_pending=args
+            self._interval_worker.requestInterruption()
+            return
+        self.interval_summary.setText(self._t("Reading all selected observations…"))
+        self.export_interval_btn.setEnabled(False)
+        worker=SessionIntervalWorker(folder,self,interval=interval,instance_id=instance_id,
+                                     event_cursor=event_cursor,process_after=process_after)
+        self._interval_worker=worker
+        worker.result_ready.connect(self._session_interval_ready)
+        worker.finished.connect(self._session_interval_finished)
+        worker.start()
+
+    def _session_interval_ready(self,packet,error):
+        if self._interval_pending is not None or self._pending_close:
+            return
+        if error or not isinstance(packet,dict):
+            self.interval_summary.setText(self._t("Selected interval is unavailable; source files were not changed."))
+            return
+        if packet["folder"]!=str(self._interval_folder):
+            return
+        self._interval_packet=packet
+        result=packet["interval"]
+        coverage=result["coverage"]
+        metrics=result["metrics"]
+        self.interval_summary.setText(
+            self._t("Observed / support / limits")+f"\n{result['series']} · "
+            f"{coverage['selected_samples']}/{coverage['total_samples']} samples · "
+            f"CPU peak {metrics['cpu_interval_percent']['max']} % · RSS peak {metrics['rss_bytes']['max']} bytes\n"
+            f"gaps={coverage['spacing_gap_pairs']} · errors={coverage['sensor_error_records']} · "
+            "Root cause: UNKNOWN · UNVERIFIED_IMPORT · "+" / ".join(result["warnings"]))
+        self.session_timeline.set_interval(result)
+        self.export_interval_btn.setEnabled(self._interval_export_worker is None and
+            result["metadata"]["recorded_status"] not in (None,"RECORDING"))
+        self._thread_detail_ready({"folder":packet["folder"],"analysis":packet["threads"]},"")
+        rows=packet["processes"]["rows"]
+        self.process_history_table.blockSignals(True)
+        self.process_history_table.setRowCount(len(rows))
+        for index,row in enumerate(rows):
+            values=(row["pid"],row["creation_time"],row["parent_pid"],row["executable_name"],
+                    row["first_observed_ns"],row["absence_observed_ns"] or row["last_observed_ns"])
+            for column,value in enumerate(values):
+                item=QTableWidgetItem(str(value if value is not None else "UNAVAILABLE"))
+                item.setData(Qt.ItemDataRole.UserRole,row["instance_id"])
+                self.process_history_table.setItem(index,column,item)
+        self.process_history_table.blockSignals(False)
+        self.process_history_more.setEnabled(packet["processes"]["has_more"])
+        self.session_event_table.blockSignals(True)
+        events=packet["events"]["rows"]
+        self.session_event_table.setRowCount(len(events))
+        for index,event in enumerate(events):
+            for column,key in enumerate(("recorded_ns","event_type","source_kind","verification_class")):
+                item=QTableWidgetItem(str(event[key]))
+                item.setData(Qt.ItemDataRole.UserRole,event.get("observed_ns") or event["recorded_ns"])
+                item.setToolTip("Recorded producer class: "+str(event["recorded_verification_class"]))
+                self.session_event_table.setItem(index,column,item)
+        self.session_event_table.blockSignals(False)
+        self.session_events_more.setEnabled(packet["events"]["has_more"])
+
+    def _session_interval_finished(self):
+        worker=self._interval_worker
+        self._interval_worker=None
+        if worker:
+            worker.deleteLater()
+        if self._pending_close:
+            self._interval_pending=None
+            QTimer.singleShot(0,self.close)
+            return
+        if self._interval_pending is not None:
+            folder,interval,instance,event_cursor,process_after=self._interval_pending
+            self._interval_pending=None
+            self._load_session_interval(folder,interval,instance_id=instance,
+                                        event_cursor=event_cursor,process_after=process_after)
+
+    def _timeline_range_requested(self,start,end):
+        if self._interval_folder is not None:
+            self._load_session_interval(self._interval_folder,None if start is None else (start,end),
+                                        instance_id=self._interval_process)
+
+    def _reset_session_interval(self):
+        if self._interval_folder:
+            self._load_session_interval(self._interval_folder)
+
+    def _history_process_selected(self):
+        row=self.process_history_table.currentRow()
+        item=self.process_history_table.item(row,0)
+        if item and self._interval_folder:
+            self._load_session_interval(self._interval_folder,instance_id=item.data(Qt.ItemDataRole.UserRole))
+
+    def _next_process_page(self):
+        packet=self._interval_packet
+        if packet and packet["processes"]["rows"]:
+            after=packet["processes"]["rows"][-1]["instance_id"]
+            self._load_session_interval(self._interval_folder,tuple(packet["interval"]["selected_interval_ns"]),
+                                        instance_id=self._interval_process,process_after=after)
+
+    def _next_event_page(self):
+        packet=self._interval_packet
+        if packet and packet["events"].get("next_cursor"):
+            self._load_session_interval(self._interval_folder,tuple(packet["interval"]["selected_interval_ns"]),
+                instance_id=self._interval_process,event_cursor=packet["events"]["next_cursor"])
+
+    def _session_event_selected(self):
+        item=self.session_event_table.item(self.session_event_table.currentRow(),0)
+        if item and self._interval_packet:
+            stamp=item.data(Qt.ItemDataRole.UserRole)
+            lo,hi=self._interval_packet["interval"]["selected_interval_ns"]
+            radius=max(1_000_000_000,(hi-lo)//20)
+            self._timeline_range_requested(max(0,stamp-radius),stamp+radius)
+            self._navigate("reports")
+
+    def _export_session_interval(self):
+        if self._interval_packet is None or self._interval_export_worker is not None:
+            return
+        dialog=QDialog(self)
+        dialog.setWindowTitle(self._t("Export privacy preview"))
+        layout=QVBoxLayout(dialog)
+        layout.addWidget(_label(self._t(
+            "Exports contain measurements and checksums. Choose whether to include process identifiers, user notes or a ZIP. Inspect before sharing.")))
+        identifiers=QCheckBox(self._t("Include PID / TID and process name"))
+        notes=QCheckBox(self._t("Include user notes"))
+        bundle=QCheckBox(self._t("Create ZIP of selected exports"))
+        for control in (identifiers,notes,bundle):
+            layout.addWidget(control)
+        buttons=QDialogButtonBox(QDialogButtonBox.StandardButton.Ok|QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        if dialog.exec()!=QDialog.DialogCode.Accepted:
+            return
+        output=QFileDialog.getExistingDirectory(self,self._t("Choose export folder"))
+        if not output:
+            return
+        result=self._interval_packet["interval"]
+        worker=SessionExportWorker(self._interval_folder,Path(output),self,
+            interval=tuple(result["selected_interval_ns"]),series=result["series"],
+            instance_id=result["instance_id"],include_identifiers=identifiers.isChecked(),
+            include_notes=notes.isChecked(),bundle=bundle.isChecked())
+        self._interval_export_worker=worker
+        self.export_interval_btn.setEnabled(False)
+        worker.result_ready.connect(self._session_export_ready)
+        worker.finished.connect(self._session_export_finished)
+        worker.start()
+
+    def _session_export_ready(self,packet,error):
+        if error:
+            self.interval_summary.setText(error+" · "+self._t("Source files were not changed."))
+        else:
+            self.interval_summary.setText(self._t("Selected interval exported.")+"\n"+packet["manifest"])
+
+    def _session_export_finished(self):
+        worker=self._interval_export_worker
+        self._interval_export_worker=None
+        if worker:
+            worker.deleteLater()
+        self.export_interval_btn.setEnabled(self._interval_packet is not None)
+        if self._pending_close:
+            QTimer.singleShot(0,self.close)
+
     def _thread_detail_ready(self, payload: object, error: str) -> None:
         if error or type(payload) is not dict:
             self.thread_detail_status.setText(self._t(
                 "Thread detail is unavailable; source data were not changed."))
             return
-        if payload.get("folder") != str(self.probe.session_folder):
+        if payload.get("folder") not in (str(self.probe.session_folder),str(self._interval_folder)):
             return
         detail = payload.get("analysis")
         if type(detail) is not dict:
@@ -1357,11 +1604,17 @@ class UniversalWindow(QMainWindow):
         rows = detail.get("top_threads", [])
         if type(rows) is not list:
             return
+        v2_rows=any("cpu_seconds" in r for r in rows)
+        self.thread_detail_table.setColumnCount(7 if v2_rows else 5)
+        self.thread_detail_table.setHorizontalHeaderLabels(
+            ("TID","SEGMENT","MEAN CPU %","PEAK CPU %","PAIRS","CPU seconds","OBSERVED %") if v2_rows else
+            ("TID","SEGMENT","MEAN CPU %","PEAK CPU %","PAIRS"))
         self.thread_detail_table.setRowCount(len(rows))
         for index, record in enumerate(rows):
             for column, name in enumerate(
-                    ("tid", "segment_start_seq", "cpu_percent",
-                     "peak_cpu_percent", "observed_pairs")):
+                    (("tid", "segment_start_seq", "cpu_percent",
+                     "peak_cpu_percent", "observed_pairs","cpu_seconds","observed_presence_percent") if v2_rows else
+                     ("tid", "segment_start_seq", "cpu_percent","peak_cpu_percent","observed_pairs"))):
                 item = QTableWidgetItem()
                 item.setData(Qt.ItemDataRole.DisplayRole, record.get(name))
                 item.setToolTip(
@@ -1841,6 +2094,17 @@ class UniversalWindow(QMainWindow):
             "No cloud upload, tunneling, process injection or admin escalation.")
 
     def closeEvent(self, event) -> None:
+        if self._interval_export_worker is not None:
+            self._pending_close = True
+            self._interval_export_worker.requestInterruption()
+            event.ignore()
+            return
+        if self._interval_worker is not None:
+            self._pending_close = True
+            self._interval_pending = None
+            self._interval_worker.requestInterruption()
+            event.ignore()
+            return
         if self._report_worker is not None:
             self._pending_close = True
             self._timer.stop()

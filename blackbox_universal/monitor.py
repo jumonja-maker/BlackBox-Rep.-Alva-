@@ -86,10 +86,15 @@ class ReadOnlyProbe:
         self.detailed_capture: DetailedCapture | None = None
         # Retain ownership of a worker whose blocking OS call outlived stop().
         self._pending_detailed: DetailedCapture | None = None
+        self._pending_v2 = None
         self._recording_origin_ns: int | None = None
 
     def _reap_detailed(self) -> None:
         """Never rebind a session while its previous sensor still owns SQLite."""
+        if self._pending_v2 is not None:
+            if self._pending_v2.thread.is_alive():
+                raise RuntimeError("SCHEMA2_WRITER_STOP_PENDING")
+            self._pending_v2 = None
         pending = self._pending_detailed
         if pending is not None:
             if not pending.stop(timeout=0):
@@ -159,6 +164,12 @@ class ReadOnlyProbe:
         if not root.is_dir() or root.is_symlink():
             raise RuntimeError("Session root is unavailable.")
         store = SessionStore(root, self.pid)
+        try:
+            store.enable_v2(pid=self.pid, created=core.created, name=self.name,
+                            origin_ns=core.origin_ns)
+        except Exception:
+            store.close()
+            raise
         if self.background_events:
             try:
                 store.enable_background_events()
@@ -183,7 +194,7 @@ class ReadOnlyProbe:
         self.incident_capture = None
         self.detailed_capture = None
         # PsutilProbe computes each elapsed_ms from its own monotonic origin.
-        self._recording_origin_ns = int(core.start * 1_000_000_000)
+        self._recording_origin_ns = core.origin_ns
         self.active = True
         self.started_at = utc_stamp()
         self._event("OBSERVATION_STARTED")
@@ -204,6 +215,10 @@ class ReadOnlyProbe:
             if not capture.stop(timeout=0.5):
                 self._pending_detailed = capture
                 self.last_error = "DETAILED_CAPTURE_STOP_PENDING"
+                if self._store.v2 is not None:
+                    self._store.v2.submit("error", {"time_ns":time.monotonic_ns(),
+                        "sensor_id":"PSUTIL_DETAILED","code":"DETAILED_CAPTURE_STOP_PENDING"})
+                capture.session_writer = None
             self.detailed_capture = None
         # Close a partially captured CPU episode as incomplete, not successful.
         if self.incident_capture is not None:
@@ -238,9 +253,15 @@ class ReadOnlyProbe:
             store.finish(status)
         except ObserverError as exc:
             self.last_error = exc.code
+            self.session_state = "STORAGE_ERROR"
             self._event("STORAGE_ERROR", exc.code)
         finally:
-            store.close()
+            try:
+                store.close()
+            except ObserverError:
+                self.last_error = "STORAGE_ERROR"
+            if store.v2 is not None and store.v2.thread.is_alive():
+                self._pending_v2 = store.v2
         if not defer_report:
             self.generate_report()
 
@@ -416,6 +437,11 @@ class ReadOnlyProbe:
         try:
             sample = self._core.sample()
             self._store.write_sample(sample)
+            if self._store.v2 is not None and self._core.last_observation is not None:
+                self._store.v2.submit("base", {
+                    **self._core.last_observation,
+                    "correlation_key": f"schema1:{self._store.seq}",
+                    "requested_interval_ns": 1_000_000_000})
             return self._accept_persisted_sample(sample, self._store.seq)
         except ObserverError as exc:
             self.last_error = exc.code
@@ -452,6 +478,7 @@ class ReadOnlyProbe:
                 capture = DetailedCapture(
                     self._store.folder, self.pid, self._core.created,
                     self._recording_origin_ns)
+                capture.session_writer = self._store.v2
                 capture.start()
                 self.detailed_capture = capture
                 self._event("DETAILED_CAPTURE_ENABLED",
@@ -462,6 +489,10 @@ class ReadOnlyProbe:
             if not stopped:
                 self._pending_detailed = capture
                 self.last_error = "DETAILED_CAPTURE_STOP_PENDING"
+                if self._store.v2 is not None:
+                    self._store.v2.submit("error", {"time_ns":time.monotonic_ns(),
+                        "sensor_id":"PSUTIL_DETAILED","code":"DETAILED_CAPTURE_STOP_PENDING"})
+                capture.session_writer = None
             self._event("DETAILED_CAPTURE_DISABLED",
                         "Stopped" if stopped else "Stop pending")
             self.detailed_capture = None

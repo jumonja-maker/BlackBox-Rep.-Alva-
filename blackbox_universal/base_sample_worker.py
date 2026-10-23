@@ -28,6 +28,7 @@ class BaseSampleWorker(QThread):
         self.core = core
         self.folder = Path(folder)
         self.requested_interval_ms = requested_interval_ms
+        self.session_writer = None
 
     def run(self) -> None:
         try:
@@ -35,6 +36,11 @@ class BaseSampleWorker(QThread):
             sample = self.core.sample()
             sensor_done_ns = time.monotonic_ns()
             seq = write_sample_from_worker(self.folder, sample)
+            if self.session_writer is not None and self.core.last_observation is not None:
+                self.session_writer.submit("base", {
+                    **self.core.last_observation,
+                    "requested_interval_ns": self.requested_interval_ms*1_000_000,
+                    "correlation_key": f"schema1:{seq}"})
             write_done_ns = time.monotonic_ns()
             self.result_ready.emit({
                 "sample": sample, "seq": seq,

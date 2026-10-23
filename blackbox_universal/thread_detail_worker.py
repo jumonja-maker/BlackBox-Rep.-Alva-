@@ -9,6 +9,8 @@ from pathlib import Path
 from PySide6.QtCore import QThread, Signal
 
 from blackbox_core.detail_analysis import analyze_detail_threads
+from blackbox_core.session_view import SessionView
+from blackbox_core.session_v2 import FILENAME
 
 
 class ThreadDetailWorker(QThread):
@@ -20,7 +22,11 @@ class ThreadDetailWorker(QThread):
 
     def run(self) -> None:
         try:
-            result = analyze_detail_threads(self.folder)
+            if (self.folder/FILENAME).is_file():
+                with SessionView.open(self.folder,cancel=self.isInterruptionRequested) as view:
+                    result=view.thread_summary()
+            else:
+                result = analyze_detail_threads(self.folder)
             self.result_ready.emit({
                 "folder": str(self.folder), "analysis": result,
             }, "")

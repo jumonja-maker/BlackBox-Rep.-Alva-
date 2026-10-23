@@ -2,6 +2,7 @@
 from __future__ import annotations
 from contextlib import closing
 import sqlite3
+import time
 from pathlib import Path
 from uuid import uuid4
 from datetime import datetime, timezone
@@ -71,6 +72,15 @@ class SessionStore:
         self.seq = 0
         self.finished = False
         self._journal: BoundedEventJournal | None = None
+        self.v2 = None
+
+    def enable_v2(self, **context) -> None:
+        from .session_v2 import SessionV2Writer
+        self.v2 = SessionV2Writer(self.folder, **context)
+
+    def _mirror_event(self, record: dict, recorded_ns: int) -> None:
+        if self.v2 is not None:
+            self.v2.submit("event", {**record, "_recorded_ns": recorded_ns})
 
     def enable_background_events(self, *, queue_capacity: int = 64) -> None:
         """Delegate events to one bounded FIFO SQLite worker, opt-in only."""
@@ -81,9 +91,11 @@ class SessionStore:
 
     def write_lifecycle_event(self, record: dict) -> None:
         """Noncritical event: queue without a GUI wait; finish flushes it."""
+        recorded_ns = time.monotonic_ns()
         data = bounded(record).decode("ascii")
         if self._journal is not None:
             self._journal.enqueue(data, durable=False)
+            self._mirror_event(record, recorded_ns)
         else:
             self.write_event(record)
 
@@ -100,13 +112,16 @@ class SessionStore:
 
     def write_event(self, record: dict) -> None:
         """Durability-acknowledged: action state MUST NOT advance before commit."""
+        recorded_ns = time.monotonic_ns()
         data = bounded(record).decode("ascii")
         if self._journal is not None:
             self._journal.enqueue(data, durable=True)
+            self._mirror_event(record, recorded_ns)
             return
         try:
             self.db.execute("INSERT INTO events(data) VALUES (?)", (data,))
             self.db.commit()
+            self._mirror_event(record, recorded_ns)
         except sqlite3.Error:
             raise ObserverError("STORAGE_ERROR", "storage") from None
 
@@ -118,6 +133,12 @@ class SessionStore:
             raise ObserverError("INVALID_DATA", "storage")
         if self._journal is not None:
             self._journal.flush()
+        v2_error = False
+        if self.v2 is not None:
+            try:
+                self.v2.finish(code)
+            except ObserverError:
+                code, v2_error = "STORAGE_ERROR", True
         try:
             self.db.execute("UPDATE metadata SET ended_utc=?, exit_code=?",
                             (_utc(), code))
@@ -125,12 +146,18 @@ class SessionStore:
             self.finished = True
         except sqlite3.Error:
             raise ObserverError("STORAGE_ERROR", "storage") from None
+        if v2_error:
+            raise ObserverError("STORAGE_ERROR", "storage")
 
     def close(self) -> None:
         try:
-            if self._journal is not None:
-                self._journal.close()
-                self._journal = None
+            try:
+                if self.v2 is not None and not self.finished:
+                    self.v2.finish("INTERRUPTED")
+            finally:
+                if self._journal is not None:
+                    self._journal.close()
+                    self._journal = None
         finally:
             self.db.close()
 
