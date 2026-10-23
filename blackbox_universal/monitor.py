@@ -20,6 +20,7 @@ from blackbox_core.contracts import ObserverError, event
 from blackbox_core.probe import PsutilProbe, list_processes
 from blackbox_core.report import write_report
 from blackbox_core.storage import SessionStore
+from blackbox_core.sampling_health import MonotonicSampleCadence, BaseWorkerTiming
 
 
 def utc_stamp() -> str:
@@ -76,6 +77,8 @@ class ReadOnlyProbe:
         self.total_samples = 0
         self.busy_timer_callbacks = 0
         self.busy_timer_episodes = 0
+        self._sample_cadence = MonotonicSampleCadence()
+        self._worker_timing = BaseWorkerTiming()
         self.last_elapsed_ms: int | None = None
         self.events: deque[dict] = deque(maxlen=300)
         self.actions = ActionCycle()
@@ -129,6 +132,8 @@ class ReadOnlyProbe:
         self.total_samples = 0
         self.busy_timer_callbacks = 0
         self.busy_timer_episodes = 0
+        self._sample_cadence = MonotonicSampleCadence()
+        self._worker_timing = BaseWorkerTiming()
         self.last_elapsed_ms = None
         self.events.clear()
         self.actions = ActionCycle()
@@ -170,6 +175,8 @@ class ReadOnlyProbe:
         self.total_samples = 0
         self.busy_timer_callbacks = 0
         self.busy_timer_episodes = 0
+        self._sample_cadence = MonotonicSampleCadence()
+        self._worker_timing = BaseWorkerTiming()
         self.last_elapsed_ms = None
         self.events.clear()
         self.actions = ActionCycle()
@@ -212,6 +219,15 @@ class ReadOnlyProbe:
                                "PROCESS_UNAVAILABLE" if reason in ("PROCESS_EXITED", "PID_REUSED") else "RECORDING_STOPPED")
         except (ObserverError, ActionError):
             self.last_error = "STORAGE_ERROR"
+        # Save bounded worker health before marking this recording ended.
+        # An unavailable health write must not become a fictional COMPLETED.
+        worker_summary = self._worker_timing.event(self._sample_cadence)
+        if worker_summary is not None:
+            try:
+                self._store.write_event(worker_summary)
+            except ObserverError:
+                self.last_error = "STORAGE_ERROR"
+                status = "STORAGE_ERROR"
         self.active = False
         store = self._store
         self.session_state = status
@@ -285,9 +301,57 @@ class ReadOnlyProbe:
         except ObserverError:
             raise
 
-    def accept_background_sample(self, sample, seq: int) -> dict:
-        """Commit worker result to GUI-facing cache AFTER SQLite commit."""
-        return self._accept_persisted_sample(sample, seq)
+    def accept_background_sample(
+            self, sample, seq: int, *,
+            requested_interval_ms: int | None = None,
+            worker_timing: dict | None = None,
+            received_ns: int | None = None) -> dict:
+        """Apply real worker result and independently classify monotonic gaps.
+
+        Commit a detected gap before updating the accepted-sample baseline.
+        A failed gap event leaves the recording in storage-error state; it
+        never fabricates an OS-missed-sample count.
+        """
+        gap = None
+        if requested_interval_ms is not None:
+            try:
+                gap = self._sample_cadence.preview(
+                    sample.elapsed_ms, requested_interval_ms)
+            except (ValueError, AttributeError):
+                raise ObserverError("INVALID_DATA", "sample") from None
+            if gap is not None:
+                if self._store is None:
+                    raise ObserverError("STORAGE_ERROR", "storage")
+                self._store.write_event(gap)
+        if worker_timing is not None:
+            if type(worker_timing) is not dict or type(received_ns) is not int:
+                raise ObserverError("INVALID_DATA", "sample")
+            # Validate timing BEFORE acceptance to avoid displaying a sample
+            # whose metadata is invalid. Validation does not mutate timing.
+            values = tuple(worker_timing.get(k) for k in (
+                "started_ns", "sensor_done_ns", "write_done_ns"))
+            if (any(type(v) is not int or v < 0 for v in values) or
+                    values[0] > values[1] or values[1] > values[2] or
+                    values[2] > received_ns):
+                raise ObserverError("INVALID_DATA", "sample")
+        result = self._accept_persisted_sample(sample, seq)
+        if requested_interval_ms is not None:
+            self._sample_cadence.commit(
+                sample.elapsed_ms, requested_interval_ms,
+                was_extended=gap is not None)
+            if gap is not None:
+                self.events.append({
+                    "timestamp_utc": utc_stamp(),
+                    "code": "EXTENDED_MONOTONIC_SAMPLE_SPACING",
+                    "detail": str(gap["observed_spacing_ms"]) +
+                              " ms between sampled OS-counter snapshots; cause UNKNOWN"})
+        if worker_timing is not None:
+            self._worker_timing.observe(
+                started_ns=worker_timing["started_ns"],
+                sensor_done_ns=worker_timing["sensor_done_ns"],
+                write_done_ns=worker_timing["write_done_ns"],
+                received_ns=received_ns)
+        return result
 
     def record_busy_timer_gap(self, observation: dict) -> None:
         """Persist only observed GUI-busy timer callbacks, never OS outages.
@@ -477,6 +541,14 @@ class ReadOnlyProbe:
             "observed_busy_timer_callbacks": self.busy_timer_callbacks,
             "observed_busy_timer_episodes": self.busy_timer_episodes,
             "busy_timer_limitations": "QT_COALESCED_CALLBACKS_NOT_COUNTED",
+            "extended_monotonic_spacing_pairs": self._sample_cadence.extended_pairs,
+            "comparable_monotonic_spacing_pairs": self._sample_cadence.comparable_pairs,
+            "monotonic_spacing_interval_changes": self._sample_cadence.interval_changes,
+            "max_observed_monotonic_spacing_ms": self._sample_cadence.max_observed_spacing_ms,
+            "completed_base_workers": self._worker_timing.completed_workers,
+            "max_base_worker_sensor_ms": self._worker_timing.max_sensor_ms,
+            "max_base_worker_sqlite_ms": self._worker_timing.max_sqlite_ms,
+            "max_base_worker_signal_delivery_ms": self._worker_timing.max_signal_delivery_ms,
             "action_state": self.actions.state,
             "completed_actions": self.actions.completed[-20:],
             "recent_events": list(self.events),
