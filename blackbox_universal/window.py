@@ -398,6 +398,13 @@ class UniversalWindow(QMainWindow):
         self.mark_problem_btn = _button("⚑  MARK PROBLEM")
         self.mark_problem_btn.clicked.connect(self._mark_problem)
         status.content.addWidget(self.mark_problem_btn)
+        self.auto_capture_btn = _button("AUTO INCIDENT CAPTURE: OFF")
+        self.auto_capture_btn.setObjectName("autoIncidentCapture")
+        self.auto_capture_btn.setToolTip(
+            "Opt-in: CPU >=85% for 3s or a sampling gap; stores SQLite sample ranges. "
+            "No OS hang detection, process tracing, dumps or proven root cause.")
+        self.auto_capture_btn.clicked.connect(self._toggle_incident_capture)
+        status.content.addWidget(self.auto_capture_btn)
         action_controls = QGridLayout()
         self.action_prepare_btn = _button("PREPARE ACTION")
         self.action_prepare_btn.clicked.connect(self._prepare_action)
@@ -1144,6 +1151,10 @@ class UniversalWindow(QMainWindow):
         self.start_btn.setEnabled(selected and not running)
         self.stop_btn.setEnabled(running)
         self.mark_problem_btn.setEnabled(running and self.probe.last_elapsed_ms is not None)
+        self.auto_capture_btn.setEnabled(running)
+        self.auto_capture_btn.setText(self._t(
+            "AUTO INCIDENT CAPTURE: ON" if self.probe.incident_capture is not None
+            else "AUTO INCIDENT CAPTURE: OFF"))
         current_action = self.probe.actions.state
         self.action_prepare_btn.setEnabled(running and current_action in ("IDLE", "COMPLETED", "ABORTED"))
         self.action_repeat_btn.setEnabled(running and current_action == "COMPLETED")
@@ -1221,6 +1232,15 @@ class UniversalWindow(QMainWindow):
         # Translate the fixed phrase before appending the actual identifier.
         prefix = detail.rsplit(" · PID ", 1)[0]
         self.target_binding_detail.setText(self._t(prefix) + f" · PID {pid}")
+
+    def _toggle_incident_capture(self) -> None:
+        try:
+            self.probe.set_incident_capture(
+                self.probe.incident_capture is None)
+        except (ObserverError, RuntimeError, ValueError):
+            QMessageBox.warning(self, "BLACK.BOX", self._t(
+                "Automatic incident capture unavailable"))
+        self._update_all()
 
     def _prepare_action(self) -> None:
         try:
