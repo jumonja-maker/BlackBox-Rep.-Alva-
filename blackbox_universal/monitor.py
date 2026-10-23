@@ -217,12 +217,18 @@ class ReadOnlyProbe:
             self.last_error = "REPORT_UNAVAILABLE"
             self._event("REPORT_UNAVAILABLE", "SQLite data retained")
 
-    def tick(self) -> dict | None:
-        if not self.active or self._core is None or self._store is None:
-            return None
+    def _accept_persisted_sample(self, sample, seq: int) -> dict:
+        """Apply an already committed sample on the owner (Qt) thread only.
+
+        Action/incident events still use the GUI-owned SessionStore. Worker
+        threads never touch mutable ReadOnlyProbe, ActionCycle or Qt state.
+        """
+        if not self.active or self._store is None:
+            raise ObserverError("INVALID_DATA", "storage")
+        if type(seq) is not int or seq != self.total_samples + 1:
+            raise ObserverError("INVALID_DATA", "storage")
+        self._store.seq = seq
         try:
-            sample = self._core.sample()
-            self._store.write_sample(sample)
             if self.incident_capture is not None:
                 try:
                     boundaries = self.incident_capture.observe(
@@ -260,6 +266,21 @@ class ReadOnlyProbe:
             self.total_samples += 1
             self.last_elapsed_ms = sample.elapsed_ms
             return record
+        except ObserverError:
+            raise
+
+    def accept_background_sample(self, sample, seq: int) -> dict:
+        """Commit worker result to GUI-facing cache AFTER SQLite commit."""
+        return self._accept_persisted_sample(sample, seq)
+
+    def tick(self) -> dict | None:
+        """Legacy synchronous path for CLI/explicit callers, not Qt timer."""
+        if not self.active or self._core is None or self._store is None:
+            return None
+        try:
+            sample = self._core.sample()
+            self._store.write_sample(sample)
+            return self._accept_persisted_sample(sample, self._store.seq)
         except ObserverError as exc:
             self.last_error = exc.code
             try:
