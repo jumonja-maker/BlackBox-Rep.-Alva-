@@ -32,6 +32,8 @@ def summarize(folder: Path) -> dict:
             incident_count, incident_preview, sampling_gaps = 0, [], 0
             busy_ticks, busy_episodes, bad_busy_events = 0, 0, 0
             truncated_busy_episodes = 0
+            extended_sample_spacing, largest_spacing, invalid_spacing = 0, None, 0
+            worker_health, invalid_worker_health = None, 0
             for entry in db.execute("SELECT data FROM events ORDER BY seq"):
                 record = json.loads(entry["data"])
                 if type(record) is not dict:
@@ -51,6 +53,49 @@ def summarize(folder: Path) -> dict:
                             truncated_busy_episodes += 1
                     else:
                         bad_busy_events += 1
+                if (record.get("kind") == "sampling_gap" and
+                        record.get("code") == "EXTENDED_MONOTONIC_SAMPLE_SPACING"):
+                    previous = record.get("previous_elapsed_ms")
+                    current = record.get("current_elapsed_ms")
+                    spacing = record.get("observed_spacing_ms")
+                    configured = record.get("configured_interval_ms")
+                    threshold = record.get("threshold_ms")
+                    if (all(type(x) is int for x in (
+                            previous, current, spacing, configured, threshold)) and
+                            previous >= 0 and current > previous and
+                            spacing == current - previous and 1 <= configured <= 60000 and
+                            threshold == max(2 * configured, configured + 500) and
+                            spacing > threshold and
+                            record.get("source") == "BLACKBOX_MONOTONIC_SAMPLE_CLOCK" and
+                            record.get("verification_class") ==
+                            "DERIVED_ADJACENT_OS_COUNTER_SNAPSHOTS" and
+                            record.get("missing_sample_count") is None):
+                        extended_sample_spacing += 1
+                        largest_spacing = max(largest_spacing or 0, spacing)
+                    else:
+                        invalid_spacing += 1
+                if (record.get("kind") == "worker_health" and
+                        record.get("code") == "BASE_SAMPLE_WORKER_TIMING_SUMMARY"):
+                    numeric = ("completed_workers", "max_sensor_ms", "max_sqlite_ms",
+                               "max_signal_delivery_ms", "comparable_sample_pairs",
+                               "extended_sample_pairs", "interval_changes")
+                    numbers = [record.get(key) for key in numeric]
+                    if (worker_health is None and
+                            all(type(value) is int and 0 <= value <= 1_000_000_000
+                                for value in numbers) and numbers[0] > 0 and
+                            numbers[5] <= numbers[4] and
+                            (record.get("max_observed_spacing_ms") is None or
+                             (type(record.get("max_observed_spacing_ms")) is int and
+                              0 <= record["max_observed_spacing_ms"] <= 86400000)) and
+                            record.get("source") == "PYTHON_MONOTONIC_BRACKETS" and
+                            record.get("verification_class") ==
+                            "INTERNAL_WORKER_TIMING_DERIVED"):
+                        worker_health = {key: record[key] for key in numeric}
+                        worker_health["max_observed_spacing_ms"] = (
+                            record.get("max_observed_spacing_ms"))
+                        worker_health["source"] = "UNVERIFIED_SAVED_WORKER_TIMING"
+                    else:
+                        invalid_worker_health += 1
                 if (record.get("kind") == "incident_boundary" and
                         record.get("code") == "AUTO_INCIDENT_COMPLETED"):
                     # Imported event strings cannot attest OS responsiveness.
@@ -108,6 +153,12 @@ def summarize(folder: Path) -> dict:
                 "automatic_incident_preview": incident_preview,
                 "automatic_incidents_omitted": max(0, incident_count-len(incident_preview)),
                 "sampling_gap_count": sampling_gaps,
+                "extended_monotonic_spacing_count": extended_sample_spacing,
+                "max_extended_monotonic_spacing_ms": largest_spacing,
+                "invalid_monotonic_spacing_events": invalid_spacing,
+                "monotonic_spacing_provenance": "DERIVED_SAVED_SNAPSHOT_SPACING",
+                "worker_health_summary": worker_health,
+                "invalid_worker_health_events": invalid_worker_health,
                 "observed_busy_timer_callbacks": busy_ticks,
                 "observed_busy_timer_episodes": busy_episodes,
                 "invalid_busy_timer_events": bad_busy_events,
@@ -281,6 +332,8 @@ def _human_html(report: dict) -> str:
         metric("Длительность / Elapsed", report["elapsed_ms"], "ms") +
         metric("Занятый сборщик / Busy timer callbacks",
                report.get("observed_busy_timer_callbacks")) +
+        metric("Удлинённые интервалы / Extended sample pairs",
+               report.get("extended_monotonic_spacing_count")) +
         "</div><h2>Сеанс / Session</h2><div class='grid'>" +
         metric("Начало UTC / Started", report["started_utc"]) +
         metric("Конец UTC / Ended", report["ended_utc"]) +
@@ -303,6 +356,24 @@ def _human_html(report: dict) -> str:
         "<h2>Углублённые данные / Detailed process capture (opt-in)</h2>" +
         detail_html +
         "<h2>Потоки / Per-thread CPU (derived)</h2>" + thread_html +
+        "<h2>Фактические интервалы / Actual snapshot spacing</h2>"
+        "<p>Extended adjacent monotonic sample intervals: " +
+        safe(report.get("extended_monotonic_spacing_count")) +
+        " · maximum extended spacing (ms): " +
+        safe(report.get("max_extended_monotonic_spacing_ms")) +
+        " · invalid imported spacing events: " +
+        safe(report.get("invalid_monotonic_spacing_events")) +
+        ". Consecutive OS-counter snapshots are separated in actual "
+        "monotonic time; the number of missing scheduled samples, Windows "
+        "hang status and delay cause are UNKNOWN. Interval-change pairs "
+        "are not classified. / Известна только реальная пауза между "
+        "снимками счётчиков, количество несделанных замеров неизвестно.</p>"
+        "<h2>Здоровье фонового сборщика / Base worker timing</h2>"
+        "<p>Worker timing: " + safe(report.get("worker_health_summary")) +
+        " · invalid summaries: " +
+        safe(report.get("invalid_worker_health_events")) +
+        ". Python monotonic brackets for sensor, SQLite and signal "
+        "delivery, not Windows deadline proof. Stored claims not attested.</p>"
         "<h2>Пропущенные такты GUI / Skipped timer callbacks</h2>"
         "<p>Count: " + safe(report.get("observed_busy_timer_callbacks")) +
         " · episodes: " + safe(report.get("observed_busy_timer_episodes")) +
