@@ -1443,7 +1443,7 @@ class UniversalWindow(QMainWindow):
     def _about(self) -> None:
         QMessageBox.about(
             self, "BLACK.BOX Universal",
-            "BLACK.BOX Universal v0.3.4 — selected process status.\n\n"
+            "BLACK.BOX Universal v0.3.5 — Investigation Engine 0.1.2.\n\n"
             "Offline monitoring, human-readable HTML and JSON reports: available.\n"
             "Diagnostics use local operating-system observations.\n"
             "Windows ETW and crash dump collection: NOT IMPLEMENTED.\n\n"

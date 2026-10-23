@@ -101,7 +101,7 @@ jobs:
       - name: Build BLACK.BOX Universal desktop with original icon
         shell: pwsh
         run: |
-          python -m PyInstaller --noconfirm --clean --onedir --windowed --collect-submodules blackbox_core --collect-submodules blackbox_universal --icon assets/blackbox.ico --add-data "assets/blackbox.png;assets" --name BLACK.BOX-Universal app.py
+          python -m PyInstaller --noconfirm --clean --onedir --windowed --collect-submodules blackbox_core --collect-submodules blackbox_investigation --collect-submodules blackbox_universal --icon assets/blackbox.ico --add-data "assets/blackbox.png;assets" --name BLACK.BOX-Universal app.py
           if ($LASTEXITCODE -ne 0) { throw 'GUI build failed' }
           Copy-Item "dist/BLACK.BOX-Maintenance.exe" "dist/BLACK.BOX-Universal/BLACK.BOX-Maintenance.exe"
           Copy-Item ".blackbox-portable.json" "dist/BLACK.BOX-Universal/.blackbox-portable.json"
@@ -131,6 +131,8 @@ jobs:
           Copy-Item -LiteralPath "README.md" -Destination "$output\README.md" -Force
           Copy-Item -LiteralPath "README.ru.md" -Destination "$output\README.ru.md" -Force
           Copy-Item -LiteralPath "docs\LICENSING.md" -Destination "$output\LICENSING.md" -Force
+          Copy-Item -LiteralPath "docs\vendor\investigation-0.1.2-LICENSE" -Destination "$output\INVESTIGATION-LICENSE.txt" -Force
+          if (-not (Test-Path "$output\INVESTIGATION-LICENSE.txt")) { throw 'Investigation license missing' }
           if (-not (Test-Path "$output\LICENSE")) { throw "Missing public application license" }
           if (-not (Test-Path "$output\README.ru.md")) { throw "Russian README missing from Windows release" }
       - name: Package portable folder without installing anything
@@ -146,7 +148,7 @@ jobs:
           retention-days: 14
 
 
-# Release v0.3.4 is published after Windows/Linux tests and Windows EXE smoke.
+# Release v0.3.5 is published after Windows/Linux tests and Windows EXE smoke.
   publish-updater-test:
     name: Publish independent BLACK.BOX release
     needs: [linux-tests, windows-portable]
@@ -163,14 +165,14 @@ jobs:
         with:
           name: BLACKBOX-INDEPENDENT-WINDOWS-QA
           path: verified-portable
-      - name: Publish verified file-picker v0.3.4
+      - name: Publish verified Investigation v0.3.5
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           VERSION="$(python -c 'from blackbox_universal import __version__; print(__version__)')"
-          if [[ "$VERSION" != "0.3.4" ]]; then
+          if [[ "$VERSION" != "0.3.5" ]]; then
             echo "No owner-authorized test release for v$VERSION"
             exit 0
           fi
@@ -183,22 +185,26 @@ jobs:
           fi
           sha256sum "$ZIP" > "$ZIP.sha256"
           cat > release-notes.md <<'EOF'
-          BLACK.BOX Universal v0.3.4 — visible process attachment.
+          BLACK.BOX Universal v0.3.5 — Investigation Engine 0.1.2
 
-          The Current Session panel now confirms which exact process instance
-          (PID) was selected, changes its message when live observation starts,
-          and shows whether observation ended and a report was saved.
-          Russian and English are both supported. Status is hidden when no
-          running process has been explicitly selected.
-          Preserves direct EXE file selection, safe offline file metadata,
-          standalone monitoring, SQLite/JSON/HTML reports and verified updater.
-          No external diagnostic runtime or hidden application launch.
-          Manual real-Windows UI/DPI, update/rollback and AV acceptance remain
-          separate from automated tests.
+          Adds user-marked problem timestamps persisted to the recorded SQLite
+          session, offline investigation of a completed current or saved session,
+          and readable evidence tables in Reports and Event Log (RU/EN).
+          Findings identify observed CPU episodes, memory growth candidates,
+          I/O throughput, sampling gaps and counter resets when measured.
+          Select a finding to see evidence and limitations, and open a separate
+          Investigation HTML report. New JSON/HTML files do not overwrite
+          original session reports. Long sessions require confirmation before
+          analyzing only the last 4096 measurements, with partial coverage shown.
+          The full Investigation Engine is bundled in the Windows EXE and its
+          original MIT copyright notice is included.
+          This is not a Windows hang detector or a root cause debugger.
+          Manual physical-Windows UI, antivirus and update/rollback validation
+          are separate from CI and should not be claimed as passing.
           EOF
           gh release create "$TAG" "$ZIP" "$ZIP.sha256" \
             --target "$GITHUB_SHA" \
-            --title "BLACK.BOX Universal v0.3.4 — selected instance status" \
+            --title "BLACK.BOX Universal v0.3.5 — Investigation Engine" \
             --notes-file release-notes.md --latest
           echo "Published $TAG from $GITHUB_SHA after Windows + Linux QA"
 
