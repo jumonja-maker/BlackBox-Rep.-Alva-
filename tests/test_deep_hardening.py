@@ -23,7 +23,8 @@ from blackbox_core.storage import SessionStore
 from blackbox_universal.releases import (
     _extract_release, EXECUTABLE_NAME, MAINTENANCE_NAME, INSTALL_MARKER)
 from blackbox_universal.maintenance import (
-    _safe_install, _keep_local_logs, MaintenanceError)
+    _safe_install, _keep_local_logs, _is_directory_link,
+    apply_update, MaintenanceError)
 from blackbox_universal.widgets import TrendChart
 
 MARKER = {"product": "blackbox-universal", "install_type": "portable"}
@@ -169,6 +170,66 @@ class OfflineInstallerAdversarialTests(unittest.TestCase):
                    side_effect=lambda path: Path(path) == install):
             with self.assertRaisesRegex(MaintenanceError, "INSTALL_FOLDER_INVALID"):
                 _safe_install(install)
+
+    def test_lstat_access_error_cannot_be_treated_as_safe(self):
+        folder = self.root / "install"
+        folder.mkdir()
+        with patch.object(Path, "lstat", side_effect=PermissionError("blocked")):
+            with self.assertRaisesRegex(MaintenanceError, "PATH_INSPECTION_FAILED"):
+                _is_directory_link(folder)
+
+    def test_junction_ancestor_blocks_uninstall_target(self):
+        parent = self.root / "junction-parent"
+        install = parent / "BLACK.BOX-Universal"
+        install.mkdir(parents=True)
+        for name in (EXECUTABLE_NAME, MAINTENANCE_NAME, INSTALL_MARKER):
+            (install / name).write_text(
+                json.dumps(MARKER) if name == INSTALL_MARKER else "binary")
+        actual = __import__("blackbox_universal.maintenance", fromlist=[
+            "_is_directory_link"])._is_directory_link
+        with patch("blackbox_universal.maintenance._is_directory_link",
+                   side_effect=lambda path: Path(path) == parent or actual(path)):
+            with self.assertRaisesRegex(MaintenanceError, "INSTALL_FOLDER_INVALID"):
+                _safe_install(install)
+        self.assertTrue((install / EXECUTABLE_NAME).is_file())
+
+    def test_update_rollback_keeps_previous_session_if_new_has_collision(self):
+        parent = self.root / "installs"
+        install = parent / "BLACK.BOX-Universal"
+        stage = parent / ".blackbox-stage-test" / "BLACK.BOX-Universal"
+        for folder, build in ((install, "old"), (stage, "new")):
+            folder.mkdir(parents=True)
+            (folder / INSTALL_MARKER).write_text(json.dumps(MARKER))
+            (folder / EXECUTABLE_NAME).write_text(build)
+            (folder / MAINTENANCE_NAME).write_text(build)
+            (folder / "sessions").mkdir()
+        (install / "sessions" / "session.sqlite3").write_bytes(b"REAL_USER_EVIDENCE")
+        (stage / "sessions" / "unwanted").write_bytes(b"NEW_INSTALL_COLLISION")
+        with self.assertRaisesRegex(MaintenanceError, "UPDATE_DATA_COLLISION"):
+            apply_update(install, stage)
+        self.assertEqual((install / EXECUTABLE_NAME).read_text(), "old")
+        self.assertEqual((install / "sessions" / "session.sqlite3").read_bytes(),
+                         b"REAL_USER_EVIDENCE")
+        self.assertTrue((stage / EXECUTABLE_NAME).is_file())
+        self.assertFalse(list(parent.glob(".blackbox-old-*")))
+
+    def test_staging_junction_ancestor_blocks_update_without_mutating_install(self):
+        parent = self.root / "installs"
+        install = parent / "BLACK.BOX-Universal"
+        stage_parent = parent / ".blackbox-stage-test"
+        stage = stage_parent / "BLACK.BOX-Universal"
+        for folder, build in ((install, "old"), (stage, "new")):
+            folder.mkdir(parents=True)
+            (folder / INSTALL_MARKER).write_text(json.dumps(MARKER))
+            (folder / EXECUTABLE_NAME).write_text(build)
+            (folder / MAINTENANCE_NAME).write_text(build)
+        actual = __import__("blackbox_universal.maintenance", fromlist=[
+            "_is_directory_link"])._is_directory_link
+        with patch("blackbox_universal.maintenance._is_directory_link",
+                   side_effect=lambda path: Path(path) == stage_parent or actual(path)):
+            with self.assertRaisesRegex(MaintenanceError, "STAGING_ROOT_NOT_SIBLING"):
+                apply_update(install, stage)
+        self.assertEqual((install / EXECUTABLE_NAME).read_text(), "old")
 
     def test_saved_user_data_link_blocks_preservation(self):
         folder = self.root / "portable"
