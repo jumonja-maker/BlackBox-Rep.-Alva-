@@ -1,5 +1,6 @@
 """Append-only SQLite observations; existing sessions are never overwritten."""
 from __future__ import annotations
+from contextlib import closing
 import sqlite3
 from pathlib import Path
 from uuid import uuid4
@@ -120,8 +121,8 @@ def write_sample_from_worker(folder: Path, sample: Sample) -> int:
     fields = ("elapsed_ms", "rss_bytes", "cpu_percent", "num_threads",
               "read_bytes", "write_bytes", "children_count")
     try:
-        with sqlite3.connect(path.resolve().as_uri() + "?mode=rw",
-                             uri=True, timeout=2) as db:
+        with closing(sqlite3.connect(path.resolve().as_uri() + "?mode=rw",
+                                     uri=True, timeout=2)) as db:
             db.execute("BEGIN IMMEDIATE")
             metadata = db.execute(
                 "SELECT schema_version, exit_code FROM metadata LIMIT 1"
