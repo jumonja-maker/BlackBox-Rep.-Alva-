@@ -256,6 +256,13 @@ class DetailedCapture:
             self.error = type(exc).__name__
         finally:
             if conn is not None:
+                # A failed thread/child insert can leave a process row in the
+                # same uncommitted transaction. Never publish that partial row
+                # while updating the final metadata state.
+                try:
+                    conn.rollback()
+                except sqlite3.Error:
+                    pass
                 try:
                     conn.execute("UPDATE detail_metadata SET status=?", (final,))
                     conn.commit()
