@@ -17,6 +17,7 @@ from pathlib import Path
 
 import psutil
 from blackbox_core.actions import ActionError
+from blackbox_investigation import InvestigationError
 from blackbox_core.contracts import ObserverError
 from blackbox_core.report import compare as compare_sessions
 from PySide6.QtCore import Qt, QTimer, QThread, Signal, QSettings, QUrl
@@ -30,7 +31,7 @@ from PySide6.QtWidgets import (
 )
 
 from .monitor import ReadOnlyProbe, available_processes, save_snapshot
-from .investigation_worker import InvestigationWorker
+from .investigation_worker import InvestigationWorker, session_bounds
 from .investigation_view import title as investigation_title, interval_text as investigation_interval, fact_text as investigation_facts, finding_details, summary_text
 from .file_targets import InspectedFile, inspect_file, find_running_executable
 from .i18n import translate
@@ -583,6 +584,10 @@ class UniversalWindow(QMainWindow):
         self.investigate_saved_btn.clicked.connect(
             lambda: self._begin_investigation(choose=True))
         investigation_actions.addWidget(self.investigate_saved_btn)
+        self.investigate_interval_btn = _button("◫  INVESTIGATE INTERVAL…")
+        self.investigate_interval_btn.setObjectName("investigateInterval")
+        self.investigate_interval_btn.clicked.connect(self._select_investigation_interval)
+        investigation_actions.addWidget(self.investigate_interval_btn)
         self.open_investigation_btn = _button("▣  OPEN INVESTIGATION HTML")
         self.open_investigation_btn.setEnabled(False)
         self.open_investigation_btn.clicked.connect(self._open_investigation_html)
@@ -1169,6 +1174,7 @@ class UniversalWindow(QMainWindow):
             self.probe.session_folder is not None and
             (self.probe.session_folder / "session.sqlite3").is_file())
         self.investigate_saved_btn.setEnabled(not self._investigation_busy)
+        self.investigate_interval_btn.setEnabled(not self._investigation_busy)
         current = self.probe.last
         self.card_cpu.set_readout(
             f'{current["cpu_pct"]:.1f}%' if self.probe.history and current["cpu_pct"] is not None else "—",
@@ -1278,6 +1284,49 @@ class UniversalWindow(QMainWindow):
                 "Unable to mark this point. The session was not changed."))
             return
         self._update_all()
+
+    def _select_investigation_interval(self) -> None:
+        """Select an arbitrary completed session interval, not merely its tail."""
+        if self._investigation_busy or self._investigation_worker is not None:
+            return
+        folder = self.probe.session_folder if not self.probe.active else None
+        if folder is None:
+            selected = QFileDialog.getExistingDirectory(
+                self, self._t("Choose saved BLACK.BOX session"))
+            if not selected:
+                return
+            folder = Path(selected)
+        try:
+            earliest, latest, count = session_bounds(folder)
+        except InvestigationError:
+            QMessageBox.warning(self, "BLACK.BOX", self._t(
+                "Session has no valid measurable interval"))
+            return
+        suggestion = max(earliest, latest - 60_000)
+        begin_str, ok = QInputDialog.getText(
+            self, self._t("Start of investigation interval"),
+            self._t("Start elapsed milliseconds"),
+            QLineEdit.EchoMode.Normal, str(suggestion))
+        if not ok:
+            return
+        end_str, ok = QInputDialog.getText(
+            self, self._t("End of investigation interval"),
+            self._t("End elapsed milliseconds"),
+            QLineEdit.EchoMode.Normal, str(latest))
+        if not ok:
+            return
+        if (not begin_str.isascii() or not begin_str.isdecimal() or
+                not end_str.isascii() or not end_str.isdecimal() or
+                len(begin_str) > 11 or len(end_str) > 11):
+            QMessageBox.warning(self, "BLACK.BOX", self._t(
+                "Invalid investigation interval"))
+            return
+        lo, hi = int(begin_str), int(end_str)
+        if not earliest <= lo <= hi <= latest:
+            QMessageBox.warning(self, "BLACK.BOX", self._t(
+                "Invalid investigation interval"))
+            return
+        self._begin_investigation(folder=folder, interval=(lo, hi))
 
     def _begin_investigation(
             self, choose: bool = False,
