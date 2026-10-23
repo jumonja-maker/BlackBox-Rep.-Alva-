@@ -135,6 +135,27 @@ def _human_html(report: dict) -> str:
     }
     errors = report.get("observation_errors", {})
     deep = report.get("detailed_capture")
+    provenance = deep.get("provenance") if isinstance(deep, dict) else None
+    provenance_html = ""
+    if isinstance(provenance, dict):
+        clock = provenance.get("clock_mapping")
+        latest = provenance.get("latest_quality")
+        mapping = (" / " + safe(clock.get("utc_anchor_iso")) +
+                   " · ±" + safe(clock.get("uncertainty_ns_at_anchor")) +
+                   " ns (anchor only; system UTC clock may adjust)"
+                   if isinstance(clock, dict) else
+                   " / No UTC mapping in this legacy detailed sidecar")
+        statuses = (
+            " · ".join(safe(k.removesuffix("_status")) + ": " + safe(v)
+                       for k, v in sorted(latest.get("measurement_status", {}).items()))
+            if isinstance(latest, dict) else
+            "No per-field measurement status in this detailed sidecar")
+        provenance_html = (
+            "<h3>Timestamp and measurement quality / Время и качество</h3>"
+            "<p>Contract: " + safe(provenance.get("contract_status")) +
+            mapping + "</p><p>Latest measurement: " + statuses + "</p>"
+            "<p>PSUTIL external counters; OS-observed metrics do not prove "
+            "Windows hang, deadlock or application-internal cause.</p>")
     detail_html = (
         "<p>Detailed mode not enabled / Углублённый режим не включён.</p>"
         if not isinstance(deep, dict) else
@@ -147,7 +168,8 @@ def _human_html(report: dict) -> str:
         metric("Peak Private Bytes", deep.get("peak_private_bytes"), "bytes") +
         metric("Peak handles / Дескрипторы", deep.get("peak_handles")) +
         metric("Sensor errors / Ошибки датчика", deep.get("sensor_errors")) +
-        "</div><p>Status: " + safe(deep.get("status")) + "</p>"
+        "</div><p>Status: " + safe(deep.get("status")) + "</p>" +
+        provenance_html
     )
     thread_cpu = report.get("thread_cpu_analysis")
     thread_rows = ""
