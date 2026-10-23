@@ -210,10 +210,14 @@ class PersistedCadenceTests(unittest.TestCase):
                 self.assertEqual(window.probe.total_samples, 1)
                 self.assertEqual(window.probe.snapshot()["completed_base_workers"], 1)
                 window._stop()
+                self.assertTrue(_drain(
+                    app, lambda: window._report_worker is None))
                 result = summarize(window.probe.session_folder)
                 self.assertEqual(result["worker_health_summary"]["completed_workers"], 1)
                 self.assertEqual(result["extended_monotonic_spacing_count"], 0)
             finally:
+                self.assertTrue(_drain(
+                    app, lambda: window._report_worker is None))
                 window.close()
 
 
