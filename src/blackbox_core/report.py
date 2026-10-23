@@ -153,7 +153,10 @@ def _human_html(report: dict) -> str:
         provenance_html = (
             "<h3>Timestamp and measurement quality / Время и качество</h3>"
             "<p>Contract: " + safe(provenance.get("contract_status")) +
+            " · quality coverage: " + safe(provenance.get("quality_coverage")) +
             mapping + "</p><p>Latest measurement: " + statuses + "</p>"
+            "<p>Stored file claims are not independently attested on import: " +
+            safe(provenance.get("file_trust")) + ".</p>"
             "<p>PSUTIL external counters; OS-observed metrics do not prove "
             "Windows hang, deadlock or application-internal cause.</p>")
     detail_html = (
