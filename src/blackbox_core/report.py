@@ -27,11 +27,26 @@ def summarize(folder: Path) -> dict:
             counts = {}
             actions, completed_total, malformed_actions = [], 0, 0
             experiments = ExperimentAccumulator()
+            incident_count, incident_preview, sampling_gaps = 0, [], 0
             for entry in db.execute("SELECT data FROM events ORDER BY seq"):
                 record = json.loads(entry["data"])
                 if type(record) is not dict:
                     raise ObserverError("INVALID_DATA", "report")
                 experiments.observe(record)
+                if record.get("kind") == "sampling_gap" and record.get("code") == "SAMPLING_GAP_OBSERVED":
+                    sampling_gaps += 1
+                if (record.get("kind") == "incident_boundary" and
+                        record.get("code") == "AUTO_INCIDENT_COMPLETED"):
+                    # Imported event strings cannot attest OS responsiveness.
+                    incident_count += 1
+                    if len(incident_preview) < 20:
+                        incident_preview.append({
+                            "trigger_code": "CPU_SUSTAINED",
+                            "first_sample_seq": record.get("first_sample_seq"),
+                            "last_sample_seq": record.get("last_sample_seq"),
+                            "status": record.get("status"),
+                            "verification_class": "UNVERIFIED_SESSION_RECORD",
+                        })
                 if record.get("kind") == "action_marker" and record.get("event") == "ACTION_COMPLETED":
                     # These are recorded USER commands, not independently attested OS events.
                     value = record.get("duration_ns")
@@ -69,6 +84,11 @@ def summarize(folder: Path) -> dict:
                 "invalid_action_markers": malformed_actions,
                 "action_evidence": "RECORDED_USER_COMMAND_NOT_ATTESTED",
                 "experiment_summary": experiments.result(),
+                "automatic_incident_count": incident_count,
+                "automatic_incident_preview": incident_preview,
+                "automatic_incidents_omitted": max(0, incident_count-len(incident_preview)),
+                "sampling_gap_count": sampling_gaps,
+                "automatic_event_provenance": "UNVERIFIED_STORED_EXTERNAL_COUNTERS",
                 "root_cause": "UNKNOWN", "root_cause_confidence": "UNKNOWN",
                 "execution_attested": False,
                 "limitations": ["external_sampling_only", "no_proof_of_memory_leak",
@@ -108,6 +128,13 @@ def _human_html(report: dict) -> str:
         "UNKNOWN": "Unknown status / Статус неизвестен",
     }
     errors = report.get("observation_errors", {})
+    incidents = report.get("automatic_incident_preview", [])
+    incidents_html = "".join(
+        "<tr><td>" + safe(e.get("trigger_code")) + "</td><td>" +
+        safe(e.get("first_sample_seq")) + "</td><td>" +
+        safe(e.get("last_sample_seq")) + "</td><td>" +
+        safe(e.get("status")) + "</td></tr>" for e in incidents
+    ) or "<tr><td colspan='4'>No incidents / Нет инцидентов</td></tr>"
     errors_html = "".join(
         "<tr><td>" + safe(code) + "</td><td>" + safe(count) + "</td></tr>"
         for code, count in sorted(errors.items())
@@ -175,6 +202,16 @@ def _human_html(report: dict) -> str:
         "<th>Median ms</th><th>p95 ms</th><th>MAD ms</th>"
         "<th>Coverage / Warnings</th></tr></thead><tbody>" +
         experiment_html + "</tbody></table>"
+        "<h2>Автоинциденты / Automatic incidents (opt-in)</h2>"
+        "<p>Stored external-counter observations only. CPU threshold and "
+        "sampling gaps are not evidence of a Windows hang or internal defect."
+        " / Только внешние счётчики, причина не доказана.</p>"
+        "<p>Captured / Захвачено: " + safe(report.get("automatic_incident_count", 0)) +
+        "; hidden / скрыто: " + safe(report.get("automatic_incidents_omitted", 0)) +
+        "; gaps / пропуски: " + safe(report.get("sampling_gap_count", 0)) + "</p>"
+        "<table><thead><tr><th>Trigger</th><th>First seq</th>"
+        "<th>Last seq</th><th>Status</th></tr></thead><tbody>" +
+        incidents_html + "</tbody></table>"
         "<h2>Ошибки наблюдателя / Observer events</h2>"
         "<table><thead><tr><th>Код / Code</th><th>Количество / Count</th>"
         "</tr></thead><tbody>" + errors_html + "</tbody></table>"
