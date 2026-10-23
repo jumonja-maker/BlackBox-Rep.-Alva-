@@ -152,7 +152,7 @@ class FileTargetGuiTests(unittest.TestCase):
              patch.object(self.window, "_attach_pid") as attached:
             self.window._launch_file_target()
             launched.assert_called_once_with(
-                [str(path)], cwd=str(path.parent), close_fds=True)
+                [str(path.resolve())], cwd=str(path.resolve().parent), close_fds=True)
             attached.assert_called_once_with(710)
 
     @unittest.skipUnless(os.name == "nt", "EXE launch is Windows-specific")
