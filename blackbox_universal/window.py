@@ -13,6 +13,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 import psutil
@@ -20,6 +21,7 @@ from blackbox_core.actions import ActionError
 from blackbox_investigation import InvestigationError
 from blackbox_core.contracts import ObserverError
 from blackbox_core.report import compare as compare_sessions
+from blackbox_core.sampling_health import BusyTickTracker
 from PySide6.QtCore import Qt, QTimer, QThread, Signal, QSettings, QUrl
 from PySide6.QtGui import QAction, QDesktopServices, QIcon
 from PySide6.QtWidgets import (
@@ -132,6 +134,7 @@ class UniversalWindow(QMainWindow):
         self._base_sample_worker: BaseSampleWorker | None = None
         self._pending_base_stop: str | None = None
         self._base_sample_error: str | None = None
+        self._busy_tick_tracker = BusyTickTracker()
         self._pending_close = False
         icon_dir = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent.parent))
         icon_file = icon_dir / "assets" / "blackbox.png"
@@ -1168,6 +1171,7 @@ class UniversalWindow(QMainWindow):
             QMessageBox.warning(self, "Observation",
                                 "Choose a running, accessible process first.")
             return
+        self._busy_tick_tracker = BusyTickTracker()
         self._set_report_status("recording")
         self._investigation_result = None
         self._investigation_html = None
@@ -1197,8 +1201,15 @@ class UniversalWindow(QMainWindow):
         if not self.probe.active:
             self._update_all()
             return
-        if self._base_sample_worker is not None or self._pending_base_stop is not None:
+        if self._base_sample_worker is not None:
+            if self._pending_base_stop is None:
+                # Observe a delivered Qt callback that cannot launch a sample.
+                # Qt coalesced/blocked callbacks remain UNKNOWN, not counted.
+                self._busy_tick_tracker.skipped(
+                    time.monotonic_ns(), self._timer.interval())
             return  # bounded backpressure: never accumulate a worker queue
+        if self._pending_base_stop is not None:
+            return
         core = self.probe._core
         folder = self.probe.session_folder
         if core is None or folder is None:
@@ -1234,6 +1245,14 @@ class UniversalWindow(QMainWindow):
             worker.deleteLater()
         code = self._base_sample_error
         self._base_sample_error = None
+        # Persist one bounded gap event per busy episode, before stop/report.
+        # A failure cannot be hidden as a successfully completed recording.
+        busy_gap = self._busy_tick_tracker.drain()
+        if busy_gap is not None:
+            try:
+                self.probe.record_busy_timer_gap(busy_gap)
+            except (ObserverError, ValueError, TypeError):
+                code = "STORAGE_ERROR"
         stop_reason = self._pending_base_stop
         if code:
             # Failed samples are preserved as observer_error evidence just as
