@@ -205,7 +205,7 @@ class ResearchSession:
         if self.book:
             book=self.book;self.book=None
             try:
-                book.sync_legacy()
+                book.sync_legacy(drain=True)
                 book.set_context("capture_health",{"finalization_errors":errors,
                     **app_coverage,
                     "application_event_ready":bool(self.tail and self.tail.ready),

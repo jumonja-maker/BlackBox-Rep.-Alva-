@@ -113,28 +113,35 @@ class CaseBook:
                 "evidence_ref":f"research.sqlite3:evidence:{cursor.lastrowid}"})
         return cursor.lastrowid
 
-    def sync_legacy(self):
+    def sync_legacy(self, *, drain=False):
         with closing(readonly(self.folder / "session.sqlite3")) as db:
-            rows = db.execute("SELECT seq,data FROM events WHERE seq>? ORDER BY seq LIMIT 1000",
-                              (self.last_legacy,))
-            for row in rows:
-                payload = json.loads(row["data"])
-                if payload.get("kind")=="research_evidence_ref":
+            # Freeze the frontier. Ordinary ticks stay bounded to one page;
+            # finalization reads every committed page from the stopped owner.
+            end=db.execute("SELECT COALESCE(MAX(seq),0) FROM events").fetchone()[0]
+            while self.last_legacy<end:
+                rows = db.execute("SELECT seq,data FROM events WHERE seq>? AND seq<=? ORDER BY seq LIMIT 1000",
+                                  (self.last_legacy,end))
+                count=0
+                for row in rows:
+                    count+=1
+                    payload = json.loads(row["data"])
+                    if payload.get("kind")=="research_evidence_ref":
+                        self.last_legacy=row["seq"]
+                        continue
+                    kind = payload.get("event", payload.get("kind", "legacy_event"))
+                    at = payload.get("timestamp_monotonic_ns")
+                    self.put(str(kind)[:80], {"legacy_event_seq": row["seq"], "event": payload},
+                             source=payload.get("source", "BLACKBOX_LEGACY"),
+                             quality="USER_REPORTED" if payload.get("source", "").startswith("USER") else "OBSERVED",
+                             at_ns=at, operation_id=payload.get("action_id"),mirror=False)
+                    if (kind=="ACTION_COMPLETED" and type(payload.get("duration_ns")) is int and
+                            0<=payload["duration_ns"]<=30*86400*10**9 and
+                            isinstance(payload.get("action_id"),str)):
+                        self.db.execute("INSERT OR IGNORE INTO action_runs VALUES(?,?,?,?)",
+                            (payload["action_id"],payload.get("experiment_id"),payload["duration_ns"],row["seq"]))
+                        self.db.commit()
                     self.last_legacy=row["seq"]
-                    continue
-                kind = payload.get("event", payload.get("kind", "legacy_event"))
-                at = payload.get("timestamp_monotonic_ns")
-                self.put(str(kind)[:80], {"legacy_event_seq": row["seq"], "event": payload},
-                         source=payload.get("source", "BLACKBOX_LEGACY"),
-                         quality="USER_REPORTED" if payload.get("source", "").startswith("USER") else "OBSERVED",
-                         at_ns=at, operation_id=payload.get("action_id"),mirror=False)
-                if (kind=="ACTION_COMPLETED" and type(payload.get("duration_ns")) is int and
-                        0<=payload["duration_ns"]<=30*86400*10**9 and
-                        isinstance(payload.get("action_id"),str)):
-                    self.db.execute("INSERT OR IGNORE INTO action_runs VALUES(?,?,?,?)",
-                        (payload["action_id"],payload.get("experiment_id"),payload["duration_ns"],row["seq"]))
-                    self.db.commit()
-                self.last_legacy = row["seq"]
+                if not drain or not count:break
 
     def close(self, state="COMPLETED"):
         self.state = state

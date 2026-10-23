@@ -100,3 +100,5 @@ At Stop, the application reader freezes a byte boundary and drains at most
 events or reported client loss produce explicit incomplete research coverage.
 Failure of this cooperative source does not terminate base sampling. A missing
 source loss counter remains NULL until a valid event reports it.
+Finalization also drains every committed legacy journal page up to a frozen
+frontier, so an action behind a large reference backlog remains in statistics.

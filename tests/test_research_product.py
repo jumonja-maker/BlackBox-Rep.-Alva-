@@ -211,6 +211,16 @@ class CaseTests(unittest.TestCase):
         self.session.book.set_context("experiment",{**experiment,"warmup_count":1})
         stored=action_statistics(self.folder)
         self.assertEqual(stored["warmups_excluded"],1);self.assertEqual(stored["repeats"],100)
+    def test_final_action_after_multi_page_reference_backlog_is_indexed(self):
+        from blackbox_core.casebook import action_statistics
+        store=self.session.probe._store
+        store.db.executemany("INSERT INTO events(data) VALUES (?)",[(json.dumps({"kind":"research_evidence_ref"}),)]*2200)
+        store.db.commit()
+        store.write_event({"event":"ACTION_COMPLETED","action_id":"last-real-action",
+                           "experiment_id":"e","duration_ns":123000000})
+        self.session.stop()
+        stats=action_statistics(self.folder)
+        self.assertEqual(stats["repeats"],1);self.assertEqual(stats["duration_ms"]["median"],123)
     def test_evidence_backwards_page(self):
         for n in range(220):self.session.book.put("fixture",{"n":n})
         first=evidence_page(self.folder,limit=100);second=evidence_page(self.folder,after_id=first["next_id"],limit=100)
