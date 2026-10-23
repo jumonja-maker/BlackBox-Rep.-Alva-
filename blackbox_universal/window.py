@@ -16,6 +16,7 @@ import tempfile
 from pathlib import Path
 
 import psutil
+from blackbox_core.actions import ActionError
 from blackbox_core.contracts import ObserverError
 from blackbox_core.report import compare as compare_sessions
 from PySide6.QtCore import Qt, QTimer, QThread, Signal, QSettings, QUrl
@@ -397,6 +398,22 @@ class UniversalWindow(QMainWindow):
         self.mark_problem_btn = _button("⚑  MARK PROBLEM")
         self.mark_problem_btn.clicked.connect(self._mark_problem)
         status.content.addWidget(self.mark_problem_btn)
+        action_controls = QGridLayout()
+        self.action_prepare_btn = _button("PREPARE ACTION")
+        self.action_prepare_btn.clicked.connect(self._prepare_action)
+        self.action_begin_btn = _button("BEGIN ACTION")
+        self.action_begin_btn.clicked.connect(self._begin_action)
+        self.action_end_btn = _button("END ACTION")
+        self.action_end_btn.clicked.connect(self._end_action)
+        self.action_repeat_btn = _button("REPEAT ACTION")
+        self.action_repeat_btn.clicked.connect(self._prepare_action)
+        for index, button in enumerate((self.action_prepare_btn, self.action_begin_btn,
+                                        self.action_end_btn, self.action_repeat_btn)):
+            button.setAccessibleName(button.text())
+            action_controls.addWidget(button, index // 2, index % 2)
+        status.content.addLayout(action_controls)
+        self.action_state_label = _label("Action state: IDLE", "caption")
+        status.content.addWidget(self.action_state_label)
         middle.addWidget(status, 4)
         content.addLayout(middle)
 
@@ -674,7 +691,7 @@ class UniversalWindow(QMainWindow):
                     self.session_location, self.process_count,
                     self.report_status_label, self.file_description,
                     self.target_binding_title, self.target_binding_detail,
-                    self.investigation_info}
+                    self.investigation_info, self.action_state_label}
         from PySide6.QtWidgets import QLabel
         for label in self.findChildren(QLabel):
             if label in changing or label.objectName() == "metricValue":
@@ -1127,6 +1144,12 @@ class UniversalWindow(QMainWindow):
         self.start_btn.setEnabled(selected and not running)
         self.stop_btn.setEnabled(running)
         self.mark_problem_btn.setEnabled(running and self.probe.last_elapsed_ms is not None)
+        current_action = self.probe.actions.state
+        self.action_prepare_btn.setEnabled(running and current_action in ("IDLE", "COMPLETED", "ABORTED"))
+        self.action_repeat_btn.setEnabled(running and current_action == "COMPLETED")
+        self.action_begin_btn.setEnabled(running and self.probe.actions.ready_to_start())
+        self.action_end_btn.setEnabled(running and current_action == "RUNNING")
+        self.action_state_label.setText(self._t("Action state") + ": " + current_action)
         self.investigate_current_btn.setEnabled(
             not running and not self._investigation_busy and
             self.probe.session_folder is not None and
@@ -1195,6 +1218,27 @@ class UniversalWindow(QMainWindow):
         # Translate the fixed phrase before appending the actual identifier.
         prefix = detail.rsplit(" · PID ", 1)[0]
         self.target_binding_detail.setText(self._t(prefix) + f" · PID {pid}")
+
+    def _prepare_action(self) -> None:
+        try:
+            self.probe.prepare_action()
+        except (ActionError, ObserverError, OSError):
+            QMessageBox.warning(self, "BLACK.BOX", self._t("Action measurement unavailable"))
+        self._update_all()
+
+    def _begin_action(self) -> None:
+        try:
+            self.probe.begin_action()
+        except (ActionError, ObserverError, OSError):
+            QMessageBox.warning(self, "BLACK.BOX", self._t("Action measurement unavailable"))
+        self._update_all()
+
+    def _end_action(self) -> None:
+        try:
+            self.probe.finish_action()
+        except (ActionError, ObserverError, OSError):
+            QMessageBox.warning(self, "BLACK.BOX", self._t("Action measurement unavailable"))
+        self._update_all()
 
     def _mark_problem(self) -> None:
         if not self.probe.active or self.probe.last_elapsed_ms is None:

@@ -24,10 +24,25 @@ def summarize(folder: Path) -> dict:
             # Stream the SQLite cursor: long recordings must not materialize
             # every event as a Python list. User problem markers are not faults.
             counts = {}
+            actions, completed_total, malformed_actions = [], 0, 0
             for entry in db.execute("SELECT data FROM events ORDER BY seq"):
                 record = json.loads(entry["data"])
                 if type(record) is not dict:
                     raise ObserverError("INVALID_DATA", "report")
+                if record.get("kind") == "action_marker" and record.get("event") == "ACTION_COMPLETED":
+                    # These are recorded USER commands, not independently attested OS events.
+                    value = record.get("duration_ns")
+                    action_id = record.get("action_id")
+                    if (type(value) is int and 0 <= value <= 30 * 86400 * 1_000_000_000 and
+                            type(action_id) is str and len(action_id) == 32 and
+                            all(c in "0123456789abcdef" for c in action_id)):
+                        completed_total += 1
+                        if len(actions) < 50:
+                            actions.append({"action_id": action_id,
+                                            "duration_ms": round(value / 1_000_000, 3),
+                                            "source": "RECORDED_USER_COMMAND_NOT_ATTESTED"})
+                    else:
+                        malformed_actions += 1
                 if record.get("kind") in ("observer_warning", "observer_error"):
                     code = record.get("code", "UNKNOWN")
                     if type(code) is not str or len(code) > 64:
@@ -45,6 +60,11 @@ def summarize(folder: Path) -> dict:
                 "peak_cpu_percent": agg["peak_cpu_percent"],
                 "max_children": agg["max_children"], "elapsed_ms": agg["elapsed_ms"],
                 "observation_errors": counts,
+                "completed_actions_total": completed_total,
+                "completed_actions": actions,
+                "completed_actions_omitted": max(0, completed_total - len(actions)),
+                "invalid_action_markers": malformed_actions,
+                "action_evidence": "RECORDED_USER_COMMAND_NOT_ATTESTED",
                 "root_cause": "UNKNOWN", "root_cause_confidence": "UNKNOWN",
                 "execution_attested": False,
                 "limitations": ["external_sampling_only", "no_proof_of_memory_leak",
@@ -88,6 +108,11 @@ def _human_html(report: dict) -> str:
         "<tr><td>" + safe(code) + "</td><td>" + safe(count) + "</td></tr>"
         for code, count in sorted(errors.items())
     ) or "<tr><td colspan='2'>None recorded / Нет зарегистрированных</td></tr>"
+    actions = report.get("completed_actions", [])
+    actions_html = "".join(
+        "<tr><td>" + safe(item["action_id"][:12]) + "</td><td>" +
+        safe(item["duration_ms"]) + "</td></tr>" for item in actions
+    ) or "<tr><td colspan='2'>No completed action / Нет завершённых действий</td></tr>"
     return (
         "<!doctype html><html lang='en'><head><meta charset='utf-8'>"
         "<meta name='viewport' content='width=device-width,initial-scale=1'>"
@@ -122,6 +147,13 @@ def _human_html(report: dict) -> str:
         metric("Конец UTC / Ended", report["ended_utc"]) +
         metric("Идентификатор / Session ID", report["session_id"]) +
         "</div>"
+        "<h2>Замеры действий / Action intervals</h2>"
+        "<p>Recorded user commands, not OS-attested function timings / "
+        "Команды пользователя, не подтверждённое профилирование функции.</p>"
+        "<p>Total / Всего: " + safe(report.get("completed_actions_total", 0)) +
+        "; omitted from preview / скрыто: " + safe(report.get("completed_actions_omitted", 0)) + "</p>"
+        "<table><thead><tr><th>Action ID</th><th>Duration / Длительность (ms)</th>"
+        "</tr></thead><tbody>" + actions_html + "</tbody></table>"
         "<h2>Ошибки наблюдателя / Observer events</h2>"
         "<table><thead><tr><th>Код / Code</th><th>Количество / Count</th>"
         "</tr></thead><tbody>" + errors_html + "</tbody></table>"

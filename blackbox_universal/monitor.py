@@ -12,6 +12,7 @@ from pathlib import Path
 import tempfile
 from typing import Any
 
+from blackbox_core.actions import ActionCycle, ActionError
 from blackbox_core.contracts import ObserverError, event
 from blackbox_core.probe import PsutilProbe, list_processes
 from blackbox_core.report import write_report
@@ -68,6 +69,8 @@ class ReadOnlyProbe:
         self.total_samples = 0
         self.last_elapsed_ms: int | None = None
         self.events: deque[dict] = deque(maxlen=300)
+        self.actions = ActionCycle()
+        self._recording_origin_ns: int | None = None
 
     def _event(self, code: str, detail: str = "") -> None:
         entry = {"timestamp_utc": utc_stamp(), "code": code,
@@ -104,6 +107,8 @@ class ReadOnlyProbe:
         self.total_samples = 0
         self.last_elapsed_ms = None
         self.events.clear()
+        self.actions = ActionCycle()
+        self._recording_origin_ns = None
         self._event("PROCESS_SELECTED", f"{self.name} · PID {pid}")
 
     def start(self) -> None:
@@ -132,6 +137,9 @@ class ReadOnlyProbe:
         self.total_samples = 0
         self.last_elapsed_ms = None
         self.events.clear()
+        self.actions = ActionCycle()
+        # PsutilProbe computes each elapsed_ms from its own monotonic origin.
+        self._recording_origin_ns = int(core.start * 1_000_000_000)
         self.active = True
         self.started_at = utc_stamp()
         self._event("OBSERVATION_STARTED")
@@ -145,6 +153,12 @@ class ReadOnlyProbe:
             "ACCESS_DENIED": "ACCESS_DENIED", "SAMPLE_UNAVAILABLE": "SAMPLE_UNAVAILABLE",
             "STORAGE_ERROR": "STORAGE_ERROR",
         }.get(reason, "INTERRUPTED")
+        # Preserve an explicit incomplete interval, not a fictional complete action.
+        try:
+            self.actions.abort(self._persist_action,
+                               "PROCESS_UNAVAILABLE" if reason in ("PROCESS_EXITED", "PID_REUSED") else "RECORDING_STOPPED")
+        except (ObserverError, ActionError):
+            self.last_error = "STORAGE_ERROR"
         self.active = False
         store = self._store
         self.session_state = status
@@ -172,6 +186,7 @@ class ReadOnlyProbe:
         try:
             sample = self._core.sample()
             self._store.write_sample(sample)
+            self.actions.advance(self._persist_action)
             record = {
                 "at": utc_stamp(),
                 "seconds": round(sample.elapsed_ms / 1000, 2),
@@ -198,6 +213,42 @@ class ReadOnlyProbe:
                 pass
             self.stop(exc.code)
             return None
+
+    def _persist_action(self, record: dict) -> None:
+        if not self.active or self._store is None or self._recording_origin_ns is None:
+            raise ActionError("RECORDING_NOT_ACTIVE")
+        data = dict(record)
+        # Actual command time, not the timestamp of the last process sample.
+        data["session_elapsed_ms"] = max(
+            0, (data["timestamp_monotonic_ns"] - self._recording_origin_ns) // 1_000_000)
+        data["previous_sample_seq"] = self.total_samples or None
+        data["pid"] = self.pid
+        data["pid_creation_time"] = self._core.created if self._core else None
+        self._store.write_event(data)
+        self.events.append({"timestamp_utc": utc_stamp(), "code": data["event"],
+                            "detail": f'{data["session_elapsed_ms"]} ms · action {data["action_id"][:8]}'})
+
+    def prepare_action(self, *, baseline_ms: int | None = None) -> dict:
+        if not self.active or self._core is None:
+            raise ActionError("RECORDING_NOT_ACTIVE")
+        if baseline_ms is not None:
+            if self.actions.state not in ("IDLE", "COMPLETED", "ABORTED"):
+                raise ActionError("ACTION_ALREADY_ACTIVE")
+            self.actions = ActionCycle(baseline_ms=baseline_ms)
+        # Refuse PID reuse before recording the beginning of a user action.
+        if abs(self._core.process.create_time() - self._core.created) > 0.000001:
+            raise ObserverError("PID_REUSED", "sample")
+        return self.actions.prepare(self._persist_action)
+
+    def begin_action(self) -> dict:
+        if not self.active:
+            raise ActionError("RECORDING_NOT_ACTIVE")
+        return self.actions.begin(self._persist_action)
+
+    def finish_action(self) -> dict:
+        if not self.active:
+            raise ActionError("RECORDING_NOT_ACTIVE")
+        return self.actions.finish(self._persist_action)
 
     def mark_problem(self, note: str = "") -> int:
         """Persist an explicit *unverified* user marker at the last real sample.
@@ -240,6 +291,8 @@ class ReadOnlyProbe:
             "session_state": self.session_state,
             "session_folder": str(self.session_folder) if self.session_folder else None,
             "sample_count": self.total_samples, "recent_samples": list(self.history),
+            "action_state": self.actions.state,
+            "completed_actions": self.actions.completed[-20:],
             "recent_events": list(self.events),
             "report_generated": self.report_result is not None,
             "limitations": [
