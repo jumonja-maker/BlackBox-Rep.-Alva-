@@ -89,8 +89,18 @@ class QtShellTests(unittest.TestCase):
         self.window = UniversalWindow()
         self.window._timer.stop()
 
+    def _wait_report(self):
+        for _ in range(600):
+            self.app.processEvents()
+            if self.window._report_worker is None and self.window._base_sample_worker is None:
+                return
+            time.sleep(0.01)
+        self.fail("report worker did not terminate")
+
     def tearDown(self):
+        self._wait_report()
         self.window.close()
+        self.app.processEvents()
         self.default_root.stop()
         self.tmp.cleanup()
 
@@ -161,6 +171,7 @@ class QtShellTests(unittest.TestCase):
                       self.window.target_binding_detail.text())
         self.window._tick()
         self.window._stop()
+        self._wait_report()
         self.assertEqual(self.window.target_binding_title.text(),
                          "✓  СЕАНС ЗАВЕРШЁН")
         self.assertIn("Отчёт сохранён", self.window.target_binding_detail.text())
@@ -196,6 +207,7 @@ class QtShellTests(unittest.TestCase):
         self.assertGreater(self.window.probe.last["rss_mb"], 0)
         self.assertTrue(self.window.stop_btn.isEnabled())
         self.window._stop()
+        self._wait_report()
         self.assertFalse(self.window.probe.active)
         session = self.window.probe.session_folder
         self.assertIsNotNone(session)
@@ -212,6 +224,7 @@ class QtShellTests(unittest.TestCase):
             self.window.probe.start()
             self.window._tick()
             self.window._stop()
+            self._wait_report()
             with patch("blackbox_universal.window.QFileDialog.getSaveFileName",
                        return_value=(str(dst), "JSON files (*.json)")), \
                  patch.object(QMessageBox, "information", return_value=None):

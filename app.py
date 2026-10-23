@@ -7,6 +7,21 @@ from pathlib import Path
 import sys
 import tempfile
 
+
+def _qa_checkpoint(stage: str) -> None:
+    if "--smoke" in sys.argv:
+        Path("blackbox-smoke-progress.json").write_text(
+            __import__("json").dumps({"stage": stage, "pid": os.getpid()}), encoding="utf-8")
+
+# Dispatch before importing Qt. The same packaged EXE owns the session child.
+if __name__ == "__main__" and "--research-worker" in sys.argv:
+    worker_parser = argparse.ArgumentParser()
+    worker_parser.add_argument("--research-worker", action="store_true")
+    worker_parser.add_argument("--research-root")
+    worker_options = worker_parser.parse_args()
+    from blackbox_core.research_worker import main as research_main
+    raise SystemExit(research_main(worker_options.research_root))
+
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication
 
@@ -19,15 +34,45 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="BLACK.BOX Universal retro desktop")
     parser.add_argument("--smoke", action="store_true",
                         help="Run Qt offscreen and exit automatically (QA only)")
+    parser.add_argument("--attach-pid", type=int, help="Select an existing process; recording remains explicit")
+    parser.add_argument("--research-e2e", type=Path, help="Run isolated end-to-end research QA into an explicit directory")
+    parser.add_argument("--deep-smoke",action="store_true",help="Run real Qt action/thread/incident/export QA")
+    parser.add_argument("--qa-output",type=Path,help="Explicit QA artifact directory")
+    parser.add_argument("--qa-fixture",choices=("cpu","ui","waitchain"),help=argparse.SUPPRESS)
+    parser.add_argument("--qa-commit-sha",default="UNKNOWN",help=argparse.SUPPRESS)
     options = parser.parse_args(argv)
-    if options.smoke:
+    if options.deep_smoke and options.qa_output is None:
+        parser.error("--deep-smoke requires --qa-output")
+    if options.qa_fixture:
+        if options.qa_output is None:
+            parser.error("--qa-fixture requires --qa-output")
+        from blackbox_universal.qa_fixtures import run_fixture
+        return run_fixture(options.qa_fixture,options.qa_output)
+    if options.smoke or options.deep_smoke:
         os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        _qa_checkpoint("QT_START")
     app = QApplication.instance() or QApplication(sys.argv[:1])
     app.setApplicationName("BLACK.BOX Universal")
     app.setOrganizationName("BlackBox")
     set_retro_theme(app)
-    window = UniversalWindow()
+    window = UniversalWindow(isolated=True,
+        output_root=(options.research_e2e or options.qa_output) / "sessions" if (options.research_e2e or options.deep_smoke) else None,
+        allow_update_check=not (options.smoke or options.research_e2e or options.deep_smoke))
     window.show()
+    if options.deep_smoke:
+        if options.qa_output is None:
+            parser.error("--deep-smoke requires --qa-output")
+        from blackbox_universal.deep_smoke import DeepSmoke
+        controller=DeepSmoke(app,window,options.qa_output,options.qa_commit_sha)
+        controller.start()
+        return app.exec()
+    if options.smoke:
+        _qa_checkpoint("WINDOW_SHOWN")
+    if options.attach_pid:
+        QTimer.singleShot(0, lambda: window._attach_pid(options.attach_pid))
+    if options.research_e2e:
+        from blackbox_universal.research_e2e import run_e2e
+        run_e2e(app, window, options.research_e2e)
     if options.smoke:
         # Exercise the ACTUAL Python/frozen binary, not only a Qt import.
         # Entirely temporary and offline.
@@ -40,9 +85,11 @@ def main(argv: list[str] | None = None) -> int:
             probe = ReadOnlyProbe(output_root=Path(temp))
             probe.attach(os.getpid())
             probe.start()
+            _qa_checkpoint("PROBE_STARTED")
             if probe.tick() is None:
                 raise RuntimeError("SMOKE_PROCESS_SAMPLE_MISSING")
             probe.stop()
+            _qa_checkpoint("PROBE_STOPPED")
             folder = probe.session_folder
             if folder is None or probe.last_error:
                 raise RuntimeError("SMOKE_SESSION_FAILED")
@@ -59,6 +106,7 @@ def main(argv: list[str] | None = None) -> int:
             smoke_worker.result_ready.connect(
                 lambda packet, error: probe_markers.append((packet, error)))
             smoke_worker.run()
+            _qa_checkpoint("INVESTIGATION_RETURNED")
             if len(probe_markers) != 1 or probe_markers[0][1]:
                 raise RuntimeError("SMOKE_INVESTIGATION_WORKER_FAILED")
             packet = probe_markers[0][0]
@@ -71,9 +119,30 @@ def main(argv: list[str] | None = None) -> int:
             html = (folder / "report.html").read_text(encoding="utf-8")
             if "Application root cause not determined" not in html:
                 raise RuntimeError("SMOKE_REPORT_NOT_HUMAN_READABLE")
-        QTimer.singleShot(280, app.quit)
-    return app.exec()
+        QTimer.singleShot(280, window.close)
+        _qa_checkpoint("EVENT_LOOP_CLOSE_SCHEDULED")
+    result = app.exec()
+    if options.smoke:
+        _qa_checkpoint("EXIT_" + str(result))
+    return result
 
 
 if __name__ == "__main__":
+    if "--smoke" in sys.argv or "--research-e2e" in sys.argv or "--deep-smoke" in sys.argv:
+        # A windowed PyInstaller failure otherwise opens a blocking error
+        # dialog on the headless runner. QA must retain the real traceback and
+        # return failure, never certify a hanging binary as a successful build.
+        import traceback
+        def qa_error(kind, value, tb):
+            Path("blackbox-qa-error.txt").write_text(
+                "".join(traceback.format_exception(kind, value, tb)), encoding="utf-8")
+            app = QApplication.instance()
+            if app is not None:
+                app.exit(1)
+        sys.excepthook = qa_error
+        try:
+            raise SystemExit(main())
+        except Exception:
+            qa_error(*sys.exc_info())
+            raise SystemExit(1)
     raise SystemExit(main())

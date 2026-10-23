@@ -105,8 +105,12 @@ def analyze_session(folder: str | Path, *, policy: Policy | None = None,
     policy = validate_policy(policy)
     source = load_session(folder, policy=policy, interval_start_ms=interval_start_ms,
                           interval_end_ms=interval_end_ms)
+    # A real USER command may arrive after the last periodic CPU sample.
+    # Retain its timestamp but expose that the tail has no sampled CPU context.
+    # Direct analyze() remains strict; never elevate such an event to OS evidence.
     report = analyze(source["samples"], markers=user_markers, policy=policy,
-                     identity={"pid": source["pid"], "creation_time": None})
+                     identity={"pid": source["pid"], "creation_time": None},
+                     allow_trailing_user_ms=5000)
     coverage = source["coverage"]
     report["coverage"] = coverage
     if not coverage["full_session_covered"]:

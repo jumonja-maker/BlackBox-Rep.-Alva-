@@ -55,6 +55,27 @@ def read_user_markers(folder: Path, *, start_ms: int | None = None,
     return markers
 
 
+def session_bounds(folder: Path) -> tuple[int, int, int]:
+    """Read-only full session time bounds; no unbounded row materialization."""
+    path = Path(folder) / "session.sqlite3"
+    if not path.is_file() or path.is_symlink() or Path(folder).is_symlink():
+        raise InvestigationError("SESSION_UNAVAILABLE")
+    try:
+        with closing(sqlite3.connect(path.resolve().as_uri() + "?mode=ro",
+                                     uri=True, timeout=1)) as connection:
+            connection.execute("PRAGMA query_only=ON")
+            count, start, end = connection.execute(
+                "SELECT count(*), min(elapsed_ms), max(elapsed_ms) FROM samples"
+            ).fetchone()
+    except (OSError, sqlite3.Error, ValueError):
+        raise InvestigationError("INVALID_SESSION") from None
+    if (type(count) is not int or count <= 0 or
+            type(start) is not int or type(end) is not int or
+            start < 0 or end < start):
+        raise InvestigationError("INVALID_SESSION")
+    return start, end, count
+
+
 def latest_bounded_interval(folder: Path) -> tuple[int, int, int]:
     """Return latest 4096 sample boundaries and total sample count."""
     path = folder / "session.sqlite3"
