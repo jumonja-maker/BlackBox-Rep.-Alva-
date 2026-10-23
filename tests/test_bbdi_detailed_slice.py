@@ -78,6 +78,33 @@ class SidecarLifecycleTests(unittest.TestCase):
             report = (probe.session_folder / "report.html").read_text(encoding="utf-8")
             self.assertIn("Detailed process capture", report)
 
+    def test_sqlite_failure_never_commits_partial_sample(self):
+        def invalid_thread(pid, created):
+            return {
+                "time_ns": time.monotonic_ns(), "sampling_duration_ns": 0,
+                "rss_bytes": 100, "private_bytes": None, "uss_bytes": None,
+                "handle_count": None, "cpu_user_s": 1.0,
+                "cpu_system_s": 0.0, "thread_count": 1,
+                "read_bytes": None, "write_bytes": None,
+                "read_ops": None, "write_ops": None,
+                "threads_omitted": 0, "children_total": 0,
+                "children_omitted": 0, "thread_status": "OK",
+                "threads": [{"tid": None, "cpu_user_s": 0.0,
+                             "cpu_system_s": 0.0}], "children": [],
+            }
+
+        with tempfile.TemporaryDirectory() as directory:
+            cap = DetailedCapture(Path(directory), os.getpid(), 1.0,
+                                  time.monotonic_ns(), collector=invalid_thread)
+            cap.start()
+            cap.thread.join(timeout=5)
+            self.assertFalse(cap.thread.is_alive())
+            self.assertEqual(cap.status, "STORAGE_OR_SENSOR_FAILURE")
+            summary = summarize_detail(Path(directory))
+            self.assertEqual(summary["status"], "STORAGE_OR_SENSOR_FAILURE")
+            self.assertEqual(summary["samples"], 0)
+            self.assertEqual(summary["thread_records"], 0)
+
     def test_detail_budget_counts_sqlite_wal_and_shm(self):
         with tempfile.TemporaryDirectory() as directory:
             cap = DetailedCapture(Path(directory), os.getpid(), 1.0,
