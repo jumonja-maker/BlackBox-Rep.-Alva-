@@ -2,7 +2,7 @@
 
 **Scope:** 75 MUST (M-001..075), 5 A (A-001..005), 36 acceptance (AC-01..36), 12 Windows fixtures (FIX-01..12), **128 total**. Normative descriptions and acceptance tests: `BLACKBOX_BigPatch_Technical_Spec_BB-DI-001_RU.md` from the original owner's `Original_Full_Order.zip`. This ledger is a **conservative WIP assessment, not a release certification**.
 
-**Repository target:** PR #17, `review/bb-di-001-action-integration-20261023`; baseline `main` v0.3.6 SHA `7be5e3899c115b1703d67aee5a575647aec17615`. CI and test evidence MUST be checked against live PR HEAD, not an inherited successful run on an earlier SHA. At ledger creation, successful new exact-HEAD Windows/frozen CI is **not yet confirmed**.
+**Repository target:** PR #17, `review/bb-di-001-action-integration-20261023`; baseline `main` v0.3.6 SHA `7be5e3899c115b1703d67aee5a575647aec17615`. CI and test evidence MUST be checked against live PR HEAD, not an inherited successful run on an earlier SHA. Historical exact-head success: Windows/Linux/portable CI #40018093140 for SHA `592f4ab7d8aea00eca83e100340079ffb45f4c65`. New thread CPU slice requires another **exact-head CI**; never inherit older success.
 
 **Counts (initial conservative assessment):** PARTIAL: 50; NOT-IMPLEMENTED: 29; NOT-RUN: 49.
 
@@ -20,7 +20,7 @@ Status rules: **PASS** needs actual user-facing integration, automated tests and
 | M-006 | PARTIAL | src/blackbox_core/detailed_capture.py; tests/test_bbdi_detailed_slice.py | RSS/Private/USS/handles best effort; per-field quality incomplete |
 | M-007 | PARTIAL | src/blackbox_core/detailed_capture.py | Cumulative byte and ops counters; safe per-interval rates not wired |
 | M-008 | PARTIAL | src/blackbox_core/detailed_capture.py | Child records, no complete tree aggregation/history |
-| M-009 | PARTIAL | src/blackbox_core/detailed_capture.py; tests/test_bbdi_detailed_slice.py | Cumulative TID times, but no validated CPU% deltas or Qt analysis |
+| M-009 | PARTIAL | src/blackbox_core/detailed_capture.py; src/blackbox_core/detail_analysis.py; tests/test_bbdi_thread_analysis.py; blackbox_universal/thread_detail_worker.py; blackbox_universal/window.py | Read-only adjacent-snapshot TID CPU% in existing Qt Processes table/JSON/HTML; no full lifetime intervals, OS birth identity, long session whole-history or complete coverage |
 | M-010 | NOT-IMPLEMENTED | — | Required full capability not present; see original order |
 | M-011 | PARTIAL | src/blackbox_core/detailed_capture.py | Observed child identity/RSS/CPU, but missing full tree IO/handles/lifetime |
 | M-012 | NOT-IMPLEMENTED | — | Required full capability not present; see original order |
@@ -41,7 +41,7 @@ Status rules: **PASS** needs actual user-facing integration, automated tests and
 | M-027 | PARTIAL | blackbox_universal/monitor.py; src/blackbox_core/detailed_capture.py | Separate detailed thread, base Qt sampling still synchronous |
 | M-028 | PARTIAL | src/blackbox_core/detailed_capture.py | Standalone v2 sidecar, not complete formal SQLite v2 contract |
 | M-029 | PARTIAL | src/blackbox_core/detailed_capture.py | Some process/thread/child tables; required entities missing |
-| M-030 | PARTIAL | src/blackbox_core/detailed_capture.py | Coarse source at collection level, not per field |
+| M-030 | PARTIAL | src/blackbox_core/detailed_capture.py; src/blackbox_core/detail_analysis.py | Derived TID rates explicitly PSUTIL/DERIVED with TID reuse warning; full per-field/source timestamp/error contract still missing |
 | M-031 | PARTIAL | src/blackbox_core/detailed_capture.py | NULL rather than fake zero in some fields; reason per field missing |
 | M-032 | PARTIAL | src/blackbox_core/detailed_capture.py | Monotonic nanoseconds stored; UTC mapping incomplete |
 | M-033 | PARTIAL | blackbox_universal/investigation_worker.py; tests/test_bbdi_interval_slice.py | Read-only selected legacy interval with max_samples bound; no full 8h streaming |
@@ -51,7 +51,7 @@ Status rules: **PASS** needs actual user-facing integration, automated tests and
 | M-037 | NOT-IMPLEMENTED | — | Required full capability not present; see original order |
 | M-038 | NOT-IMPLEMENTED | — | Required full capability not present; see original order |
 | M-039 | PARTIAL | blackbox_universal/window.py; tests/test_bbdi_detailed_slice.py | Overview controls; no complete investigation timeline |
-| M-040 | PARTIAL | blackbox_universal/window.py; src/blackbox_core/detailed_capture.py | Base process selection; no full thread/tree Qt table |
+| M-040 | PARTIAL | blackbox_universal/window.py; blackbox_universal/thread_detail_worker.py; src/blackbox_core/detail_analysis.py | User-loadable bounded TID CPU table; full process tree, child detail rows, historic interval and sort/zoom absent |
 | M-041 | PARTIAL | blackbox_universal/window.py; src/blackbox_core/incidents.py | User/CPU events; no native HWND/WCT/ETW timeline |
 | M-042 | PARTIAL | src/blackbox_core/report.py; blackbox_universal/window.py | JSON/HTML summaries but full evidence-driven Investigation incomplete |
 | M-043 | PARTIAL | blackbox_universal/window.py | Partial controls; complete profiles/privacy/quota UI missing |
@@ -64,7 +64,7 @@ Status rules: **PASS** needs actual user-facing integration, automated tests and
 | M-050 | NOT-IMPLEMENTED | — | Required full capability not present; see original order |
 | M-051 | NOT-IMPLEMENTED | — | Required full capability not present; see original order |
 | M-052 | PARTIAL | blackbox_universal/investigation_worker.py; tests/test_bbdi_interval_slice.py | Bounded legacy interval, not full coverage streaming |
-| M-053 | PARTIAL | src/blackbox_core/report.py | JSON/HTML, no schema2 full export, CSV/bundle not provided |
+| M-053 | PARTIAL | src/blackbox_core/report.py; src/blackbox_core/detail_analysis.py | Bounded derived TID CPU included in session JSON/HTML; full schema2 CSV/bundle and all field exports missing |
 | M-054 | PARTIAL | src/blackbox_core/experiments.py; src/blackbox_core/report.py | Duration-only experiment comparison |
 | M-055 | PARTIAL | src/blackbox_investigation/sqlite_adapter.py | Read-only v1 interval works; full v1/v2 SessionView missing |
 | M-056 | NOT-IMPLEMENTED | — | Required full capability not present; see original order |
@@ -141,6 +141,13 @@ Status rules: **PASS** needs actual user-facing integration, automated tests and
 | FIX-11 | NOT-RUN | — | No independent full-scenario Windows/EXE acceptance evidence for this exact item |
 | FIX-12 | NOT-RUN | — | No independent full-scenario Windows/EXE acceptance evidence for this exact item |
 
+## New read-only per-thread CPU vertical subfeature (still PARTIAL)
+
+- `src/blackbox_core/detail_analysis.py`: adjacent-sample delta `(user+system CPU seconds)/monotonic interval` converted into single-core-equivalent CPU percent, only for the same TID in consecutive process snapshots. First-seen/reappeared TIDs, nonadjacent snapshots and negative/reset counters **do not receive fabricated rates**. Possible unobserved TID reuse remains explicitly unproven.
+- `blackbox_universal/thread_detail_worker.py` and `window.py`: explicit, background-loaded bounded Top-TID table on the existing Processes page, 5 tabs unchanged; RU/EN status; no added runtime/cloud/sensor privilege.
+- `report.py`: `thread_cpu_analysis` embedded in JSON plus safe HTML table, distinguished as PSUTIL/DERIVED, not WCT/OS-hang evidence. Legacy `session.sqlite3` schema1 is unchanged; sidecar is read-only.
+- `tests/test_bbdi_thread_analysis.py`: fake source fixtures are test-only; exercise churn, gaps, reset, monotonic deltas, SQLite immutability, JSON/HTML, Qt worker and five-tab invariant. **No full Windows native fixture has been accepted from these synthetic examples.**
+
 ## Newly handled safety cases on this branch
 
 - `ReadOnlyProbe` retains the unfinished detailed collector as `_pending_detailed` on stop-timeout, blocks new attach/start/re-enable while it is alive, and reaps it without blocking UI once it exits. Tests explicitly hold an injected collector inside an OS-like blocking wait. The worker cannot be forcibly killed by Python; this mitigates ownership/rebind, **not** a guaranteed deadline for a blocked Win32/psutil call.
@@ -152,7 +159,7 @@ Status rules: **PASS** needs actual user-facing integration, automated tests and
 
 1. Complete schema2 contracts, provenance/status/capability vocabulary, monotonic↔UTC mapping and V1 read-only/V2 readers with atomic lifecycle.
 2. Move **base sampling and SQLite writing** off Qt main thread into ownership-managed bounded workers with health/backpressure.
-3. Implement real delta-validated TID CPU% + sampling gaps, process tree, per-field quality, full user-facing charts and exports.
+3. Extend the **new bounded adjacent-snapshot TID CPU%** to selected full-session intervals, per-field quality, tree/history, charts, CSV and compare. Existing table/HTML/JSON only covers a recent bounded window; TID birth identity is unverified.
 4. Add real bounded Windows HWND responsiveness and WCT with positive/negative Windows fixtures and explicit unsupported/denied states; opt-in ETW where capable.
 5. Build complete evidence-led Investigation/compare/timeline/experiment history; 8h Standard, 1h Detailed, 12 fixtures, AC-01..36.
 6. Run actual **frozen Windows EXE full vertical test** and physical-platform matrix; final report and human owner sign-off before merge/release.
