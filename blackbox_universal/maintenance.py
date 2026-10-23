@@ -30,10 +30,38 @@ class MaintenanceError(RuntimeError):
     pass
 
 
+def _is_directory_link(path: Path) -> bool:
+    """Recognize symlinks/junctions; fail closed on inaccessible paths.
+
+    A missing path is not a link. Permission and filesystem errors are NOT
+    evidence that a path is safe to delete or move.
+    """
+    import stat
+    try:
+        item = path.lstat()
+    except FileNotFoundError:
+        return False
+    except OSError:
+        raise MaintenanceError("PATH_INSPECTION_FAILED") from None
+    return (stat.S_ISLNK(item.st_mode) or
+            bool(getattr(item, "st_file_attributes", 0) &
+                 getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)))
+
+
+def _has_reparse_ancestor(path: Path) -> bool:
+    """Check the complete path, not just its final directory component.
+
+    A plain marked installation inside a junction is still outside the
+    authorized filesystem tree. Do not follow it for update or deletion.
+    """
+    return any(_is_directory_link(parent) for parent in
+               (path, *path.parents))
+
+
 def _safe_install(path: Path) -> Path:
     """Only a specific, marked portable folder can be affected."""
     candidate = Path(os.path.abspath(path))
-    if candidate.is_symlink() or not candidate.is_dir():
+    if _has_reparse_ancestor(candidate) or not candidate.is_dir():
         raise MaintenanceError("INSTALL_FOLDER_INVALID")
     if candidate.parent == candidate or candidate.parent.parent == candidate.parent:
         raise MaintenanceError("SYSTEM_ROOT_REFUSED")
@@ -42,7 +70,7 @@ def _safe_install(path: Path) -> Path:
         raise MaintenanceError("SYSTEM_INSTALL_REFUSED")
     for name in (INSTALL_MARKER, EXECUTABLE_NAME, MAINTENANCE_NAME):
         item = candidate / name
-        if item.is_symlink() or not item.is_file():
+        if _is_directory_link(item) or not item.is_file():
             raise MaintenanceError("PORTABLE_INSTALL_NOT_VERIFIED")
     try:
         manifest = json.loads((candidate / INSTALL_MARKER).read_text(encoding="utf-8"))
@@ -93,9 +121,9 @@ def _keep_local_logs(folder: Path, destination: Path) -> list[tuple[Path, Path]]
     try:
         for name in SAVED_DIRS:
             source = folder / name
-            if not source.exists() and not source.is_symlink():
+            if not source.exists() and not _is_directory_link(source):
                 continue
-            if source.is_symlink() or not source.is_dir():
+            if _is_directory_link(source) or not source.is_dir():
                 raise MaintenanceError("DATA_LINK_REFUSED")
             target = destination / name
             if target.exists():
@@ -135,7 +163,7 @@ def uninstall(install: Path) -> None:
 def apply_update(install: Path, staged: Path) -> None:
     install = _safe_install(install)
     staged = Path(os.path.abspath(staged))
-    if staged.is_symlink() or staged.parent.parent != install.parent:
+    if _has_reparse_ancestor(staged) or staged.parent.parent != install.parent:
         raise MaintenanceError("STAGING_ROOT_NOT_SIBLING")
     if not staged.parent.name.startswith(".blackbox-stage-"):
         raise MaintenanceError("UNAUTHORIZED_STAGING_FOLDER")
@@ -151,9 +179,9 @@ def apply_update(install: Path, staged: Path) -> None:
         new_installed = True
         for name in SAVED_DIRS:
             previous = backup / name
-            if not previous.exists() and not previous.is_symlink():
+            if not previous.exists() and not _is_directory_link(previous):
                 continue
-            if previous.is_symlink() or not previous.is_dir():
+            if _is_directory_link(previous) or not previous.is_dir():
                 raise MaintenanceError("DATA_LINK_REFUSED")
             new_place = install / name
             if new_place.exists():

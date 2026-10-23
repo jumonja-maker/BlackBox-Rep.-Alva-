@@ -12,6 +12,7 @@ import json
 import os
 from pathlib import Path, PurePosixPath
 import re
+import unicodedata
 import shutil
 import stat
 import tempfile
@@ -145,12 +146,32 @@ def runtime_directory() -> Path | None:
     return folder
 
 
+_WIN_DEVICE = re.compile(
+    r"^(?:CON|PRN|AUX|NUL|(?:COM|LPT)[1-9\u00b9\u00b2\u00b3])(?:\.|$)",
+    re.IGNORECASE,
+)
+_WIN_FORBIDDEN = frozenset('<>:"|?*')
+
+
+def _valid_portable_component(part: str) -> bool:
+    """Conservative Windows ZIP filenames: reject aliases and device paths."""
+    return bool(part and part not in (".", "..") and
+                not part.endswith((".", " ")) and
+                not any(ord(c) < 32 or c in _WIN_FORBIDDEN for c in part) and
+                _WIN_DEVICE.match(part) is None)
+
+
 def _extract_release(zip_path: Path, dest: Path) -> Path:
     """Reject paths escaping the package, links, duplicate targets, and zip bombs."""
     root_name = "BLACK.BOX-Universal"
     root = dest / root_name
     seen = set()
+    regular_files, directories = set(), set()
     used = 0
+    # Never extract onto an existing root: it may be a directory junction or
+    # symlink planted between staging and extraction by another actor.
+    if root.exists() or root.is_symlink():
+        raise ValueError("STAGING_NOT_EMPTY")
     with zipfile.ZipFile(zip_path) as archive:
         members = archive.infolist()
         if len(members) > MAX_MEMBERS:
@@ -162,28 +183,37 @@ def _extract_release(zip_path: Path, dest: Path) -> Path:
             raw_parts = original.rstrip("/").split("/")
             # Windows filesystem aliases (CON, trailing dots, ADS colons)
             # and noncanonical components can bypass path comparisons.
-            if (not raw_parts or any(
-                    not part or part in (".", "..") or
-                    part.endswith((".", " ")) or ":" in part or
-                    part.split(".")[0].upper() in (
-                        "CON", "PRN", "AUX", "NUL",
-                        "COM1", "COM2", "COM3", "COM4", "COM5",
-                        "LPT1", "LPT2", "LPT3", "LPT4", "LPT5")
-                    for part in raw_parts)):
+            if not raw_parts or any(not _valid_portable_component(part) for part in raw_parts):
                 raise ValueError("ARCHIVE_PATH_INVALID")
             name = PurePosixPath(original)
             parts = name.parts
-            if name.is_absolute() or parts[0] != root_name:
-                raise ValueError("ARCHIVE_PATH_INVALID")
-            if original.casefold() in seen:
+            if name.is_absolute() or parts[0] != root_name or len(parts) < 2:
+                # An explicit root directory is allowed, but never a root file.
+                if not (item.is_dir() and parts == (root_name,)):
+                    raise ValueError("ARCHIVE_PATH_INVALID")
+            canonical = unicodedata.normalize("NFC", original.rstrip("/")).casefold()
+            if canonical in seen:
                 raise ValueError("ARCHIVE_DUPLICATE_PATH")
-            seen.add(original.casefold())
+            seen.add(canonical)
             kind = (item.external_attr >> 16) & 0o170000
-            if kind == stat.S_IFLNK:
-                raise ValueError("ARCHIVE_SYMLINK_REFUSED")
+            if kind not in (0, stat.S_IFREG, stat.S_IFDIR):
+                raise ValueError("ARCHIVE_SPECIAL_FILE_REFUSED")
+            if kind == stat.S_IFDIR and not item.is_dir():
+                raise ValueError("ARCHIVE_TYPE_CONFLICT")
+            if item.is_dir():
+                directories.add(canonical)
+            else:
+                regular_files.add(canonical)
             used += item.file_size
             if used > MAX_UNCOMPRESSED_BYTES:
                 raise ValueError("ARCHIVE_TOO_LARGE")
+        # A file must not act as a parent directory of any other archive entry.
+        # Check *before* writing the first byte into the staging directory.
+        for name in seen:
+            parts = name.split("/")
+            if any("/".join(parts[:i]) in regular_files
+                   for i in range(1, len(parts))):
+                raise ValueError("ARCHIVE_FILE_DIRECTORY_COLLISION")
         for item in members:
             if item.is_dir():
                 continue

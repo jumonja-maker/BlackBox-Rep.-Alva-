@@ -21,15 +21,18 @@ def summarize(folder: Path) -> dict:
             agg = db.execute("""SELECT count(*) AS samples, MAX(rss_bytes) AS peak_rss_bytes,
                        MAX(cpu_percent) AS peak_cpu_percent, MAX(children_count) AS max_children,
                        MAX(elapsed_ms) AS elapsed_ms FROM samples""").fetchone()
-            events = db.execute("SELECT data FROM events ORDER BY seq").fetchall()
+            # Stream the SQLite cursor: long recordings must not materialize
+            # every event as a Python list. User problem markers are not faults.
             counts = {}
-            for entry in events:
+            for entry in db.execute("SELECT data FROM events ORDER BY seq"):
                 record = json.loads(entry["data"])
-                # Preserve historical warning/error reporting, but never
-                # count lifecycle timeline messages as observation errors.
-                if record.get("kind") != "observer_lifecycle":
-                    kind = record.get("code", "UNKNOWN")
-                    counts[kind] = counts.get(kind, 0) + 1
+                if type(record) is not dict:
+                    raise ObserverError("INVALID_DATA", "report")
+                if record.get("kind") in ("observer_warning", "observer_error"):
+                    code = record.get("code", "UNKNOWN")
+                    if type(code) is not str or len(code) > 64:
+                        raise ObserverError("INVALID_DATA", "report")
+                    counts[code] = counts.get(code, 0) + 1
             result = {
                 "schema_version": 1,
                 "report_type": "BLACKBOX_PROCESS_OBSERVATION",
@@ -158,15 +161,18 @@ def write_report(folder: Path) -> dict:
                 output.write(content)
                 output.flush()
                 os.fsync(output.fileno())
-        # Keep report.json last: it is the completion marker for consumers.
+        # No TOCTOU overwrite: hard-link exclusive publishing refuses an
+        # existing destination even if another process created it after preflight.
+        # Staging files are on the same volume. JSON remains the last marker.
         for source, target in ((staged[1], html_path), (staged[0], json_path)):
-            if target.exists() or target.is_symlink():
-                raise OSError("Report destination already exists")
-            os.replace(source, target)
+            os.link(source, target)
             published.append(target)
     except OSError:
         for target in reversed(published):
-            target.unlink(missing_ok=True)
+            try:
+                target.unlink(missing_ok=True)
+            except OSError:
+                pass  # Preserve the first failure; warn caller of incomplete publish.
         raise ObserverError("STORAGE_ERROR", "storage") from None
     finally:
         for tmp in staged:

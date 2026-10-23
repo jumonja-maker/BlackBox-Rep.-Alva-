@@ -39,6 +39,21 @@ jobs:
         run: python -m unittest discover -s tests -v
       - name: Real Qt offscreen startup smoke
         run: python app.py --smoke
+      - name: Offscreen RU/EN screenshots at simulated Windows DPI 100-200%
+        shell: pwsh
+        run: |
+          foreach ($scale in @('1', '1.25', '1.5', '2')) {
+            $env:QT_SCALE_FACTOR = $scale
+            python tools/qa_dpi_offscreen.py dpi-offscreen
+            if ($LASTEXITCODE -ne 0) { throw "Offscreen DPI capture failed at scale $scale" }
+          }
+          Remove-Item Env:\QT_SCALE_FACTOR -ErrorAction SilentlyContinue
+      - uses: actions/upload-artifact@v4
+        with:
+          name: BLACKBOX-OFFSCREEN-DPI-QA
+          path: dpi-offscreen/*.png
+          if-no-files-found: error
+          retention-days: 7
       - name: Validate human-first CLI (no platform command)
         shell: pwsh
         run: |

@@ -63,23 +63,23 @@ class AuditCoreRegressions(unittest.TestCase):
                 ["OBSERVATION_STARTED", "USER_STOPPED"])
             self.assertEqual(summarize(probe.session_folder)["observation_errors"], {})
 
-    def test_json_html_publication_rolls_back_if_second_replace_fails(self):
+    def test_json_html_publication_rolls_back_if_second_link_fails(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = SessionStore(Path(tmp), os.getpid())
             folder = store.folder
             store.finish("COMPLETED")
             store.close()
-            real_replace = os.replace
+            real_link = os.link
             calls = [0]
 
-            def replace_then_fail(source, destination):
+            def link_then_fail(source, destination):
                 calls[0] += 1
                 if calls[0] == 2:
                     raise OSError("simulated filesystem failure")
-                return real_replace(source, destination)
+                return real_link(source, destination)
 
-            with patch("blackbox_core.report.os.replace",
-                       side_effect=replace_then_fail):
+            with patch("blackbox_core.report.os.link",
+                       side_effect=link_then_fail):
                 with self.assertRaises(ObserverError):
                     write_report(folder)
             self.assertFalse((folder / "report.json").exists())

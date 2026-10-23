@@ -121,6 +121,7 @@ class TrendChart(QWidget):
         self._cpu: list[float | None] = []
         self._ram: list[float | None] = []
         self.language = "EN"
+        self.cpu_scale = 100  # A multi-core process can exceed 100%.
         self.setMinimumHeight(205)
         self.setAccessibleName("CPU and memory trend graph")
 
@@ -134,6 +135,9 @@ class TrendChart(QWidget):
                      else None for x in window]
         self._ram = [float(x["rss_mb"]) if x.get("rss_mb") is not None
                      else None for x in window]
+        cpu_peak = max((x for x in self._cpu if x is not None), default=0.0)
+        # Keep the y-axis honest for multithreaded CPU usage > 100%.
+        self.cpu_scale = max(100, (int(cpu_peak / 50) + 1) * 50) if cpu_peak > 100 else 100
         self.update()
 
     def paintEvent(self, event):
@@ -151,7 +155,7 @@ class TrendChart(QWidget):
         font = QFont("Consolas", 9)
         painter.setFont(font)
         for i in range(5):
-            pct = int(100 - 25 * i)
+            pct = int(self.cpu_scale * (4 - i) / 4)
             painter.drawText(QRectF(0, plot.top() + plot.height() * i / 4 - 7,
                                     40, 15),
                              Qt.AlignmentFlag.AlignRight, f"{pct}%")
@@ -189,7 +193,7 @@ class TrendChart(QWidget):
             painter.drawPath(path)
 
         # RAM is a relative trend, so CPU% and RAM colors remain distinct.
-        draw_series(self._cpu, COLORS["coral"], 100)
+        draw_series(self._cpu, COLORS["coral"], self.cpu_scale)
         peak_ram = max((value for value in self._ram if value is not None),
                        default=0.0)
         peak_ram = max(peak_ram, 1.0)
