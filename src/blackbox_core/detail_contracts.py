@@ -142,3 +142,72 @@ def sample_field_statuses(sample: dict) -> dict[str, str]:
         "threads_status": out["threads"],
         "children_status": out["children"],
     }
+
+
+def read_provenance(connection) -> dict:
+    """Read additive v2 contract tables, never modifying a historic session.
+
+    Called on an existing read-only SQLite connection. Legacy detail-v2
+    captures without these tables are *not* rewritten or invented.
+    """
+    try:
+        tables = {row[0] for row in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name IN "
+            "('detail_clock_mapping','detail_capabilities','detail_sample_quality')"
+        )}
+        required = {"detail_clock_mapping", "detail_capabilities",
+                    "detail_sample_quality"}
+        if tables != required:
+            return {"status": "LEGACY_DETAIL_V2_NO_PROVENANCE",
+                    "clock_mapping": None, "capabilities": [],
+                    "latest_quality": None, "quality_samples": 0}
+        clock_rows = connection.execute(
+            "SELECT monotonic_anchor_ns, utc_anchor_ns, uncertainty_ns, "
+            "clock_source FROM detail_clock_mapping LIMIT 2").fetchall()
+        if len(clock_rows) != 1:
+            raise ValueError("INVALID_CLOCK_CARDINALITY")
+        clock = ClockAnchor(*clock_rows[0])
+        rows = connection.execute(
+            "SELECT field_name, source_kind, verification_class, unit "
+            "FROM detail_capabilities ORDER BY field_name LIMIT 16").fetchall()
+        if len(rows) != len(FIELD_UNITS):
+            raise ValueError("INVALID_CAPABILITY_COUNT")
+        actual = {}
+        for name, source, verification, unit in rows:
+            if (name not in FIELD_UNITS or FIELD_UNITS[name] != unit or
+                    source != SOURCE_KIND or verification != VERIFICATION_CLASS or
+                    name in actual):
+                raise ValueError("INVALID_CAPABILITY")
+            actual[name] = {"source_kind": source,
+                            "verification_class": verification, "unit": unit}
+        total = connection.execute(
+            "SELECT count(*) FROM detail_sample_quality").fetchone()[0]
+        columns = ", ".join(("sample_seq", "utc_estimate_ns", "source_kind",
+                             "verification_class") + FIELD_STATUS_COLUMNS)
+        records = connection.execute(
+            "SELECT " + columns +
+            " FROM detail_sample_quality ORDER BY sample_seq DESC LIMIT 1"
+        ).fetchall()
+        latest = None
+        if records:
+            item = records[0]
+            if (type(item[0]) is not int or item[0] <= 0
+                    or type(item[1]) is not int or item[1] <= 0
+                    or item[2] != SOURCE_KIND
+                    or item[3] != VERIFICATION_CLASS):
+                raise ValueError("INVALID_QUALITY_ROW")
+            statuses = dict(zip(FIELD_STATUS_COLUMNS, item[4:]))
+            if any(status not in MEASUREMENT_STATUSES
+                   for status in statuses.values()):
+                raise ValueError("INVALID_QUALITY_STATUS")
+            latest = {"sample_seq": item[0], "utc_estimate_ns": item[1],
+                      "source_kind": item[2], "verification_class": item[3],
+                      "measurement_status": statuses}
+        return {"status": "OK", "clock_mapping": clock.as_dict(),
+                "capabilities": [{"field": key, **actual[key]}
+                                 for key in sorted(actual)],
+                "latest_quality": latest, "quality_samples": total}
+    except (ValueError, TypeError, OverflowError):
+        return {"status": "INVALID_DETAIL_PROVENANCE",
+                "clock_mapping": None, "capabilities": [],
+                "latest_quality": None, "quality_samples": 0}
