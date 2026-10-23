@@ -82,6 +82,7 @@ def sample_process(pid: int, created: float, *, thread_limit: int = 256,
         descendants = []
         children_total = None
         children_status = "OK"
+        children_failed = 0
         try:
             all_children = p.children(recursive=True)
             children_total = len(all_children)
@@ -103,6 +104,7 @@ def sample_process(pid: int, created: float, *, thread_limit: int = 256,
                         except (psutil.AccessDenied, NotImplementedError, OSError):
                             child_handles = None
                     if abs(float(psutil.Process(child.pid).create_time()) - child_created) > 0.000001:
+                        children_failed += 1
                         continue
                     descendants.append({
                         "pid": child.pid, "created": child_created,
@@ -117,11 +119,14 @@ def sample_process(pid: int, created: float, *, thread_limit: int = 256,
                         "write_ops": getattr(child_io,"write_count",None),
                     })
                 except (psutil.NoSuchProcess, psutil.ZombieProcess, psutil.AccessDenied, OSError):
+                    children_failed += 1
                     continue
         except psutil.AccessDenied:
             children_status = "ACCESS_DENIED"
         except (psutil.NoSuchProcess, OSError):
             children_status = "NOT_OBSERVED"
+        if children_status == "OK" and children_failed:
+            children_status = "TRUNCATED"
         if abs(float(psutil.Process(pid).create_time()) - created) > 0.000001:
             raise DetailSensorError("PID_REUSED")
         ended = time.monotonic_ns()
@@ -144,6 +149,7 @@ def sample_process(pid: int, created: float, *, thread_limit: int = 256,
             "children": descendants, "children_total": children_total,
             "children_omitted": (max(0, children_total-len(descendants))
                                  if children_total is not None else None),
+            "children_failed": children_failed,
             "source": "PSUTIL_EXTERNAL_COUNTERS_NOT_CAUSAL_PROOF",
             "sensor_status": {
                 "rss_bytes": "OK", "private_bytes": private_status,

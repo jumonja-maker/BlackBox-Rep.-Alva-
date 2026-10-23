@@ -62,6 +62,7 @@ class SessionStore:
                     seq INTEGER PRIMARY KEY AUTOINCREMENT,
                     data TEXT NOT NULL
                 );
+                CREATE INDEX ix_samples_elapsed ON samples(elapsed_ms, seq);
             """)
             self.db.execute("INSERT INTO metadata VALUES (1, ?, ?, ?, NULL, NULL, ?)",
                             (self.folder.name, pid, _utc(), started_with))

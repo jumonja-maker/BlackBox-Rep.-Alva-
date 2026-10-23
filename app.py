@@ -7,6 +7,15 @@ from pathlib import Path
 import sys
 import tempfile
 
+# Dispatch before importing Qt. The same packaged EXE owns the session child.
+if __name__ == "__main__" and "--research-worker" in sys.argv:
+    worker_parser = argparse.ArgumentParser()
+    worker_parser.add_argument("--research-worker", action="store_true")
+    worker_parser.add_argument("--research-root")
+    worker_options = worker_parser.parse_args()
+    from blackbox_core.research_worker import main as research_main
+    raise SystemExit(research_main(worker_options.research_root))
+
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication
 
@@ -19,6 +28,8 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="BLACK.BOX Universal retro desktop")
     parser.add_argument("--smoke", action="store_true",
                         help="Run Qt offscreen and exit automatically (QA only)")
+    parser.add_argument("--attach-pid", type=int, help="Select an existing process; recording remains explicit")
+    parser.add_argument("--research-e2e", type=Path, help="Run isolated end-to-end research QA into an explicit directory")
     options = parser.parse_args(argv)
     if options.smoke:
         os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -26,8 +37,14 @@ def main(argv: list[str] | None = None) -> int:
     app.setApplicationName("BLACK.BOX Universal")
     app.setOrganizationName("BlackBox")
     set_retro_theme(app)
-    window = UniversalWindow()
+    window = UniversalWindow(isolated=True,
+        output_root=options.research_e2e / "sessions" if options.research_e2e else None)
     window.show()
+    if options.attach_pid:
+        QTimer.singleShot(0, lambda: window._attach_pid(options.attach_pid))
+    if options.research_e2e:
+        from blackbox_universal.research_e2e import run_e2e
+        run_e2e(app, window, options.research_e2e)
     if options.smoke:
         # Exercise the ACTUAL Python/frozen binary, not only a Qt import.
         # Entirely temporary and offline.
@@ -71,7 +88,7 @@ def main(argv: list[str] | None = None) -> int:
             html = (folder / "report.html").read_text(encoding="utf-8")
             if "Application root cause not determined" not in html:
                 raise RuntimeError("SMOKE_REPORT_NOT_HUMAN_READABLE")
-        QTimer.singleShot(280, app.quit)
+        QTimer.singleShot(280, window.close)
     return app.exec()
 
 

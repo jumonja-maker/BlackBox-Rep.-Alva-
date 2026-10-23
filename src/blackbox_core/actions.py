@@ -32,6 +32,7 @@ class ActionCycle:
         self.ended_ns = None
         self.last_timestamp_ns = None
         self.completed = []
+        self.completed_total = 0
 
     def _now(self):
         now = self.clock()
@@ -77,6 +78,10 @@ class ActionCycle:
                                    "start_ns": self.started_ns,
                                    "end_ns": self.ended_ns,
                                    "duration_ns": self.ended_ns - self.started_ns})
+            self.completed_total += 1
+            # Durable SQLite retains every run; GUI keeps only a recent tail.
+            if len(self.completed) > 256:
+                del self.completed[0]
             return record
         return None
 

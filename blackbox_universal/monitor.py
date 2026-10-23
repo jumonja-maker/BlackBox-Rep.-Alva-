@@ -430,7 +430,7 @@ class ReadOnlyProbe:
         except ObserverError:
             self.last_error = "STORAGE_ERROR"
 
-    def tick(self) -> dict | None:
+    def tick(self, *, requested_interval_ms: int = 1000) -> dict | None:
         """Legacy synchronous path for CLI/explicit callers, not Qt timer."""
         if not self.active or self._core is None or self._store is None:
             return None
@@ -441,7 +441,7 @@ class ReadOnlyProbe:
                 self._store.v2.submit("base", {
                     **self._core.last_observation,
                     "correlation_key": f"schema1:{self._store.seq}",
-                    "requested_interval_ns": 1_000_000_000})
+                    "requested_interval_ns": requested_interval_ms*1_000_000})
             return self._accept_persisted_sample(sample, self._store.seq)
         except ObserverError as exc:
             self.last_error = exc.code
@@ -602,6 +602,7 @@ class ReadOnlyProbe:
             "max_base_worker_signal_delivery_ms": self._worker_timing.max_signal_delivery_ms,
             "action_state": self.actions.state,
             "completed_actions": self.actions.completed[-20:],
+            "completed_actions_total": self.actions.completed_total,
             "recent_events": list(self.events),
             "report_generated": self.report_result is not None,
             "limitations": [

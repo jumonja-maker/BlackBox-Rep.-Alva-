@@ -39,6 +39,8 @@ jobs:
         run: python -m unittest discover -s tests -v
       - name: Real Qt offscreen startup smoke
         run: python app.py --smoke
+      - name: Real Qt isolated research end-to-end
+        run: python app.py --research-e2e source-research-e2e
       - name: Offscreen RU/EN screenshots at simulated Windows DPI 100-200%
         shell: pwsh
         run: |
@@ -87,6 +89,8 @@ jobs:
         run: python -m unittest discover -s tests -v
       - name: Qt offscreen startup smoke
         run: python app.py --smoke
+      - name: Real Qt isolated research end-to-end
+        run: python app.py --research-e2e source-research-e2e
       - name: Validate independent observer CLI
         run: python -m blackbox_core --help
 
@@ -116,7 +120,7 @@ jobs:
       - name: Build BLACK.BOX Universal desktop with original icon
         shell: pwsh
         run: |
-          python -m PyInstaller --noconfirm --clean --onedir --windowed --collect-submodules blackbox_core --collect-submodules blackbox_investigation --collect-submodules blackbox_universal --icon assets/blackbox.ico --add-data "assets/blackbox.png;assets" --name BLACK.BOX-Universal app.py
+          python -m PyInstaller --noconfirm --clean --onedir --windowed --collect-submodules blackbox_core --collect-submodules blackbox_investigation --collect-submodules blackbox_universal --icon assets/blackbox.ico --add-data "assets/blackbox.png;assets" --add-data "src/blackbox_core/instrumentation.py;blackbox_core" --name BLACK.BOX-Universal app.py
           if ($LASTEXITCODE -ne 0) { throw 'GUI build failed' }
           Copy-Item "dist/BLACK.BOX-Maintenance.exe" "dist/BLACK.BOX-Universal/BLACK.BOX-Maintenance.exe"
           Copy-Item ".blackbox-portable.json" "dist/BLACK.BOX-Universal/.blackbox-portable.json"
@@ -138,6 +142,22 @@ jobs:
           $maintenance = Join-Path $PWD "dist\BLACK.BOX-Universal\BLACK.BOX-Maintenance.exe"
           $check = Start-Process -FilePath $maintenance -ArgumentList "--help" -PassThru -Wait
           if ($check.ExitCode -ne 0) { throw "Maintenance EXE failed smoke: $($check.ExitCode)" }
+      - name: Full research roundtrip in the actual frozen EXE
+        shell: pwsh
+        run: |
+          $exe = Join-Path $PWD "dist\BLACK.BOX-Universal\BLACK.BOX-Universal.exe"
+          $evidence = Join-Path $PWD "frozen-research-e2e"
+          $job = Start-Process -FilePath $exe -ArgumentList @('--research-e2e', ('"' + $evidence + '"')) -PassThru
+          if (-not $job.WaitForExit(120000)) { $job.Kill(); throw 'Frozen research E2E exceeded deadline' }
+          if ($job.ExitCode -ne 0) { throw "Frozen research E2E failed: $($job.ExitCode)" }
+          $proof = Get-Content (Join-Path $evidence 'e2e.json') -Raw | ConvertFrom-Json
+          if ($proof.status -ne 'PASS' -or $proof.helper_pid -eq $proof.gui_pid) { throw 'Missing isolated research proof' }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: BLACKBOX-FROZEN-RESEARCH-E2E
+          path: frozen-research-e2e/
+          if-no-files-found: error
+          retention-days: 7
       - name: Include public source license and distribution notices
         shell: pwsh
         run: |
