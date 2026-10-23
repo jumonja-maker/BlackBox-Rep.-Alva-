@@ -159,6 +159,7 @@ def read_provenance(connection) -> dict:
                     "detail_sample_quality"}
         if tables != required:
             return {"contract_status": "LEGACY_DETAIL_V2_NO_PROVENANCE",
+                    "file_trust": "UNVERIFIED_IMPORT",
                     "clock_mapping": None, "capabilities": [],
                     "latest_quality": None, "quality_samples": 0}
         clock_rows = connection.execute(
@@ -203,11 +204,13 @@ def read_provenance(connection) -> dict:
             latest = {"sample_seq": item[0], "utc_estimate_ns": item[1],
                       "source_kind": item[2], "verification_class": item[3],
                       "measurement_status": statuses}
-        return {"contract_status": "OK", "clock_mapping": clock.as_dict(),
+        return {"contract_status": "OK", "file_trust": "UNVERIFIED_IMPORT",
+                "clock_mapping": clock.as_dict(),
                 "capabilities": [{"field": key, **actual[key]}
                                  for key in sorted(actual)],
                 "latest_quality": latest, "quality_samples": total}
     except (ValueError, TypeError, OverflowError):
         return {"contract_status": "INVALID_DETAIL_PROVENANCE",
+                "file_trust": "UNVERIFIED_IMPORT",
                 "clock_mapping": None, "capabilities": [],
                 "latest_quality": None, "quality_samples": 0}
