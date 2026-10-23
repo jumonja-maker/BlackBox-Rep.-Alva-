@@ -103,8 +103,13 @@ class ThreadDeltaTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "INVALID_MAX_SAMPLES"):
                 analyze_detail_threads(folder, max_samples=1000000)
             path.unlink()
-            path.symlink_to(folder / "missing.db")
-            self.assertEqual(analyze_detail_threads(folder)["status"], "NOT_RECORDED")
+            try:
+                path.symlink_to(folder / "missing.db")
+            except (OSError, NotImplementedError):
+                # Windows CI without SeCreateSymbolicLinkPrivilege is valid.
+                pass
+            else:
+                self.assertEqual(analyze_detail_threads(folder)["status"], "NOT_RECORDED")
 
     def test_json_html_include_derived_thread_cpu_but_not_os_hang(self):
         with tempfile.TemporaryDirectory() as root:
