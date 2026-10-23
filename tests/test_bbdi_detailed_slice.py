@@ -215,7 +215,18 @@ class SidecarLifecycleTests(unittest.TestCase):
                 self.assertIn("ВКЛ", window.detailed_capture_btn.text())
                 window._stop()
                 self.assertFalse(window.detailed_capture_btn.isEnabled())
+                for _ in range(500):
+                    app.processEvents()
+                    if window._report_worker is None:
+                        break
+                    time.sleep(0.01)
+                self.assertIsNone(window._report_worker)
             finally:
+                for _ in range(500):
+                    app.processEvents()
+                    if window._report_worker is None:
+                        break
+                    time.sleep(0.01)
                 window.close()
 
 
