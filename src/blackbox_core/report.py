@@ -11,6 +11,7 @@ import sqlite3
 from .contracts import ObserverError, bounded
 from .experiments import ExperimentAccumulator
 from .detailed_capture import summarize_detail
+from .detail_analysis import analyze_detail_threads
 from .storage import _open_ro
 
 
@@ -86,6 +87,9 @@ def summarize(folder: Path) -> dict:
                 "action_evidence": "RECORDED_USER_COMMAND_NOT_ATTESTED",
                 "experiment_summary": experiments.result(),
                 "detailed_capture": summarize_detail(folder),
+                "thread_cpu_analysis": (analyze_detail_threads(folder)
+                                        if (Path(folder) / "detail-v2.sqlite3").is_file()
+                                        else None),
                 "automatic_incident_count": incident_count,
                 "automatic_incident_preview": incident_preview,
                 "automatic_incidents_omitted": max(0, incident_count-len(incident_preview)),
@@ -144,6 +148,34 @@ def _human_html(report: dict) -> str:
         metric("Peak handles / Дескрипторы", deep.get("peak_handles")) +
         metric("Sensor errors / Ошибки датчика", deep.get("sensor_errors")) +
         "</div><p>Status: " + safe(deep.get("status")) + "</p>"
+    )
+    thread_cpu = report.get("thread_cpu_analysis")
+    thread_rows = ""
+    if isinstance(thread_cpu, dict):
+        thread_rows = "".join(
+            "<tr><td>" + safe(item.get("tid")) + "</td><td>" +
+            safe(item.get("cpu_percent")) + "</td><td>" +
+            safe(item.get("peak_cpu_percent")) + "</td><td>" +
+            safe(item.get("observed_pairs")) + "</td></tr>"
+            for item in thread_cpu.get("top_threads", [])[:16]
+            if isinstance(item, dict)
+        )
+    thread_html = (
+        "<p>No detailed thread CPU data recorded / Нет замеров CPU потоков.</p>"
+        if not isinstance(thread_cpu, dict) else
+        "<p>Derived single-core-equivalent CPU% from adjacent TID snapshots; "
+        "TID reuse between samples cannot be ruled out. "
+        "No proof of hangs, deadlocks or root cause. / "
+        "CPU% вычислен из соседних замеров TID; повторное использование TID "
+        "не исключено.</p>"
+        "<p>Status: " + safe(thread_cpu.get("status")) +
+        " · Source: " + safe(thread_cpu.get("source_kind")) +
+        " · Verification: " + safe(thread_cpu.get("verification_class")) +
+        " · Warnings: " + safe(", ".join(thread_cpu.get("warnings", []))) + "</p>"
+        "<table><thead><tr><th>TID</th><th>Mean CPU%</th>"
+        "<th>Peak CPU%</th><th>Valid pairs</th></tr></thead><tbody>" +
+        (thread_rows or "<tr><td colspan='4'>No comparable intervals</td></tr>") +
+        "</tbody></table>"
     )
     incidents = report.get("automatic_incident_preview", [])
     incidents_html = "".join(
@@ -221,6 +253,7 @@ def _human_html(report: dict) -> str:
         experiment_html + "</tbody></table>"
         "<h2>Углублённые данные / Detailed process capture (opt-in)</h2>" +
         detail_html +
+        "<h2>Потоки / Per-thread CPU (derived)</h2>" + thread_html +
         "<h2>Автоинциденты / Automatic incidents (opt-in)</h2>"
         "<p>Stored external-counter observations only. CPU threshold and "
         "sampling gaps are not evidence of a Windows hang or internal defect."
