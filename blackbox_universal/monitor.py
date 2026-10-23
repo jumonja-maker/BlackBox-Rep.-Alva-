@@ -235,7 +235,11 @@ class ReadOnlyProbe:
         if baseline_ms is not None:
             if self.actions.state not in ("IDLE", "COMPLETED", "ABORTED"):
                 raise ActionError("ACTION_ALREADY_ACTIVE")
-            self.actions = ActionCycle(baseline_ms=baseline_ms)
+            # Keep existing experiment identity and previous repeat timings.
+            # Replacing the ActionCycle here silently erased past repeats.
+            if type(baseline_ms) is not int or not 0 <= baseline_ms <= 60000:
+                raise ActionError("INVALID_BASELINE")
+            self.actions.baseline_ms = baseline_ms
         # Refuse PID reuse before recording the beginning of a user action.
         if abs(self._core.process.create_time() - self._core.created) > 0.000001:
             raise ObserverError("PID_REUSED", "sample")
