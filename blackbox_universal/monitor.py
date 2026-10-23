@@ -66,6 +66,7 @@ class ReadOnlyProbe:
         self.last_error: str | None = None
         self.history: deque[dict] = deque(maxlen=3600)
         self.total_samples = 0
+        self.last_elapsed_ms: int | None = None
         self.events: deque[dict] = deque(maxlen=300)
 
     def _event(self, code: str, detail: str = "") -> None:
@@ -101,6 +102,7 @@ class ReadOnlyProbe:
         self.last_error = None
         self.history.clear()
         self.total_samples = 0
+        self.last_elapsed_ms = None
         self.events.clear()
         self._event("PROCESS_SELECTED", f"{self.name} · PID {pid}")
 
@@ -128,6 +130,7 @@ class ReadOnlyProbe:
         self.last_error = None
         self.history.clear()
         self.total_samples = 0
+        self.last_elapsed_ms = None
         self.events.clear()
         self.active = True
         self.started_at = utc_stamp()
@@ -185,6 +188,7 @@ class ReadOnlyProbe:
             }
             self.history.append(record)
             self.total_samples += 1
+            self.last_elapsed_ms = sample.elapsed_ms
             return record
         except ObserverError as exc:
             self.last_error = exc.code
@@ -194,6 +198,28 @@ class ReadOnlyProbe:
                 pass
             self.stop(exc.code)
             return None
+
+    def mark_problem(self, note: str = "") -> int:
+        """Persist an explicit *unverified* user marker at the last real sample.
+
+        The timestamp comes from a stored sample, never a fabricated UI clock.
+        Markers remain local and cannot claim an OS-confirmed hang.
+        """
+        if (not self.active or self._store is None or
+                self.last_elapsed_ms is None or self.pid is None):
+            raise RuntimeError("Record at least one sample before marking a problem.")
+        if not isinstance(note, str):
+            raise ValueError("INVALID_MARKER_NOTE")
+        clipped = note.strip()[:128]
+        elapsed_ms = self.last_elapsed_ms
+        self._store.write_event({
+            "kind": "user_problem", "source": "USER",
+            "elapsed_ms": elapsed_ms, "note": clipped,
+            "timestamp_utc": utc_stamp(),
+        })
+        self.events.append({"timestamp_utc": utc_stamp(), "code": "USER_PROBLEM",
+                            "detail": f"{elapsed_ms} ms · {clipped}"[:120]})
+        return elapsed_ms
 
     @property
     def last(self) -> dict:
