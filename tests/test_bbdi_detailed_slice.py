@@ -134,13 +134,17 @@ class SidecarLifecycleTests(unittest.TestCase):
                     probe.stop()
 
     def test_unexpected_collector_exception_is_not_clean_stop(self):
+        entered = Event()
+
         def failing_collector(pid, created):
+            entered.set()
             raise RuntimeError("unexpected internal collector fault")
 
         with tempfile.TemporaryDirectory() as directory:
             cap = DetailedCapture(Path(directory), os.getpid(), 1.0,
                                   time.monotonic_ns(), collector=failing_collector)
             cap.start()
+            self.assertTrue(entered.wait(5))
             self.assertTrue(cap.stop(timeout=5))
             self.assertEqual(cap.status, "SENSOR_INTERNAL_FAILURE")
             self.assertEqual(cap.error, "RuntimeError")
