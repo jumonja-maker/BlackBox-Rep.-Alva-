@@ -128,7 +128,7 @@ class SchemaV2Reader(_Reader):
         try:
             rows=self.db.execute("SELECT * FROM sessions LIMIT 2").fetchall()
             if (len(rows)!=1 or rows[0]["schema_version"]!=2 or
-                    rows[0]["contract_version"]!=CONTRACT_VERSION):
+                    rows[0]["contract_version"] not in (CONTRACT_VERSION,"bb-di-001/session/2.0")):
                 raise SessionReadError("UNSUPPORTED_SCHEMA2_CONTRACT")
             meta=dict(rows[0])
             targets=self.db.execute("SELECT * FROM targets LIMIT 2").fetchall()
@@ -139,6 +139,8 @@ class SchemaV2Reader(_Reader):
                 "executable_name":target["executable_name"],"file_trust":"UNVERIFIED_IMPORT",
                 "recorded_verification_class":target["verification_class"],
                 "verification_class":"UNVERIFIED_IMPORT","clock_quality":"ANCHORED_UTC_ESTIMATE",
+                "clock_uncertainty_model":("BRACKET_PLUS_REPORTED_CLOCK_RESOLUTIONS" if
+                    meta["contract_version"]==CONTRACT_VERSION else "LEGACY_BRACKET_MODEL_NOT_REATTESTED"),
                 "recorded_status":meta["status"],
                 "warnings":["SOURCE_FILE_NOT_AUTHENTICATED","TID_REUSE_CANNOT_BE_EXCLUDED",
                             "SYSTEM_CLOCK_CAN_ADJUST_AFTER_ANCHOR"],
@@ -196,7 +198,8 @@ class SessionView:
         if self.is_v2:
             # Include command/incident tails after the last periodic sample.
             # No resource measurement is invented for these unsampled tails.
-            event_lo,event_hi=self.db.execute("SELECT min(recorded_ns),max(recorded_ns) FROM events").fetchone()
+            event_lo,event_hi=self.db.execute("SELECT min(coalesce(observed_ns,recorded_ns)),"
+                                             "max(coalesce(observed_ns,recorded_ns)) FROM events").fetchone()
             lo=min(x for x in (lo,event_lo,self.metadata["monotonic_origin_ns"]) if x is not None)
             hi=max(x for x in (hi,event_hi,self.metadata.get("ended_monotonic_ns"),lo) if x is not None)
         start=lo if start is None else start
@@ -307,7 +310,7 @@ class SessionView:
             errors=self.db.execute("SELECT count(*) FROM sensor_errors WHERE monotonic_ns BETWEEN ? AND ?",
                                    (start,end)).fetchone()[0]
             native=[dict(r) for r in self.db.execute("""SELECT source_kind,event_type,measurement_status,
-                count(*) AS count FROM events WHERE recorded_ns BETWEEN ? AND ? AND source_kind IN ('WIN32','WCT')
+                count(*) AS count FROM events WHERE coalesce(observed_ns,recorded_ns) BETWEEN ? AND ? AND source_kind IN ('WIN32','WCT')
                 GROUP BY source_kind,event_type,measurement_status""",(start,end))]
         return {"schema_version":2,"source_schema_version":self.metadata["schema_version"],
             "file_trust":"UNVERIFIED_IMPORT","verification_class":"DERIVED",
@@ -315,7 +318,7 @@ class SessionView:
             "selected_interval_ns":[start,end],"metrics":{k:v.result(units[k]) for k,v in stats.items()},
             "cpu_time_seconds_over_comparable_pairs":covered_cpu_seconds if cpu_pairs else None,
             "quality_counts":statuses,"coverage":{"selected_samples":count,"total_samples":total,
-                "quality_contract":("COMPLETE" if sum(r["count"] for r in statuses)==count*len(UNITS)
+                "quality_contract":("COMPLETE" if sum(r["count"] for r in statuses if r["metric"] in UNITS)==count*len(UNITS)
                                     and self.is_v2 else "LEGACY_LIMITED_DATA" if not self.is_v2 else "PARTIAL_OR_INVALID"),
                 "outside_selected_interval":total-count,"first_sample_ns":first_time,"last_sample_ns":last_time,
                 "observed_comparable_duration_ns":observed_duration,"spacing_gap_pairs":gaps,
@@ -368,6 +371,10 @@ class SessionView:
                                                 (*args,top_n))]
         selected_count,omitted=self.db.execute("""SELECT count(*),sum(threads_omitted) FROM samples
             WHERE instance_id=? AND series='DETAILED' AND monotonic_ns BETWEEN ? AND ?""",args).fetchone()
+        capture_quality=[dict(r) for r in self.db.execute("""SELECT measurement_status,count(*) AS count
+            FROM measurements_quality q JOIN samples s USING(sample_id) WHERE s.instance_id=?
+            AND s.series='DETAILED' AND s.monotonic_ns BETWEEN ? AND ? AND q.metric='thread_counters'
+            GROUP BY measurement_status""",args)]
         for row in ranked:
             pid=self.db.execute("SELECT pid FROM process_instances WHERE instance_id=?",(instance_id,)).fetchone()[0]
             row.update(pid=pid,source_kind="PSUTIL",verification_class="DERIVED",
@@ -377,6 +384,10 @@ class SessionView:
             "top_threads":ranked,"threads_ranked":totals[0],"top_n":top_n,
             "omitted_from_top":max(0,totals[0]-len(ranked)),"truncated":totals[0]>len(ranked) or bool(omitted),
             "recorded_omitted_thread_observations":omitted,
+            "capture_quality":capture_quality,
+            "capture_quality_contract":"NOT_RECORDED" if selected_count==0 else
+                                       "COMPLETE" if sum(r["count"] for r in capture_quality)==selected_count
+                                       else "LEGACY_NO_CAPTURE_STATUS",
             "omitted_cpu_seconds":max(0,totals[1]-sum(r["cpu_seconds"] or 0 for r in ranked))
                                   if totals[1] is not None else None,
             "segments_without_comparable_pairs":totals[2] or 0,
@@ -406,9 +417,11 @@ class SessionView:
             return {"rows":[],"has_more":False,"status":"LEGACY_LIMITED_DATA"}
         raw=self.db.execute("""SELECT event_id,recorded_ns,observed_ns,instance_id,event_type,
             source_kind,verification_class,timestamp_precision,correlation_key,measurement_status,
-            substr(detail_json,1,16385) AS detail_json,length(detail_json) AS detail_size FROM events
-            WHERE recorded_ns BETWEEN ? AND ? AND (recorded_ns,event_id)>(?,?)
-            ORDER BY recorded_ns,event_id LIMIT ?""",(start_ns,end_ns,*after,limit+1)).fetchall()
+            substr(detail_json,1,16385) AS detail_json,length(detail_json) AS detail_size,
+            coalesce(observed_ns,recorded_ns) AS event_time_ns FROM events
+            WHERE coalesce(observed_ns,recorded_ns) BETWEEN ? AND ?
+            AND (coalesce(observed_ns,recorded_ns),event_id)>(?,?)
+            ORDER BY coalesce(observed_ns,recorded_ns),event_id LIMIT ?""",(start_ns,end_ns,*after,limit+1)).fetchall()
         rows=[]
         for item in raw[:limit]:
             row=dict(item)
@@ -419,4 +432,4 @@ class SessionView:
             row["detail"]=json.loads(row.pop("detail_json"))
             rows.append(row)
         return {"rows":rows,"has_more":len(raw)>limit,
-                "next_cursor":[rows[-1]["recorded_ns"],rows[-1]["event_id"]] if rows else None}
+                "next_cursor":[rows[-1]["event_time_ns"],rows[-1]["event_id"]] if rows else None}

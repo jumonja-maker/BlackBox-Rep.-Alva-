@@ -1,5 +1,6 @@
 # BB-DI-001 — asynchronous schema1 base sampler vertical slice (WIP)
 
+> Historical checkpoint. Current live normalized v2/native implementation and limitations: ADR-01..04, BB_DI_001_IMPLEMENTATION_STATUS.md and BB_DI_001_QA_20261024.md.
 This document describes an incremental production Qt change, **not** the complete
 schema2 producer/writer architecture or acceptance of M-027 / M-066.
 

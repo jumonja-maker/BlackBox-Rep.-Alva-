@@ -27,6 +27,8 @@ class DetailedSensorTests(unittest.TestCase):
         observed = sample_process(pid, psutil.Process(pid).create_time())
         self.assertEqual(observed["pid"], pid)
         self.assertGreater(observed["time_ns"], 0)
+        self.assertLessEqual(observed["capture_started_ns"],observed["time_ns"])
+        self.assertLessEqual(observed["time_ns"],observed["capture_ended_ns"])
         self.assertGreater(observed["rss_bytes"], 0)
         self.assertEqual(observed["source"], "PSUTIL_EXTERNAL_COUNTERS_NOT_CAUSAL_PROOF")
         self.assertLessEqual(len(observed["threads"]), 256)

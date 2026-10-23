@@ -29,9 +29,55 @@ def digest(path):
 
 
 def _redact_metadata(report,include_identifiers):
+    allowed={"schema_version","contract_version","started_utc_ns","monotonic_origin_ns",
+        "anchor_monotonic_ns","anchor_utc_ns","anchor_uncertainty_ns","monotonic_resolution_ns",
+        "clock_source","clock_quality","clock_uncertainty_model","logical_cpu_count","status",
+        "ended_monotonic_ns","exit_code","writer_dropped_commands","file_trust",
+        "verification_class","recorded_verification_class","recorded_status","warnings",
+        "pid","creation_time","executable_name","session_uuid"}
+    # An imported SQLite can contain extra columns even when its version
+    # string is familiar. Unknown metadata never silently enters a share file.
+    report["metadata"]={k:v for k,v in report["metadata"].items() if k in allowed}
+    if report["metadata"].get("clock_source") not in (None,"PYTHON_MONOTONIC_NS_AND_TIME_NS"):
+        report["metadata"]["clock_source"]="UNVERIFIED_CLOCK_SOURCE"
     if not include_identifiers:
         report["metadata"]={k:v for k,v in report["metadata"].items()
             if k not in ("pid","creation_time","executable_name","session_uuid")}
+
+
+def _safe_native_details(detail):
+    out={}
+    methods={"EnumWindows","GetWindowThreadProcessId/OWNER_IDENTITY_CHECK",
+             "SendMessageTimeoutW/WM_NULL/SMTO_BLOCK|ABORTIFHUNG|ERRORONEXIT",
+             "ASYNCHRONOUS_GET_THREAD_WAIT_CHAIN"}
+    statuses={"OK","UNKNOWN","WINDOW_GONE","CANCELLED","UNSUPPORTED","NOT_OBSERVED",
+              "NOT_APPLICABLE","ACCESS_DENIED","SENSOR_TIMEOUT","TRUNCATED","INVALID"}
+    numeric={"win32_code","started_ns","ended_ns","timeout_ms","enumeration_omitted",
+             "probe_omitted","deadline_ns","cleanup_duration_ns","reported_node_count",
+             "pid","tid","hwnd","object_type","object_status","wait_time_raw","context_switches"}
+    boolean={"visible","is_cycle","truncated","observer_deadline_exceeded"}
+    def record(value):
+        if not isinstance(value,dict):
+            return {}
+        item={k:v for k,v in value.items() if (k in numeric and (v is None or
+            type(v) in (int,float) and math_isfinite(v))) or k in boolean and type(v) is bool}
+        if "status" in value:
+            item["status"]=value["status"] if value["status"] in statuses else "UNKNOWN"
+        if "method" in value:
+            item["method"]=value["method"] if value["method"] in methods else "UNVERIFIED_METHOD"
+        if isinstance(value.get("nodes"),list):
+            item["nodes"]=[record(n) for n in value["nodes"][:16]]
+        return item
+    for key in ("check","wct","window"):
+        if key in detail:
+            out[key]=record(detail[key])
+    for key in ("consecutive_timeouts","first_timeout_ns","last_responsive_ns"):
+        if type(detail.get(key)) is int and detail[key]>=0:
+            out[key]=detail[key]
+    for key in ("onset_exact","duration_is_observation_bound"):
+        if type(detail.get(key)) is bool:
+            out[key]=detail[key]
+    return out
 
 
 def human_html(report,threads):
@@ -156,16 +202,12 @@ def export_interval(folder: Path,output: Path,*,interval=None,series=None,instan
                     for event in page["rows"]:
                         # Raw detail is opt-in. Arbitrary strings in imported
                         # JSON never affect the reader-assigned trust class.
-                        if not include_notes:
-                            detail=event.pop("detail",{})
-                            if event.get("source_kind") in ("WIN32","WCT"):
-                                event["detail"]={k:detail[k] for k in ("check","wct","window",
-                                    "consecutive_timeouts","first_timeout_ns","last_responsive_ns",
-                                    "onset_exact","duration_is_observation_bound") if k in detail}
-                        elif "detail" in event:
+                        detail=event.pop("detail",{})
+                        if event.get("source_kind") in ("WIN32","WCT"):
+                            event["detail"]=_safe_native_details(detail)
+                        elif include_notes:
                             # Explicitly selected user notes, not arbitrary
                             # imported command lines, titles or environment.
-                            detail=event["detail"]
                             event["detail"]={k:detail[k] for k in ("note","comment") if
                                 k in detail and detail.get("kind") in ("user_problem","user_marker")}
                         if not include_identifiers:

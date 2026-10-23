@@ -673,6 +673,12 @@ class UniversalWindow(QMainWindow):
         self.session_timeline = SessionTimeline()
         self.session_timeline.range_requested.connect(self._timeline_range_requested)
         interval_panel.content.addWidget(self.session_timeline)
+        self.session_event_details=QPlainTextEdit()
+        self.session_event_details.setReadOnly(True)
+        self.session_event_details.setAccessibleName("Selected event evidence / Данные выбранного события")
+        self.session_event_details.setPlaceholderText("Select a saved event to inspect method, status, HWND/TID or WCT nodes. Root cause: UNKNOWN.")
+        self.session_event_details.setMaximumHeight(155)
+        interval_panel.content.addWidget(self.session_event_details)
         track_controls = QGridLayout()
         for index,key in enumerate(SessionTimeline.TRACKS):
             toggle = QCheckBox(key)
@@ -893,6 +899,8 @@ class UniversalWindow(QMainWindow):
                 header.setText(self._t(str(original)))
         self.process_search.setPlaceholderText(
             self._t("Search by process name or PID…"))
+        self.session_event_details.setPlaceholderText(self._t(
+            "Select a saved event to inspect method, status, HWND/TID or WCT nodes. Root cause: UNKNOWN."))
         self.selected_file_path.setPlaceholderText(
             self._t("No application file selected"))
         self._render_selected_file()
@@ -1283,7 +1291,7 @@ class UniversalWindow(QMainWindow):
             return
         try:
             self.probe.start()
-        except (psutil.Error, OSError, RuntimeError, ObserverError):
+        except (psutil.Error, OSError, RuntimeError, ValueError, ObserverError):
             QMessageBox.warning(self, "Observation",
                                 "Choose a running, accessible process first.")
             return
@@ -1459,6 +1467,8 @@ class UniversalWindow(QMainWindow):
         if folder is None:
             return
         folder=Path(folder)
+        if folder!=self._interval_folder:
+            self.session_event_details.clear()
         self._interval_folder=folder
         self._interval_process=instance_id
         args=(folder,interval,instance_id,event_cursor,process_after)
@@ -1517,10 +1527,11 @@ class UniversalWindow(QMainWindow):
         events=packet["events"]["rows"]
         self.session_event_table.setRowCount(len(events))
         for index,event in enumerate(events):
-            for column,key in enumerate(("recorded_ns","event_type","source_kind","verification_class")):
+            for column,key in enumerate(("event_time_ns","event_type","source_kind","verification_class")):
                 item=QTableWidgetItem(str(event[key]))
                 item.setData(Qt.ItemDataRole.UserRole,event.get("observed_ns") or event["recorded_ns"])
-                item.setToolTip("Recorded producer class: "+str(event["recorded_verification_class"]))
+                item.setToolTip("Recorded producer class: "+str(event["recorded_verification_class"])+
+                                " · writer recorded ns: "+str(event["recorded_ns"]))
                 self.session_event_table.setItem(index,column,item)
         self.session_event_table.blockSignals(False)
         self.session_events_more.setEnabled(packet["events"]["has_more"])
@@ -1569,8 +1580,21 @@ class UniversalWindow(QMainWindow):
                 instance_id=self._interval_process,event_cursor=packet["events"]["next_cursor"])
 
     def _session_event_selected(self):
-        item=self.session_event_table.item(self.session_event_table.currentRow(),0)
+        row=self.session_event_table.currentRow()
+        item=self.session_event_table.item(row,0)
         if item and self._interval_packet:
+            events=self._interval_packet["events"]["rows"]
+            if 0<=row<len(events):
+                event=events[row]
+                self.session_event_details.setPlainText(json.dumps({
+                    "source_file_trust":"UNVERIFIED_IMPORT","root_cause":"UNKNOWN",
+                    "recorded_producer_class":event.get("recorded_verification_class"),
+                    "source":event.get("source_kind"),"event":event.get("event_type"),
+                    "observation_ns":event.get("event_time_ns"),"status":event.get("measurement_status"),
+                    "source_clock_resolution_ns":self._interval_packet["interval"]["metadata"].get("monotonic_resolution_ns"),
+                    "recorded_evidence":event.get("detail"),
+                    "limitations":"Snapshot only; imported claims are not independently authenticated. Correlation is not causation."
+                },ensure_ascii=False,indent=2))
             stamp=item.data(Qt.ItemDataRole.UserRole)
             lo,hi=self._interval_packet["interval"]["selected_interval_ns"]
             radius=max(1_000_000_000,(hi-lo)//20)
@@ -1721,8 +1745,12 @@ class UniversalWindow(QMainWindow):
             "AUTO INCIDENT CAPTURE: ON" if self.probe.incident_capture is not None
             else "AUTO INCIDENT CAPTURE: OFF"))
         current_action = self.probe.actions.state
-        self.action_prepare_btn.setEnabled(running and not stopping and current_action in ("IDLE", "COMPLETED", "ABORTED"))
-        self.action_repeat_btn.setEnabled(running and not stopping and current_action == "COMPLETED")
+        can_repeat=len(self.probe.actions.completed)<20
+        self.action_prepare_btn.setEnabled(running and not stopping and can_repeat and current_action in ("IDLE", "COMPLETED", "ABORTED"))
+        self.action_repeat_btn.setEnabled(running and not stopping and can_repeat and current_action == "COMPLETED")
+        limit_tip=self._t("Maximum 20 repeats per recording. Start a new recording for another experiment.")
+        self.action_prepare_btn.setToolTip(limit_tip)
+        self.action_repeat_btn.setToolTip(limit_tip)
         self.action_begin_btn.setEnabled(running and not stopping and self.probe.actions.ready_to_start())
         self.action_end_btn.setEnabled(running and not stopping and current_action == "RUNNING")
         repeat_count = len(self.probe.actions.completed)
@@ -2213,6 +2241,13 @@ class UniversalWindow(QMainWindow):
             self._pending_close = True
             self._timer.stop()
             self._complete_base_stop("UI_CLOSED")
+            event.ignore()
+            return
+        owners=(self.probe._pending_windows,self.probe._pending_detailed,self.probe._pending_v2)
+        if any(owner is not None and owner.thread is not None and owner.thread.is_alive() for owner in owners):
+            self._pending_close=True
+            self._timer.stop()
+            QTimer.singleShot(50,self.close)
             event.ignore()
             return
         self._timer.stop()

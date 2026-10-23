@@ -182,7 +182,8 @@ class ReadOnlyProbe:
             raise RuntimeError("Session root is unavailable.")
         store = SessionStore(root, self.pid)
         try:
-            store.enable_v2(pid=self.pid, created=core.created, name=self.name,
+            store.enable_v2(pid=self.pid, created=core.created,
+                            name=self.name if self.name!="Unknown" else None,
                             origin_ns=core.origin_ns)
         except Exception:
             store.close()

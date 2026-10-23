@@ -36,6 +36,7 @@ def observation(seq,**values):
         "read_bytes":seq*100,"write_bytes":0,"read_ops":seq,"write_ops":0,
         "thread_count":1,"threads_omitted":0,"children_total":0,"children_omitted":0,
         "sensor_status":{"children":"OK"},"threads":[],"children":[],
+        "thread_capture_status":"OK","child_capture_status":"OK",
         "requested_interval_ns":1_000_000_000,**values}
 
 
@@ -46,7 +47,7 @@ def synthetic_history(folder,count=100001):
     with closing(sqlite3.connect(folder/FILENAME)) as db:
         db.execute("""WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<?)
             INSERT INTO samples (instance_id,series,series_seq,correlation_key,monotonic_ns,
-                capture_started_ns,capture_ended_ns,persisted_ns,requested_interval_ns,utc_estimate_ns,
+                capture_started_ns,capture_ended_ns,writer_recorded_ns,requested_interval_ns,utc_estimate_ns,
                 rss_bytes,cpu_user_s,cpu_system_s,read_bytes,write_bytes)
             SELECT 1,'STANDARD',i,'TEST_ONLY:'||i,?+i*1000000000,?+i*1000000000,
                 ?+i*1000000000,?+i*1000000000,1000000000,?+i*1000000000,
@@ -58,6 +59,57 @@ def synthetic_history(folder,count=100001):
 
 
 class Schema2ContractTests(unittest.TestCase):
+    def test_event_range_and_cursor_use_observation_time_not_writer_delay(self):
+        with tempfile.TemporaryDirectory() as temp:
+            folder=Path(temp);w=writer(folder)
+            for order in (1,2):
+                w.submit("event",{"kind":"user_marker","code":"USER_COMMENT",
+                    "timestamp_monotonic_ns":ORIGIN+order*10**9,"_recorded_ns":ORIGIN+(order+10)*10**9})
+            w.finish("COMPLETED")
+            with SessionView.open(folder) as v:
+                first=v.event_page(ORIGIN,ORIGIN+3*10**9,limit=1)
+                self.assertTrue(first["has_more"])
+                second=v.event_page(ORIGIN,ORIGIN+3*10**9,after=first["next_cursor"],limit=1)
+                self.assertEqual(first["rows"][0]["event_time_ns"],ORIGIN+10**9)
+                self.assertEqual(second["rows"][0]["event_time_ns"],ORIGIN+2*10**9)
+                self.assertNotEqual(first["rows"][0]["event_id"],second["rows"][0]["event_id"])
+
+    def test_quality_resolution_cannot_be_finer_than_the_capture_clock(self):
+        from types import SimpleNamespace
+        with tempfile.TemporaryDirectory() as temp,patch(
+                "blackbox_core.session_v2.time.get_clock_info",return_value=SimpleNamespace(resolution=1.)):
+            folder=Path(temp);w=writer(folder);w.submit("base",observation(1));w.finish("COMPLETED")
+            with SessionView.open(folder) as v:
+                self.assertEqual(v.metadata["monotonic_resolution_ns"],1_000_000_000)
+                self.assertEqual(v.db.execute("SELECT min(resolution_ns) FROM measurements_quality").fetchone()[0],
+                                 1_000_000_000)
+
+    def test_denied_thread_capture_keeps_reason_and_unknown_cpu(self):
+        with tempfile.TemporaryDirectory() as temp:
+            folder=Path(temp);w=writer(folder)
+            w.submit("detail",observation(1,thread_count=4,thread_capture_status="ACCESS_DENIED",threads=[]))
+            w.finish("COMPLETED")
+            with SessionView.open(folder) as v:
+                result=v.thread_summary()
+                self.assertEqual(result["top_threads"],[])
+                self.assertIsNone(result["omitted_cpu_seconds"])
+                self.assertEqual(result["capture_quality"],[{"measurement_status":"ACCESS_DENIED","count":1}])
+                self.assertEqual(v.interval(series="DETAILED")["metrics"]["thread_count"]["max"],4)
+
+    def test_normalized_20_remains_readonly_without_invented_capture_quality(self):
+        with tempfile.TemporaryDirectory() as temp:
+            folder=Path(temp);w=writer(folder);w.submit("detail",observation(1));w.finish("COMPLETED")
+            # A test-only older-contract fixture, never migration of user data.
+            with closing(sqlite3.connect(folder/FILENAME)) as db:
+                db.execute("UPDATE sessions SET contract_version='bb-di-001/session/2.0'")
+                db.execute("ALTER TABLE samples RENAME COLUMN writer_recorded_ns TO persisted_ns")
+                db.execute("DELETE FROM measurements_quality WHERE metric IN ('thread_counters','child_counters')")
+                db.commit()
+            before=digest(folder/FILENAME)
+            with SessionView.open(folder) as v:
+                self.assertEqual(v.thread_summary()["capture_quality_contract"],"LEGACY_NO_CAPTURE_STATUS")
+            self.assertEqual(before,digest(folder/FILENAME))
+
     def test_schema2_sink_failure_cannot_prevent_primary_shutdown(self):
         with tempfile.TemporaryDirectory() as temp:
             p=ReadOnlyProbe(Path(temp));p.attach(os.getpid());p.start();p.tick()
@@ -97,7 +149,8 @@ class Schema2ContractTests(unittest.TestCase):
                 self.assertGreater(view.thread_summary()["threads_ranked"],0)
                 self.assertEqual(view.db.execute("PRAGMA foreign_key_check").fetchall(),[])
                 self.assertEqual(view.db.execute("SELECT count(*) FROM measurements_quality").fetchone()[0],
-                                 view.db.execute("SELECT count(*) FROM samples").fetchone()[0]*13)
+                                 view.db.execute("SELECT count(*) FROM samples").fetchone()[0]*13+
+                                 view.db.execute("SELECT count(*) FROM samples WHERE series='DETAILED'").fetchone()[0]*2)
 
     def test_zero_missing_reset_and_spacing_are_distinct(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -205,6 +258,27 @@ class Schema2ContractTests(unittest.TestCase):
 
 
 class FullIntervalTests(unittest.TestCase):
+    def test_default_export_drops_unknown_imported_metadata_and_native_fields(self):
+        with tempfile.TemporaryDirectory() as temp:
+            folder=Path(temp);w=writer(folder);w.submit("base",observation(1));w.finish("COMPLETED")
+            with closing(sqlite3.connect(folder/FILENAME)) as db:
+                db.execute("ALTER TABLE sessions ADD COLUMN command_line TEXT")
+                db.execute("UPDATE sessions SET command_line='DO_NOT_EXPORT_SECRET'")
+                detail=json.dumps({"check":{"status":"OK","method":"EnumWindows",
+                    "command_line":"DO_NOT_EXPORT_SECRET"},"wct":{"nodes":[{"object_type":8,
+                    "object_name":"DO_NOT_EXPORT_SECRET"}]}})
+                db.execute("""INSERT INTO events(recorded_ns,observed_ns,instance_id,event_type,source_kind,
+                    verification_class,timestamp_precision,correlation_key,measurement_status,detail_json)
+                    VALUES (?,?,1,'WCT_SNAPSHOT','WCT','OS_OBSERVED','TEST_ONLY','TEST_ONLY','OK',?)""",
+                    (ORIGIN+10**9,ORIGIN+10**9,detail))
+                db.commit()
+            before=digest(folder/FILENAME)
+            packet=export_interval(folder,folder,prefix="privacy")
+            for name in packet["files"]:
+                if not name.endswith(".zip"):
+                    self.assertNotIn("DO_NOT_EXPORT_SECRET",Path(name).read_text())
+            self.assertEqual(before,digest(folder/FILENAME))
+
     def test_100k_early_minute_full_statistics_peak_and_bounded_memory(self):
         with tempfile.TemporaryDirectory() as temp:
             folder=Path(temp);synthetic_history(folder)
@@ -284,6 +358,15 @@ class IntervalQtTests(unittest.TestCase):
         app=QApplication.instance() or QApplication([])
         with tempfile.TemporaryDirectory() as temp:
             folder=Path(temp);synthetic_history(folder,6000)
+            with closing(sqlite3.connect(folder/FILENAME)) as db:
+                # Explicit synthetic imported evidence for the Qt handler;
+                # actual Win32/WCT measurements are separate Windows tests.
+                db.execute("""INSERT INTO events(recorded_ns,observed_ns,instance_id,event_type,source_kind,
+                    verification_class,timestamp_precision,correlation_key,measurement_status,detail_json)
+                    VALUES (?,?,1,'WCT_SNAPSHOT','WCT','OS_OBSERVED','TEST_ONLY','TEST_ONLY','OK',?)""",
+                    (ORIGIN+1005*10**9,ORIGIN+1005*10**9,json.dumps({"wct":{
+                        "method":"TEST_ONLY_FAKE_WCT","is_cycle":True,"nodes":[]}})))
+                db.commit()
             window=UniversalWindow();window._timer.stop()
             window.probe.pid=98765
             window.probe.session_folder=folder
@@ -302,6 +385,10 @@ class IntervalQtTests(unittest.TestCase):
                 self.assertEqual(window.probe.pid,98765)
                 self.assertGreater(window.process_history_table.rowCount(),0)
                 self.assertIn("UNKNOWN",window.interval_summary.text())
+                window.session_event_table.selectRow(0);drain()
+                self.assertIn("WCT_SNAPSHOT",window.session_event_details.toPlainText())
+                self.assertIn("UNVERIFIED_IMPORT",window.session_event_details.toPlainText())
+                self.assertIn("is_cycle",window.session_event_details.toPlainText())
             finally:
                 drain();window.close();app.processEvents()
 

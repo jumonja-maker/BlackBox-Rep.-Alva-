@@ -1,5 +1,6 @@
 # BB-DI-001 — bounded background event writer for schema1 (WIP)
 
+> Historical checkpoint. Current live normalized v2/native implementation and limitations: ADR-01..04, BB_DI_001_IMPLEMENTATION_STATUS.md and BB_DI_001_QA_20261024.md.
 **Scope:** current Windows GUI sessions only. The existing independent schema1
 `session.sqlite3` is unchanged. This improves M-027 and M-066 but does **not**
 complete the required single-owner schema2 architecture.

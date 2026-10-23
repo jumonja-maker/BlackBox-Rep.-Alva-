@@ -35,6 +35,7 @@ def sample_process(pid: int, created: float, *, thread_limit: int = 256,
         began = time.monotonic_ns()
         with p.oneshot():
             cpu = p.cpu_times()
+            counter_ns = time.monotonic_ns()
             rss = p.memory_info().rss
             thread_count = p.num_threads()
             try:
@@ -87,10 +88,12 @@ def sample_process(pid: int, created: float, *, thread_limit: int = 256,
             children_total = len(all_children)
             for child in all_children[:child_limit]:
                 try:
+                    child_began = time.monotonic_ns()
                     child_created = float(child.create_time())
                     with child.oneshot():
                         child_mem = child.memory_info()
                         child_cpu = child.cpu_times()
+                        child_counter_ns = time.monotonic_ns()
                         child_name = child.name()[:96]
                         child_parent = child.ppid()
                         child_threads = child.num_threads()
@@ -106,6 +109,8 @@ def sample_process(pid: int, created: float, *, thread_limit: int = 256,
                         continue
                     descendants.append({
                         "pid": child.pid, "created": child_created,
+                        "time_ns":child_counter_ns,"capture_started_ns":child_began,
+                        "capture_ended_ns":time.monotonic_ns(),
                         "rss_bytes": int(child_mem.rss),
                         "cpu_user_s": float(child_cpu.user),
                         "cpu_system_s": float(child_cpu.system),
@@ -126,7 +131,8 @@ def sample_process(pid: int, created: float, *, thread_limit: int = 256,
             raise DetailSensorError("PID_REUSED")
         ended = time.monotonic_ns()
         return {
-            "time_ns": ended, "sampling_duration_ns": max(0, ended-began),
+            "time_ns": counter_ns, "sampling_duration_ns": max(0, ended-began),
+            "capture_started_ns":began,"capture_ended_ns":ended,
             "pid": pid, "created": created, "rss_bytes": int(rss),
             "private_bytes": private, "uss_bytes": uss, "handle_count": handles,
             "cpu_user_s": float(cpu.user), "cpu_system_s": float(cpu.system),
@@ -340,6 +346,8 @@ class DetailedCapture:
                                 statuses["io_status"] if statuses["io_status"]!="OK" else "NOT_OBSERVED")
                         self.session_writer.submit("detail", {
                             **x, "field_status": field_status,
+                            "thread_capture_status":statuses["threads_status"],
+                            "child_capture_status":statuses["children_status"],
                             "requested_interval_ns": int(self.interval_s*1e9),
                             "correlation_key": f"detail-v2:{seq}"})
                 except (DetailSensorError, KeyError, TypeError, ValueError) as exc:

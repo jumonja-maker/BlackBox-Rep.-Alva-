@@ -36,6 +36,38 @@ class FakeNative:
 
 
 class WindowContractTests(unittest.TestCase):
+    def test_gui_close_keeps_pending_native_owner_until_it_finishes(self):
+        from threading import Event,Thread
+        from types import SimpleNamespace
+        from PySide6.QtWidgets import QApplication
+        from blackbox_universal.window import UniversalWindow
+        os.environ.setdefault("QT_QPA_PLATFORM","offscreen")
+        app=QApplication.instance() or QApplication([])
+        release=Event()
+        thread=Thread(target=lambda:release.wait(5),daemon=True)
+        thread.start()
+        window=UniversalWindow();window._timer.stop();window.show()
+        window.probe._pending_windows=SimpleNamespace(thread=thread)
+        try:
+            window.close();app.processEvents()
+            self.assertTrue(window.isVisible())
+            self.assertTrue(window._pending_close)
+            release.set();thread.join(2)
+            deadline=time.monotonic()+2
+            while window.isVisible() and time.monotonic()<deadline:
+                app.processEvents();time.sleep(.01)
+            self.assertFalse(window.isVisible())
+        finally:
+            release.set();thread.join(2);window.close();app.processEvents()
+
+    def test_owner_change_does_not_invent_a_win32_error_code(self):
+        adapter=WindowsNative.__new__(WindowsNative)
+        adapter.owner=lambda hwnd:(999,123)
+        result=adapter.responsiveness({"hwnd":44,"pid":123,"tid":99})
+        self.assertEqual(result["status"],"WINDOW_GONE")
+        self.assertIsNone(result["win32_code"])
+        self.assertEqual(result["reason"],"HWND_OWNER_NO_LONGER_MATCHES")
+
     def test_x64_wct_layout_is_exact_without_host_wchar_size_assumptions(self):
         self.assertEqual(ctypes.sizeof(WaitChainNode),280)
         self.assertEqual(WaitChainNode.data.offset,8)

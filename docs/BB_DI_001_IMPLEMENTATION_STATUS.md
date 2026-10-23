@@ -16,23 +16,23 @@ Status rules: **PASS** needs actual user-facing integration, automated tests and
 | M-002 | PARTIAL | blackbox_universal/monitor.py; tests/test_bbdi_action_slice.py | Target switch denied while active; full PID-reuse Windows E2E unverified |
 | M-003 | PARTIAL | src/blackbox_core/detailed_capture.py; blackbox_universal/window.py | Opt-in detailed channel; no complete profiles or Incident Burst |
 | M-004 | PARTIAL | src/blackbox_core/session_v2.py; tests/test_bbdi_schema2_sessions.py | New live session UUID and paired nanosecond clock anchor cover Standard/Detailed; system UTC drift and all sensor clocks not accepted |
-| M-005 | PARTIAL | src/blackbox_core/probe.py; src/blackbox_core/detailed_capture.py | Stored cumulative CPU; missing full v2 interval semantics |
+| M-005 | PARTIAL | src/blackbox_core/probe.py; src/blackbox_core/session_view.py; tests/test_bbdi_schema2_sessions.py | Live cumulative user/system counters and actual read tags, real-dt CPU >100%, logical CPU context; full CPU/observer acceptance not complete |
 | M-006 | PARTIAL | src/blackbox_core/detailed_capture.py; tests/test_bbdi_detailed_slice.py | RSS/Private/USS/handles best effort; per-field quality incomplete |
-| M-007 | PARTIAL | src/blackbox_core/detailed_capture.py | Cumulative byte and ops counters; safe per-interval rates not wired |
+| M-007 | PARTIAL | src/blackbox_core/session_view.py; tests/test_bbdi_schema2_sessions.py | Cumulative bytes/ops and full-range valid-pair rates, reset/gap invalidation; full IO burst/native fixture acceptance incomplete |
 | M-008 | PARTIAL | src/blackbox_core/detailed_capture.py | Child records, no complete tree aggregation/history |
 | M-009 | PARTIAL | src/blackbox_core/detailed_capture.py; src/blackbox_core/detail_analysis.py; tests/test_bbdi_thread_analysis.py; blackbox_universal/thread_detail_worker.py; blackbox_universal/window.py | Read-only adjacent-snapshot TID CPU% in existing Qt Processes table/JSON/HTML; no full lifetime intervals, OS birth identity, long session whole-history or complete coverage |
 | M-010 | PARTIAL | src/blackbox_core/session_view.py; blackbox_universal/window.py; tests/test_bbdi_schema2_sessions.py | Full selected v2 TID segments ranked by cumulative CPU, presence/omitted CPU; native 300-thread acceptance pending |
 | M-011 | PARTIAL | src/blackbox_core/detailed_capture.py; src/blackbox_core/session_v2.py; tests/test_bbdi_schema2_sessions.py | Persisted child CPU/RSS/IO/handles/name/PID+birth history; 100 DTO identities tested, real 100 OS descendants pending |
 | M-012 | PARTIAL | src/blackbox_core/session_view.py; tests/test_bbdi_schema2_sessions.py | Per-field status counts, full selected count, spacing gaps and estimated schedule slots; exact OS missed counts unknown |
-| M-013 | PARTIAL | src/blackbox_core/windows_observer.py; tests/test_bbdi_windows_observer.py | Real HWND/PID/TID/visibility/lifecycle, no titles; native CI and physical Win10/11 acceptance pending |
-| M-014 | PARTIAL | src/blackbox_core/windows_observer.py; docs/ADR-04-WINDOWS-RESPONSIVENESS-WCT.md | Independent low-frequency WM_NULL timeout worker, exact error/UNKNOWN; real native CI pending |
-| M-015 | PARTIAL | src/blackbox_core/windows_observer.py; src/blackbox_core/session_v2.py | Consecutive independent timeout/recovery/WINDOW_GONE events and UI incidents; native runner verification pending |
-| M-016 | PARTIAL | src/blackbox_core/windows_observer.py; tests/test_bbdi_windows_observer.py | Real async WCT callback/nodes/cycle or exact denied/unsupported; 280-byte ABI and bounded arrays; Windows evidence pending |
-| M-017 | PARTIAL | blackbox_universal/window.py; src/blackbox_core/windows_observer.py | HWND preference selector without root rebind; NOT_APPLICABLE for absent windows; native non-GUI fixture pending |
+| M-013 | PARTIAL | docs/BB_DI_001_QA_20261024.md; CI 40036985762 (a3b0bee1f6c51980b9263ea2dce4ea279b44900f); src/blackbox_core/windows_observer.py | Actual HWND/PID/TID/visibility/lifecycle native test PASS; unseen HWND reuse/complete physical Win10/11 lifecycle coverage pending |
+| M-014 | PARTIAL | docs/BB_DI_001_QA_20261024.md; CI 40036985762 (a3b0bee1f6c51980b9263ea2dce4ea279b44900f); tests/test_bbdi_windows_observer.py | Independent WM_NULL worker and real consecutive Win32 error 1460 confirmed; final hardened-head/physical QA pending |
+| M-015 | PARTIAL | docs/BB_DI_001_QA_20261024.md; CI 40036985762 (a3b0bee1f6c51980b9263ea2dce4ea279b44900f) | Real timeout/recovery/window lifecycle and native incident persistence; complete burst/pre-post integration and final exact-head acceptance pending |
+| M-016 | PARTIAL | docs/BB_DI_001_QA_20261024.md; CI 40036985762 (a3b0bee1f6c51980b9263ea2dce4ea279b44900f) | Actual mutex cycle: WCT OK, 5 nodes, is_cycle=true; UI snapshot without cycle also real. Native event evidence viewer implemented; hard cleanup deadlines/complete Win10/11 acceptance pending |
+| M-017 | PARTIAL | docs/BB_DI_001_QA_20261024.md; CI 40036985762 (a3b0bee1f6c51980b9263ea2dce4ea279b44900f); blackbox_universal/window.py | Actual non-GUI EnumWindows empty; NOT_APPLICABLE policy and HWND selector without root rebind; exhaustive physical multi-window QA pending |
 | M-018 | PARTIAL | src/blackbox_core/actions.py; blackbox_universal/window.py; tests/test_bbdi_action_slice.py | Action cycle wired; complete integrated E2E absent |
 | M-019 | PARTIAL | src/blackbox_core/actions.py; tests/test_bbdi_action_slice.py | Real USER-command monotonic timestamps; no OS execution attestation |
 | M-020 | PARTIAL | blackbox_universal/monitor.py; src/blackbox_core/actions.py | Problem marker exists; no app instrumented channel and all marker types |
-| M-021 | PARTIAL | src/blackbox_core/experiments.py; tests/test_bbdi_experiment_slice.py | Same-session repeats; saved experiment library absent |
+| M-021 | PARTIAL | src/blackbox_core/actions.py; src/blackbox_core/session_v2.py; tests/test_bbdi_action_slice.py | Persistent runs with 20-repeat UI/core limit, existing median/p95/MAD; scenario/app versions, saved experiment library and resource compare incomplete |
 | M-022 | PARTIAL | src/blackbox_core/experiments.py; src/blackbox_core/report.py | Duration aggregation/compare partial; no resource delta comparability |
 | M-023 | PARTIAL | src/blackbox_core/incidents.py; src/blackbox_core/windows_observer.py; blackbox_universal/window.py | CPU/gap plus native UI timeout; CPU threshold/duration Settings; all memory/handles/IO/exit/burst policies still incomplete |
 | M-024 | PARTIAL | src/blackbox_core/incidents.py | Pre/post sample sequence bounded; not full multi-sensor ring |
@@ -42,8 +42,8 @@ Status rules: **PASS** needs actual user-facing integration, automated tests and
 | M-028 | PARTIAL | src/blackbox_core/session_v2.py; docs/ADR-02-SESSION-V2-AND-INTERVALS.md | Live normalized versioned schema2 sidecar for new GUI recordings; historical v1 never rewritten; crash/recovery acceptance pending |
 | M-029 | PARTIAL | src/blackbox_core/session_v2.py; tests/test_bbdi_schema2_sessions.py | Required normalized entities/FKs/indices exist; actual sample/event/action/incident/experiment writes; windows/artifact inventory and experiment metadata workflow incomplete |
 | M-030 | PARTIAL | src/blackbox_core/session_v2.py; src/blackbox_core/session_view.py | Producer-selected source, typed quality and imported trust separation; full Windows/native sensor provenance absent |
-| M-031 | PARTIAL | src/blackbox_core/session_v2.py; tests/test_bbdi_schema2_sessions.py | NULL/status/units on each v2 process field; zero/reset/gap tests; child denial reason granularity remains incomplete |
-| M-032 | PARTIAL | src/blackbox_core/probe.py; src/blackbox_core/session_v2.py | Actual Standard and Detailed capture brackets and ns UTC estimates; complete all-source drift/accuracy policy pending |
+| M-031 | PARTIAL | src/blackbox_core/session_v2.py; tests/test_bbdi_detail_contracts.py; tests/fixtures/bbdi_status_cases.json | Contract 2.1 distinguishes field and thread/child group statuses, 0 vs NULL, reason and clock resolution. Full per-source accuracy/ACL cases remain incomplete |
+| M-032 | PARTIAL | src/blackbox_core/detail_contracts.py; src/blackbox_core/session_view.py; tests/test_bbdi_schema2_sessions.py | NS read tags/brackets, anchored UTC estimate plus reported resolution, observation-time event alignment; individual TID read/birth and calibrated UTC accuracy unavailable |
 | M-033 | PARTIAL | src/blackbox_core/session_view.py; blackbox_universal/session_interval_worker.py; tests/test_bbdi_schema2_sessions.py | All selected v2/v1 rows streamed, exact statistics, first/min/max/last plots, full CSV; accelerated 100001-row early-minute test passed locally; 8h hardware latency pending |
 | M-034 | PARTIAL | src/blackbox_core/detailed_capture.py; tests/test_bbdi_detailed_slice.py; tests/test_bbdi_detail_contracts.py | Sample/quality rows atomic on malformed data and WAL+soft quota remain; power-loss recovery/checkpoint/8h NOT RUN |
 | M-035 | NOT-IMPLEMENTED | — | Required full capability not present; see original order |
@@ -52,7 +52,7 @@ Status rules: **PASS** needs actual user-facing integration, automated tests and
 | M-038 | PARTIAL | blackbox_universal/timeline.py; src/blackbox_core/session_view.py | Peak-preserving buckets, gap segment breaks, cancellable background range reload; full endurance/physical Windows pending |
 | M-039 | PARTIAL | blackbox_universal/window.py; tests/test_bbdi_detailed_slice.py | Overview controls; no complete investigation timeline |
 | M-040 | PARTIAL | blackbox_universal/window.py; src/blackbox_core/session_view.py | Persisted paged child history, per-child interval, cumulative TID table/presence; no root rebind; full hierarchical tree widget/native load QA pending |
-| M-041 | PARTIAL | blackbox_universal/window.py; src/blackbox_core/session_view.py | Cursor-paged persisted event timeline and click-to-range; complete filters and Windows/WCT/ETW streams absent |
+| M-041 | PARTIAL | blackbox_universal/window.py; src/blackbox_core/session_view.py | Paged observation-time timeline, native/user source distinction and selected event evidence/WCT nodes in UI; full filters/ETW stream absent |
 | M-042 | PARTIAL | blackbox_universal/window.py; src/blackbox_core/interval_report.py | Human selected-interval summary before hidden raw JSON; saved-session open and privacy-selected exports; full findings/cards/compare pending |
 | M-043 | PARTIAL | blackbox_universal/window.py | Partial controls; complete profiles/privacy/quota UI missing |
 | M-044 | PARTIAL | blackbox_universal/window.py; src/blackbox_core/session_view.py | Open saved session and paged process/event histories work; local indexed session library/delete/experiment history not implemented |
@@ -69,8 +69,8 @@ Status rules: **PASS** needs actual user-facing integration, automated tests and
 | M-055 | PARTIAL | src/blackbox_core/session_view.py; tests/test_bbdi_schema2_sessions.py | Separate v1/v2 readers and SessionView; v1 LEGACY_LIMITED_DATA with unchanged hash; full Windows legacy fixture acceptance pending |
 | M-056 | NOT-IMPLEMENTED | — | Required full capability not present; see original order |
 | M-057 | PARTIAL | src/blackbox_core/probe.py; src/blackbox_core/detailed_capture.py | Read-only psutil sample; full capabilities/permission matrix not verified |
-| M-058 | PARTIAL | src/blackbox_core/windows_observer.py; docs/ADR-04-WINDOWS-RESPONSIVENESS-WCT.md | Win32/WCT off Qt with native timeout/async cancel and retained ownership; hard cleanup deadline and ETW/dump isolation incomplete |
-| M-059 | PARTIAL | src/blackbox_core/detailed_capture.py; src/blackbox_core/report.py | No command line/title/path capture in added slice; full privacy tests missing |
+| M-058 | PARTIAL | docs/ADR-04-WINDOWS-RESPONSIVENESS-WCT.md; tests/test_bbdi_windows_observer.py | Native async WCT cleanup and finite send timeout, non-daemon native owner and deferred GUI close; absolute OS cleanup deadline and ETW/dump isolation incomplete |
+| M-059 | PARTIAL | src/blackbox_core/interval_report.py; tests/test_bbdi_schema2_sessions.py | Opt-in identifier/note export, allowlisted imported metadata/native data, no titles/commandline/env/object names capture; all original privacy/threat fixtures not accepted |
 | M-060 | NOT-IMPLEMENTED | — | Required full capability not present; see original order |
 | M-061 | PARTIAL | src/blackbox_core/storage.py; src/blackbox_core/report.py | Existing 0.3.6 hardening retained; all BB-DI security cases not proven |
 | M-062 | NOT-IMPLEMENTED | — | Required full capability not present; see original order |
@@ -83,10 +83,10 @@ Status rules: **PASS** needs actual user-facing integration, automated tests and
 | M-069 | PARTIAL | src/blackbox_core/session_v2.py; tests/test_bbdi_schema2_sessions.py | Finite immutable v2 queue with explicit discarded command count and fail-closed storage status; complete latency/adaptive policy absent |
 | M-070 | PARTIAL | src/blackbox_core/session_view.py; docs/ADR-02-SESSION-V2-AND-INTERVALS.md | Separate read-only SchemaV1Reader/SchemaV2Reader share SessionView; no in-place migration; recovery/rollback full acceptance pending |
 | M-071 | PARTIAL | app.py; blackbox_universal/window.py | Existing launch and five tabs kept; complete E2E not proven |
-| M-072 | PARTIAL | src/blackbox_core/windows_observer.py; tests/test_bbdi_windows_observer.py | Explicit x64 ctypes ABI/callback lifetime/array bounds/status mapping; native Windows CI pending |
+| M-072 | PARTIAL | docs/BB_DI_001_QA_20261024.md; CI 40036985762 (a3b0bee1f6c51980b9263ea2dce4ea279b44900f) | Real x64 ABI/callback/node fixture PASS, exact API errors and observer deadline separate; full supported Windows/security matrix pending |
 | M-073 | PARTIAL | .github/workflows/shell-qa.yml; PR #17 | Draft/no release so far; final merge gate pending |
 | M-074 | PARTIAL | tests/test_bbdi_action_slice.py; tests/test_bbdi_incident_slice.py; tests/test_bbdi_detailed_slice.py | Several Qt controls tested; full acceptance matrix absent |
-| M-075 | PARTIAL | blackbox_universal/deep_smoke.py; .github/workflows/shell-qa.yml; docs/ADR-04-WINDOWS-RESPONSIVENESS-WCT.md | Real Python Qt 3 actions/TID/auto incident/selected export locally passed with explicit proc namespace PID; frozen Windows same-EXE target gate added, pending CI |
+| M-075 | CONDITIONAL-PASS | docs/BB_DI_001_QA_20261024.md; CI 40036985762 (a3b0bee1f6c51980b9263ea2dce4ea279b44900f); blackbox_universal/deep_smoke.py | Both Python/Qt and real frozen EXE creation/action/TID/incident/analysis/export PASS at checkpoint. Repeat exact-head CI for subsequent 2.1 hardening; not full 128-point acceptance |
 | A-001 | NOT-IMPLEMENTED | — | Required full capability not present; see original order |
 | A-002 | NOT-IMPLEMENTED | — | Required full capability not present; see original order |
 | A-003 | NOT-IMPLEMENTED | — | Required full capability not present; see original order |
@@ -94,28 +94,28 @@ Status rules: **PASS** needs actual user-facing integration, automated tests and
 | A-005 | NOT-IMPLEMENTED | — | Required full capability not present; see original order |
 | AC-01 | NOT-RUN | — | No independent full-scenario Windows/EXE acceptance evidence for this exact item |
 | AC-02 | NOT-RUN | — | No independent full-scenario Windows/EXE acceptance evidence for this exact item |
-| AC-03 | NOT-RUN | — | No independent full-scenario Windows/EXE acceptance evidence for this exact item |
+| AC-03 | PARTIAL | docs/BB_DI_001_QA_20261024.md; CI 40036985762 (a3b0bee1f6c51980b9263ea2dce4ea279b44900f) | Real two-native-worker frozen target and nonzero TID CPU confirmed; full specified graph/fixture acceptance still pending |
 | AC-04 | NOT-RUN | — | No independent full-scenario Windows/EXE acceptance evidence for this exact item |
 | AC-05 | NOT-RUN | — | No independent full-scenario Windows/EXE acceptance evidence for this exact item |
 | AC-06 | NOT-RUN | — | No independent full-scenario Windows/EXE acceptance evidence for this exact item |
 | AC-07 | NOT-RUN | — | No independent full-scenario Windows/EXE acceptance evidence for this exact item |
 | AC-08 | NOT-RUN | — | No independent full-scenario Windows/EXE acceptance evidence for this exact item |
 | AC-09 | NOT-RUN | — | No independent full-scenario Windows/EXE acceptance evidence for this exact item |
-| AC-10 | NOT-RUN | — | No independent full-scenario Windows/EXE acceptance evidence for this exact item |
-| AC-11 | NOT-RUN | — | No independent full-scenario Windows/EXE acceptance evidence for this exact item |
-| AC-12 | NOT-RUN | — | No independent full-scenario Windows/EXE acceptance evidence for this exact item |
-| AC-13 | NOT-RUN | — | No independent full-scenario Windows/EXE acceptance evidence for this exact item |
+| AC-10 | PARTIAL | docs/BB_DI_001_QA_20261024.md; CI 40036985762 (a3b0bee1f6c51980b9263ea2dce4ea279b44900f) | Real UI block, independent timeout code 1460 and responsive monitor workflow PASS on hosted Windows Server 2025; full platform gate pending |
+| AC-11 | PARTIAL | docs/BB_DI_001_QA_20261024.md; CI 40036985762 (a3b0bee1f6c51980b9263ea2dce4ea279b44900f) | Actual timeout then recovery rows/observation bounds verified; complete final supported-platform evidence pending |
+| AC-12 | PARTIAL | docs/BB_DI_001_QA_20261024.md; CI 40036985762 (a3b0bee1f6c51980b9263ea2dce4ea279b44900f) | Actual controlled Win32 mutex cycle returned 5 WCT nodes and true cycle; denied path is portable fake test, complete supported-platform gate pending |
+| AC-13 | PARTIAL | docs/BB_DI_001_QA_20261024.md; CI 40036985762 (a3b0bee1f6c51980b9263ea2dce4ea279b44900f) | Real non-GUI fixture enumeration empty and NOT_APPLICABLE path tested; final-head/platform gate pending |
 | AC-14 | NOT-RUN | — | No independent full-scenario Windows/EXE acceptance evidence for this exact item |
 | AC-15 | NOT-RUN | — | No independent full-scenario Windows/EXE acceptance evidence for this exact item |
 | AC-16 | NOT-RUN | — | No independent full-scenario Windows/EXE acceptance evidence for this exact item |
 | AC-17 | NOT-RUN | — | No independent full-scenario Windows/EXE acceptance evidence for this exact item |
 | AC-18 | NOT-RUN | — | No independent full-scenario Windows/EXE acceptance evidence for this exact item |
 | AC-19 | NOT-RUN | — | No independent full-scenario Windows/EXE acceptance evidence for this exact item |
-| AC-20 | NOT-RUN | — | No independent full-scenario Windows/EXE acceptance evidence for this exact item |
+| AC-20 | PARTIAL | tests/test_bbdi_schema2_sessions.py; docs/BB_DI_001_QA_20261024.md | Accelerated 100001-row history with arbitrary early minute, full stats/peak/bounded Python memory PASS. Real 8h recording NOT-RUN |
 | AC-21 | NOT-RUN | — | No independent full-scenario Windows/EXE acceptance evidence for this exact item |
-| AC-22 | NOT-RUN | — | No independent full-scenario Windows/EXE acceptance evidence for this exact item |
-| AC-23 | NOT-RUN | — | No independent full-scenario Windows/EXE acceptance evidence for this exact item |
-| AC-24 | NOT-RUN | — | No independent full-scenario Windows/EXE acceptance evidence for this exact item |
+| AC-22 | PARTIAL | tests/test_bbdi_schema2_sessions.py; docs/BB_DI_001_QA_20261024.md | Legacy exact schema1 read/export and source SHA invariance tested; full old-release/platform acceptance pending |
+| AC-23 | PARTIAL | tests/test_bbdi_schema2_sessions.py; src/blackbox_core/session_view.py | User source strings cannot become native producer class; reopened file class always UNVERIFIED_IMPORT. Complete import-attack suite pending |
+| AC-24 | PARTIAL | tests/test_bbdi_schema2_sessions.py; src/blackbox_core/interval_report.py | Real full CSV/JSON/HTML, allowlists and escaped HTML/SVG; full comments/privacy attack matrix pending |
 | AC-25 | NOT-RUN | — | No independent full-scenario Windows/EXE acceptance evidence for this exact item |
 | AC-26 | NOT-RUN | — | No independent full-scenario Windows/EXE acceptance evidence for this exact item |
 | AC-27 | NOT-RUN | — | No independent full-scenario Windows/EXE acceptance evidence for this exact item |
@@ -123,14 +123,14 @@ Status rules: **PASS** needs actual user-facing integration, automated tests and
 | AC-29 | NOT-RUN | — | No independent full-scenario Windows/EXE acceptance evidence for this exact item |
 | AC-30 | NOT-RUN | — | No independent full-scenario Windows/EXE acceptance evidence for this exact item |
 | AC-31 | NOT-RUN | — | No independent full-scenario Windows/EXE acceptance evidence for this exact item |
-| AC-32 | NOT-RUN | — | No independent full-scenario Windows/EXE acceptance evidence for this exact item |
-| AC-33 | NOT-RUN | — | No independent full-scenario Windows/EXE acceptance evidence for this exact item |
+| AC-32 | CONDITIONAL-PASS | docs/BB_DI_001_QA_20261024.md; CI 40036985762 (a3b0bee1f6c51980b9263ea2dce4ea279b44900f) | Actual bundled EXE (no Python PATH/source working directory) passed 3 actions, 126 TID rows, 5 incidents and analysis/export. Subsequent 2.1 head requires its own CI |
+| AC-33 | PARTIAL | docs/BB_DI_001_QA_20261024.md; CI 40036985762 (a3b0bee1f6c51980b9263ea2dce4ea279b44900f) | Checkpoint exact-head Windows/Linux/native/build/deep smoke/ZIP green; release SKIPPED by authorization gate. Subsequent final HEAD CI required |
 | AC-34 | NOT-RUN | — | No independent full-scenario Windows/EXE acceptance evidence for this exact item |
-| AC-35 | NOT-RUN | — | No independent full-scenario Windows/EXE acceptance evidence for this exact item |
-| AC-36 | NOT-RUN | — | No independent full-scenario Windows/EXE acceptance evidence for this exact item |
-| FIX-01 | NOT-RUN | — | No independent full-scenario Windows/EXE acceptance evidence for this exact item |
-| FIX-02 | NOT-RUN | — | No independent full-scenario Windows/EXE acceptance evidence for this exact item |
-| FIX-03 | NOT-RUN | — | No independent full-scenario Windows/EXE acceptance evidence for this exact item |
+| AC-35 | PARTIAL | docs/BB_DI_001_QA_20261024.md; CI 40036985762 (a3b0bee1f6c51980b9263ea2dce4ea279b44900f); tests/test_bbdi_schema2_sessions.py | Frozen reanalysis/export preserved original v1/v2 DB and JSON/HTML hashes; concurrent export no-clobber PASS, full adversarial matrix incomplete |
+| AC-36 | PARTIAL | src/blackbox_core/session_view.py; tests/test_bbdi_schema2_sessions.py | Source/units/status/unknown, full selected counts, actual errors, estimated slots, dropped command distinction. Complete all-sensor coverage validation pending |
+| FIX-01 | PARTIAL | blackbox_universal/qa_fixtures.py; docs/BB_DI_001_QA_20261024.md; CI 40036985762 (a3b0bee1f6c51980b9263ea2dce4ea279b44900f) | Real two-native-hash-worker fixture included in bundled EXE and used in deep QA; configurable 1/2/N and full load matrix incomplete |
+| FIX-02 | PARTIAL | blackbox_universal/qa_fixtures.py; docs/BB_DI_001_QA_20261024.md; CI 40036985762 (a3b0bee1f6c51980b9263ea2dce4ea279b44900f) | Native Qt freeze 2s/8s buttons and automatic 5s freeze/recovery; actual detection/recovery PASS, physical matrix pending |
+| FIX-03 | PARTIAL | blackbox_universal/qa_fixtures.py; docs/BB_DI_001_QA_20261024.md; CI 40036985762 (a3b0bee1f6c51980b9263ea2dce4ea279b44900f) | Controlled two-mutex cycle, actual positive WCT evidence; complete negative/permission/platform fixture matrix pending |
 | FIX-04 | NOT-RUN | — | No independent full-scenario Windows/EXE acceptance evidence for this exact item |
 | FIX-05 | NOT-RUN | — | No independent full-scenario Windows/EXE acceptance evidence for this exact item |
 | FIX-06 | NOT-RUN | — | No independent full-scenario Windows/EXE acceptance evidence for this exact item |
@@ -138,7 +138,7 @@ Status rules: **PASS** needs actual user-facing integration, automated tests and
 | FIX-08 | NOT-RUN | — | No independent full-scenario Windows/EXE acceptance evidence for this exact item |
 | FIX-09 | NOT-RUN | — | No independent full-scenario Windows/EXE acceptance evidence for this exact item |
 | FIX-10 | NOT-RUN | — | No independent full-scenario Windows/EXE acceptance evidence for this exact item |
-| FIX-11 | NOT-RUN | — | No independent full-scenario Windows/EXE acceptance evidence for this exact item |
+| FIX-11 | PARTIAL | tests/test_bbdi_schema2_sessions.py; docs/BB_DI_001_QA_20261024.md; CI 40036985762 (a3b0bee1f6c51980b9263ea2dce4ea279b44900f) | Accelerated ordered 100001-row selection fixture PASS; actual 8h/1h endurance NOT-RUN |
 | FIX-12 | NOT-RUN | — | No independent full-scenario Windows/EXE acceptance evidence for this exact item |
 
 ## Qt background report generation (still PARTIAL)
@@ -233,3 +233,21 @@ namespace runs remained FAIL; no metrics were fabricated to make them pass.
 Windows/native/frozen results must be recorded against the next exact HEAD.
 All acceptance rows still require their full original criterion, including
 unavailable physical/endurance evidence. No release/merge authorization follows.
+
+## Verified checkpoint and final precision hardening
+
+See [QA evidence and remaining blockers](BB_DI_001_QA_20261024.md). Checkpoint
+`a3b0bee1f6c51980b9263ea2dce4ea279b44900f` / CI 40036985762 is SUCCESS:
+Windows 242 PASS + 1 SKIP, Linux 238 PASS + 5 SKIP, actual native WCT cycle and
+UI recovery, Python deep workflow, portable build and actual frozen deep
+workflow, ZIP; release SKIPPED. Frozen artifact ID 12537357880 was downloaded
+and independently checked against its archive SHA and measured qa-summary.
+
+`CONDITIONAL-PASS` is scoped automated evidence with explicit remaining gates;
+it is not full-order sign-off. Later contract 2.1 clock/source/privacy/ownership
+hardening requires a new exact-head run. Never reuse the above SHA's green
+status for a different head. No real 8h/1h, complete AC/FIX, ETW or physical
+Win10/11 acceptance is claimed. Old historical sections are checkpoints, not
+the current source of truth; use this table and ADR-01..04.
+
+**Current matrix counts (acceptance states, not implementation percentages):** CONDITIONAL-PASS=2, NOT-IMPLEMENTED=13, NOT-RUN=32, PARTIAL=81. Total 128.

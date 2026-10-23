@@ -36,3 +36,11 @@ authenticated, even if a producer source string says OS_OBSERVED.
 Human explanations of native HWND/WCT evidence and its limits are in ADR-04.
 None of these measurements proves a leak, internal function cause or complete
 deadlock diagnosis. Observer overhead and 8h/1h endurance are still unmeasured.
+
+Contract 2.1 timestamps CPU counters at their actual read tag, before potentially
+slow child enumeration. Child samples keep their own read tags and capture
+brackets; observed child absence uses the completed enumeration bracket.
+TID observations still span a psutil enumeration bracket: individual thread
+read instants/birth identities are not independently attested. The clock
+resolution/collection uncertainty must not be confused with CPU-counter or
+physical UTC accuracy. Event alignment uses observation time, not writer delay.

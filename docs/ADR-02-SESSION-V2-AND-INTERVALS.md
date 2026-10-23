@@ -22,9 +22,9 @@ Tables: `sessions`, `targets`, `process_instances`, `samples`, `thread_samples`,
 `child_process_samples`, `windows`, `events`, `action_intervals`, `incidents`,
 `measurements_quality`, `experiments`, `experiment_runs`, `artifacts`,
 `sensor_errors`, `capabilities`. `PRAGMA user_version=2`,
-`contract_version=bb-di-001/session/2.0`; schema is defined in `session_v2.DDL`.
-Empty `windows`/`artifacts` tables do **not** implement native Windows sensors or
-an artifact inventory. Experiment metadata remains UNSPECIFIED_SCENARIO until
+`contract_version=bb-di-001/session/2.1` (consumer also accepts normalized 2.0 read-only); schema is defined in `session_v2.DDL`.
+`windows` is populated by the real native adapter (ADR-04). An empty
+`artifacts` catalog does **not** implement a full artifact inventory. Experiment metadata remains UNSPECIFIED_SCENARIO until
 a separate editing/compare workflow is implemented. Those requirements remain
 partial/absent in the matrix.
 
@@ -107,7 +107,31 @@ OS children, Windows physical QA, WCT/ETW or full order acceptance.
 
 Remaining: synchronous primary journal command acknowledgements and finish,
 startup psutil/SQLite on Qt, no hard cancellation of stalled OS/filesystem calls,
-no HWND/WCT/ETW implementation, full capability adapters, saved experiment
+complete native lifecycle/deadline acceptance, ETW implementation, full capability adapters, saved experiment
 metadata/resource compare, all trigger types, incident investigation cards,
 local indexed session library, real endurance/observer benchmarks and complete
 frozen/native Windows acceptance. Keep Draft. No merge or release.
+
+## Contract 2.1 precision and evidence corrections
+
+New producer adds separate thread/child capture-group quality records. A known
+thread count is not proof that its TID counters were readable. Normalized 2.0
+retains LEGACY_NO_CAPTURE_STATUS instead of invented metadata. Current writer
+time is named `writer_recorded_ns`, not commit completion; old 2.0
+`persisted_ns` remains readable without rewriting it. Sample, per-child and
+CPU counter read tags are separated from the complete collection end bracket.
+
+Clock-anchor uncertainty includes the sampling bracket plus **reported clock
+resolutions**. It is not calibrated UTC accuracy and cannot predict wall-clock
+adjustments. Per-field timestamp resolution cannot be finer than the reported
+monotonic clock, even when two calls return the same tick.
+
+Event range/index/paging uses observed_ns when available, falling back to
+recorded_ns only for events without an observation time. Writer delay cannot
+move an actual observed timeout out of a selected interval. The GUI has a
+read-only selected-event evidence view for methods, statuses, windows and WCT.
+
+Default export allowlists metadata/native fields, dropping unknown imported
+columns and mutex names/extra raw data. Opt-in notes do not remove native
+evidence. Producer format schema and five explicitly synthetic contract status
+fixtures are in `docs/contracts` and `tests/fixtures/bbdi_status_cases.json`.

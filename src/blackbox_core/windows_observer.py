@@ -109,8 +109,10 @@ class WindowsNative:
         began=time.monotonic_ns()
         expected=(window["pid"],window["tid"])
         if self.owner(window["hwnd"])!=expected:
-            return {"status":"WINDOW_GONE","win32_code":1400,"started_ns":began,
-                    "ended_ns":time.monotonic_ns(),"timeout_ms":timeout_ms}
+            return {"status":"WINDOW_GONE","win32_code":None,"started_ns":began,
+                    "ended_ns":time.monotonic_ns(),"timeout_ms":timeout_ms,
+                    "method":"GetWindowThreadProcessId/OWNER_IDENTITY_CHECK",
+                    "reason":"HWND_OWNER_NO_LONGER_MATCHES"}
         result=PTR()
         C.set_last_error(0)
         # WM_NULL=0. Never HWND_BROADCAST or NOTIMEOUTIFNOTHUNG.
@@ -119,7 +121,9 @@ class WindowsNative:
         code=C.get_last_error() if not ok else 0
         status="OK" if ok else win32_status(code) if code else "UNKNOWN"
         if self.owner(window["hwnd"])!=expected:
-            status,code="WINDOW_GONE",1400
+            # Preserve the actual SendMessage result code. An owner mismatch
+            # is not evidence that Win32 returned ERROR_INVALID_WINDOW_HANDLE.
+            status="WINDOW_GONE"
         return {"status":status,"win32_code":code,"started_ns":began,
                 "ended_ns":time.monotonic_ns(),"timeout_ms":timeout_ms,
                 "method":"SendMessageTimeoutW/WM_NULL/SMTO_BLOCK|ABORTIFHUNG|ERRORONEXIT"}
@@ -176,10 +180,14 @@ class WindowsNative:
         finally:
             # Documented cancellation invokes/joins outstanding callbacks.
             # All callback/array/count references remain alive until return.
+            cleanup_began=time.monotonic_ns()
             self.advapi.CloseThreadWaitChainSession(handle)
+            cleanup_ended=time.monotonic_ns()
         if timed_out:
             packet.update(status="SENSOR_TIMEOUT",nodes=[],is_cycle=None)
         return {**packet,"tid":tid,"started_ns":began,"ended_ns":time.monotonic_ns(),
+                "observer_deadline_exceeded":timed_out,
+                "cleanup_duration_ns":cleanup_ended-cleanup_began,
                 "deadline_ns":began+int(timeout_s*1e9),"method":"ASYNCHRONOUS_GET_THREAD_WAIT_CHAIN",
                 "root_cause":"UNKNOWN","limitation":"DYNAMIC_SNAPSHOT_NOT_COMPLETE_ROOT_CAUSE"}
 
@@ -206,7 +214,8 @@ class WindowCapture:
             return self.status,self._view
 
     def start(self):
-        self.thread=Thread(target=self._run,name="blackbox-windows-observer",daemon=True)
+        # Native callbacks must finish before Python interpreter finalization.
+        self.thread=Thread(target=self._run,name="blackbox-windows-observer",daemon=False)
         self.thread.start()
 
     def stop(self,timeout=0):
@@ -268,6 +277,7 @@ class WindowCapture:
             state=self._windows.setdefault(window["hwnd"],{
                 "window":window,"timeouts":0,"unresponsive":False,"last_responsive_ns":None,
                 "first_timeout_ns":None})
+            state["window"]=window
             check=self.adapter.responsiveness(window)
             when=check["ended_ns"]
             events.append({"code":"WINDOW_PROBE_RESULT","window":window,"time_ns":when,"check":check})

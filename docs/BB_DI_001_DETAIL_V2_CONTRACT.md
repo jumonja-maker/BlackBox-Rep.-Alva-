@@ -1,5 +1,6 @@
 # BB-DI-001 — additive detail-v2 clock and quality contract (WIP)
 
+> Historical checkpoint. Current live normalized v2/native implementation and limitations: ADR-01..04, BB_DI_001_IMPLEMENTATION_STATUS.md and BB_DI_001_QA_20261024.md.
 **Scope:** opt-in process/threads/children sidecar `detail-v2.sqlite3` only. This is **not** the full BB-DI-001 schema2 / SessionView / independent worker architecture, and must not be reported as M-028..032 complete. Core `session.sqlite3` remains schema1 as in v0.3.6. No in-place migration of customer files is attempted.
 
 ## Producer and source policy

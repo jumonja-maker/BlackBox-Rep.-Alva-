@@ -37,6 +37,7 @@ class PsutilProbe:
                 mem = p.memory_info()
                 cpu = p.cpu_percent(interval=None)
                 cpu_times = p.cpu_times()
+                counter_ns = time.monotonic_ns()
                 threads = p.num_threads()
                 try:
                     io = p.io_counters()
@@ -52,7 +53,7 @@ class PsutilProbe:
                 raise ObserverError("PID_REUSED", "sample")
             ended = time.monotonic_ns()
             self.last_observation = {
-                "time_ns": ended, "capture_started_ns": began,
+                "time_ns": counter_ns, "capture_started_ns": began,
                 "capture_ended_ns": ended, "pid": self.pid,
                 "created": self.created, "rss_bytes": int(mem.rss),
                 "cpu_percent": float(cpu), "cpu_user_s": float(cpu_times.user),

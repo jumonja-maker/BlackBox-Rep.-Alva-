@@ -17,6 +17,20 @@ from blackbox_core.report import summarize
 
 
 class ActionClockTests(unittest.TestCase):
+    def test_experiment_refuses_21st_repeat_before_persisting(self):
+        from itertools import count
+        clock=count(1)
+        cycle=ActionCycle(clock=lambda:next(clock),baseline_ms=0,cool_down_ms=0)
+        rows=[]
+        for _ in range(20):
+            cycle.prepare(rows.append);cycle.begin(rows.append)
+            cycle.finish(rows.append);cycle.advance(rows.append)
+        previous=len(rows)
+        with self.assertRaisesRegex(ActionError,"EXPERIMENT_REPEAT_LIMIT_REACHED"):
+            cycle.prepare(rows.append)
+        self.assertEqual(len(rows),previous)
+        self.assertEqual(len(cycle.completed),20)
+
     def setUp(self):
         self.ns = [10_000_000_000]
         self.events = []

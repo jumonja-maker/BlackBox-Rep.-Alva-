@@ -45,7 +45,7 @@ single snapshot/cycle is not a complete application root cause.
 for CloseThreadWaitChainSession, not an unconditional hard cleanup latency.
 The worker can remain owned if OS cleanup stalls. GUI Stop waits at most 50 ms
 for this sensor, records WINDOW_SENSOR_STOP_PENDING, detaches its v2 sink and
-retains the worker; rebind is blocked until it exits. Complete hard shutdown /
+retains the worker; rebind is blocked until it exits. Native workers are non-daemon and GUI close defers while any pending capture/writer still owns resources. Complete hard shutdown /
 OS watchdog acceptance remains partial. No uncontrolled per-TID threads.
 
 ## Persistence, privacy and trust

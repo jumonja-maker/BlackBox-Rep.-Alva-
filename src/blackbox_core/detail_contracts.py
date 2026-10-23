@@ -84,8 +84,12 @@ def capture_clock_anchor() -> ClockAnchor:
     after = time.monotonic_ns()
     if after < before or utc <= 0:
         raise ValueError("INVALID_CLOCK_SOURCE")
+    # A quantized monotonic clock can return the same integer before/after a
+    # UTC read. Zero bracket width does not mean zero synchronization error.
+    resolution_ns=sum(max(1,math.ceil(time.get_clock_info(name).resolution*1e9))
+                      for name in ("monotonic","time"))
     return ClockAnchor((before + after) // 2, utc,
-                       (after - before + 1) // 2)
+                       (after - before + 1) // 2+resolution_ns)
 
 
 def _observed(value: object) -> bool:

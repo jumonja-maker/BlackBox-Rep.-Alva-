@@ -18,10 +18,10 @@ import time
 from uuid import uuid4
 
 from .contracts import ObserverError
-from .detail_contracts import capture_clock_anchor
+from .detail_contracts import capture_clock_anchor, MEASUREMENT_STATUSES
 
 FILENAME = "session-v2.sqlite3"
-CONTRACT_VERSION = "bb-di-001/session/2.0"
+CONTRACT_VERSION = "bb-di-001/session/2.1"
 UNITS = {
     "rss_bytes": "bytes", "private_bytes": "bytes", "uss_bytes": "bytes",
     "handle_count": "handles", "cpu_user_s": "seconds",
@@ -54,7 +54,7 @@ CREATE TABLE samples (
     sample_id INTEGER PRIMARY KEY, instance_id INTEGER NOT NULL REFERENCES process_instances,
     series TEXT NOT NULL, series_seq INTEGER NOT NULL, correlation_key TEXT NOT NULL,
     monotonic_ns INTEGER NOT NULL, capture_started_ns INTEGER NOT NULL,
-    capture_ended_ns INTEGER NOT NULL, persisted_ns INTEGER NOT NULL,
+    capture_ended_ns INTEGER NOT NULL, writer_recorded_ns INTEGER NOT NULL,
     requested_interval_ns INTEGER NOT NULL, utc_estimate_ns INTEGER NOT NULL,
     rss_bytes INTEGER, private_bytes INTEGER, uss_bytes INTEGER, handle_count INTEGER,
     cpu_user_s REAL, cpu_system_s REAL, cpu_percent REAL, thread_count INTEGER,
@@ -91,6 +91,7 @@ CREATE TABLE events (
     timestamp_precision TEXT NOT NULL, correlation_key TEXT NOT NULL,
     measurement_status TEXT NOT NULL, detail_json TEXT NOT NULL);
 CREATE INDEX ix_v2_events_time ON events(recorded_ns,event_id);
+CREATE INDEX ix_v2_events_observed ON events(coalesce(observed_ns,recorded_ns),event_id);
 CREATE INDEX ix_v2_events_type ON events(event_type,recorded_ns);
 CREATE TABLE action_intervals (
     action_id TEXT PRIMARY KEY, experiment_id TEXT NOT NULL, state TEXT NOT NULL,
@@ -161,7 +162,7 @@ class SessionV2Writer:
     A failed/overflowed mirror is explicit and must never be certified complete.
     """
 
-    def __init__(self, folder: Path, *, pid: int, created: float, name: str,
+    def __init__(self, folder: Path, *, pid: int, created: float, name: str | None,
                  origin_ns: int, capacity: int = 64, max_bytes: int = 256*1024*1024):
         if (type(pid) is not int or pid <= 0 or type(origin_ns) is not int or origin_ns < 0
                 or type(created) not in (int, float) or not math.isfinite(created) or created <= 0
@@ -170,7 +171,7 @@ class SessionV2Writer:
             raise ValueError("INVALID_V2_CONTEXT")
         self.folder = safe_path(folder)
         self.path = safe_path(self.folder / FILENAME)
-        self.pid, self.created, self.name = pid, created, str(name)[:96]
+        self.pid, self.created, self.name = pid, created, str(name)[:96] if name is not None else None
         self.origin_ns = origin_ns
         self.anchor = capture_clock_anchor()
         self.session_uuid = str(uuid4())
@@ -224,6 +225,7 @@ class SessionV2Writer:
         db.execute("PRAGMA synchronous=FULL")
         db.executescript(DDL)
         resolution = max(1, math.ceil(time.get_clock_info("monotonic").resolution*1e9))
+        self.clock_resolution_ns=resolution
         db.execute("INSERT INTO sessions VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (
             self.session_uuid, 2, CONTRACT_VERSION,
             self.anchor.estimate_utc_ns(self.origin_ns), self.origin_ns,
@@ -267,7 +269,7 @@ class SessionV2Writer:
                 raise ValueError("INVALID_SAMPLE_COUNTER")
             values.append(value)
         columns = ("instance_id","series","series_seq","correlation_key","monotonic_ns",
-                   "capture_started_ns","capture_ended_ns","persisted_ns","requested_interval_ns",
+                   "capture_started_ns","capture_ended_ns","writer_recorded_ns","requested_interval_ns",
                    "utc_estimate_ns",*UNITS,"threads_omitted","children_omitted")
         params = (instance,series,seq,str(data.get("correlation_key",f"{series}:{seq}"))[:128],stamp,
                   began,ended,time.monotonic_ns(),interval_ns,self.anchor.estimate_utc_ns(stamp),
@@ -287,15 +289,26 @@ class SessionV2Writer:
                 sample_id,key,status,"PSUTIL","DERIVED" if key=="cpu_percent" else "OS_OBSERVED",UNITS[key],
                 None if status=="OK" else status,
                 "PSUTIL_INTERNAL_DELTA_INTERVAL" if key=="cpu_percent" else "COUNTER_SNAPSHOT",
-                max(1,ended-began),"CURRENT_USER"))
+                max(self.clock_resolution_ns,ended-began),"CURRENT_USER"))
         if series=="DETAILED":
+            for metric,key,unit in (("thread_counters","thread_capture_status","cumulative_cpu_seconds"),
+                                    ("child_counters","child_capture_status","process_instances")):
+                status=data.get(key,"NOT_OBSERVED")
+                if status not in {"OK","NOT_OBSERVED","ACCESS_DENIED","UNSUPPORTED","TRUNCATED",
+                                  "SENSOR_TIMEOUT","SAMPLED_GAP","INVALID","NOT_APPLICABLE"}:
+                    raise ValueError("INVALID_CAPTURE_STATUS")
+                db.execute("INSERT INTO measurements_quality VALUES (?,?,?,?,?,?,?,?,?,?)",(
+                    sample_id,metric,status,"PSUTIL","OS_OBSERVED",unit,
+                    None if status=="OK" else status,"COUNTER_SNAPSHOT",
+                    max(self.clock_resolution_ns,ended-began),"CURRENT_USER"))
             db.executemany("INSERT INTO thread_samples VALUES (?,?,?,?,?)", (
                 (sample_id,t["tid"],t["cpu_user_s"],t["cpu_system_s"],"TID_REUSE_UNVERIFIED")
                 for t in data.get("threads",())))
             observed = []
             for child in data.get("children",()):
-                child_data = {**child,"time_ns":stamp,"capture_started_ns":began,
-                              "capture_ended_ns":ended,"requested_interval_ns":interval_ns,
+                child_data = {**child,"time_ns":child.get("time_ns",stamp),
+                              "capture_started_ns":child.get("capture_started_ns",began),
+                              "capture_ended_ns":child.get("capture_ended_ns",ended),"requested_interval_ns":interval_ns,
                               "parent_pid":child.get("parent_pid",self.pid)}
                 child_id,child_instance = self._sample(db,child_data,"CHILD",parent_sample=sample_id)
                 observed.append(child_instance)
@@ -307,7 +320,7 @@ class SessionV2Writer:
                 for (child_instance,) in active:
                     if child_instance not in observed:
                         db.execute("UPDATE process_instances SET absence_observed_ns=? WHERE instance_id=?",
-                                   (stamp,child_instance))
+                                   (ended,child_instance))
         if parent_sample is not None:
             db.execute("INSERT INTO child_process_samples VALUES (?,?)",(parent_sample,sample_id))
         return sample_id,instance
@@ -334,7 +347,7 @@ class SessionV2Writer:
              timestamp_precision,correlation_key,measurement_status,detail_json)
              VALUES (?,?,1,?,?,?,?,?,?,?)""", (
                  stamp,observed,code,source,verification,precision,
-                 str(data.get("action_id",data.get("kind","event")))[:128],
+                 str(data.get("action_id",data.get("correlation_key",data.get("kind","event"))))[:128],
                  data.get("measurement_status","OK") if native_source else "OK",
                  json.dumps(data,ensure_ascii=True,allow_nan=False))).lastrowid
         if kind=="action_marker":
@@ -402,9 +415,13 @@ class SessionV2Writer:
                 raise ValueError("INVALID_NATIVE_EVENT_CODE")
             source="WCT" if code=="WCT_SNAPSHOT" else "WIN32"
             status=event.get("wct",event.get("check",{})).get("status","OK")
+            measurement_status=status if status in MEASUREMENT_STATUSES else "NOT_OBSERVED"
             eid=self._event(db,{"_recorded_ns":time.monotonic_ns(),
                 "timestamp_monotonic_ns":event["time_ns"],"timestamp_precision":"NATIVE_MONOTONIC_BRACKET",
-                "kind":"native_window_observation","code":code,"measurement_status":status,
+                "kind":"native_window_observation","code":code,"measurement_status":measurement_status,
+                "native_result_status":status,
+                "correlation_key":("HWND:"+str(event.get("window",{}).get("hwnd"))+":TID:"+
+                                   str(event.get("window",{}).get("tid"))),
                 **event},native_source=source)
             if code=="UI_UNRESPONSIVE_OBSERVED":
                 db.execute("INSERT INTO incidents(trigger_code,start_ns,status,primary_event_id,context_json) "

@@ -54,6 +54,8 @@ class ActionCycle:
     def prepare(self, persist):
         if self.state not in ("IDLE", "COMPLETED", "ABORTED"):
             raise ActionError("ACTION_ALREADY_ACTIVE")
+        if len(self.completed)>=20:
+            raise ActionError("EXPERIMENT_REPEAT_LIMIT_REACHED")
         now = self._now()
         previous_id = self.action_id
         self.action_id = uuid4().hex

@@ -6,6 +6,8 @@ are NEVER translated: only interface chrome and explanatory text.
 from __future__ import annotations
 
 RU = {
+"Select a saved event to inspect method, status, HWND/TID or WCT nodes. Root cause: UNKNOWN.":"Выберите сохранённое событие: метод, статус, HWND/TID или узлы WCT. Первопричина: UNKNOWN.",
+"Maximum 20 repeats per recording. Start a new recording for another experiment.":"До 20 повторов в одном сеансе. Для другого эксперимента начните новый сеанс.",
 "CPU trigger threshold (% of one logical CPU)":"Порог CPU (% одного логического ядра)",
 "CPU trigger sustained duration (ms)":"Минимальная длительность CPU (мс)",
 "WINDOW TIMEOUT / WCT: OFF":"ОКНА / WCT: ВЫКЛ",

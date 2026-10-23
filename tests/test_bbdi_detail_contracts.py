@@ -13,6 +13,7 @@ import sqlite3
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 
 from blackbox_core.detail_contracts import (
     ClockAnchor, capture_clock_anchor, read_provenance, sample_field_statuses,
@@ -41,6 +42,22 @@ def _synthetic_process_snapshot(pid, created):
 
 
 class ClockAndStatusContractTests(unittest.TestCase):
+    def test_quantized_clock_anchor_does_not_claim_zero_uncertainty(self):
+        from types import SimpleNamespace
+        with patch("blackbox_core.detail_contracts.time.monotonic_ns",side_effect=[100,100]), \
+             patch("blackbox_core.detail_contracts.time.time_ns",return_value=1_700_000_000_000_000_000), \
+             patch("blackbox_core.detail_contracts.time.get_clock_info",return_value=SimpleNamespace(resolution=.01)):
+            anchor=capture_clock_anchor()
+        self.assertGreaterEqual(anchor.uncertainty_ns,20_000_000)
+
+    def test_versioned_status_case_fixtures_never_alias_zero_and_missing(self):
+        cases=json.loads((Path(__file__).parent/"fixtures"/"bbdi_status_cases.json").read_text())
+        self.assertTrue(cases["synthetic_test_only"])
+        self.assertEqual(set(cases["cases"]),{"OK","MISSING","DENIED","UNSUPPORTED","PARTIAL"})
+        for name,case in cases["cases"].items():
+            with self.subTest(case=name):
+                self.assertEqual(sample_field_statuses(case["sample"]),case["expected_statuses"])
+
     def test_clock_anchor_preserves_nanoseconds_without_faking_precision(self):
         anchor = ClockAnchor(100, 1_700_000_000_123_456_789, 44)
         self.assertEqual(anchor.estimate_utc_ns(210),

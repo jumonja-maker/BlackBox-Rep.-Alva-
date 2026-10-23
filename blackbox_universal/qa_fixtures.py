@@ -15,6 +15,13 @@ from threading import Barrier,Event,Thread,get_native_id
 import time
 
 
+def observer_identity():
+    """Actual PID visible to psutil's /proc namespace, plus its source."""
+    if os.name=="posix" and Path("/proc/self/stat").is_file():
+        return int(Path("/proc/self/stat").read_text().split(" ",1)[0]),"PROC_SELF_STAT_PID_NAMESPACE"
+    return os.getpid(),"OS_GETPID"
+
+
 def run_fixture(mode,directory,*,ttl_s=75):
     directory=Path(directory)
     directory.mkdir(parents=True,exist_ok=True)
@@ -53,14 +60,7 @@ def run_fixture(mode,directory,*,ttl_s=75):
         # their handles while waits are pending would be undefined Windows API
         # behavior. The OS releases this fixture's handles on its own exit.
     def ready(hwnd=None):
-        sensor_pid=os.getpid()
-        pid_source="OS_GETPID"
-        if os.name=="posix" and Path("/proc/self/stat").is_file():
-            # psutil reads the /proc namespace, which can differ from the
-            # child-control namespace in an isolated executor. Keep both real
-            # OS identities explicit; never substitute CPU measurements.
-            sensor_pid=int(Path("/proc/self/stat").read_text().split(" ",1)[0])
-            pid_source="PROC_SELF_STAT_PID_NAMESPACE"
+        sensor_pid,pid_source=observer_identity()
         data={"fixture":"BB-DI-001/REAL_OS_WORKLOAD","mode":mode,"pid":os.getpid(),
               "sensor_pid":sensor_pid,"sensor_pid_source":pid_source,
               "thread_ids":tids,"hwnd":hwnd,"ttl_seconds":ttl_s}

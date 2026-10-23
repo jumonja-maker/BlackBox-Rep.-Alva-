@@ -53,8 +53,9 @@ def main(argv: list[str] | None = None) -> int:
         if window.stack.count() != 5:
             raise RuntimeError("SMOKE_PLATFORM_PAGE_PRESENT")
         with tempfile.TemporaryDirectory(prefix="bb-human-smoke-") as temp:
+            from blackbox_universal.qa_fixtures import observer_identity
             probe = ReadOnlyProbe(output_root=Path(temp))
-            probe.attach(os.getpid())
+            probe.attach(observer_identity()[0])
             probe.start()
             if probe.tick() is None:
                 raise RuntimeError("SMOKE_PROCESS_SAMPLE_MISSING")
