@@ -224,7 +224,7 @@ class QtShellTests(unittest.TestCase):
             self.window.probe.start()
             self.window._tick()
             self.window._stop()
-        self._wait_report()
+            self._wait_report()
             with patch("blackbox_universal.window.QFileDialog.getSaveFileName",
                        return_value=(str(dst), "JSON files (*.json)")), \
                  patch.object(QMessageBox, "information", return_value=None):
