@@ -1,0 +1,144 @@
+"""Typed, bounded provenance and clock contracts for detailed observations.
+
+These are *external* PSUTIL counters, not process instrumentation or native
+Windows hang evidence. Unknown is never silently coerced to measured zero.
+Existing detail-v2 databases without these additive tables remain readable.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime, timezone
+import math
+import time
+
+SOURCE_KIND = "PSUTIL"
+VERIFICATION_CLASS = "OS_OBSERVED_EXTERNAL_COUNTER"  # never WCT/ETW attestation
+MEASUREMENT_STATUSES = frozenset({
+    "OK", "NOT_OBSERVED", "NOT_APPLICABLE", "ACCESS_DENIED",
+    "UNSUPPORTED", "SENSOR_TIMEOUT", "SAMPLED_GAP",
+    "TRUNCATED", "INVALID",
+})
+# Canonical column keys, source and unit of one detailed process sample.
+FIELD_UNITS = {
+    "rss_bytes": "bytes",
+    "private_bytes": "bytes",
+    "uss_bytes": "bytes",
+    "handle_count": "handles",
+    "io": "bytes_and_ops_cumulative",
+    "threads": "cumulative_cpu_seconds",
+    "children": "process_instances",
+}
+FIELD_STATUS_COLUMNS = (
+    "rss_status", "private_status", "uss_status", "handle_status",
+    "io_status", "threads_status", "children_status",
+)
+
+
+def _nonnegative_int(value: object) -> bool:
+    return type(value) is int and value >= 0
+
+
+@dataclass(frozen=True)
+class ClockAnchor:
+    monotonic_ns: int
+    utc_ns: int
+    uncertainty_ns: int
+    source: str = "PYTHON_MONOTONIC_NS_AND_TIME_NS"
+
+    def __post_init__(self) -> None:
+        if not (_nonnegative_int(self.monotonic_ns) and
+                _nonnegative_int(self.utc_ns) and self.utc_ns > 0 and
+                _nonnegative_int(self.uncertainty_ns) and
+                self.source == "PYTHON_MONOTONIC_NS_AND_TIME_NS"):
+            raise ValueError("INVALID_CLOCK_ANCHOR")
+
+    def estimate_utc_ns(self, monotonic_ns: int) -> int:
+        if not _nonnegative_int(monotonic_ns):
+            raise ValueError("INVALID_MONOTONIC_TIMESTAMP")
+        value = self.utc_ns + monotonic_ns - self.monotonic_ns
+        if value <= 0:
+            raise ValueError("INVALID_UTC_ESTIMATE")
+        return value
+
+    def as_dict(self) -> dict:
+        seconds, nanos = divmod(self.utc_ns, 1_000_000_000)
+        iso = (datetime.fromtimestamp(seconds, tz=timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%S") + f".{nanos:09d}Z")
+        return {"monotonic_anchor_ns": self.monotonic_ns,
+                "utc_anchor_ns": self.utc_ns,
+                "utc_anchor_iso": iso,
+                "uncertainty_ns_at_anchor": self.uncertainty_ns,
+                "source": self.source,
+                "quality": "ESTIMATED_WALL_CLOCK",
+                "warning": "SYSTEM_CLOCK_CAN_ADJUST_AFTER_ANCHOR"}
+
+
+def capture_clock_anchor() -> ClockAnchor:
+    """Bound synchronization uncertainty with a monotonic sampling bracket.
+
+    This uncertainty applies AT THE ANCHOR, not for arbitrary future UTC wall
+    time; a system-clock adjustment after the anchor cannot be inferred.
+    """
+    before = time.monotonic_ns()
+    utc = time.time_ns()
+    after = time.monotonic_ns()
+    if after < before or utc <= 0:
+        raise ValueError("INVALID_CLOCK_SOURCE")
+    return ClockAnchor((before + after) // 2, utc,
+                       (after - before + 1) // 2)
+
+
+def _observed(value: object) -> bool:
+    return (type(value) in (int, float) and
+            math.isfinite(float(value)) and value >= 0)
+
+
+def sample_field_statuses(sample: dict) -> dict[str, str]:
+    """Validate all explicit per-field statuses against measured counters.
+
+    Synthetic test collectors may omit sensor_status: in that case missing
+    values become NOT_OBSERVED (not an invented permission denial).
+    """
+    if type(sample) is not dict:
+        raise ValueError("INVALID_SENSOR_SAMPLE")
+    requested = sample.get("sensor_status", {})
+    if type(requested) is not dict:
+        raise ValueError("INVALID_SENSOR_STATUS")
+    for name, status in requested.items():
+        if name not in FIELD_UNITS or status not in MEASUREMENT_STATUSES:
+            raise ValueError("INVALID_SENSOR_STATUS")
+    bases = {
+        "rss_bytes": _observed(sample.get("rss_bytes")),
+        "private_bytes": _observed(sample.get("private_bytes")),
+        "uss_bytes": _observed(sample.get("uss_bytes")),
+        "handle_count": _observed(sample.get("handle_count")),
+        "io": (_observed(sample.get("read_bytes")) and
+               _observed(sample.get("write_bytes"))),
+        "threads": sample.get("thread_status") == "OK",
+        "children": _observed(sample.get("children_total")),
+    }
+    out = {}
+    for key, available in bases.items():
+        status = requested.get(key, "OK" if available else "NOT_OBSERVED")
+        # No explicit denial/unsupported status can coexist with an observed
+        # numeric value: this would turn ambiguous imported data into proof.
+        if (status == "OK") != bool(available):
+            raise ValueError("INCONSISTENT_SENSOR_STATUS")
+        out[key] = status
+    for key, count in (
+            ("threads", sample.get("threads_omitted")),
+            ("children", sample.get("children_omitted"))):
+        if count is not None:
+            if not _nonnegative_int(count):
+                raise ValueError("INVALID_OMISSION_COUNT")
+            if count and out[key] == "OK":
+                out[key] = "TRUNCATED"
+    return {
+        "rss_status": out["rss_bytes"],
+        "private_status": out["private_bytes"],
+        "uss_status": out["uss_bytes"],
+        "handle_status": out["handle_count"],
+        "io_status": out["io"],
+        "threads_status": out["threads"],
+        "children_status": out["children"],
+    }
