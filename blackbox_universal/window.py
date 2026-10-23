@@ -341,12 +341,42 @@ class UniversalWindow(QMainWindow):
         middle.addWidget(chart_panel, 7)
 
         status = WindowPanel("Current session", "TARGET STATUS")
-        self.target_name = _label("No process selected", "h2")
-        status.content.addWidget(self.target_name)
+        identity_row = QHBoxLayout()
+        identity_row.setSpacing(10)
+        identity_left = QVBoxLayout()
+        identity_left.setSpacing(7)
+        self.target_name = _label("No process selected", "h2", False)
+        identity_left.addWidget(self.target_name)
         self.target_pid = _label("Select an application to begin.", "caption")
-        status.content.addWidget(self.target_pid)
-        self.state_text = _label("READY TO ATTACH", "signal")
-        status.content.addWidget(self.state_text)
+        identity_left.addWidget(self.target_pid)
+        self.state_text = _label("READY TO ATTACH", "signal", False)
+        identity_left.addWidget(self.state_text)
+        identity_row.addLayout(identity_left, 3)
+
+        # A concise acknowledgement beside the selected PID, not a
+        # decorative heading. This is hidden until a real PID is attached.
+        self.target_binding = QFrame()
+        self.target_binding.setObjectName("targetBinding")
+        self.target_binding.setStyleSheet(
+            "QFrame#targetBinding { background: #f0ecdb; "
+            "border-left: 3px solid #078b84; border-top: 0; "
+            "border-right: 0; border-bottom: 0; }")
+        binding_layout = QVBoxLayout(self.target_binding)
+        binding_layout.setContentsMargins(11, 9, 7, 9)
+        binding_layout.setSpacing(5)
+        self.target_binding_title = _label("", wrap=False)
+        self.target_binding_title.setObjectName("targetBindingTitle")
+        self.target_binding_title.setStyleSheet(
+            "color: #056c6d; font: 700 11px 'Segoe UI';")
+        self.target_binding_detail = _label("", wrap=True)
+        self.target_binding_detail.setObjectName("targetBindingDetail")
+        self.target_binding_detail.setStyleSheet(
+            "color: #605d6d; font: 11px 'Segoe UI';")
+        binding_layout.addWidget(self.target_binding_title)
+        binding_layout.addWidget(self.target_binding_detail)
+        binding_layout.addStretch()
+        identity_row.addWidget(self.target_binding, 4)
+        status.content.addLayout(identity_row)
         status.content.addStretch()
         select_btn = _button("▣  CHOOSE APPLICATION", "primary")
         select_btn.clicked.connect(lambda: self._navigate("processes"))
@@ -1037,6 +1067,7 @@ class UniversalWindow(QMainWindow):
         else:
             status = "○  WAITING FOR TARGET"
         self.state_text.setText(self._t(status))
+        self._refresh_target_binding(selected, running)
         self.live_badge.setText(self._t(status))
         self.toolbar_state.setText(self._t(status))
         if self.probe.session_folder is not None:
@@ -1049,6 +1080,29 @@ class UniversalWindow(QMainWindow):
             self._t("System ready. Choose a process in the PROCESS EXPLORER."))
         if self.stack.currentIndex() == self._page_ids["events"]:
             self._update_event_table()
+
+    def _refresh_target_binding(self, selected: bool, running: bool) -> None:
+        """Explain what is attached without claiming recording before Start."""
+        self.target_binding.setVisible(selected)
+        if not selected:
+            self.target_binding_title.setText("")
+            self.target_binding_detail.setText("")
+            return
+        pid = self.probe.pid
+        if running:
+            heading = "●  OBSERVING THIS INSTANCE"
+            detail = "Recording process" + f" · PID {pid}"
+        elif self.probe.session_folder is not None:
+            heading = "✓  SESSION FINISHED"
+            detail = ("Report saved" if self.probe.report_result is not None
+                      else "Observation stopped") + f" · PID {pid}"
+        else:
+            heading = "✓  PROCESS ATTACHED"
+            detail = "Ready to observe" + f" · PID {pid}"
+        self.target_binding_title.setText(self._t(heading))
+        # Translate the fixed phrase before appending the actual identifier.
+        prefix = detail.rsplit(" · PID ", 1)[0]
+        self.target_binding_detail.setText(self._t(prefix) + f" · PID {pid}")
 
     def _update_event_table(self) -> None:
         events = list(reversed(self.probe.events))
