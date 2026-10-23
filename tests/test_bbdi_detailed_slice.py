@@ -78,6 +78,22 @@ class SidecarLifecycleTests(unittest.TestCase):
             report = (probe.session_folder / "report.html").read_text(encoding="utf-8")
             self.assertIn("Detailed process capture", report)
 
+    def test_detail_budget_counts_sqlite_wal_and_shm(self):
+        with tempfile.TemporaryDirectory() as directory:
+            cap = DetailedCapture(Path(directory), os.getpid(), 1.0,
+                                  time.monotonic_ns(), max_bytes=1024,
+                                  collector=lambda *_: self.fail(
+                                      "collector must not run after disk quota"))
+            cap.start()
+            cap.thread.join(timeout=5)
+            self.assertFalse(cap.thread.is_alive())
+            self.assertEqual(cap.status, "CAPTURE_LIMIT_REACHED")
+            self.assertEqual(summarize_detail(Path(directory))["samples"], 0)
+            wal = cap.path.with_name(cap.path.name + "-wal")
+            wal.write_bytes(b"x" * 1234)
+            self.assertGreaterEqual(cap._storage_bytes(),
+                                    cap.path.stat().st_size + 1234)
+
     def test_sidecar_exclusive_create_cannot_overwrite_preexisting_file(self):
         with tempfile.TemporaryDirectory() as directory:
             folder = Path(directory)
