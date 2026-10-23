@@ -3,6 +3,7 @@
 Partial implementation only; these tests are NOT evidence of full M-021/22.
 """
 from __future__ import annotations
+from contextlib import closing
 
 import json
 import os
@@ -95,7 +96,7 @@ class RealSessionExperimentTests(unittest.TestCase):
                 self.assertEqual(len(ids), 1)
             finally:
                 probe.stop()
-            with sqlite3.connect(probe.session_folder / "session.sqlite3") as db:
+            with closing(sqlite3.connect(probe.session_folder / "session.sqlite3")) as db:
                 events = [json.loads(row[0]) for row in db.execute(
                     "SELECT data FROM events ORDER BY seq")]
             completed = [row for row in events if row.get("event") == "ACTION_COMPLETED"]
