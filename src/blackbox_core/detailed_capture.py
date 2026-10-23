@@ -238,6 +238,10 @@ class DetailedCapture:
         except (sqlite3.Error, OSError, ValueError, TypeError) as exc:
             final = "STORAGE_OR_SENSOR_FAILURE"
             self.error = type(exc).__name__
+        except Exception as exc:
+            # An unexpected psutil/collector failure is not a clean Stop.
+            final = "SENSOR_INTERNAL_FAILURE"
+            self.error = type(exc).__name__
         finally:
             if conn is not None:
                 try:
