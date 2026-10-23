@@ -97,6 +97,10 @@ class QtReportWorkerTests(unittest.TestCase):
             self.assertTrue((folder / "report.json").is_file())
             self.assertTrue((folder / "report.html").is_file())
             self.assertTrue(self.window.start_btn.isEnabled())
+            report_before = self.window.probe.report_result
+            self.window._stop()  # old duplicate Stop must not overwrite files
+            self.assertIsNone(self.window._report_worker)
+            self.assertIs(self.window.probe.report_result, report_before)
             with closing(sqlite3.connect(folder / "session.sqlite3")) as db:
                 self.assertEqual(db.execute(
                     "SELECT schema_version, exit_code FROM metadata").fetchone(),
