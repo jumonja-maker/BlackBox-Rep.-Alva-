@@ -1,0 +1,54 @@
+name: One-time Investigation 0.1.2 source import
+on:
+  push:
+    paths:
+      - 'vendor/blackbox-investigation-0.1.2.zip'
+      - '.github/workflows/import-investigation.yml'
+jobs:
+  import-reviewed-source:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate vendored source and extract only reviewed files
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          from zipfile import ZipFile
+          import stat
+          archive=Path("vendor/blackbox-investigation-0.1.2.zip")
+          with ZipFile(archive) as z:
+              entries=z.infolist()
+              assert len(entries)==12, "Unexpected vendor source count"
+              for m in entries:
+                  p=Path(m.filename)
+                  assert p.parts[0] in ("src", "tests") or m.filename=="LICENSE"
+                  assert ".." not in p.parts and not p.is_absolute()
+                  assert m.file_size < 75000
+                  assert not stat.S_ISLNK(m.external_attr >> 16)
+                  if m.filename=="LICENSE":
+                      dest=Path("docs/vendor/investigation-0.1.2-LICENSE")
+                  else:
+                      dest=Path(m.filename)
+                  dest.parent.mkdir(parents=True,exist_ok=True)
+                  dest.write_bytes(z.read(m))
+          assert Path("src/blackbox_investigation/engine.py").exists()
+          assert Path("tests/test_consumer_hardening_012.py").exists()
+          PY
+      - name: Run standalone module test suite
+        shell: bash
+        run: |
+          python -I -S -c "import unittest,sys;sys.path.insert(0,'src'); suite=unittest.defaultTestLoader.discover('tests',pattern='test_investigation.py'); result=unittest.TextTestRunner(verbosity=2).run(suite);sys.exit(not result.wasSuccessful())"
+          python -I -S -c "import unittest,sys;sys.path.insert(0,'src');suite=unittest.defaultTestLoader.discover('tests',pattern='test_blackbox_feedback_011.py'); result=unittest.TextTestRunner(verbosity=2).run(suite);sys.exit(not result.wasSuccessful())"
+          python -I -S -c "import unittest,sys;sys.path.insert(0,'src');suite=unittest.defaultTestLoader.discover('tests',pattern='test_consumer_hardening_012.py'); result=unittest.TextTestRunner(verbosity=2).run(suite);sys.exit(not result.wasSuccessful())"
+      - name: Commit reviewed source to public main
+        shell: bash
+        run: |
+          git config user.name "blackbox-investigation-import"
+          git config user.email "actions@users.noreply.github.com"
+          git add src/blackbox_investigation tests/test_investigation.py tests/test_blackbox_feedback_011.py tests/test_consumer_hardening_012.py docs/vendor/investigation-0.1.2-LICENSE
+          git rm vendor/blackbox-investigation-0.1.2.zip
+          git commit -m "vendor: import tested Investigation Engine 0.1.2 independent source"
+          git push origin HEAD:main
