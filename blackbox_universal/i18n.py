@@ -61,6 +61,14 @@ RU = {
 "Action state":"СОСТОЯНИЕ ЗАМЕРА",
 "completed repeats":"завершённых повторов",
 "AUTO INCIDENT CAPTURE: ON":"АВТОЗАХВАТ СОБЫТИЙ: ВКЛ",
+"◫  INVESTIGATE INTERVAL…":"◫  ИССЛЕДОВАТЬ ИНТЕРВАЛ…",
+"Session has no valid measurable interval":"В сеансе нет пригодного интервала измерений",
+"Start of investigation interval":"Начало интервала исследования",
+"End of investigation interval":"Конец интервала исследования",
+"Start elapsed milliseconds":"Начало: миллисекунды с начала записи",
+"End elapsed milliseconds":"Конец: миллисекунды с начала записи",
+"Invalid investigation interval":"Недопустимый интервал исследования",
+
 "AUTO INCIDENT CAPTURE: OFF":"АВТОЗАХВАТ СОБЫТИЙ: ВЫКЛ",
 "Automatic incident capture unavailable":"Автоматическая фиксация событий недоступна",
 
