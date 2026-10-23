@@ -595,7 +595,8 @@ class UniversalWindow(QMainWindow):
         changing = {self.target_name, self.target_pid, self.state_text,
                     self.live_badge, self.toolbar_state, self.clock,
                     self.session_location, self.process_count,
-                    self.report_status_label, self.file_description}
+                    self.report_status_label, self.file_description,
+                    self.target_binding_title, self.target_binding_detail}
         from PySide6.QtWidgets import QLabel
         for label in self.findChildren(QLabel):
             if label in changing or label.objectName() == "metricValue":
