@@ -38,7 +38,7 @@ Status rules: **PASS** needs actual user-facing integration, automated tests and
 | M-024 | PARTIAL | src/blackbox_core/incidents.py | Pre/post sample sequence bounded; not full multi-sensor ring |
 | M-025 | PARTIAL | src/blackbox_core/incidents.py; tests/test_bbdi_incident_slice.py | Cooldown and incident bounds; incomplete disk/trigger policy |
 | M-026 | PARTIAL | src/blackbox_core/incidents.py; src/blackbox_core/report.py | Explicit external-counter provenance, incomplete sensor coincidence |
-| M-027 | PARTIAL | blackbox_universal/base_sample_worker.py; blackbox_universal/window.py; src/blackbox_core/storage.py; src/blackbox_core/detailed_capture.py; tests/test_bbdi_base_worker.py | Production Qt timer now samples/writes base process in a one-at-a-time background QThread; GUI still owns event IO, report generation and sync setup |
+| M-027 | PARTIAL | blackbox_universal/base_sample_worker.py; src/blackbox_core/event_journal.py; src/blackbox_core/storage.py; tests/test_bbdi_event_journal.py; tests/test_bbdi_base_worker.py | Qt timer's base samples and SQLite events now use separate workers; durable action callbacks/stop can still wait on disk, initial session and reports run on GUI |
 | M-028 | PARTIAL | src/blackbox_core/detailed_capture.py; src/blackbox_core/detail_contracts.py; docs/BB_DI_001_DETAIL_V2_CONTRACT.md | Additive v2 clock/capability/quality tables and conservative legacy reader; full normalized schema2/session lifecycle not implemented |
 | M-029 | PARTIAL | src/blackbox_core/detailed_capture.py; src/blackbox_core/detail_contracts.py | Added clock/capabilities/sample-quality rows; sessions, targets, incident, experiment, artifacts and other required entities missing |
 | M-030 | PARTIAL | src/blackbox_core/detail_analysis.py; src/blackbox_core/detail_contracts.py; src/blackbox_core/detailed_capture.py | New PSUTIL/OS_OBSERVED producer metadata per detailed sample, read-only file_trust UNVERIFIED_IMPORT; full event sensor/source/permission contract still missing |
@@ -77,7 +77,7 @@ Status rules: **PASS** needs actual user-facing integration, automated tests and
 | M-063 | PARTIAL | src/blackbox_core/detailed_capture.py; tests/test_bbdi_detailed_slice.py | Thread/child/size limits; 8h performance not verified |
 | M-064 | NOT-IMPLEMENTED | — | Required full capability not present; see original order |
 | M-065 | NOT-IMPLEMENTED | — | Required full capability not present; see original order |
-| M-066 | PARTIAL | blackbox_universal/base_sample_worker.py; blackbox_universal/window.py; src/blackbox_core/storage.py; tests/test_bbdi_base_worker.py | Base periodic sample/SQLite insert moved off Qt; no full owner queue for events, callback deadlines, queue instrumentation or forced cancellation |
+| M-066 | PARTIAL | blackbox_universal/base_sample_worker.py; src/blackbox_core/event_journal.py; blackbox_universal/monitor.py; src/blackbox_core/storage.py; tests/test_bbdi_event_journal.py | Bounded FIFO SQLite event writer and periodic sample QThread, but no fully async action acknowledgements, global unified queue, deadlines, measured backpressure or hard quota |
 | M-067 | NOT-IMPLEMENTED | — | Required full capability not present; see original order |
 | M-068 | NOT-IMPLEMENTED | — | Required full capability not present; see original order |
 | M-069 | NOT-IMPLEMENTED | — | Required full capability not present; see original order |
@@ -141,6 +141,12 @@ Status rules: **PASS** needs actual user-facing integration, automated tests and
 | FIX-11 | NOT-RUN | — | No independent full-scenario Windows/EXE acceptance evidence for this exact item |
 | FIX-12 | NOT-RUN | — | No independent full-scenario Windows/EXE acceptance evidence for this exact item |
 
+## Bounded GUI SQLite event journal slice (still PARTIAL)
+
+- `src/blackbox_core/event_journal.py` and `src/blackbox_core/storage.py`: one session-owned 64-slot FIFO for schema1 events, external SQLite worker connection, nonblocking lifecycle enqueue, **durable** action/incident/user marker acknowledgement before state changes, ordered barrier before session finish.
+- `blackbox_universal/monitor.py` and `window.py`: opt in automatically for real GUI sessions, leaving original CLI APIs and schema1 files intact; no new UI section or cloud interaction.
+- `tests/test_bbdi_event_journal.py`: worker-thread identity, queue exhaustion, fail-closed writer fault, FIFO, schema1 backward compatibility and actual Qt action/marker integration. See `docs/BB_DI_001_EVENT_JOURNAL_ARCHITECTURE.md` for the remaining blocking calls and unproven durability on forced process crash. **M-027/M-066 still PARTIAL.**
+
 ## Background base sampler / SQLite writer slice (still PARTIAL)
 
 - Production `UniversalWindow` timer launches one bounded `BaseSampleWorker` (`psutil` sampling + independent schema1 SQLite sample insert); user commands and `ActionCycle` still run through existing Qt-owned `SessionStore` event connection.
@@ -170,7 +176,7 @@ Status rules: **PASS** needs actual user-facing integration, automated tests and
 ## Release blockers / next implementation order
 
 1. Complete schema2 contracts, provenance/status/capability vocabulary, monotonic↔UTC mapping and V1 read-only/V2 readers with atomic lifecycle.
-2. Finish unified ownership-managed queue for **all** SQLite writes and event/marker/report IO, stop/join deadline, worker metrics and explicit dropped-tick records; periodic base sampling and sample INSERT now run off Qt.
+2. Finish fully async UI actions/acknowledgements, owner-managed session writer across samples/events/finish and reports, stop/join deadlines, worker health metrics and dropped-tick records; periodic base sample INSERT and GUI event INSERT now run in worker-owned connections.
 3. Extend the **new bounded adjacent-snapshot TID CPU%** to selected full-session intervals, per-field quality, tree/history, charts, CSV and compare. Existing table/HTML/JSON only covers a recent bounded window; TID birth identity is unverified.
 4. Add real bounded Windows HWND responsiveness and WCT with positive/negative Windows fixtures and explicit unsupported/denied states; opt-in ETW where capable.
 5. Build complete evidence-led Investigation/compare/timeline/experiment history; 8h Standard, 1h Detailed, 12 fixtures, AC-01..36.
