@@ -36,6 +36,7 @@ from .monitor import ReadOnlyProbe, available_processes, save_snapshot
 from .investigation_worker import InvestigationWorker, session_bounds
 from .thread_detail_worker import ThreadDetailWorker
 from .base_sample_worker import BaseSampleWorker
+from .report_worker import ReportWorker
 from .investigation_view import title as investigation_title, interval_text as investigation_interval, fact_text as investigation_facts, finding_details, summary_text
 from .file_targets import InspectedFile, inspect_file, find_running_executable
 from .i18n import translate
@@ -132,6 +133,8 @@ class UniversalWindow(QMainWindow):
         self._investigation_busy = False
         self._thread_detail_worker: ThreadDetailWorker | None = None
         self._base_sample_worker: BaseSampleWorker | None = None
+        self._report_worker: ReportWorker | None = None
+        self._report_error: str | None = None
         self._pending_base_stop: str | None = None
         self._base_sample_error: str | None = None
         self._busy_tick_tracker = BusyTickTracker()
@@ -1069,6 +1072,8 @@ class UniversalWindow(QMainWindow):
                 "SHA-256 skipped for files larger than 16 MiB."))
 
     def _attach_pid(self, pid: int) -> None:
+        if self._report_worker is not None or self._pending_base_stop is not None:
+            return
         try:
             self.probe.attach(pid)
         except (psutil.Error, OSError, ValueError, RuntimeError, ObserverError):
@@ -1083,6 +1088,8 @@ class UniversalWindow(QMainWindow):
         self._navigate("dashboard")
 
     def _attach_file_target(self) -> None:
+        if self._report_worker is not None or self._pending_base_stop is not None:
+            return
         item = self._selected_file
         if item is None or not item.executable_target:
             return
@@ -1121,6 +1128,8 @@ class UniversalWindow(QMainWindow):
         self._attach_pid(pid)
 
     def _launch_file_target(self) -> None:
+        if self._report_worker is not None or self._pending_base_stop is not None:
+            return
         item = self._selected_file
         if item is None or not item.executable_target or os.name != "nt":
             return
@@ -1163,7 +1172,9 @@ class UniversalWindow(QMainWindow):
         self._attach_pid(int(pid_item.data(Qt.ItemDataRole.UserRole)))
 
     def _start(self) -> None:
-        if self._base_sample_worker is not None or self._pending_base_stop is not None:
+        if (self._base_sample_worker is not None or
+                self._pending_base_stop is not None or
+                self._report_worker is not None):
             return
         try:
             self.probe.start()
@@ -1191,11 +1202,49 @@ class UniversalWindow(QMainWindow):
         self._complete_base_stop("USER_STOPPED")
 
     def _complete_base_stop(self, reason: str) -> None:
+        """Close GUI-owned SQLite, then build reports on a separate QThread."""
+        if self._report_worker is not None:
+            return
         self._pending_base_stop = None
-        self.probe.stop(reason)
+        # Stop owns the original SessionStore connection created in Qt.
+        # It must NOT be used from ReportWorker (SQLite check_same_thread).
+        self.probe.stop(reason, defer_report=True)
+        if self.probe.session_folder is None:
+            self._set_report_status("unavailable")
+            self._update_all()
+            return
+        worker = ReportWorker(self.probe.session_folder, self)
+        self._report_worker = worker
+        self._report_error = None
+        worker.result_ready.connect(self._report_ready)
+        worker.finished.connect(self._report_finished)
+        self._set_report_status("saving")
+        self._update_all()
+        worker.start()
+
+    def _report_ready(self, payload: object, error: str) -> None:
+        if error or type(payload) is not dict:
+            self._report_error = "REPORT_UNAVAILABLE"
+            return
+        try:
+            self.probe.complete_report(payload, "")
+        except (RuntimeError, ValueError, TypeError):
+            self._report_error = "REPORT_UNAVAILABLE"
+
+    def _report_finished(self) -> None:
+        worker = self._report_worker
+        self._report_worker = None
+        if worker is not None:
+            worker.deleteLater()
+        if self._report_error is not None:
+            self.probe.complete_report(None, self._report_error)
+        self._report_error = None
         self._set_report_status(
             "saved" if self.probe.report_result is not None else "unavailable")
         self._update_all()
+        if self._pending_close:
+            self._pending_close = False
+            QTimer.singleShot(0, self.close)
 
     def _request_background_sample(self) -> None:
         if not self.probe.active:
@@ -1272,10 +1321,8 @@ class UniversalWindow(QMainWindow):
             self._complete_base_stop(stop_reason)
         else:
             self._update_all()
-        if self._pending_close:
-            self._pending_close = False
-            QTimer.singleShot(0, self.close)
-
+        # ReportWorker owns post-stop report IO; it will honor any
+        # deferred window close when its own finished signal is delivered.
 
     def _change_interval(self, index: int) -> None:
         if hasattr(self, "_timer"):
@@ -1339,8 +1386,9 @@ class UniversalWindow(QMainWindow):
         self.clock.setText(datetime.now().strftime("%H:%M"))
         selected = self.probe.pid is not None
         running = self.probe.active
-        self.start_btn.setEnabled(selected and not running)
-        stopping = self._pending_base_stop is not None
+        stopping = (self._pending_base_stop is not None or
+                    self._report_worker is not None)
+        self.start_btn.setEnabled(selected and not running and not stopping)
         self.stop_btn.setEnabled(running and not stopping)
         self.mark_problem_btn.setEnabled(running and not stopping and
                                          self.probe.last_elapsed_ms is not None)
@@ -1366,11 +1414,11 @@ class UniversalWindow(QMainWindow):
             self._t("Action state") + ": " + current_action +
             (f" · {repeat_count} " + self._t("completed repeats") if repeat_count else ""))
         self.investigate_current_btn.setEnabled(
-            not running and not self._investigation_busy and
+            not running and not stopping and not self._investigation_busy and
             self.probe.session_folder is not None and
             (self.probe.session_folder / "session.sqlite3").is_file())
-        self.investigate_saved_btn.setEnabled(not self._investigation_busy)
-        self.investigate_interval_btn.setEnabled(not self._investigation_busy)
+        self.investigate_saved_btn.setEnabled(not stopping and not self._investigation_busy)
+        self.investigate_interval_btn.setEnabled(not stopping and not self._investigation_busy)
         current = self.probe.last
         self.card_cpu.set_readout(
             f'{current["cpu_pct"]:.1f}%' if self.probe.history and current["cpu_pct"] is not None else "—",
@@ -1384,14 +1432,16 @@ class UniversalWindow(QMainWindow):
         self.chart.set_samples(list(self.probe.history))
         folder = self.probe.session_folder
         self.open_report_button.setEnabled(
-            folder is not None and (folder / "report.html").is_file())
+            not stopping and folder is not None and (folder / "report.html").is_file())
         if selected:
             self.target_name.setText(self.probe.name)
             self.target_pid.setText(f"PID {self.probe.pid}  /  local computer")
         else:
             self.target_name.setText(self._t("No process selected"))
             self.target_pid.setText(self._t("Visit PROCESSES to attach."))
-        if running:
+        if stopping:
+            status = "●  FINALIZING SESSION"
+        elif running:
             status = "●  OBSERVING"
         elif selected:
             status = "●  READY / STOPPED"
@@ -1420,7 +1470,10 @@ class UniversalWindow(QMainWindow):
             self.target_binding_detail.setText("")
             return
         pid = self.probe.pid
-        if running:
+        if self._report_worker is not None or self._pending_base_stop is not None:
+            heading = "●  FINALIZING SESSION"
+            detail = "Saving report" + f" · PID {pid}"
+        elif running:
             heading = "●  OBSERVING THIS INSTANCE"
             detail = "Recording process" + f" · PID {pid}"
         elif self.probe.session_folder is not None:
@@ -1436,6 +1489,8 @@ class UniversalWindow(QMainWindow):
         self.target_binding_detail.setText(self._t(prefix) + f" · PID {pid}")
 
     def _toggle_detailed_capture(self) -> None:
+        if self._report_worker is not None or self._pending_base_stop is not None:
+            return
         try:
             self.probe.set_detailed_capture(
                 self.probe.detailed_capture is None)
@@ -1445,6 +1500,8 @@ class UniversalWindow(QMainWindow):
         self._update_all()
 
     def _toggle_incident_capture(self) -> None:
+        if self._report_worker is not None or self._pending_base_stop is not None:
+            return
         try:
             self.probe.set_incident_capture(
                 self.probe.incident_capture is None)
@@ -1454,6 +1511,8 @@ class UniversalWindow(QMainWindow):
         self._update_all()
 
     def _prepare_action(self) -> None:
+        if self._report_worker is not None or self._pending_base_stop is not None:
+            return
         try:
             self.probe.prepare_action()
         except (ActionError, ObserverError, OSError):
@@ -1461,6 +1520,8 @@ class UniversalWindow(QMainWindow):
         self._update_all()
 
     def _begin_action(self) -> None:
+        if self._report_worker is not None or self._pending_base_stop is not None:
+            return
         try:
             self.probe.begin_action()
         except (ActionError, ObserverError, OSError):
@@ -1468,6 +1529,8 @@ class UniversalWindow(QMainWindow):
         self._update_all()
 
     def _end_action(self) -> None:
+        if self._report_worker is not None or self._pending_base_stop is not None:
+            return
         try:
             self.probe.finish_action()
         except (ActionError, ObserverError, OSError):
@@ -1475,6 +1538,8 @@ class UniversalWindow(QMainWindow):
         self._update_all()
 
     def _mark_problem(self) -> None:
+        if self._report_worker is not None or self._pending_base_stop is not None:
+            return
         if not self.probe.active or self.probe.last_elapsed_ms is None:
             return
         note, ok = QInputDialog.getText(
@@ -1731,6 +1796,8 @@ class UniversalWindow(QMainWindow):
                         "После остановки будет сохранён локальный отчёт."),
             "recording": ("Recording process observations…",
                           "Идёт запись наблюдений за процессом…"),
+            "saving": ("Saving offline report in background…",
+                       "Сохраняется локальный отчёт в фоне…"),
             "saved": ("Local process report saved.",
                       "Локальный отчёт о процессе сохранён."),
             "unavailable": ("Report unavailable; SQLite data may remain.",
@@ -1771,6 +1838,11 @@ class UniversalWindow(QMainWindow):
             "No cloud upload, tunneling, process injection or admin escalation.")
 
     def closeEvent(self, event) -> None:
+        if self._report_worker is not None:
+            self._pending_close = True
+            self._timer.stop()
+            event.ignore()
+            return
         if self._base_sample_worker is not None:
             self._pending_base_stop = "UI_CLOSED"
             self._pending_close = True
@@ -1795,6 +1867,11 @@ class UniversalWindow(QMainWindow):
                 self, "BLACK.BOX Universal",
                 self._t("Finish the current update before closing."))
             return
-        self.probe.stop("UI_CLOSED")
+        if self.probe.active:
+            self._pending_close = True
+            self._timer.stop()
+            self._complete_base_stop("UI_CLOSED")
+            event.ignore()
+            return
         self._timer.stop()
         super().closeEvent(event)
