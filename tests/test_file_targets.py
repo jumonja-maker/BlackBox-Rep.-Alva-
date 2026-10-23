@@ -136,6 +136,38 @@ class FileTargetGuiTests(unittest.TestCase):
             self.window._attach_file_target()
             attach.assert_called_once_with(101)
 
+    @unittest.skipUnless(os.name == "nt", "EXE launch is Windows-specific")
+    def test_launch_requires_confirmation_and_never_uses_shell(self):
+        path = fake_pe(Path(self.tmp.name) / "approved.exe")
+        self._select(path)
+        with patch.object(QMessageBox, "question",
+                          return_value=QMessageBox.StandardButton.No), \
+             patch("blackbox_universal.window.subprocess.Popen") as launched:
+            self.window._launch_file_target()
+            launched.assert_not_called()
+        with patch.object(QMessageBox, "question",
+                          return_value=QMessageBox.StandardButton.Yes), \
+             patch("blackbox_universal.window.subprocess.Popen",
+                   return_value=SimpleNamespace(pid=710)) as launched, \
+             patch.object(self.window, "_attach_pid") as attached:
+            self.window._launch_file_target()
+            launched.assert_called_once_with(
+                [str(path)], cwd=str(path.parent), close_fds=True)
+            attached.assert_called_once_with(710)
+
+    @unittest.skipUnless(os.name == "nt", "EXE launch is Windows-specific")
+    def test_changed_file_is_rejected_before_launch(self):
+        path = fake_pe(Path(self.tmp.name) / "changed.exe")
+        self._select(path)
+        with path.open("ab") as f:
+            f.write(b"changed since selection")
+        with patch.object(QMessageBox, "question",
+                          return_value=QMessageBox.StandardButton.Yes), \
+             patch.object(QMessageBox, "warning", return_value=None), \
+             patch("blackbox_universal.window.subprocess.Popen") as launched:
+            self.window._launch_file_target()
+            launched.assert_not_called()
+
     def test_absent_process_does_not_start_selected_exe(self):
         path = fake_pe(Path(self.tmp.name) / "stopped.exe")
         self._select(path)
