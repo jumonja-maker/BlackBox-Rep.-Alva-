@@ -56,7 +56,11 @@ def _default_sessions_root() -> Path:
 class ReadOnlyProbe:
     """A durable recording per explicit Start; all GUI views are read-only."""
 
-    def __init__(self, output_root: Path | None = None) -> None:
+    def __init__(self, output_root: Path | None = None, *,
+                 background_events: bool = False) -> None:
+        if type(background_events) is not bool:
+            raise ValueError("INVALID_EVENT_WRITER_POLICY")
+        self.background_events = background_events
         self.output_root = Path(output_root) if output_root else _default_sessions_root()
         self.pid: int | None = None
         self.name = ""
@@ -93,7 +97,7 @@ class ReadOnlyProbe:
         self.events.append(entry)
         if self._store is not None:
             try:
-                self._store.write_event({"kind": "observer_lifecycle",
+                self._store.write_lifecycle_event({"kind": "observer_lifecycle",
                                          "code": code,
                                          "timestamp_utc": entry["timestamp_utc"],
                                          "detail": entry["detail"]})
@@ -146,6 +150,12 @@ class ReadOnlyProbe:
         if not root.is_dir() or root.is_symlink():
             raise RuntimeError("Session root is unavailable.")
         store = SessionStore(root, self.pid)
+        if self.background_events:
+            try:
+                store.enable_background_events()
+            except (ObserverError, OSError, RuntimeError):
+                store.close()
+                raise
         self._core = core
         self._store = store
         self.session_folder = store.folder
