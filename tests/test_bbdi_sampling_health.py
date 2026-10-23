@@ -81,6 +81,9 @@ class StoredBusyTickTests(unittest.TestCase):
         if worker is not None:
             worker.wait(5000)
             drain(self.app, lambda: self.window._base_sample_worker is None)
+        self.assertTrue(drain(
+            self.app, lambda: self.window._report_worker is None
+            and self.window._base_sample_worker is None))
         self.window.close()
         self.context.stop()
         self.temp.cleanup()
@@ -109,7 +112,9 @@ class StoredBusyTickTests(unittest.TestCase):
                 self.window._request_background_sample()
                 release.set()
                 self.assertTrue(worker.wait(5000))
-                self.assertTrue(drain(self.app, lambda: not self.window.probe.active))
+                self.assertTrue(drain(
+                    self.app, lambda: self.window._report_worker is None and
+                    not self.window.probe.active))
                 folder = self.window.probe.session_folder
                 report = summarize(folder)
                 self.assertEqual(report["samples"], 1)
