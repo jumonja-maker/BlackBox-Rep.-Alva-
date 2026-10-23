@@ -15,7 +15,7 @@ Status rules: **PASS** needs actual user-facing integration, automated tests and
 | M-001 | PARTIAL | blackbox_universal/monitor.py; src/blackbox_core/detailed_capture.py; tests/test_bbdi_detailed_slice.py | PID + birth checked; formal target provenance not complete |
 | M-002 | PARTIAL | blackbox_universal/monitor.py; tests/test_bbdi_action_slice.py | Target switch denied while active; full PID-reuse Windows E2E unverified |
 | M-003 | PARTIAL | src/blackbox_core/detailed_capture.py; blackbox_universal/window.py | Opt-in detailed channel; no complete profiles or Incident Burst |
-| M-004 | PARTIAL | blackbox_universal/monitor.py; src/blackbox_core/detailed_capture.py | Monotonic origin exists; no complete UTC clock-mapping schema |
+| M-004 | PARTIAL | src/blackbox_core/detail_contracts.py; src/blackbox_core/detailed_capture.py; tests/test_bbdi_detail_contracts.py | Clock anchor and approximate UTC mapping now persisted for opt-in detailed sidecar only; no full session UUID / cross-sensor mapping |
 | M-005 | PARTIAL | src/blackbox_core/probe.py; src/blackbox_core/detailed_capture.py | Stored cumulative CPU; missing full v2 interval semantics |
 | M-006 | PARTIAL | src/blackbox_core/detailed_capture.py; tests/test_bbdi_detailed_slice.py | RSS/Private/USS/handles best effort; per-field quality incomplete |
 | M-007 | PARTIAL | src/blackbox_core/detailed_capture.py | Cumulative byte and ops counters; safe per-interval rates not wired |
@@ -39,13 +39,13 @@ Status rules: **PASS** needs actual user-facing integration, automated tests and
 | M-025 | PARTIAL | src/blackbox_core/incidents.py; tests/test_bbdi_incident_slice.py | Cooldown and incident bounds; incomplete disk/trigger policy |
 | M-026 | PARTIAL | src/blackbox_core/incidents.py; src/blackbox_core/report.py | Explicit external-counter provenance, incomplete sensor coincidence |
 | M-027 | PARTIAL | blackbox_universal/monitor.py; src/blackbox_core/detailed_capture.py | Separate detailed thread, base Qt sampling still synchronous |
-| M-028 | PARTIAL | src/blackbox_core/detailed_capture.py | Standalone v2 sidecar, not complete formal SQLite v2 contract |
-| M-029 | PARTIAL | src/blackbox_core/detailed_capture.py | Some process/thread/child tables; required entities missing |
-| M-030 | PARTIAL | src/blackbox_core/detailed_capture.py; src/blackbox_core/detail_analysis.py | Derived TID rates explicitly PSUTIL/DERIVED with TID reuse warning; full per-field/source timestamp/error contract still missing |
-| M-031 | PARTIAL | src/blackbox_core/detailed_capture.py | NULL rather than fake zero in some fields; reason per field missing |
-| M-032 | PARTIAL | src/blackbox_core/detailed_capture.py | Monotonic nanoseconds stored; UTC mapping incomplete |
+| M-028 | PARTIAL | src/blackbox_core/detailed_capture.py; src/blackbox_core/detail_contracts.py; docs/BB_DI_001_DETAIL_V2_CONTRACT.md | Additive v2 clock/capability/quality tables and conservative legacy reader; full normalized schema2/session lifecycle not implemented |
+| M-029 | PARTIAL | src/blackbox_core/detailed_capture.py; src/blackbox_core/detail_contracts.py | Added clock/capabilities/sample-quality rows; sessions, targets, incident, experiment, artifacts and other required entities missing |
+| M-030 | PARTIAL | src/blackbox_core/detail_analysis.py; src/blackbox_core/detail_contracts.py; src/blackbox_core/detailed_capture.py | New PSUTIL/OS_OBSERVED producer metadata per detailed sample, read-only file_trust UNVERIFIED_IMPORT; full event sensor/source/permission contract still missing |
+| M-031 | PARTIAL | src/blackbox_core/detail_contracts.py; tests/test_bbdi_detail_contracts.py | Explicit field statuses on new detailed samples: OK vs NOT_OBSERVED/ACCESS_DENIED/UNSUPPORTED/TRUNCATED; other sensors and complete reason granularity missing |
+| M-032 | PARTIAL | src/blackbox_core/detail_contracts.py; src/blackbox_core/detailed_capture.py | Precise monotonic timestamps and approximate nanosecond UTC mapping for detailed sidecar; old GUI sample timestamps and system-clock drift remain unaddressed |
 | M-033 | PARTIAL | blackbox_universal/investigation_worker.py; tests/test_bbdi_interval_slice.py | Read-only selected legacy interval with max_samples bound; no full 8h streaming |
-| M-034 | PARTIAL | src/blackbox_core/detailed_capture.py; tests/test_bbdi_detailed_slice.py | WAL and per-sample soft quota incl WAL/SHM; crash/recovery unverified |
+| M-034 | PARTIAL | src/blackbox_core/detailed_capture.py; tests/test_bbdi_detailed_slice.py; tests/test_bbdi_detail_contracts.py | Sample/quality rows atomic on malformed data and WAL+soft quota remain; power-loss recovery/checkpoint/8h NOT RUN |
 | M-035 | NOT-IMPLEMENTED | — | Required full capability not present; see original order |
 | M-036 | PARTIAL | blackbox_universal/window.py; blackbox_universal/monitor.py | Action and incident controls; no complete status architecture |
 | M-037 | NOT-IMPLEMENTED | — | Required full capability not present; see original order |
@@ -64,7 +64,7 @@ Status rules: **PASS** needs actual user-facing integration, automated tests and
 | M-050 | NOT-IMPLEMENTED | — | Required full capability not present; see original order |
 | M-051 | NOT-IMPLEMENTED | — | Required full capability not present; see original order |
 | M-052 | PARTIAL | blackbox_universal/investigation_worker.py; tests/test_bbdi_interval_slice.py | Bounded legacy interval, not full coverage streaming |
-| M-053 | PARTIAL | src/blackbox_core/report.py; src/blackbox_core/detail_analysis.py | Bounded derived TID CPU included in session JSON/HTML; full schema2 CSV/bundle and all field exports missing |
+| M-053 | PARTIAL | src/blackbox_core/report.py; src/blackbox_core/detail_contracts.py; src/blackbox_core/detail_analysis.py | Saved JSON/HTML now include detailed-source clock/status/quality and bounded TID deltas; complete schema2 CSV/bundle unavailable |
 | M-054 | PARTIAL | src/blackbox_core/experiments.py; src/blackbox_core/report.py | Duration-only experiment comparison |
 | M-055 | PARTIAL | src/blackbox_investigation/sqlite_adapter.py | Read-only v1 interval works; full v1/v2 SessionView missing |
 | M-056 | NOT-IMPLEMENTED | — | Required full capability not present; see original order |
@@ -140,6 +140,12 @@ Status rules: **PASS** needs actual user-facing integration, automated tests and
 | FIX-10 | NOT-RUN | — | No independent full-scenario Windows/EXE acceptance evidence for this exact item |
 | FIX-11 | NOT-RUN | — | No independent full-scenario Windows/EXE acceptance evidence for this exact item |
 | FIX-12 | NOT-RUN | — | No independent full-scenario Windows/EXE acceptance evidence for this exact item |
+
+## Additive provenance / clock sidecar slice (still PARTIAL)
+
+- `src/blackbox_core/detail_contracts.py`, `detailed_capture.py`: opt-in detailed sidecar now stores an anchored monotonic↔UTC nanosecond estimate, explicit PSUTIL source/verification, per-sample RSS/Private/USS/handles/I/O/thread/child statuses and unit metadata; late sensor data failures rollback all partial sample rows.
+- `summarize_detail` keeps legacy v2 read-only, reports `LEGACY_DETAIL_V2_NO_PROVENANCE` for absent additive tables, and marks reopened-file trust as `UNVERIFIED_IMPORT`; JSON/HTML surface contract quality without claiming Windows hangs.
+- `tests/test_bbdi_detail_contracts.py` covers these contracts; see `docs/BB_DI_001_DETAIL_V2_CONTRACT.md` for semantics and explicit limitations. The full schema2/SessionView/UI writer migration remains undone.
 
 ## New read-only per-thread CPU vertical subfeature (still PARTIAL)
 
