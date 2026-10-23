@@ -92,8 +92,11 @@ class BackgroundQtTests(unittest.TestCase):
         if worker is not None:
             worker.wait(5000)
             drain(self.app, lambda: self.window._base_sample_worker is None)
+        self.assertTrue(drain(
+            self.app, lambda: self.window._report_worker is None
+            and self.window._base_sample_worker is None))
         self.window.close()
-        drain(self.app, lambda: self.window._base_sample_worker is None)
+        self.app.processEvents()
         self.patched_root.stop()
         self.temp.cleanup()
 
@@ -127,6 +130,8 @@ class BackgroundQtTests(unittest.TestCase):
                 self.assertTrue(worker.wait(5_000))
                 self.assertTrue(drain(self.app, lambda: not self.window.probe.active))
                 self.assertIsNone(self.window._base_sample_worker)
+                self.assertTrue(drain(
+                    self.app, lambda: self.window._report_worker is None))
                 folder = self.window.probe.session_folder
                 self.assertTrue((folder / "report.json").is_file())
                 with closing(sqlite3.connect(folder / "session.sqlite3")) as db:
@@ -178,6 +183,8 @@ class BackgroundQtTests(unittest.TestCase):
                 self.assertTrue(drain(self.app, lambda: not self.window.probe.active))
                 self.app.processEvents()
                 self.assertIsNone(self.window._base_sample_worker)
+                self.assertTrue(drain(
+                    self.app, lambda: self.window._report_worker is None))
                 with closing(sqlite3.connect(
                         self.window.probe.session_folder / "session.sqlite3")) as db:
                     self.assertEqual(db.execute(
