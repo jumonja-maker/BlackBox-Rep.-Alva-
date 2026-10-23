@@ -31,19 +31,37 @@ class MaintenanceError(RuntimeError):
 
 
 def _is_directory_link(path: Path) -> bool:
-    """Refuse symlinks and Windows junction/reparse points before deletion."""
+    """Recognize symlinks/junctions; fail closed on inaccessible paths.
+
+    A missing path is not a link. Permission and filesystem errors are NOT
+    evidence that a path is safe to delete or move.
+    """
     import stat
     try:
-        attrs = getattr(path.lstat(), "st_file_attributes", 0)
-        return (path.is_symlink() or bool(attrs & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)))
-    except OSError:
+        item = path.lstat()
+    except FileNotFoundError:
         return False
+    except OSError:
+        raise MaintenanceError("PATH_INSPECTION_FAILED") from None
+    return (stat.S_ISLNK(item.st_mode) or
+            bool(getattr(item, "st_file_attributes", 0) &
+                 getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)))
+
+
+def _has_reparse_ancestor(path: Path) -> bool:
+    """Check the complete path, not just its final directory component.
+
+    A plain marked installation inside a junction is still outside the
+    authorized filesystem tree. Do not follow it for update or deletion.
+    """
+    return any(_is_directory_link(parent) for parent in
+               (path, *path.parents))
 
 
 def _safe_install(path: Path) -> Path:
     """Only a specific, marked portable folder can be affected."""
     candidate = Path(os.path.abspath(path))
-    if _is_directory_link(candidate) or not candidate.is_dir():
+    if _has_reparse_ancestor(candidate) or not candidate.is_dir():
         raise MaintenanceError("INSTALL_FOLDER_INVALID")
     if candidate.parent == candidate or candidate.parent.parent == candidate.parent:
         raise MaintenanceError("SYSTEM_ROOT_REFUSED")
@@ -145,7 +163,7 @@ def uninstall(install: Path) -> None:
 def apply_update(install: Path, staged: Path) -> None:
     install = _safe_install(install)
     staged = Path(os.path.abspath(staged))
-    if _is_directory_link(staged) or _is_directory_link(staged.parent) or staged.parent.parent != install.parent:
+    if _has_reparse_ancestor(staged) or staged.parent.parent != install.parent:
         raise MaintenanceError("STAGING_ROOT_NOT_SIBLING")
     if not staged.parent.name.startswith(".blackbox-stage-"):
         raise MaintenanceError("UNAUTHORIZED_STAGING_FOLDER")
