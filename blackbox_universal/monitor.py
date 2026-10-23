@@ -10,6 +10,7 @@ import json
 import os
 from pathlib import Path
 import tempfile
+import time
 from typing import Any
 
 from blackbox_core.actions import ActionCycle, ActionError
@@ -251,22 +252,31 @@ class ReadOnlyProbe:
         return self.actions.finish(self._persist_action)
 
     def mark_problem(self, note: str = "") -> int:
-        """Persist an explicit *unverified* user marker at the last real sample.
+        """Record actual command time; preserve provenance as USER_REPORTED.
 
-        The timestamp comes from a stored sample, never a fabricated UI clock.
-        Markers remain local and cannot claim an OS-confirmed hang.
+        The previous sample ordinal is metadata, never substituted for the
+        command's real monotonic timestamp. No Windows-hang attestation.
         """
         if (not self.active or self._store is None or
-                self.last_elapsed_ms is None or self.pid is None):
+                self.last_elapsed_ms is None or self.pid is None or
+                self._recording_origin_ns is None):
             raise RuntimeError("Record at least one sample before marking a problem.")
-        if not isinstance(note, str):
+        if type(note) is not str:
             raise ValueError("INVALID_MARKER_NOTE")
         clipped = note.strip()[:128]
-        elapsed_ms = self.last_elapsed_ms
+        command_ns = time.monotonic_ns()
+        if command_ns < self._recording_origin_ns:
+            raise ValueError("INVALID_COMMAND_CLOCK")
+        elapsed_ms = (command_ns - self._recording_origin_ns) // 1_000_000
         self._store.write_event({
             "kind": "user_problem", "source": "USER",
             "elapsed_ms": elapsed_ms, "note": clipped,
             "timestamp_utc": utc_stamp(),
+            "timestamp_monotonic_ns": command_ns,
+            "timestamp_precision": "COMMAND_MONOTONIC_NS",
+            "previous_sample_elapsed_ms": self.last_elapsed_ms,
+            "previous_sample_seq": self.total_samples,
+            "nearest_sample_id": None,
         })
         self.events.append({"timestamp_utc": utc_stamp(), "code": "USER_PROBLEM",
                             "detail": f"{elapsed_ms} ms · {clipped}"[:120]})

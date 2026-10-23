@@ -127,6 +127,29 @@ class DurableActionTests(unittest.TestCase):
                              ["ACTION_PREPARED", "ACTION_ABORTED"])
 
 
+    def test_user_problem_between_samples_uses_command_timestamp_not_previous_sample(self):
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as temp:
+            probe = ReadOnlyProbe(output_root=Path(temp))
+            probe.attach(os.getpid())
+            probe.start()
+            probe.tick()
+            previous = probe.last_elapsed_ms
+            now = probe._recording_origin_ns + (previous + 250) * 1_000_000
+            with patch("blackbox_universal.monitor.time.monotonic_ns", return_value=now):
+                when = probe.mark_problem("delayed window")
+            self.assertEqual(when, previous + 250)
+            probe.stop()
+            with closing(sqlite3.connect(probe.session_folder / "session.sqlite3")) as db:
+                rows = [json.loads(row[0]) for row in db.execute("SELECT data FROM events")]
+            mark = next(x for x in rows if x.get("kind") == "user_problem")
+            self.assertEqual(mark["elapsed_ms"], previous + 250)
+            self.assertEqual(mark["previous_sample_elapsed_ms"], previous)
+            self.assertEqual(mark["timestamp_precision"], "COMMAND_MONOTONIC_NS")
+            self.assertIsNone(mark["nearest_sample_id"])
+            self.assertEqual(mark["source"], "USER")
+
+
 class QtActionControls(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
