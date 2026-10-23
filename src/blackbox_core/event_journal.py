@@ -86,6 +86,7 @@ class BoundedEventJournal:
                 while True:
                     task = self._tasks.get()
                     if task is None:
+                        self._tasks.task_done()
                         return
                     try:
                         if self._failure:
