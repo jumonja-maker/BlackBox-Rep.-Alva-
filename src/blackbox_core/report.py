@@ -154,6 +154,7 @@ def _human_html(report: dict) -> str:
     if isinstance(thread_cpu, dict):
         thread_rows = "".join(
             "<tr><td>" + safe(item.get("tid")) + "</td><td>" +
+            safe(item.get("segment_start_seq")) + "</td><td>" +
             safe(item.get("cpu_percent")) + "</td><td>" +
             safe(item.get("peak_cpu_percent")) + "</td><td>" +
             safe(item.get("observed_pairs")) + "</td></tr>"
@@ -172,9 +173,10 @@ def _human_html(report: dict) -> str:
         " · Source: " + safe(thread_cpu.get("source_kind")) +
         " · Verification: " + safe(thread_cpu.get("verification_class")) +
         " · Warnings: " + safe(", ".join(thread_cpu.get("warnings", []))) + "</p>"
-        "<table><thead><tr><th>TID</th><th>Mean CPU%</th>"
-        "<th>Peak CPU%</th><th>Valid pairs</th></tr></thead><tbody>" +
-        (thread_rows or "<tr><td colspan='4'>No comparable intervals</td></tr>") +
+        "<table><thead><tr><th>TID</th><th>Segment first seq</th>"
+        "<th>Mean CPU%</th><th>Peak CPU%</th><th>Valid pairs</th>"
+        "</tr></thead><tbody>" +
+        (thread_rows or "<tr><td colspan='5'>No comparable intervals</td></tr>") +
         "</tbody></table>"
     )
     incidents = report.get("automatic_incident_preview", [])
