@@ -38,7 +38,7 @@ Status rules: **PASS** needs actual user-facing integration, automated tests and
 | M-024 | PARTIAL | src/blackbox_core/incidents.py | Pre/post sample sequence bounded; not full multi-sensor ring |
 | M-025 | PARTIAL | src/blackbox_core/incidents.py; tests/test_bbdi_incident_slice.py | Cooldown and incident bounds; incomplete disk/trigger policy |
 | M-026 | PARTIAL | src/blackbox_core/incidents.py; src/blackbox_core/report.py | Explicit external-counter provenance, incomplete sensor coincidence |
-| M-027 | PARTIAL | blackbox_universal/monitor.py; src/blackbox_core/detailed_capture.py | Separate detailed thread, base Qt sampling still synchronous |
+| M-027 | PARTIAL | blackbox_universal/base_sample_worker.py; blackbox_universal/window.py; src/blackbox_core/storage.py; src/blackbox_core/detailed_capture.py; tests/test_bbdi_base_worker.py | Production Qt timer now samples/writes base process in a one-at-a-time background QThread; GUI still owns event IO, report generation and sync setup |
 | M-028 | PARTIAL | src/blackbox_core/detailed_capture.py; src/blackbox_core/detail_contracts.py; docs/BB_DI_001_DETAIL_V2_CONTRACT.md | Additive v2 clock/capability/quality tables and conservative legacy reader; full normalized schema2/session lifecycle not implemented |
 | M-029 | PARTIAL | src/blackbox_core/detailed_capture.py; src/blackbox_core/detail_contracts.py | Added clock/capabilities/sample-quality rows; sessions, targets, incident, experiment, artifacts and other required entities missing |
 | M-030 | PARTIAL | src/blackbox_core/detail_analysis.py; src/blackbox_core/detail_contracts.py; src/blackbox_core/detailed_capture.py | New PSUTIL/OS_OBSERVED producer metadata per detailed sample, read-only file_trust UNVERIFIED_IMPORT; full event sensor/source/permission contract still missing |
@@ -77,7 +77,7 @@ Status rules: **PASS** needs actual user-facing integration, automated tests and
 | M-063 | PARTIAL | src/blackbox_core/detailed_capture.py; tests/test_bbdi_detailed_slice.py | Thread/child/size limits; 8h performance not verified |
 | M-064 | NOT-IMPLEMENTED | — | Required full capability not present; see original order |
 | M-065 | NOT-IMPLEMENTED | — | Required full capability not present; see original order |
-| M-066 | PARTIAL | src/blackbox_core/detailed_capture.py; blackbox_universal/monitor.py | Only detailed sensor is threaded; base sampling and writer remain on GUI |
+| M-066 | PARTIAL | blackbox_universal/base_sample_worker.py; blackbox_universal/window.py; src/blackbox_core/storage.py; tests/test_bbdi_base_worker.py | Base periodic sample/SQLite insert moved off Qt; no full owner queue for events, callback deadlines, queue instrumentation or forced cancellation |
 | M-067 | NOT-IMPLEMENTED | — | Required full capability not present; see original order |
 | M-068 | NOT-IMPLEMENTED | — | Required full capability not present; see original order |
 | M-069 | NOT-IMPLEMENTED | — | Required full capability not present; see original order |
@@ -141,6 +141,12 @@ Status rules: **PASS** needs actual user-facing integration, automated tests and
 | FIX-11 | NOT-RUN | — | No independent full-scenario Windows/EXE acceptance evidence for this exact item |
 | FIX-12 | NOT-RUN | — | No independent full-scenario Windows/EXE acceptance evidence for this exact item |
 
+## Background base sampler / SQLite writer slice (still PARTIAL)
+
+- Production `UniversalWindow` timer launches one bounded `BaseSampleWorker` (`psutil` sampling + independent schema1 SQLite sample insert); user commands and `ActionCycle` still run through existing Qt-owned `SessionStore` event connection.
+- Stop and close are deferred until the outstanding worker exits; an external-counter failure persists `observer_error` before finalization; no QThread is destroyed while it owns the sample database connection.
+- Deterministic concurrency, failure and schema1 regression tests: `tests/test_bbdi_base_worker.py`. See `docs/BB_DI_001_BASE_WORKER_ARCHITECTURE.md` for unsupported cases. This is not the full bounded queue/async writer for **all** record types and does not prove 8h endurance or OS deadlines.
+
 ## Additive provenance / clock sidecar slice (still PARTIAL)
 
 - `src/blackbox_core/detail_contracts.py`, `detailed_capture.py`: opt-in detailed sidecar now stores an anchored monotonic↔UTC nanosecond estimate, explicit PSUTIL source/verification, per-sample RSS/Private/USS/handles/I/O/thread/child statuses and unit metadata; late sensor data failures rollback all partial sample rows.
@@ -164,7 +170,7 @@ Status rules: **PASS** needs actual user-facing integration, automated tests and
 ## Release blockers / next implementation order
 
 1. Complete schema2 contracts, provenance/status/capability vocabulary, monotonic↔UTC mapping and V1 read-only/V2 readers with atomic lifecycle.
-2. Move **base sampling and SQLite writing** off Qt main thread into ownership-managed bounded workers with health/backpressure.
+2. Finish unified ownership-managed queue for **all** SQLite writes and event/marker/report IO, stop/join deadline, worker metrics and explicit dropped-tick records; periodic base sampling and sample INSERT now run off Qt.
 3. Extend the **new bounded adjacent-snapshot TID CPU%** to selected full-session intervals, per-field quality, tree/history, charts, CSV and compare. Existing table/HTML/JSON only covers a recent bounded window; TID birth identity is unverified.
 4. Add real bounded Windows HWND responsiveness and WCT with positive/negative Windows fixtures and explicit unsupported/denied states; opt-in ETW where capable.
 5. Build complete evidence-led Investigation/compare/timeline/experiment history; 8h Standard, 1h Detailed, 12 fixtures, AC-01..36.
