@@ -273,6 +273,21 @@ class ReadOnlyProbe:
         """Commit worker result to GUI-facing cache AFTER SQLite commit."""
         return self._accept_persisted_sample(sample, seq)
 
+    def record_background_failure(self, code: str) -> None:
+        """Persist a failed async sample with the original observer semantics."""
+        if not self.active or self._store is None:
+            return
+        if code not in ("PROCESS_EXITED", "PID_REUSED", "ACCESS_DENIED",
+                        "SAMPLE_UNAVAILABLE", "STORAGE_ERROR"):
+            code = "SAMPLE_UNAVAILABLE"
+        self.last_error = code
+        stage = "storage" if code == "STORAGE_ERROR" else "sample"
+        try:
+            self._store.write_event(event(
+                "observer_error", code, stage, self.last_elapsed_ms or 0))
+        except ObserverError:
+            self.last_error = "STORAGE_ERROR"
+
     def tick(self) -> dict | None:
         """Legacy synchronous path for CLI/explicit callers, not Qt timer."""
         if not self.active or self._core is None or self._store is None:
