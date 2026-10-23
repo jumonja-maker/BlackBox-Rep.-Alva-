@@ -298,6 +298,7 @@ class SessionView:
             plots[key]=sorted(points.values(),key=lambda p:(p["time_ns"],p["segment"]))
         statuses=[]
         errors=0
+        native=[]
         if self.is_v2:
             statuses=[dict(r) for r in self.db.execute("""SELECT q.metric,q.measurement_status,count(*) AS count
                 FROM samples s JOIN measurements_quality q USING(sample_id)
@@ -305,6 +306,9 @@ class SessionView:
                 GROUP BY q.metric,q.measurement_status""",(instance_id,series,start,end))]
             errors=self.db.execute("SELECT count(*) FROM sensor_errors WHERE monotonic_ns BETWEEN ? AND ?",
                                    (start,end)).fetchone()[0]
+            native=[dict(r) for r in self.db.execute("""SELECT source_kind,event_type,measurement_status,
+                count(*) AS count FROM events WHERE recorded_ns BETWEEN ? AND ? AND source_kind IN ('WIN32','WCT')
+                GROUP BY source_kind,event_type,measurement_status""",(start,end))]
         return {"schema_version":2,"source_schema_version":self.metadata["schema_version"],
             "file_trust":"UNVERIFIED_IMPORT","verification_class":"DERIVED",
             "root_cause":"UNKNOWN","metadata":self.metadata,"series":series,"instance_id":instance_id,
@@ -319,6 +323,8 @@ class SessionView:
                 "expected_slots_estimate_between_samples":expected_slots_estimate if self.is_v2 else None,
                 "limitations":["BETWEEN_SAMPLE_ACTIVITY_UNKNOWN","SCHEDULE_COVERAGE_IS_AN_ESTIMATE",
                     "BOUNDS_EXCLUDE_PARTIAL_COUNTER_PAIRS"]},
+            "native_windows_observations":{"file_trust":"UNVERIFIED_IMPORT","counts":native,
+                "status":"RECORDED" if native else "NOT_RECORDED","root_cause":"UNKNOWN"},
             "timeline":{"method":"FIRST_MIN_MAX_LAST","buckets":buckets,"tracks":plots},
             "warnings":self.metadata["warnings"]}
 
@@ -357,7 +363,7 @@ class SessionView:
                 100.0*sum(delta)/sum(dt) AS cpu_percent
             FROM segments GROUP BY tid,segment_id
         ) """
-        totals=self.db.execute(cte+"SELECT count(*),sum(cpu_seconds) FROM ranked",args).fetchone()
+        totals=self.db.execute(cte+"SELECT count(*),sum(cpu_seconds),sum(cpu_seconds IS NULL) FROM ranked",args).fetchone()
         ranked=[dict(r) for r in self.db.execute(cte+"SELECT * FROM ranked ORDER BY cpu_seconds DESC,tid,segment_id LIMIT ?",
                                                 (*args,top_n))]
         selected_count,omitted=self.db.execute("""SELECT count(*),sum(threads_omitted) FROM samples
@@ -367,11 +373,14 @@ class SessionView:
             row.update(pid=pid,source_kind="PSUTIL",verification_class="DERIVED",
                        tid_reuse_uncertain=True,
                        observed_presence_percent=100*row["observed_samples"]/selected_count if selected_count else None)
-        return {"status":"OK" if ranked else "NO_COMPARABLE_THREAD_INTERVALS",
+        return {"status":"OK" if totals[1] is not None else "NO_COMPARABLE_THREAD_INTERVALS",
             "top_threads":ranked,"threads_ranked":totals[0],"top_n":top_n,
             "omitted_from_top":max(0,totals[0]-len(ranked)),"truncated":totals[0]>len(ranked) or bool(omitted),
             "recorded_omitted_thread_observations":omitted,
-            "omitted_cpu_seconds":(totals[1] or 0)-sum(r["cpu_seconds"] or 0 for r in ranked),
+            "omitted_cpu_seconds":max(0,totals[1]-sum(r["cpu_seconds"] or 0 for r in ranked))
+                                  if totals[1] is not None else None,
+            "segments_without_comparable_pairs":totals[2] or 0,
+            "omitted_cpu_quality":"PARTIAL_OR_UNKNOWN" if totals[2] else "OBSERVED_PAIRS_ONLY",
             "sample_window":selected_count,"pair_count":max(0,selected_count-1),
             "selected_interval_ns":[start,end],"total_session_samples":total,
             "source_kind":"PSUTIL","verification_class":"DERIVED","file_trust":"UNVERIFIED_IMPORT",

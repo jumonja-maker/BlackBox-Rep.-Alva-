@@ -189,11 +189,11 @@ class SessionV2Writer:
         self.thread.start()
 
     def submit(self, kind: str, payload: dict) -> None:
-        if kind not in ("base", "detail", "event", "error"):
+        if kind not in ("base", "detail", "event", "error", "windows"):
             raise ValueError("INVALID_V2_COMMAND")
         encoded = json.dumps(payload, ensure_ascii=True, allow_nan=False,
                              separators=(",", ":"))
-        if len(encoded) > (512*1024 if kind == "detail" else 16384):
+        if len(encoded) > (512*1024 if kind in ("detail","windows") else 16384):
             raise ValueError("V2_COMMAND_SIZE_LIMIT")
         with self._gate:
             if self._closed or self.failure or not self.thread.is_alive():
@@ -312,7 +312,7 @@ class SessionV2Writer:
             db.execute("INSERT INTO child_process_samples VALUES (?,?)",(parent_sample,sample_id))
         return sample_id,instance
 
-    def _event(self, db, data):
+    def _event(self, db, data, *, native_source=None):
         stamp = data.pop("_recorded_ns")
         kind = data.get("kind","")
         # This classification is determined by the producer entry point/kind,
@@ -320,6 +320,8 @@ class SessionV2Writer:
         user = kind in ("action_marker","user_problem","user_marker")
         source = "USER" if user else "BLACKBOX_OBSERVER"
         verification = "USER_DECLARED" if user else "DERIVED"
+        if native_source in ("WIN32","WCT"):
+            source,verification=native_source,"OS_OBSERVED"
         observed = data.get("timestamp_monotonic_ns")
         precision = data.get("timestamp_precision","RECORDED_COMMAND_NS")
         if type(observed) is not int:
@@ -330,9 +332,10 @@ class SessionV2Writer:
         event_id = db.execute("""INSERT INTO events
             (recorded_ns,observed_ns,instance_id,event_type,source_kind,verification_class,
              timestamp_precision,correlation_key,measurement_status,detail_json)
-             VALUES (?,?,1,?,?,?,?,?,'OK',?)""", (
+             VALUES (?,?,1,?,?,?,?,?,?,?)""", (
                  stamp,observed,code,source,verification,precision,
                  str(data.get("action_id",data.get("kind","event")))[:128],
+                 data.get("measurement_status","OK") if native_source else "OK",
                  json.dumps(data,ensure_ascii=True,allow_nan=False))).lastrowid
         if kind=="action_marker":
             action_id, experiment_id = data["action_id"],data["experiment_id"]
@@ -361,6 +364,63 @@ class SessionV2Writer:
                 db.execute("UPDATE incidents SET end_ns=?,status=?,context_json=? WHERE "
                            "trigger_code=? AND start_ns=? AND end_ns IS NULL",(
                                end,data["status"],json.dumps(data,allow_nan=False),data["trigger_code"],start))
+        return event_id
+
+    def _windows(self,db,data):
+        if data["pid"]!=self.pid or abs(data["created"]-self.created)>.000001:
+            raise ValueError("WINDOW_TARGET_IDENTITY_MISMATCH")
+        windows,events=data["windows"],data["events"]
+        if len(windows)>32 or len(events)>80:
+            raise ValueError("WINDOW_BATCH_LIMIT")
+        stamp=data["time_ns"]
+        present=[]
+        for window in windows:
+            hwnd,tid=window["hwnd"],window["tid"]
+            if type(hwnd) is not int or hwnd<=0 or type(tid) is not int or tid<=0:
+                raise ValueError("INVALID_WINDOW_IDENTITY")
+            present.append((hwnd,tid))
+            old=db.execute("SELECT window_id FROM windows WHERE instance_id=1 AND hwnd=? AND tid=? "
+                           "AND absence_observed_ns IS NULL",(hwnd,tid)).fetchone()
+            if old:
+                db.execute("UPDATE windows SET last_observed_ns=?,visible=? WHERE window_id=?",
+                           (stamp,int(window["visible"]),old[0]))
+            else:
+                db.execute("""INSERT INTO windows(instance_id,hwnd,tid,visible,first_observed_ns,
+                    last_observed_ns,source_kind) VALUES (1,?,?,?,?,?,'WIN32')""",
+                           (hwnd,tid,int(window["visible"]),stamp,stamp))
+        if not data.get("enumeration_omitted"):
+            for row in db.execute("SELECT window_id,hwnd,tid FROM windows WHERE absence_observed_ns IS NULL").fetchall():
+                if (row[1],row[2]) not in present:
+                    db.execute("UPDATE windows SET absence_observed_ns=? WHERE window_id=?",(stamp,row[0]))
+        db.execute("INSERT OR REPLACE INTO capabilities VALUES "
+                   "('window_timeout','WIN32','CURRENT_USER',1,'Windows x64',"
+                   "'WM_NULL timeout is an observation, not a proven root cause',NULL)")
+        for event in events:
+            code=event["code"]
+            if code not in {"WINDOW_GONE","UI_UNRESPONSIVE_OBSERVED","UI_RESPONSIVE_AGAIN",
+                            "WCT_SNAPSHOT","WINDOW_PROBE_STATUS","WINDOW_PROBE_RESULT","WINDOW_ENUMERATION_STATUS"}:
+                raise ValueError("INVALID_NATIVE_EVENT_CODE")
+            source="WCT" if code=="WCT_SNAPSHOT" else "WIN32"
+            status=event.get("wct",event.get("check",{})).get("status","OK")
+            eid=self._event(db,{"_recorded_ns":time.monotonic_ns(),
+                "timestamp_monotonic_ns":event["time_ns"],"timestamp_precision":"NATIVE_MONOTONIC_BRACKET",
+                "kind":"native_window_observation","code":code,"measurement_status":status,
+                **event},native_source=source)
+            if code=="UI_UNRESPONSIVE_OBSERVED":
+                db.execute("INSERT INTO incidents(trigger_code,start_ns,status,primary_event_id,context_json) "
+                    "VALUES ('UI_TIMEOUT',?,'OBSERVED',?,?)",(event["time_ns"],eid,json.dumps(event)))
+            elif code=="UI_RESPONSIVE_AGAIN":
+                for row in db.execute("SELECT incident_id,context_json FROM incidents WHERE trigger_code='UI_TIMEOUT' "
+                                      "AND end_ns IS NULL").fetchall():
+                    prior=json.loads(row[1])
+                    if all(prior.get("window",{}).get(k)==event["window"].get(k) for k in ("pid","tid","hwnd")):
+                        db.execute("UPDATE incidents SET end_ns=?,status='RECOVERY_OBSERVED' WHERE incident_id=?",
+                                   (event["time_ns"],row[0]))
+            elif code=="WCT_SNAPSHOT":
+                db.execute("INSERT OR REPLACE INTO capabilities VALUES "
+                    "('wait_chain','WCT','CURRENT_TOKEN/SE_DEBUG_MAY_BE_REQUIRED',1,'Windows x64',"
+                    "'Async bounded wait; dynamic nodes/cycle, no object names',?)",(
+                    None if status=="OK" else status,))
 
     def _run(self):
         db = None
@@ -407,9 +467,11 @@ class SessionV2Writer:
                         self._sample(db,data,"STANDARD" if command.kind=="base" else "DETAILED")
                     elif command.kind=="event":
                         self._event(db,data)
+                    elif command.kind=="windows":
+                        self._windows(db,data)
                     else:
-                        db.execute("INSERT INTO sensor_errors(monotonic_ns,sensor_id,code) VALUES (?,?,?)",
-                                   (data["time_ns"],data["sensor_id"],data["code"]))
+                        db.execute("INSERT INTO sensor_errors(monotonic_ns,sensor_id,code,win32_code) VALUES (?,?,?,?)",
+                                   (data["time_ns"],data["sensor_id"],data["code"],data.get("win32_code")))
                     db.commit()
                 except Exception as exc:
                     db.rollback()

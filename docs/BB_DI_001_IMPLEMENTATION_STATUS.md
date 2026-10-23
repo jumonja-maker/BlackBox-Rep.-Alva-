@@ -1,6 +1,6 @@
 # BB-DI-001 — implementation and acceptance evidence ledger
 
-**Scope:** 75 MUST (M-001..075), 5 A (A-001..005), 36 acceptance (AC-01..36), 12 Windows fixtures (FIX-01..12), **128 total**. Normative descriptions and acceptance tests: `BLACKBOX_BigPatch_Technical_Spec_BB-DI-001_RU.md` from the original owner's `Original_Full_Order.zip`. This ledger is a **conservative WIP assessment, not a release certification**.
+**Scope:** 75 M entries with normative MUST/MUST-IF-CAPABLE/SHOULD levels (M-001..075), 5 A (A-001..005), 36 acceptance (AC-01..36), 12 Windows fixtures (FIX-01..12), **128 total**. Normative descriptions and acceptance tests: `BLACKBOX_BigPatch_Technical_Spec_BB-DI-001_RU.md` from the original owner's `Original_Full_Order.zip`. This ledger is a **conservative WIP assessment, not a release certification**.
 
 **Repository target:** PR #17, `review/bb-di-001-action-integration-20261023`; baseline `main` v0.3.6 SHA `7be5e3899c115b1703d67aee5a575647aec17615`. CI and test evidence MUST be checked against live PR HEAD, not an inherited successful run on an earlier SHA. Historical exact-head success: Windows/Linux/portable CI #40018093140 for SHA `592f4ab7d8aea00eca83e100340079ffb45f4c65`. New thread CPU slice requires another **exact-head CI**; never inherit older success.
 
@@ -24,17 +24,17 @@ Status rules: **PASS** needs actual user-facing integration, automated tests and
 | M-010 | PARTIAL | src/blackbox_core/session_view.py; blackbox_universal/window.py; tests/test_bbdi_schema2_sessions.py | Full selected v2 TID segments ranked by cumulative CPU, presence/omitted CPU; native 300-thread acceptance pending |
 | M-011 | PARTIAL | src/blackbox_core/detailed_capture.py; src/blackbox_core/session_v2.py; tests/test_bbdi_schema2_sessions.py | Persisted child CPU/RSS/IO/handles/name/PID+birth history; 100 DTO identities tested, real 100 OS descendants pending |
 | M-012 | PARTIAL | src/blackbox_core/session_view.py; tests/test_bbdi_schema2_sessions.py | Per-field status counts, full selected count, spacing gaps and estimated schedule slots; exact OS missed counts unknown |
-| M-013 | NOT-IMPLEMENTED | — | Required full capability not present; see original order |
-| M-014 | NOT-IMPLEMENTED | — | Required full capability not present; see original order |
-| M-015 | NOT-IMPLEMENTED | — | Required full capability not present; see original order |
-| M-016 | NOT-IMPLEMENTED | — | Required full capability not present; see original order |
-| M-017 | NOT-IMPLEMENTED | — | Required full capability not present; see original order |
+| M-013 | PARTIAL | src/blackbox_core/windows_observer.py; tests/test_bbdi_windows_observer.py | Real HWND/PID/TID/visibility/lifecycle, no titles; native CI and physical Win10/11 acceptance pending |
+| M-014 | PARTIAL | src/blackbox_core/windows_observer.py; docs/ADR-04-WINDOWS-RESPONSIVENESS-WCT.md | Independent low-frequency WM_NULL timeout worker, exact error/UNKNOWN; real native CI pending |
+| M-015 | PARTIAL | src/blackbox_core/windows_observer.py; src/blackbox_core/session_v2.py | Consecutive independent timeout/recovery/WINDOW_GONE events and UI incidents; native runner verification pending |
+| M-016 | PARTIAL | src/blackbox_core/windows_observer.py; tests/test_bbdi_windows_observer.py | Real async WCT callback/nodes/cycle or exact denied/unsupported; 280-byte ABI and bounded arrays; Windows evidence pending |
+| M-017 | PARTIAL | blackbox_universal/window.py; src/blackbox_core/windows_observer.py | HWND preference selector without root rebind; NOT_APPLICABLE for absent windows; native non-GUI fixture pending |
 | M-018 | PARTIAL | src/blackbox_core/actions.py; blackbox_universal/window.py; tests/test_bbdi_action_slice.py | Action cycle wired; complete integrated E2E absent |
 | M-019 | PARTIAL | src/blackbox_core/actions.py; tests/test_bbdi_action_slice.py | Real USER-command monotonic timestamps; no OS execution attestation |
 | M-020 | PARTIAL | blackbox_universal/monitor.py; src/blackbox_core/actions.py | Problem marker exists; no app instrumented channel and all marker types |
 | M-021 | PARTIAL | src/blackbox_core/experiments.py; tests/test_bbdi_experiment_slice.py | Same-session repeats; saved experiment library absent |
 | M-022 | PARTIAL | src/blackbox_core/experiments.py; src/blackbox_core/report.py | Duration aggregation/compare partial; no resource delta comparability |
-| M-023 | PARTIAL | src/blackbox_core/incidents.py; tests/test_bbdi_incident_slice.py | Only CPU/gap triggers, not HWND/IO/private/handles |
+| M-023 | PARTIAL | src/blackbox_core/incidents.py; src/blackbox_core/windows_observer.py; blackbox_universal/window.py | CPU/gap plus native UI timeout; CPU threshold/duration Settings; all memory/handles/IO/exit/burst policies still incomplete |
 | M-024 | PARTIAL | src/blackbox_core/incidents.py | Pre/post sample sequence bounded; not full multi-sensor ring |
 | M-025 | PARTIAL | src/blackbox_core/incidents.py; tests/test_bbdi_incident_slice.py | Cooldown and incident bounds; incomplete disk/trigger policy |
 | M-026 | PARTIAL | src/blackbox_core/incidents.py; src/blackbox_core/report.py | Explicit external-counter provenance, incomplete sensor coincidence |
@@ -69,7 +69,7 @@ Status rules: **PASS** needs actual user-facing integration, automated tests and
 | M-055 | PARTIAL | src/blackbox_core/session_view.py; tests/test_bbdi_schema2_sessions.py | Separate v1/v2 readers and SessionView; v1 LEGACY_LIMITED_DATA with unchanged hash; full Windows legacy fixture acceptance pending |
 | M-056 | NOT-IMPLEMENTED | — | Required full capability not present; see original order |
 | M-057 | PARTIAL | src/blackbox_core/probe.py; src/blackbox_core/detailed_capture.py | Read-only psutil sample; full capabilities/permission matrix not verified |
-| M-058 | NOT-IMPLEMENTED | — | Required full capability not present; see original order |
+| M-058 | PARTIAL | src/blackbox_core/windows_observer.py; docs/ADR-04-WINDOWS-RESPONSIVENESS-WCT.md | Win32/WCT off Qt with native timeout/async cancel and retained ownership; hard cleanup deadline and ETW/dump isolation incomplete |
 | M-059 | PARTIAL | src/blackbox_core/detailed_capture.py; src/blackbox_core/report.py | No command line/title/path capture in added slice; full privacy tests missing |
 | M-060 | NOT-IMPLEMENTED | — | Required full capability not present; see original order |
 | M-061 | PARTIAL | src/blackbox_core/storage.py; src/blackbox_core/report.py | Existing 0.3.6 hardening retained; all BB-DI security cases not proven |
@@ -83,10 +83,10 @@ Status rules: **PASS** needs actual user-facing integration, automated tests and
 | M-069 | PARTIAL | src/blackbox_core/session_v2.py; tests/test_bbdi_schema2_sessions.py | Finite immutable v2 queue with explicit discarded command count and fail-closed storage status; complete latency/adaptive policy absent |
 | M-070 | PARTIAL | src/blackbox_core/session_view.py; docs/ADR-02-SESSION-V2-AND-INTERVALS.md | Separate read-only SchemaV1Reader/SchemaV2Reader share SessionView; no in-place migration; recovery/rollback full acceptance pending |
 | M-071 | PARTIAL | app.py; blackbox_universal/window.py | Existing launch and five tabs kept; complete E2E not proven |
-| M-072 | NOT-IMPLEMENTED | — | Required full capability not present; see original order |
+| M-072 | PARTIAL | src/blackbox_core/windows_observer.py; tests/test_bbdi_windows_observer.py | Explicit x64 ctypes ABI/callback lifetime/array bounds/status mapping; native Windows CI pending |
 | M-073 | PARTIAL | .github/workflows/shell-qa.yml; PR #17 | Draft/no release so far; final merge gate pending |
 | M-074 | PARTIAL | tests/test_bbdi_action_slice.py; tests/test_bbdi_incident_slice.py; tests/test_bbdi_detailed_slice.py | Several Qt controls tested; full acceptance matrix absent |
-| M-075 | NOT-IMPLEMENTED | — | Required full capability not present; see original order |
+| M-075 | PARTIAL | blackbox_universal/deep_smoke.py; .github/workflows/shell-qa.yml; docs/ADR-04-WINDOWS-RESPONSIVENESS-WCT.md | Real Python Qt 3 actions/TID/auto incident/selected export locally passed with explicit proc namespace PID; frozen Windows same-EXE target gate added, pending CI |
 | A-001 | NOT-IMPLEMENTED | — | Required full capability not present; see original order |
 | A-002 | NOT-IMPLEMENTED | — | Required full capability not present; see original order |
 | A-003 | NOT-IMPLEMENTED | — | Required full capability not present; see original order |
@@ -211,3 +211,25 @@ preserving timeline, persisted process/event pages, full-range TID ranking and
 privacy-selected JSON/HTML/CSV/ZIP exports are wired through existing pages.
 
 New local evidence command: `QT_QPA_PLATFORM=offscreen python -m unittest discover -s tests -p 'test_bbdi_schema2_sessions.py' -v` — 12 PASS before the final integration regression run. These include real local psutil capture, Qt range selection and test-only accelerated 100001-row history/100 child DTO fixtures. **Not real 8h/1h endurance or native Windows acceptance.** Full original criteria and every AC/FIX remain unaccepted until exact-head Windows/Linux/frozen evidence and their additional required scenarios are recorded. CI for this stage must be checked on its new exact commit, not inherited from 7ab0bad.
+
+## Windows-native and deep frozen QA stage
+
+Real HWND/WM_NULL/WCT code, native fixtures and actual Qt/frozen deep scenario
+are now implemented; see ADR-01..04. **CI is pending for the new stage.** The
+first schema2 checkpoint `32f38da4aaadf466379fbeaa85ea4ebf8141bb75` failed CI
+[40034664938](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/actions/runs/40034664938):
+Windows requires a writable staging handle for fsync; three Linux tests deleted
+their temporary directory before background report completion. Both are fixed
+in the next stage; the failing run is not successful acceptance evidence.
+
+Local stage evidence: 242 tests, 237 PASS + 5 platform SKIP, plus ordinary smoke.
+Real-process Python deep smoke passed: 3 completed actions, 42 sample rows,
+42 actual TID rows, 1 automatic CPU incident, nonzero cumulative TID CPU,
+privacy-selected 6-file export/ZIP and unchanged source hashes. This executor
+has different control/proc PID namespaces; the QA fixture explicitly records
+both and selects its actual `/proc/self/stat` PID for psutil. Two earlier wrong-
+namespace runs remained FAIL; no metrics were fabricated to make them pass.
+
+Windows/native/frozen results must be recorded against the next exact HEAD.
+All acceptance rows still require their full original criterion, including
+unavailable physical/endurance evidence. No release/merge authorization follows.

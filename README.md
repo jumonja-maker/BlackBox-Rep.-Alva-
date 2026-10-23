@@ -145,3 +145,27 @@ See [Architecture](docs/ARCHITECTURE.md), [Product scope](docs/PRODUCT_SCOPE.md)
 The original source is available under [MIT](LICENSE). Packaged dependencies, including Qt/PySide6 and Python, retain their respective licenses; see [Licensing](docs/LICENSING.md).
 
 To report a problem, [open an issue](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/issues) with your BLACK.BOX version, Windows version, reproduction steps, and only **non-sensitive** report excerpts.
+
+### BB-DI-001 development branch (Draft PR #17, not a release)
+
+New recordings also write a normalized `session-v2.sqlite3` with a bounded owner
+writer. Reports → Load recorded session/Open saved session reads the whole
+selected interval, with peak/gap preserving zoom/pan/A-B tracks. Processes and
+Events show persisted history and cumulative TID CPU for the selected range.
+Export selected interval offers offline JSON/HTML/CSV/events, checksums and an
+explicit optional ZIP; identifiers and notes are off by default. Old sessions
+open read-only and retain their original hashes.
+
+Overview can opt into actual Windows HWND timeout observations and async WCT.
+Missing GUI is NOT_APPLICABLE; denied/unsupported WCT is explicit, not a fake
+chain. No titles, mutex names, privilege changes or ETW are collected. Settings
+lets users configure the CPU trigger threshold/duration. CPU 100% is one logical
+CPU; sustained load and memory growth do not prove a defect.
+
+Real-process QA: `python app.py --deep-smoke --qa-output <owned-output-dir>`
+drives three actions, actual TID CPU, an auto incident, selected-range analysis
+and privacy-selected exports. CI runs it in Python and the actual frozen EXE
+without Python on PATH. This does not certify all BB-DI-001 criteria: ETW, full
+resource repeat comparison/incident cards, full async stop, 8h/1h endurance and
+physical Windows 10/11 acceptance remain outstanding. See `docs/ADR-01*` through
+`ADR-04*` and `docs/BB_DI_001_IMPLEMENTATION_STATUS.md`.

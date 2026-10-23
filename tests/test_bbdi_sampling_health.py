@@ -84,7 +84,8 @@ class StoredBusyTickTests(unittest.TestCase):
         self.assertTrue(drain(
             self.app, lambda: self.window._report_worker is None
             and self.window._base_sample_worker is None))
-        self.window.close()
+        from qt_test_support import close_and_drain
+        close_and_drain(self.window,self.app)
         self.context.stop()
         self.temp.cleanup()
 

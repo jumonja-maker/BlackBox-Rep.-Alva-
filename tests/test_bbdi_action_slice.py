@@ -211,7 +211,8 @@ class QtActionControls(unittest.TestCase):
                 window._stop()
                 self.assertFalse(window.action_end_btn.isEnabled())
             finally:
-                window.close()
+                from qt_test_support import close_and_drain
+                close_and_drain(window,self.application)
 
 
 if __name__ == "__main__":

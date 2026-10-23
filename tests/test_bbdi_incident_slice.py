@@ -131,7 +131,8 @@ class PersistedIncidentTests(unittest.TestCase):
                 window._stop()
                 self.assertFalse(window.auto_capture_btn.isEnabled())
             finally:
-                window.close()
+                from qt_test_support import close_and_drain
+                close_and_drain(window,app)
 
 
 if __name__ == "__main__":

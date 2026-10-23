@@ -138,9 +138,13 @@ class SessionTimeline(QWidget):
             painter.drawLine(QPointF(plot.left(),y+height-4),QPointF(plot.right(),y+height-4))
             painter.setPen(QColor("#584c63"))
             unit=self.payload["metrics"][key]["unit"]
+            display_unit="% / 1 CPU" if unit=="percentage_of_one_logical_cpu" else unit
+            name={"cpu_interval_percent":"CPU","rss_bytes":"RSS / Working set",
+                "private_bytes":"Private","uss_bytes":"USS","handle_count":"Handles",
+                "read_bps":"Read","write_bps":"Write","thread_count":"Threads",
+                "children_total":"Children"}.get(key,key)
             painter.drawText(QRectF(3,y,144,height),Qt.AlignmentFlag.AlignVCenter,
-                key.replace("_interval_percent"," %")+f"\n{maximum:.3g} {unit}" if points else
-                key+"\nUNAVAILABLE")
+                name+f"\n{maximum:.3g} {display_unit}" if points else name+"\nUNAVAILABLE")
             path=QPainterPath()
             previous_segment=None
             for point in points:

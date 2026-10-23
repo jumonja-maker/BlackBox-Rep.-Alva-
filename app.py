@@ -19,8 +19,17 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="BLACK.BOX Universal retro desktop")
     parser.add_argument("--smoke", action="store_true",
                         help="Run Qt offscreen and exit automatically (QA only)")
+    parser.add_argument("--deep-smoke",action="store_true",help="Run real Qt action/thread/incident/export QA")
+    parser.add_argument("--qa-output",type=Path,help="Explicit QA artifact directory")
+    parser.add_argument("--qa-fixture",choices=("cpu","ui","waitchain"),help=argparse.SUPPRESS)
+    parser.add_argument("--qa-commit-sha",default="UNKNOWN",help=argparse.SUPPRESS)
     options = parser.parse_args(argv)
-    if options.smoke:
+    if options.qa_fixture:
+        if options.qa_output is None:
+            parser.error("--qa-fixture requires --qa-output")
+        from blackbox_universal.qa_fixtures import run_fixture
+        return run_fixture(options.qa_fixture,options.qa_output)
+    if options.smoke or options.deep_smoke:
         os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     app = QApplication.instance() or QApplication(sys.argv[:1])
     app.setApplicationName("BLACK.BOX Universal")
@@ -28,6 +37,13 @@ def main(argv: list[str] | None = None) -> int:
     set_retro_theme(app)
     window = UniversalWindow()
     window.show()
+    if options.deep_smoke:
+        if options.qa_output is None:
+            parser.error("--deep-smoke requires --qa-output")
+        from blackbox_universal.deep_smoke import DeepSmoke
+        controller=DeepSmoke(app,window,options.qa_output,options.qa_commit_sha)
+        controller.start()
+        return app.exec()
     if options.smoke:
         # Exercise the ACTUAL Python/frozen binary, not only a Qt import.
         # Entirely temporary and offline.

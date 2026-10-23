@@ -26,6 +26,8 @@ jobs:
       PYTHONUTF8: "1"
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -39,6 +41,15 @@ jobs:
         run: python -m unittest discover -s tests -v
       - name: Real Qt offscreen startup smoke
         run: python app.py --smoke
+      - name: Real process action thread incident and selected export (Python)
+        run: python app.py --deep-smoke --qa-output deep-smoke-python --qa-commit-sha "${{ github.event.pull_request.head.sha || github.sha }}"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: BLACKBOX-REAL-PROCESS-WINDOWS-PYTHON
+          path: deep-smoke-python/
+          if-no-files-found: warn
+          retention-days: 7
       - name: Offscreen RU/EN screenshots at simulated Windows DPI 100-200%
         shell: pwsh
         run: |
@@ -70,6 +81,8 @@ jobs:
       PYTHONUTF8: "1"
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -87,6 +100,15 @@ jobs:
         run: python -m unittest discover -s tests -v
       - name: Qt offscreen startup smoke
         run: python app.py --smoke
+      - name: Real process action thread incident and selected export (Linux)
+        run: python app.py --deep-smoke --qa-output deep-smoke-linux --qa-commit-sha "${{ github.event.pull_request.head.sha || github.sha }}"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: BLACKBOX-REAL-PROCESS-LINUX
+          path: deep-smoke-linux/
+          if-no-files-found: warn
+          retention-days: 7
       - name: Validate independent observer CLI
         run: python -m blackbox_core --help
 
@@ -100,6 +122,8 @@ jobs:
       PYTHONUTF8: "1"
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -138,6 +162,32 @@ jobs:
           $maintenance = Join-Path $PWD "dist\BLACK.BOX-Universal\BLACK.BOX-Maintenance.exe"
           $check = Start-Process -FilePath $maintenance -ArgumentList "--help" -PassThru -Wait
           if ($check.ExitCode -ne 0) { throw "Maintenance EXE failed smoke: $($check.ExitCode)" }
+      - name: Deep test actual frozen EXE without Python on PATH or source working directory
+        shell: pwsh
+        run: |
+          $exe = Join-Path $PWD "dist\BLACK.BOX-Universal\BLACK.BOX-Universal.exe"
+          $evidence = Join-Path $PWD "deep-smoke-frozen"
+          New-Item -ItemType Directory -Path $evidence -Force | Out-Null
+          $savedPath = $env:PATH
+          try {
+            $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot"
+            $job = Start-Process -FilePath $exe -WorkingDirectory $evidence -ArgumentList @('--deep-smoke', '--qa-output', $evidence, '--qa-commit-sha', '${{ github.event.pull_request.head.sha || github.sha }}') -PassThru
+            if (-not $job.WaitForExit(120000)) { throw 'Frozen deep smoke exceeded 120s deadline' }
+            if ($job.ExitCode -ne 0) { throw "Frozen deep smoke failed: $($job.ExitCode)" }
+          } finally { $env:PATH = $savedPath }
+          $summaryFile = Get-ChildItem -Path $evidence -Filter qa-summary.json -Recurse | Select-Object -First 1
+          if (-not $summaryFile) { throw 'Frozen evidence summary missing' }
+          $summary = Get-Content -Raw $summaryFile.FullName | ConvertFrom-Json
+          if ($summary.result -ne 'PASS' -or -not $summary.frozen -or $summary.completed_actions -ne 3 -or $summary.thread_cpu_seconds -le 0 -or $summary.incidents -le 0) { throw 'Frozen vertical evidence incomplete' }
+          if ($summary.requested_head_sha -ne '${{ github.event.pull_request.head.sha || github.sha }}') { throw 'Frozen evidence head mismatch' }
+          Get-FileHash -Algorithm SHA256 -LiteralPath $exe | Format-List
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: BLACKBOX-REAL-PROCESS-FROZEN
+          path: deep-smoke-frozen/
+          if-no-files-found: warn
+          retention-days: 14
       - name: Include public source license and distribution notices
         shell: pwsh
         run: |
