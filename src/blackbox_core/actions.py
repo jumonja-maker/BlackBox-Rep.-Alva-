@@ -26,6 +26,7 @@ class ActionCycle:
         self.cool_down_ms = cool_down_ms
         self.state = "IDLE"
         self.action_id = None
+        self.experiment_id = uuid4().hex  # Stable across repeats in one recording.
         self.prepared_ns = None
         self.started_ns = None
         self.ended_ns = None
@@ -41,7 +42,8 @@ class ActionCycle:
     def _emit(self, event, new_state, now, persist, **details):
         record = {"kind": "action_marker", "source": "USER_COMMAND_UNVERIFIED",
                   "timestamp_precision": "COMMAND_MONOTONIC_NS",
-                  "action_id": self.action_id, "event": event,
+                  "action_id": self.action_id, "experiment_id": self.experiment_id,
+                  "event": event,
                   "timestamp_monotonic_ns": now, "state": new_state, **details}
         # The SQLite transaction commits before in-memory state advances.
         persist(record)
@@ -71,7 +73,8 @@ class ActionCycle:
         if self.state == "COOL_DOWN" and now - self.ended_ns >= self.cool_down_ms * 1000000:
             record = self._emit("ACTION_COMPLETED", "COMPLETED", now, persist,
                                 duration_ns=self.ended_ns - self.started_ns)
-            self.completed.append({"action_id": self.action_id, "start_ns": self.started_ns,
+            self.completed.append({"action_id": self.action_id, "experiment_id": self.experiment_id,
+                                   "start_ns": self.started_ns,
                                    "end_ns": self.ended_ns,
                                    "duration_ns": self.ended_ns - self.started_ns})
             return record
