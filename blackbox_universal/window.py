@@ -32,6 +32,7 @@ from PySide6.QtWidgets import (
 
 from .monitor import ReadOnlyProbe, available_processes, save_snapshot
 from .investigation_worker import InvestigationWorker, session_bounds
+from .thread_detail_worker import ThreadDetailWorker
 from .investigation_view import title as investigation_title, interval_text as investigation_interval, fact_text as investigation_facts, finding_details, summary_text
 from .file_targets import InspectedFile, inspect_file, find_running_executable
 from .i18n import translate
@@ -126,6 +127,7 @@ class UniversalWindow(QMainWindow):
         self._investigation_html: Path | None = None
         self._investigation_result: dict | None = None
         self._investigation_busy = False
+        self._thread_detail_worker: ThreadDetailWorker | None = None
         icon_dir = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent.parent))
         icon_file = icon_dir / "assets" / "blackbox.png"
         if icon_file.is_file():
@@ -510,6 +512,30 @@ class UniversalWindow(QMainWindow):
         attach.clicked.connect(self._attach_selected)
         bottom.addWidget(attach)
         content.addLayout(bottom)
+        # A saved-session TID table on the existing Processes page. The user
+        # requests a bounded read through a separate QThread (no GUI disk I/O).
+        threads_panel = WindowPanel("Threads of selected PID", "DERIVED / PSUTIL")
+        self.thread_detail_status = _label(
+            "Record with DETAILED THREADS, then load TID CPU intervals.", "caption")
+        threads_panel.content.addWidget(self.thread_detail_status)
+        self.thread_detail_refresh = _button("◈  LOAD THREAD CPU")
+        self.thread_detail_refresh.setObjectName("loadThreadCpu")
+        self.thread_detail_refresh.clicked.connect(self._load_thread_detail)
+        threads_panel.content.addWidget(self.thread_detail_refresh)
+        self.thread_detail_table = QTableWidget(0, 4)
+        self.thread_detail_table.setObjectName("threadCpuTable")
+        self.thread_detail_table.setHorizontalHeaderLabels(
+            ("TID", "MEAN CPU %", "PEAK CPU %", "PAIRS"))
+        for col in (0, 1, 2):
+            self.thread_detail_table.horizontalHeader().setSectionResizeMode(
+                col, QHeaderView.ResizeMode.ResizeToContents)
+        self.thread_detail_table.horizontalHeader().setSectionResizeMode(
+            3, QHeaderView.ResizeMode.Stretch)
+        self.thread_detail_table.setEditTriggers(
+            QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.thread_detail_table.setMinimumHeight(170)
+        threads_panel.content.addWidget(self.thread_detail_table)
+        content.addWidget(threads_panel)
         return page
 
     def _build_events(self) -> QWidget:
@@ -737,7 +763,8 @@ class UniversalWindow(QMainWindow):
                 original = action.text()
                 action.setProperty("bb_english", original)
             action.setText(self._t(str(original)))
-        for table in (self.process_table, self.event_table):
+        for table in (self.process_table, self.event_table,
+                      self.thread_detail_table):
             for i in range(table.columnCount()):
                 header = table.horizontalHeaderItem(i)
                 if header is None:
@@ -1040,6 +1067,9 @@ class UniversalWindow(QMainWindow):
                 self, self._t("Cannot attach"), self._t(
                     "This process is unavailable or protected. Choose another one."))
             return
+        self.thread_detail_table.setRowCount(0)
+        self.thread_detail_status.setText(self._t(
+            "Record with DETAILED THREADS, then load TID CPU intervals."))
         self._update_all()
         self._navigate("dashboard")
 
@@ -1136,6 +1166,7 @@ class UniversalWindow(QMainWindow):
         self.open_investigation_btn.setEnabled(False)
         self._refresh_investigation_info()
         self._render_investigation_findings()
+        self.thread_detail_table.setRowCount(0)
         self._update_all()
 
     def _stop(self) -> None:
@@ -1147,6 +1178,51 @@ class UniversalWindow(QMainWindow):
     def _change_interval(self, index: int) -> None:
         if hasattr(self, "_timer"):
             self._timer.setInterval(int(self.interval_combo.itemData(index)))
+
+    def _load_thread_detail(self) -> None:
+        folder = self.probe.session_folder
+        if (self._thread_detail_worker is not None or folder is None or
+                not (folder / "detail-v2.sqlite3").is_file()):
+            return
+        self.thread_detail_status.setText(self._t("Reading saved thread counters…"))
+        self.thread_detail_refresh.setEnabled(False)
+        worker = ThreadDetailWorker(folder, self)
+        self._thread_detail_worker = worker
+        worker.result_ready.connect(self._thread_detail_ready)
+        worker.finished.connect(self._thread_detail_finished)
+        worker.start()
+
+    def _thread_detail_ready(self, payload: object, error: str) -> None:
+        if error or type(payload) is not dict:
+            self.thread_detail_status.setText(self._t(
+                "Thread detail is unavailable; source data were not changed."))
+            return
+        if payload.get("folder") != str(self.probe.session_folder):
+            return
+        detail = payload.get("analysis")
+        if type(detail) is not dict:
+            return
+        rows = detail.get("top_threads", [])
+        if type(rows) is not list:
+            return
+        self.thread_detail_table.setRowCount(len(rows))
+        for index, record in enumerate(rows):
+            for column, name in enumerate(
+                    ("tid", "cpu_percent", "peak_cpu_percent", "observed_pairs")):
+                item = QTableWidgetItem()
+                item.setData(Qt.ItemDataRole.DisplayRole, record.get(name))
+                item.setToolTip(
+                    "PSUTIL / DERIVED; TID reuse between samples cannot be excluded.")
+                self.thread_detail_table.setItem(index, column, item)
+        warnings = ", ".join(detail.get("warnings", []))
+        self.thread_detail_status.setText(
+            self._t("Thread CPU is derived from adjacent snapshots only.") +
+            " · " + str(detail.get("status")) +
+            ((" · " + warnings) if warnings else ""))
+
+    def _thread_detail_finished(self) -> None:
+        self._thread_detail_worker = None
+        self._update_all()
 
     def _tick(self) -> None:
         was_active = self.probe.active
@@ -1165,6 +1241,10 @@ class UniversalWindow(QMainWindow):
         self.mark_problem_btn.setEnabled(running and self.probe.last_elapsed_ms is not None)
         self.auto_capture_btn.setEnabled(running)
         self.detailed_capture_btn.setEnabled(running)
+        folder_for_threads = self.probe.session_folder
+        self.thread_detail_refresh.setEnabled(
+            self._thread_detail_worker is None and folder_for_threads is not None
+            and (folder_for_threads / "detail-v2.sqlite3").is_file())
         self.detailed_capture_btn.setText(self._t(
             "DETAILED THREADS: ON" if self.probe.detailed_capture is not None
             else "DETAILED THREADS: OFF"))
@@ -1586,6 +1666,12 @@ class UniversalWindow(QMainWindow):
             "No cloud upload, tunneling, process injection or admin escalation.")
 
     def closeEvent(self, event) -> None:
+        if (self._thread_detail_worker is not None and
+                self._thread_detail_worker.isRunning()):
+            event.ignore()
+            QMessageBox.information(self, "BLACK.BOX", self._t(
+                "Thread analysis is finishing; close again after it completes."))
+            return
         if self._investigation_worker is not None and self._investigation_worker.isRunning():
             event.ignore()
             QMessageBox.information(
