@@ -9,6 +9,7 @@ import tempfile
 from pathlib import Path
 import sqlite3
 from .contracts import ObserverError, bounded
+from .experiments import ExperimentAccumulator
 from .storage import _open_ro
 
 
@@ -25,10 +26,12 @@ def summarize(folder: Path) -> dict:
             # every event as a Python list. User problem markers are not faults.
             counts = {}
             actions, completed_total, malformed_actions = [], 0, 0
+            experiments = ExperimentAccumulator()
             for entry in db.execute("SELECT data FROM events ORDER BY seq"):
                 record = json.loads(entry["data"])
                 if type(record) is not dict:
                     raise ObserverError("INVALID_DATA", "report")
+                experiments.observe(record)
                 if record.get("kind") == "action_marker" and record.get("event") == "ACTION_COMPLETED":
                     # These are recorded USER commands, not independently attested OS events.
                     value = record.get("duration_ns")
@@ -65,6 +68,7 @@ def summarize(folder: Path) -> dict:
                 "completed_actions_omitted": max(0, completed_total - len(actions)),
                 "invalid_action_markers": malformed_actions,
                 "action_evidence": "RECORDED_USER_COMMAND_NOT_ATTESTED",
+                "experiment_summary": experiments.result(),
                 "root_cause": "UNKNOWN", "root_cause_confidence": "UNKNOWN",
                 "execution_attested": False,
                 "limitations": ["external_sampling_only", "no_proof_of_memory_leak",
@@ -109,6 +113,16 @@ def _human_html(report: dict) -> str:
         for code, count in sorted(errors.items())
     ) or "<tr><td colspan='2'>None recorded / Нет зарегистрированных</td></tr>"
     actions = report.get("completed_actions", [])
+    experiment_groups = report.get("experiment_summary", {}).get("experiments", [])
+    experiment_html = "".join(
+        "<tr><td>" + safe(e["experiment_id"][:12]) + "</td><td>" +
+        safe(e["repeats"]) + "</td><td>" +
+        safe(e["duration_ms"]["median"]) + "</td><td>" +
+        safe(e["duration_ms"]["p95"]) + "</td><td>" +
+        safe(e["duration_ms"]["mad"]) + "</td><td>" +
+        safe(", ".join(e["warnings"]) or "—") + "</td></tr>"
+        for e in experiment_groups
+    ) or "<tr><td colspan='6'>No experiment / Нет повторов</td></tr>"
     actions_html = "".join(
         "<tr><td>" + safe(item["action_id"][:12]) + "</td><td>" +
         safe(item["duration_ms"]) + "</td></tr>" for item in actions
@@ -154,6 +168,13 @@ def _human_html(report: dict) -> str:
         "; omitted from preview / скрыто: " + safe(report.get("completed_actions_omitted", 0)) + "</p>"
         "<table><thead><tr><th>Action ID</th><th>Duration / Длительность (ms)</th>"
         "</tr></thead><tbody>" + actions_html + "</tbody></table>"
+        "<h2>Эксперименты / Repeat experiments</h2>"
+        "<p>Only completed USER-command intervals. MAD is median absolute "
+        "deviation. Differences do not prove speedup or causal improvement.</p>"
+        "<table><thead><tr><th>Experiment</th><th>Repeats</th>"
+        "<th>Median ms</th><th>p95 ms</th><th>MAD ms</th>"
+        "<th>Coverage / Warnings</th></tr></thead><tbody>" +
+        experiment_html + "</tbody></table>"
         "<h2>Ошибки наблюдателя / Observer events</h2>"
         "<table><thead><tr><th>Код / Code</th><th>Количество / Count</th>"
         "</tr></thead><tbody>" + errors_html + "</tbody></table>"
