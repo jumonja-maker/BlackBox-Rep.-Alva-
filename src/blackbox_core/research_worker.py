@@ -33,7 +33,11 @@ class ResearchSession:
         self.last_command=None;self.command_latency_ms=None
         self.last_app_health=None
         self.research_state="NO_SESSION";self.research_error=None
-        import psutil
+        try:
+            import psutil
+        except ImportError:
+            from .contracts import ObserverError
+            raise ObserverError("DEPENDENCY_MISSING","attach") from None
         self._observer=self._frontend=None
         try:
             self._observer=psutil.Process()
@@ -51,6 +55,7 @@ class ResearchSession:
         data.update(name=p.name,pid=p.pid,last_error=p.last_error,
             action_ready=p.actions.ready_to_start(),
             detail_enabled=p.detailed_capture is not None,incident_enabled=p.incident_capture is not None,
+            detail_status=p.detailed_capture.status if p.detailed_capture is not None else "DISABLED",
             report_result=p.report_result,capabilities=capabilities(),
             experiment_context=self.context,native_enabled=self.native_enabled,
             wpr_active=bool(self.wpr and self.wpr.active),
@@ -202,6 +207,8 @@ class ResearchSession:
             return n
         if op=="start":
             self.probe.start()
+            self.probe._store.v2.max_bytes=self.budget_bytes
+            self.native_enabled=False;self.runtime_trace=None;self.wpr=None
             self.research_state="RECORDING";self.research_error=None
             try:
                 self.book=CaseBook(self.probe.session_folder,self.probe.pid,self.probe._core.created,
@@ -234,6 +241,8 @@ class ResearchSession:
         if op=="mark":return self.probe.mark_problem(a.get("note",""))
         if op=="detailed":
             result=self.probe.set_detailed_capture(bool(a["enabled"]))
+            if self.probe.detailed_capture is not None:
+                self.probe.detailed_capture.max_bytes=self.budget_bytes
             self.book.set_context("configuration_changed",True)
             return result
         if op=="incidents":return self.probe.set_incident_capture(bool(a["enabled"]))

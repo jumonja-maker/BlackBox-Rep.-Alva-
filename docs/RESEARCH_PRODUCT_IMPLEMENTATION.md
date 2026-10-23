@@ -1,6 +1,6 @@
 # BLACK.BOX research product — implementation and acceptance
 
-This is one additive patch on pinned PR17 `7ab0bad65cb4315c16e58d5894196c229fea208f`.
+This is one additive patch preserving PR17 through `32f38da4aaadf466379fbeaa85ea4ebf8141bb75`.
 It preserves that branch's work, main's five pages and legacy schema1 recordings.
 The original BB-DI-001 matrix is not rewritten or signed off by this document.
 

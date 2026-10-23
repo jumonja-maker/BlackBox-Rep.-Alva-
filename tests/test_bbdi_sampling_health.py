@@ -85,6 +85,8 @@ class StoredBusyTickTests(unittest.TestCase):
             self.app, lambda: self.window._report_worker is None
             and self.window._base_sample_worker is None))
         self.window.close()
+        self.assertTrue(drain(self.app,lambda:self.window._report_worker is None
+                              and not self.window.probe.active))
         self.context.stop()
         self.temp.cleanup()
 

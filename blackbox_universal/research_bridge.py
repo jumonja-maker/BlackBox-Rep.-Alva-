@@ -87,7 +87,9 @@ class ResearchBridge(QObject):
                 elif packet.get("type")=="result":
                     op=self._pending.pop(packet.get("id"),packet.get("op",""))
                     if op in ("stop","quit"):self._stop_deadline=None
-                    self.last_error=packet.get("error") or self.last_error
+                    if op in ("attach","start") and not packet.get("error"):
+                        self.last_error=None
+                    else:self.last_error=packet.get("error") or self.last_error
                     self.result_ready.emit(op,packet.get("result"),packet.get("error") or "")
                 elif packet.get("type")=="error":self.last_error=packet.get("error")
             except (ValueError,KeyError,TypeError):self.last_error="INVALID_RESEARCH_PROTOCOL"

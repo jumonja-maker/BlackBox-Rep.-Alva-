@@ -114,8 +114,10 @@ class ResearchPanel(QWidget):
     def refresh(self):
         data=getattr(self.bridge,"data",{})
         mode=data.get("capabilities",{}).get("privilege",{}).get("mode","UNKNOWN")
-        self.status.setText(self.tr("Access: ","Права: ")+mode+" · "+self.tr("Application event verified: ","Событие приложения получено: ")+
-            str(bool(data.get("app_ready")))+" · "+(self.bridge.last_error or ""))
+        mode_text={"STANDARD":self.tr("Standard user","Обычные права"),
+                   "ADMINISTRATOR":self.tr("Administrator","Администратор")}.get(mode,self.tr("Checking…","Проверяем…"))
+        ready=self.tr("Control event received","Проверочное событие получено") if data.get("app_ready") else self.tr("Waiting for application event","Ожидается событие приложения")
+        self.status.setText(mode_text+" · "+ready+" · "+(self.bridge.last_error or ""))
         caps=data.get("capabilities",{})
         for name,key in (("Windows observation","hwnd"),("ETW recording","etw_wpr"),
                          ("EventPipe 10 s","dotnet_trace"),("Capture minidump","minidump")):

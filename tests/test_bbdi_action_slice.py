@@ -212,6 +212,13 @@ class QtActionControls(unittest.TestCase):
                 self.assertFalse(window.action_end_btn.isEnabled())
             finally:
                 window.close()
+                # Close owns an asynchronous report worker. Keep the source
+                # directory alive until the owner has really released it.
+                import time
+                deadline=time.monotonic()+10
+                while window._report_worker is not None and time.monotonic()<deadline:
+                    self.application.processEvents();time.sleep(.005)
+                self.assertIsNone(window._report_worker)
 
 
 if __name__ == "__main__":

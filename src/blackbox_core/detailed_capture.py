@@ -172,11 +172,11 @@ class DetailedCapture:
     """Independent thread with independent SQLite v2 sidecar connection."""
 
     def __init__(self, folder: Path, pid: int, created: float, origin_ns: int,
-                 *, interval_s: float = 2.0, max_samples: int = 14400,
+                 *, interval_s: float = 2.0, max_samples: int | None = None,
                  max_bytes: int = 256 * 1024 * 1024, collector=None):
         if (type(origin_ns) is not int or origin_ns < 0 or
                 not 0.5 <= interval_s <= 30 or
-                type(max_samples) is not int or not 1 <= max_samples <= 20000):
+                (max_samples is not None and (type(max_samples) is not int or not 1 <= max_samples <= 20000))):
             raise ValueError("INVALID_DETAILED_CAPTURE_POLICY")
         self.folder = Path(folder)
         self.path = self.folder / "detail-v2.sqlite3"
@@ -297,7 +297,8 @@ class DetailedCapture:
             conn.commit()
             self.status = "RUNNING"
             while not self.stop_event.is_set():
-                if self.samples >= self.max_samples or self._storage_bytes() >= self.max_bytes:
+                if ((self.max_samples is not None and self.samples >= self.max_samples) or
+                        self._storage_bytes() >= self.max_bytes):
                     final = "CAPTURE_LIMIT_REACHED"
                     break
                 try:

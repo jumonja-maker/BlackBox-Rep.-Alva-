@@ -1,5 +1,6 @@
 """Exercise the actual production isolated GUI, including slow SQLite IO."""
 from __future__ import annotations
+from contextlib import closing
 import os
 from pathlib import Path
 import sqlite3
@@ -55,7 +56,7 @@ class IsolatedGuiTests(unittest.TestCase):
         self.start_recording();folder=self.window.probe.session_folder
         self.window.close()
         self.assertTrue(self.drain(lambda:not self.window.probe.alive))
-        with sqlite3.connect(folder/"session.sqlite3") as db:
+        with closing(sqlite3.connect(folder/"session.sqlite3")) as db:
             row=db.execute("SELECT exit_code FROM metadata").fetchone()
         self.assertEqual(row[0],"INTERRUPTED")
         self.assertTrue((folder/"research.sqlite3").is_file())

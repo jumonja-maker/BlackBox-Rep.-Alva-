@@ -152,10 +152,18 @@ jobs:
           if ($job.ExitCode -ne 0) { throw "Frozen research E2E failed: $($job.ExitCode)" }
           $proof = Get-Content (Join-Path $evidence 'e2e.json') -Raw | ConvertFrom-Json
           if ($proof.status -ne 'PASS' -or $proof.helper_pid -eq $proof.gui_pid) { throw 'Missing isolated research proof' }
+      - name: Frozen research with administrator SID and privileges removed
+        run: python tools/qa_standard_token.py "dist/BLACK.BOX-Universal/BLACK.BOX-Universal.exe" "frozen-standard-token-e2e"
       - uses: actions/upload-artifact@v4
         with:
           name: BLACKBOX-FROZEN-RESEARCH-E2E
           path: frozen-research-e2e/
+          if-no-files-found: error
+          retention-days: 7
+      - uses: actions/upload-artifact@v4
+        with:
+          name: BLACKBOX-STANDARD-TOKEN-E2E
+          path: frozen-standard-token-e2e/
           if-no-files-found: error
           retention-days: 7
       - name: Include public source license and distribution notices
