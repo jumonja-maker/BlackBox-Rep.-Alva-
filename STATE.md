@@ -1,5 +1,7 @@
-# BLACK.BOX Universal v0.3.5 — main
+# BLACK.BOX Universal v0.3.6 — main
 
-Independent Investigation Engine 0.1.2 is embedded as Python package `blackbox_investigation` and packaged with its original MIT copyright notice. Qt preserves five pages. Overview has an explicit user problem marker persisted in schema-1 SQLite at a real sampled timestamp. A QThread worker runs bounded offline analysis of completed sessions and exclusively creates additional JSON/HTML outputs. Reports and Event Log present human-readable findings, evidence limitations and coverage in RU/EN.
+Deep-hardened standalone BLACK.BOX. PR #16 has been independently reviewed and merged with further defensive checks. Core report writes are exclusive/no-clobber, SQLite event summaries stream and classify user markers separately, ZIP staging refuses Windows alias and special-path attacks, maintenance detects reparse points in ancestors and fails closed on filesystem inspection errors, and per-process multicore CPU scales beyond 100%.
 
-GitHub Actions must pass Windows/Linux unit+Qt tests and frozen EXE smoke including a real Investigation Engine execution before v0.3.5 is published. Real Windows GUI/upgrade, antivirus reputation and arbitrary application root cause are not CI-verified.
+Investigation Engine 0.1.2 and the existing five RU/EN pages are preserved. Existing user session SQLite/JSON/HTML is retained on normal update/uninstall paths, with regression tests for simulated rollback on Windows CI. Qt offscreen screenshot artifacts cover 5 pages x RU/EN x four simulated DPI scales. Offscreen screenshots exhibit Qt font glyph issues in CI and are NOT physical Windows font legibility acceptance.
+
+Release v0.3.6 is gated by Windows/Linux test suite and portable EXE smoke. Real Windows hardware DPI/keyboard/OneDrive/antivirus/update/uninstall acceptance remains NOT RUN. No separate proprietary runtime is included.

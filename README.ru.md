@@ -2,10 +2,10 @@
 
 **Портативная программа мониторинга процессов и просмотра файлов приложений Windows.**
 
-[**Скачать для Windows x64 — v0.3.5**](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/releases/download/v0.3.5/BLACK.BOX-Universal-Windows.zip) · [Все версии](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/releases) · [English README](README.md)
+[**Скачать для Windows x64 — v0.3.6**](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/releases/download/v0.3.6/BLACK.BOX-Universal-Windows.zip) · [Все версии](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/releases) · [English README](README.md)
 
 [![Проверка Windows/Linux](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/actions/workflows/shell-qa.yml/badge.svg?branch=main)](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/actions/workflows/shell-qa.yml)
-![Версия](https://img.shields.io/badge/version-0.3.5-40766c) ![Windows](https://img.shields.io/badge/platform-Windows%20x64-40766c) ![MIT](https://img.shields.io/badge/license-MIT-40766c)
+![Версия](https://img.shields.io/badge/version-0.3.6-40766c) ![Windows](https://img.shields.io/badge/platform-Windows%20x64-40766c) ![MIT](https://img.shields.io/badge/license-MIT-40766c)
 
 BLACK.BOX Universal позволяет **выбрать запущенный процесс либо указать файл приложения**. У работающего процесса программа измеряет системные показатели и сохраняет сеансы в SQLite, JSON и HTML; выбор файла сам по себе ничего не запускает. Программа не изменяет наблюдаемый процесс, не внедряется в его код и не требует регистрации, подписки, собственного сервера, фоновой службы или отдельной установки Python.
 
@@ -70,6 +70,17 @@ BLACK.BOX Universal позволяет **выбрать запущенный п�
 
 Подробнее: [Обновление и обслуживание](docs/UPDATES_FEEDBACK_UNINSTALL.md).
 
+## Надёжность и интерфейс в версии 0.3.6
+
+- Публикация `report.json` и `report.html` больше не перезаписывает чужие файлы при конкурентной записи; при ошибке откатываются созданные этим сеансом результаты.
+- В отчёте учитываются только настоящие ошибки наблюдения; пользовательские пометки ошибок не создают. Чтение журнала SQLite не требует загрузки всех событий в память.
+- Проверка ZIP для обновлений отклоняет дополнительные опасные Windows-имена, коллизии путей, специальные файлы и существующие каталоги распаковки.
+- Обновление и удаление блокируются, если путь установки или его родитель содержит junction/reparse point или Windows отказала в проверке пути. Проверяется откат обновления и сохранность прежних сеансов при конфликте.
+- График CPU отображает значения выше 100% для многоядерных процессов.
+- CI создаёт снимки 5 экранов в RU/EN при масштабах 100/125/150/200%. Это **не заменяет** ручную проверку на настоящем дисплее и проверку обновления/удаления на пользовательской Windows.
+
+[Независимое ревью и границы проверки](docs/DEEP_HARDENING_REVIEW.md).
+
 ## Investigation Engine 0.1.2 — исследование сеансов
 
 - Во время наблюдения нажми **«Отметить проблему»** (после первого измерения). Сохраняется время и необязательное пояснение. Это **пометка пользователя**, а не доказанное зависание Windows.
@@ -83,9 +94,9 @@ BLACK.BOX Universal позволяет **выбрать запущенный п�
 
 BLACK.BOX **не** является очистителем Windows, антивирусом, автоматическим ремонтником, анализатором дампов памяти или отладчиком чужого кода. Эта версия не собирает Windows ETW-трассы и стеки внутренних вызовов сторонних приложений. Только по CPU/RAM/I/O нельзя достоверно определить неисправный участок программы.
 
-### Насколько проверена версия 0.3.5?
+### Насколько проверена версия 0.3.6?
 
-Для **предыдущей версии 0.3.2**, коммита [`6c8d9478`](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/commit/6c8d94785492e4373a80720b7812871b94856241) [GitHub Actions #39872624116](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/actions/runs/39872624116) успешно выполнил **53 теста на Windows и 53 на Linux**, сборку EXE и проверку запуска. Новая версия 0.3.5 с выбором файлов проверяется отдельно через [актуальные GitHub Actions](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/actions?query=branch%3Amain).
+PR #16 проверен на Windows (148 тестов) и Linux (146 PASS + 2 SKIP); Windows EXE smoke успешен. Финальный релиз v0.3.6 дополнительно проверяется отдельным CI для коммита `main`. Достоверный статус смотри в [GitHub Actions](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/actions?query=branch%3Amain). Физические тесты обновления/удаления и читаемости интерфейса при разных DPI остаются открытыми.
 
 Эти проверки **не заменяют** ручные испытания на обычной Windows: установку обновления и откат, совместимость с антивирусами, репутацию неподписанного EXE и аудит лицензионных уведомлений. Исполняемые файлы пока не имеют цифровой подписи.
 

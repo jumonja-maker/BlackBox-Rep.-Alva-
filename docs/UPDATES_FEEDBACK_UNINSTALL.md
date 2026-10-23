@@ -1,7 +1,17 @@
-# Updates and portable maintenance
+# Updates and portable maintenance (v0.3.6)
 
-The built-in updater reads `/releases/latest` for the repository, verifies a strictly newer `vMAJOR.MINOR.PATCH` tag and a `BLACK.BOX-Universal-Windows.zip` asset with its SHA-256 digest. It downloads into staging and asks before installing. The separate Maintenance EXE waits until the main app closes, performs safe replacement and preserves user session data in Documents. Protected paths, symlink escapes, malformed ZIP members and oversized archives are rejected.
+The built-in updater checks the official latest GitHub Release for a strictly newer semantic version and the named portable ZIP asset with SHA-256 digest and expected byte size. User confirmation is required to download and install. Downloading and verifying staging data does not replace the running installation. The Maintenance EXE waits for the running application to exit before proceeding.
 
-The next release after v0.3.1 is v0.3.2. A new main commit **does not** become an update until an official Release with a higher version exists. Desktop shortcuts are optional. Uninstallation removes only an appropriately marked portable installation; existing session evidence remains outside the installed folder.
+### Filesystem guardrails
 
-Feedback links lead to the repository or email client and are user initiated. Network access is otherwise limited to update checks; no session data is automatically uploaded.
+- A valid marked installation folder is required for update or removal. System roots and protected installation paths are refused.
+- Windows junction/reparse points in the installation folder or its parent chain are refused; uninspectable paths fail closed.
+- Staging is required to be a specific sibling folder with no junction/reparse ancestry.
+- ZIP extraction refuses traversal, Windows reserved names, trailing aliases, special nodes, file/directory collisions, duplicate aliases and preexisting staging roots. Unverified or malformed archives cannot start an install.
+- Local `logs`, `sessions`, `reports` inside the portable directory are moved to the new version during replacement, or into a separately named directory under Documents on uninstall. Normal user sessions stored directly in Documents are not part of the portable app removal.
+- A data-directory collision aborts the replacement and restores the old executable and preserved user files, subject to filesystem availability. A locked or partly deleted backup may require manual recovery; do not advertise universal rollback.
+- No cleanup is performed on arbitrary, unmarked paths.
+
+Windows/Linux integration tests, simulated Windows rollback tests and frozen EXE smoke are automated. A live in-use update, OneDrive redirection, antivirus locks, physical 100–200% DPI, and screen reader acceptance **remain manual and are not guaranteed by CI**.
+
+Feedback opens the repository or email client on explicit user action. No session data is automatically uploaded.

@@ -1,6 +1,6 @@
 # BLACK.BOX deep hardening — single handoff candidate
 
-**Status: REVIEW-ONLY. NOT an installed release.**
+**Original status at handoff: REVIEW-ONLY. Integrated into main after independent review with extra fixes for reparse ancestry and fail-closed errors; release target v0.3.6.**
 **Target exact main:** `8368ccecfcc734a18e776a4db4401a829d2f537f` (BLACK.BOX Universal v0.3.5).
 **Scope:** defensive patch to first-party report, trusted-release ZIP validation,
 portable maintenance filesystem boundaries, multicore chart, and independent regression QA.
@@ -30,3 +30,7 @@ Review the PR file diff; either cherry-pick the exact review commit onto matchin
 
 ### Explicit non-claims
 Not a penetration test of all Windows configurations or rendered DPI themes; not a proof that arbitrary third-party applications' root causes are discoverable; not a new app release.
+
+## Follow-up after independent review
+
+PR #16 was merged into main after additional checks for inaccessible Windows path metadata, junctions in installation ancestors, rollback with a conflicting session directory, and simulated-DPI screenshots. The historical review-only instructions above refer to the original proposal, not the final integrated state. See [the independent review report](DEEP_HARDENING_REVIEW.md) for verified test results and remaining NOT RUN acceptance checks.

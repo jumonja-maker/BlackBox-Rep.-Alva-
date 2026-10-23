@@ -163,7 +163,7 @@ jobs:
           retention-days: 14
 
 
-# Release v0.3.5 is published after Windows/Linux tests and Windows EXE smoke.
+# Release v0.3.6 is published after Windows/Linux tests and Windows EXE smoke.
   publish-updater-test:
     name: Publish independent BLACK.BOX release
     needs: [linux-tests, windows-portable]
@@ -180,14 +180,14 @@ jobs:
         with:
           name: BLACKBOX-INDEPENDENT-WINDOWS-QA
           path: verified-portable
-      - name: Publish verified Investigation v0.3.5
+      - name: Publish verified hardened v0.3.6
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           VERSION="$(python -c 'from blackbox_universal import __version__; print(__version__)')"
-          if [[ "$VERSION" != "0.3.5" ]]; then
+          if [[ "$VERSION" != "0.3.6" ]]; then
             echo "No owner-authorized test release for v$VERSION"
             exit 0
           fi
@@ -200,26 +200,34 @@ jobs:
           fi
           sha256sum "$ZIP" > "$ZIP.sha256"
           cat > release-notes.md <<'EOF'
-          BLACK.BOX Universal v0.3.5 — Investigation Engine 0.1.2
+          BLACK.BOX Universal v0.3.6 — deep reliability hardening
 
-          Adds user-marked problem timestamps persisted to the recorded SQLite
-          session, offline investigation of a completed current or saved session,
-          and readable evidence tables in Reports and Event Log (RU/EN).
-          Findings identify observed CPU episodes, memory growth candidates,
-          I/O throughput, sampling gaps and counter resets when measured.
-          Select a finding to see evidence and limitations, and open a separate
-          Investigation HTML report. New JSON/HTML files do not overwrite
-          original session reports. Long sessions require confirmation before
-          analyzing only the last 4096 measurements, with partial coverage shown.
-          The full Investigation Engine is bundled in the Windows EXE and its
-          original MIT copyright notice is included.
-          This is not a Windows hang detector or a root cause debugger.
-          Manual physical-Windows UI, antivirus and update/rollback validation
-          are separate from CI and should not be claimed as passing.
+          Reviewed PR #16 plus independent fixes:
+          - Original SQLite, JSON and HTML reports are never replaced by a
+            racing second writer; HTML + JSON use exclusive hard links and
+            conservative rollback.
+          - SQLite report errors count only genuine observation warnings/errors,
+            not user problem markers; streaming handles large event histories.
+          - Update ZIP validation rejects additional malformed Windows filenames,
+            device names, special nodes, aliases, collisions and existing roots.
+          - Portable update/uninstall reject junctions and Windows reparse points,
+            including ancestor directories. Fail closed if path inspection fails.
+          - On failure, the updater protects the prior portable installation and
+            saved session folders; Windows tests include a deliberate collision.
+          - CPU graph dynamically displays multicore utilization above 100%.
+          - Windows CI captures RU/EN Qt offscreen screenshots at 100/125/150/200%
+            scale, available as a separate QA artifact (not shipped to users).
+
+          The standalone Investigation Engine 0.1.2 remains included, and the
+          product still has exactly five tabs, no external worker or cloud
+          upload. All changes are tested against Windows/Linux Python 3.11
+          and frozen Windows EXE before publication.
+          Physical Windows screens, OneDrive/junction rights configurations,
+          AV blocks and a real end-user updater replacement remain NOT RUN.
           EOF
           gh release create "$TAG" "$ZIP" "$ZIP.sha256" \
             --target "$GITHUB_SHA" \
-            --title "BLACK.BOX Universal v0.3.5 — Investigation Engine" \
+            --title "BLACK.BOX Universal v0.3.6 — reliability hardening" \
             --notes-file release-notes.md --latest
           echo "Published $TAG from $GITHUB_SHA after Windows + Linux QA"
 
