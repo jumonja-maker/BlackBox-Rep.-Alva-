@@ -356,6 +356,3 @@ https://learn.microsoft.com/en-us/windows/win32/sysinfo/acquiring-high-resolutio
 
 [S8] Microsoft — Configuring and Starting an Event Tracing Session:
 https://learn.microsoft.com/en-us/windows/win32/etw/configuring-and-starting-an-event-tracing-session
-
-
-
