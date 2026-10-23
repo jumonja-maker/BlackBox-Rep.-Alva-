@@ -59,6 +59,7 @@ RU = {
 "END ACTION":"ЗАВЕРШИТЬ ДЕЙСТВИЕ",
 "REPEAT ACTION":"ПОВТОРИТЬ ЗАМЕР",
 "Action state":"СОСТОЯНИЕ ЗАМЕРА",
+"completed repeats":"завершённых повторов",
 "Action measurement unavailable":"Невозможно выполнить замер действия",
 "System messages":"Системные сообщения",
 "LATEST ACTIVITY":"ПОСЛЕДНИЕ СОБЫТИЯ",
