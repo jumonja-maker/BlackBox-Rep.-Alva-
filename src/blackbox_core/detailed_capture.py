@@ -13,7 +13,8 @@ import time
 
 from .detail_contracts import (
     ClockAnchor, FIELD_STATUS_COLUMNS, FIELD_UNITS, SOURCE_KIND,
-    VERIFICATION_CLASS, capture_clock_anchor, sample_field_statuses,
+    VERIFICATION_CLASS, capture_clock_anchor, read_provenance,
+    sample_field_statuses,
 )
 
 
@@ -375,6 +376,7 @@ def summarize_detail(folder: Path) -> dict | None:
                     "peak_handles": max_handles,
                     "thread_records": thread_records,
                     "child_records": child_records, "sensor_errors": errors,
+                    "provenance": read_provenance(connection),
                     "source": "PSUTIL_EXTERNAL_READ_ONLY",
                     "root_cause_proven": False,
                     "tids_identity_attested": False}
