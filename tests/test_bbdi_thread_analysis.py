@@ -76,6 +76,26 @@ class ThreadDeltaTests(unittest.TestCase):
             self.assertAlmostEqual(rows[202]["cpu_percent"], 25)
             self.assertFalse(result["root_cause_proven"])
 
+    def test_reappearing_tid_uses_two_independent_observed_segments(self):
+        with tempfile.TemporaryDirectory() as root:
+            folder = Path(root)
+            path = fixture(folder)
+            with closing(sqlite3.connect(path)) as db:
+                db.execute("INSERT INTO process_samples VALUES (?,?,?,?,?,?,?)",
+                           (5, 5_000_000_000, "OK", 0, 10, 8, 2))
+                db.execute("INSERT INTO thread_samples VALUES (?,?,?,?,?)",
+                           (5, 77, 101, 1.7, 0.0))
+                db.commit()
+            result = analyze_detail_threads(folder)
+            segments = sorted(
+                [r for r in result["top_threads"] if r["tid"] == 101],
+                key=lambda row: row["segment_start_seq"])
+            self.assertEqual(len(segments), 2)
+            self.assertEqual([r["segment_start_seq"] for r in segments], [1, 4])
+            self.assertAlmostEqual(segments[0]["cpu_percent"], 100)
+            self.assertAlmostEqual(segments[1]["cpu_percent"], 20)
+            self.assertEqual([r["observed_pairs"] for r in segments], [1, 1])
+
     def test_discontinuity_and_counter_reset_never_produce_fake_rate(self):
         with tempfile.TemporaryDirectory() as root:
             folder = Path(root)
