@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (
 
 from .monitor import ReadOnlyProbe, available_processes, save_snapshot
 from .investigation_worker import InvestigationWorker
+from .investigation_view import title as investigation_title, interval_text as investigation_interval, fact_text as investigation_facts, finding_details, summary_text
 from .file_targets import InspectedFile, inspect_file, find_running_executable
 from .i18n import translate
 from .releases import (Release, NoOfficialRelease, check_latest_release, stage_release,
@@ -495,9 +496,26 @@ class UniversalWindow(QMainWindow):
             QAbstractItemView.EditTrigger.NoEditTriggers)
         self.event_table.setAlternatingRowColors(True)
         self.event_table.verticalHeader().setVisible(False)
-        self.event_table.setMinimumHeight(370)
+        self.event_table.setMinimumHeight(300)
         frame.content.addWidget(self.event_table)
         content.addWidget(frame)
+
+        findings_panel = WindowPanel("Investigation findings", "OFFLINE EVIDENCE")
+        self.event_investigation_table = QTableWidget(0, 3)
+        self.event_investigation_table.setObjectName("eventInvestigationFindings")
+        self.event_investigation_table.setHorizontalHeaderLabels(("TIME", "FINDING", "EVIDENCE"))
+        self.event_investigation_table.horizontalHeader().setSectionResizeMode(
+            0, QHeaderView.ResizeMode.ResizeToContents)
+        self.event_investigation_table.horizontalHeader().setSectionResizeMode(
+            1, QHeaderView.ResizeMode.ResizeToContents)
+        self.event_investigation_table.horizontalHeader().setSectionResizeMode(
+            2, QHeaderView.ResizeMode.Stretch)
+        self.event_investigation_table.setEditTriggers(
+            QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.event_investigation_table.setMinimumHeight(145)
+        self.event_investigation_table.setMaximumHeight(215)
+        findings_panel.content.addWidget(self.event_investigation_table)
+        content.addWidget(findings_panel)
         content.addWidget(_label(
             "A disappearing process or high CPU is a clue, not a proven defect.",
             "caption"))
@@ -549,6 +567,38 @@ class UniversalWindow(QMainWindow):
         self.investigation_info = _label(
             "Run a separate, read-only analysis of a completed session.", "caption")
         content.addWidget(self.investigation_info)
+
+        investigation_panel = WindowPanel("Investigation results", "SOURCE-LINKED FINDINGS")
+        self.investigation_summary = _label(
+            "Investigate a completed session to see findings.", "caption")
+        investigation_panel.content.addWidget(self.investigation_summary)
+        self.investigation_table = QTableWidget(0, 3)
+        self.investigation_table.setObjectName("investigationFindings")
+        self.investigation_table.setHorizontalHeaderLabels(("TIME", "FINDING", "EVIDENCE"))
+        self.investigation_table.horizontalHeader().setSectionResizeMode(
+            0, QHeaderView.ResizeMode.ResizeToContents)
+        self.investigation_table.horizontalHeader().setSectionResizeMode(
+            1, QHeaderView.ResizeMode.ResizeToContents)
+        self.investigation_table.horizontalHeader().setSectionResizeMode(
+            2, QHeaderView.ResizeMode.Stretch)
+        self.investigation_table.setSelectionBehavior(
+            QAbstractItemView.SelectionBehavior.SelectRows)
+        self.investigation_table.setSelectionMode(
+            QAbstractItemView.SelectionMode.SingleSelection)
+        self.investigation_table.setEditTriggers(
+            QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.investigation_table.setMinimumHeight(155)
+        investigation_panel.content.addWidget(self.investigation_table)
+        self.investigation_details = QPlainTextEdit()
+        self.investigation_details.setObjectName("investigationDetails")
+        self.investigation_details.setReadOnly(True)
+        self.investigation_details.setMaximumHeight(115)
+        self.investigation_details.setPlainText(
+            "Selected evidence and its limitations appear here.")
+        self.investigation_table.itemSelectionChanged.connect(
+            self._show_selected_investigation_finding)
+        investigation_panel.content.addWidget(self.investigation_details)
+        content.addWidget(investigation_panel)
         content.addWidget(_label(
             "Automatic SQLite, HTML and JSON session reports are saved "
             "when you press STOP. Manual JSON exports are optional. "
@@ -676,6 +726,7 @@ class UniversalWindow(QMainWindow):
         self.chart.set_language(language)
         self._refresh_report_status()
         self._refresh_investigation_info()
+        self._render_investigation_findings()
         self.lang_ru.setProperty("active", language == "RU")
         self.lang_en.setProperty("active", language == "EN")
         for button in (self.lang_ru, self.lang_en):
@@ -1048,6 +1099,7 @@ class UniversalWindow(QMainWindow):
         self._investigation_html = None
         self.open_investigation_btn.setEnabled(False)
         self._refresh_investigation_info()
+        self._render_investigation_findings()
         self._update_all()
 
     def _stop(self) -> None:
@@ -1182,7 +1234,9 @@ class UniversalWindow(QMainWindow):
         self._investigation_busy = True
         self._investigation_result = None
         self._investigation_html = None
+        self.open_investigation_btn.setEnabled(False)
         self._refresh_investigation_info()
+        self._render_investigation_findings()
         self._investigation_worker = InvestigationWorker(
             folder, self.language, interval=interval, parent=self)
         self._investigation_worker.result_ready.connect(self._investigation_ready)
@@ -1195,7 +1249,7 @@ class UniversalWindow(QMainWindow):
             self._investigation_result = {"error": error}
             QMessageBox.warning(self, self._t("Investigation unavailable"),
                                 self._t("Analysis could not be completed.") +
-                                "\\n" + error)
+                                "\n" + error)
             return
         if type(payload) is not dict:
             return
@@ -1203,7 +1257,7 @@ class UniversalWindow(QMainWindow):
             lo, hi, total = payload["long_session"]
             question = self._t(
                 "This session is long. Analyze only the latest 4096 measurements?") + (
-                    f"\\n{total} samples · {lo}–{hi} ms")
+                    f"\n{total} samples · {lo}–{hi} ms")
             if QMessageBox.question(
                     self, "BLACK.BOX", question,
                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
@@ -1218,16 +1272,7 @@ class UniversalWindow(QMainWindow):
         self._investigation_html = Path(payload["html"])
         self.open_investigation_btn.setEnabled(True)
         self._navigate("reports")
-        self.report_preview.setPlainText(json.dumps(
-            {
-                "investigation_schema": report.get("schema_version"),
-                "findings": report.get("findings", [])[:32],
-                "warnings": report.get("warnings", []),
-                "coverage": report.get("coverage"),
-                "root_cause": "UNKNOWN / NOT PROVEN",
-                "saved_json": payload["json"],
-                "saved_html": payload["html"]
-            }, ensure_ascii=False, indent=2))
+        self._render_investigation_findings()
         if Path(payload["session"]) == self.probe.session_folder:
             self.probe.events.append({
                 "timestamp_utc": datetime.now().isoformat(timespec="seconds"),
@@ -1259,6 +1304,47 @@ class UniversalWindow(QMainWindow):
         else:
             status = "Run a separate, read-only analysis of a completed session."
         self.investigation_info.setText(self._t(status))
+
+    def _render_investigation_findings(self) -> None:
+        """Keep the separate report and Event Log evidence tables in sync."""
+        report = self._investigation_result
+        if type(report) is not dict or "error" in report:
+            report = None
+        findings = report.get("findings", []) if report else []
+        if type(findings) is not list:
+            findings = []
+        self.investigation_summary.setText(summary_text(report, self.language))
+        self.investigation_details.setPlainText(self._t(
+            "Selected evidence and its limitations appear here."))
+        for table in (self.investigation_table, self.event_investigation_table):
+            table.setRowCount(min(len(findings), 200))
+            headers = ("TIME", "FINDING", "EVIDENCE")
+            table.setHorizontalHeaderLabels(tuple(self._t(h) for h in headers))
+            for row, finding in enumerate(findings[:200]):
+                if type(finding) is not dict:
+                    continue
+                entries = (
+                    investigation_interval(finding),
+                    investigation_title(str(finding.get("code", "UNKNOWN")), self.language),
+                    investigation_facts(finding, self.language),
+                )
+                for col, value in enumerate(entries):
+                    cell = QTableWidgetItem(value[:280])
+                    cell.setToolTip(finding_details(finding, self.language))
+                    table.setItem(row, col, cell)
+        self.investigation_table.clearSelection()
+
+    def _show_selected_investigation_finding(self) -> None:
+        report = self._investigation_result
+        if type(report) is not dict:
+            return
+        row = self.investigation_table.currentRow()
+        findings = report.get("findings", [])
+        if type(findings) is list and 0 <= row < len(findings):
+            finding = findings[row]
+            if type(finding) is dict:
+                self.investigation_details.setPlainText(
+                    finding_details(finding, self.language))
 
     def _open_investigation_html(self) -> None:
         page = self._investigation_html
