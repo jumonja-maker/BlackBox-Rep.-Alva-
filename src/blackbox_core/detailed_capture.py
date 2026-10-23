@@ -370,13 +370,19 @@ def summarize_detail(folder: Path) -> dict | None:
                 "SELECT count(*) FROM child_samples").fetchone()[0]
             errors = connection.execute(
                 "SELECT count(*) FROM sensor_errors").fetchone()[0]
+            provenance = read_provenance(connection)
+            provenance["quality_coverage"] = (
+                "COMPLETE" if (provenance["contract_status"] == "OK" and
+                               provenance["quality_samples"] == samples) else
+                "LEGACY_NO_METADATA" if provenance["contract_status"] == (
+                    "LEGACY_DETAIL_V2_NO_PROVENANCE") else "PARTIAL_OR_INVALID")
             return {"schema_version": 2, "status": status, "pid": pid,
                     "samples": samples, "peak_rss_bytes": maxrss,
                     "peak_private_bytes": max_private,
                     "peak_handles": max_handles,
                     "thread_records": thread_records,
                     "child_records": child_records, "sensor_errors": errors,
-                    "provenance": read_provenance(connection),
+                    "provenance": provenance,
                     "source": "PSUTIL_EXTERNAL_READ_ONLY",
                     "root_cause_proven": False,
                     "tids_identity_attested": False}
