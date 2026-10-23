@@ -79,7 +79,11 @@ def analyze_detail_threads(folder: Path, *, max_samples: int = 128,
                         or _seconds(system) is None):
                     return {**empty, "status": "INVALID_DETAILED_DATA",
                             "warnings": ["INVALID_THREAD_COUNTER"]}
-                by_seq.setdefault(seq, {})[tid] = (float(user), float(system))
+                snapshot = by_seq.setdefault(seq, {})
+                if tid in snapshot:
+                    return {**empty, "status": "INVALID_DETAILED_DATA",
+                            "warnings": ["DUPLICATE_TID_SAMPLE"]}
+                snapshot[tid] = (float(user), float(system))
             # Separate observed TID lifetimes: a TID that disappears and
             # reappears must not reuse an earlier CPU aggregate.
             aggregates: dict[tuple[int, int], dict] = {}
