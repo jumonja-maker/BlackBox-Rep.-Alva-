@@ -406,6 +406,13 @@ class UniversalWindow(QMainWindow):
             "No OS hang detection, process tracing, dumps or proven root cause.")
         self.auto_capture_btn.clicked.connect(self._toggle_incident_capture)
         status.content.addWidget(self.auto_capture_btn)
+        self.detailed_capture_btn = _button("DETAILED THREADS: OFF")
+        self.detailed_capture_btn.setObjectName("detailedCaptureToggle")
+        self.detailed_capture_btn.setToolTip(
+            "Opt-in bounded background process/threads/children counters. "
+            "Stored in independent v2 SQLite sidecar. No stacks or wait chains.")
+        self.detailed_capture_btn.clicked.connect(self._toggle_detailed_capture)
+        status.content.addWidget(self.detailed_capture_btn)
         action_controls = QGridLayout()
         self.action_prepare_btn = _button("PREPARE ACTION")
         self.action_prepare_btn.clicked.connect(self._prepare_action)
@@ -1157,6 +1164,10 @@ class UniversalWindow(QMainWindow):
         self.stop_btn.setEnabled(running)
         self.mark_problem_btn.setEnabled(running and self.probe.last_elapsed_ms is not None)
         self.auto_capture_btn.setEnabled(running)
+        self.detailed_capture_btn.setEnabled(running)
+        self.detailed_capture_btn.setText(self._t(
+            "DETAILED THREADS: ON" if self.probe.detailed_capture is not None
+            else "DETAILED THREADS: OFF"))
         self.auto_capture_btn.setText(self._t(
             "AUTO INCIDENT CAPTURE: ON" if self.probe.incident_capture is not None
             else "AUTO INCIDENT CAPTURE: OFF"))
@@ -1238,6 +1249,15 @@ class UniversalWindow(QMainWindow):
         # Translate the fixed phrase before appending the actual identifier.
         prefix = detail.rsplit(" · PID ", 1)[0]
         self.target_binding_detail.setText(self._t(prefix) + f" · PID {pid}")
+
+    def _toggle_detailed_capture(self) -> None:
+        try:
+            self.probe.set_detailed_capture(
+                self.probe.detailed_capture is None)
+        except (ObserverError, RuntimeError, ValueError, OSError):
+            QMessageBox.warning(self, "BLACK.BOX", self._t(
+                "Detailed sampling unavailable"))
+        self._update_all()
 
     def _toggle_incident_capture(self) -> None:
         try:
