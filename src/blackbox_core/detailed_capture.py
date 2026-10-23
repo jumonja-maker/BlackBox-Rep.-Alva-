@@ -1,0 +1,284 @@
+"""Opt-in, bounded process-depth sampler on a dedicated Python thread.
+
+The v2 sidecar is deliberately separate from immutable schema-1 sessions.
+No injection, registry writes, dump capture, window titles, arguments or paths.
+"""
+from __future__ import annotations
+from contextlib import closing
+import os
+from pathlib import Path
+import sqlite3
+from threading import Event, Thread
+import time
+
+
+class DetailSensorError(ValueError):
+    pass
+
+
+def sample_process(pid: int, created: float, *, thread_limit: int = 256,
+                   child_limit: int = 64) -> dict:
+    """Snapshot cumulative counters with NULL for unavailable fields."""
+    if type(pid) is not int or pid <= 0 or type(created) not in (float, int) or created <= 0:
+        raise DetailSensorError("INVALID_TARGET")
+    try:
+        import psutil
+        p = psutil.Process(pid)
+        if abs(float(p.create_time()) - created) > 0.000001:
+            raise DetailSensorError("PID_REUSED")
+        began = time.monotonic_ns()
+        with p.oneshot():
+            cpu = p.cpu_times()
+            rss = p.memory_info().rss
+            thread_count = p.num_threads()
+            try:
+                io = p.io_counters()
+            except (AttributeError, NotImplementedError, psutil.AccessDenied, OSError):
+                io = None
+            try:
+                tids = p.threads()
+            except (psutil.AccessDenied, NotImplementedError, OSError):
+                tids = None
+        try:
+            full = p.memory_full_info()
+            private = getattr(full, "private", None)
+            uss = getattr(full, "uss", None)
+        except (psutil.AccessDenied, OSError, NotImplementedError):
+            private, uss = None, None
+        try:
+            handles = p.num_handles() if hasattr(p, "num_handles") else None
+        except (psutil.AccessDenied, OSError, NotImplementedError):
+            handles = None
+        descendants = []
+        children_total = None
+        try:
+            all_children = p.children(recursive=True)
+            children_total = len(all_children)
+            for child in all_children[:child_limit]:
+                try:
+                    child_created = float(child.create_time())
+                    with child.oneshot():
+                        child_mem = child.memory_info()
+                        child_cpu = child.cpu_times()
+                    if abs(float(child.create_time()) - child_created) > 0.000001:
+                        continue
+                    descendants.append({
+                        "pid": child.pid, "created": child_created,
+                        "rss_bytes": int(child_mem.rss),
+                        "cpu_user_s": float(child_cpu.user),
+                        "cpu_system_s": float(child_cpu.system),
+                    })
+                except (psutil.NoSuchProcess, psutil.ZombieProcess, psutil.AccessDenied, OSError):
+                    continue
+        except (psutil.NoSuchProcess, psutil.AccessDenied, OSError):
+            pass
+        if abs(float(p.create_time()) - created) > 0.000001:
+            raise DetailSensorError("PID_REUSED")
+        ended = time.monotonic_ns()
+        return {
+            "time_ns": ended, "sampling_duration_ns": max(0, ended-began),
+            "pid": pid, "created": created, "rss_bytes": int(rss),
+            "private_bytes": private, "uss_bytes": uss, "handle_count": handles,
+            "cpu_user_s": float(cpu.user), "cpu_system_s": float(cpu.system),
+            "thread_count": thread_count,
+            "read_bytes": getattr(io, "read_bytes", None),
+            "write_bytes": getattr(io, "write_bytes", None),
+            "read_ops": getattr(io, "read_count", None),
+            "write_ops": getattr(io, "write_count", None),
+            "threads": ([{"tid": item.id,
+                          "cpu_user_s": float(item.user_time),
+                          "cpu_system_s": float(item.system_time)}
+                         for item in tids[:thread_limit]] if tids is not None else []),
+            "thread_status": ("OK" if tids is not None else "ACCESS_DENIED_OR_UNSUPPORTED"),
+            "threads_omitted": max(0, len(tids)-thread_limit) if tids is not None else None,
+            "children": descendants, "children_total": children_total,
+            "children_omitted": (max(0, children_total-child_limit)
+                                 if children_total is not None else None),
+            "source": "PSUTIL_EXTERNAL_COUNTERS_NOT_CAUSAL_PROOF",
+        }
+    except DetailSensorError:
+        raise
+    except (psutil.NoSuchProcess, psutil.ZombieProcess):
+        raise DetailSensorError("PROCESS_EXITED") from None
+    except psutil.AccessDenied:
+        raise DetailSensorError("ACCESS_DENIED") from None
+    except (OSError, ValueError, OverflowError, AttributeError):
+        raise DetailSensorError("SENSOR_UNAVAILABLE") from None
+
+
+class DetailedCapture:
+    """Independent thread with independent SQLite v2 sidecar connection."""
+
+    def __init__(self, folder: Path, pid: int, created: float, origin_ns: int,
+                 *, interval_s: float = 2.0, max_samples: int = 14400,
+                 max_bytes: int = 256 * 1024 * 1024, collector=None):
+        if (type(origin_ns) is not int or origin_ns < 0 or
+                not 0.5 <= interval_s <= 30 or
+                type(max_samples) is not int or not 1 <= max_samples <= 20000):
+            raise ValueError("INVALID_DETAILED_CAPTURE_POLICY")
+        self.folder = Path(folder)
+        self.path = self.folder / "detail-v2.sqlite3"
+        self.pid = pid
+        self.created = created
+        self.origin_ns = origin_ns
+        self.interval_s = interval_s
+        self.max_samples = max_samples
+        self.max_bytes = max_bytes
+        self.collector = collector or sample_process
+        self.stop_event = Event()
+        self.thread: Thread | None = None
+        self.status = "NOT_STARTED"
+        self.error: str | None = None
+        self.samples = 0
+
+    def start(self) -> None:
+        if (self.thread is not None or not self.folder.is_dir() or
+                self.folder.is_symlink() or self.path.exists() or self.path.is_symlink()):
+            raise DetailSensorError("DETAILED_SESSION_UNAVAILABLE")
+        # Exclusive file reservation, even if a competing local writer races.
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        fd = os.open(self.path, flags, 0o600)
+        os.close(fd)
+        self.thread = Thread(target=self._run, name="blackbox-detailed-sampler",
+                             daemon=True)
+        self.thread.start()
+
+    def stop(self, timeout: float = 0.5) -> bool:
+        self.stop_event.set()
+        if self.thread is not None:
+            self.thread.join(timeout)
+            return not self.thread.is_alive()
+        return True
+
+    def _run(self) -> None:
+        conn = None
+        final = "STOPPED"
+        try:
+            conn = sqlite3.connect(self.path, timeout=2)
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA synchronous=NORMAL")
+            conn.executescript("""
+                CREATE TABLE detail_metadata (
+                    schema_version INTEGER NOT NULL,
+                    pid INTEGER NOT NULL,
+                    created REAL NOT NULL,
+                    monotonic_origin_ns INTEGER NOT NULL,
+                    status TEXT NOT NULL);
+                CREATE TABLE process_samples (
+                    seq INTEGER PRIMARY KEY,
+                    time_monotonic_ns INTEGER NOT NULL,
+                    elapsed_ms INTEGER NOT NULL,
+                    sampling_duration_ns INTEGER NOT NULL,
+                    rss_bytes INTEGER, private_bytes INTEGER, uss_bytes INTEGER,
+                    handles INTEGER, cpu_user_s REAL, cpu_system_s REAL,
+                    threads_reported INTEGER, read_bytes INTEGER,
+                    write_bytes INTEGER, read_ops INTEGER, write_ops INTEGER,
+                    threads_omitted INTEGER, children_total INTEGER,
+                    children_omitted INTEGER, thread_status TEXT);
+                CREATE INDEX ix_detail_samples_time ON process_samples(time_monotonic_ns);
+                CREATE TABLE thread_samples (
+                    sample_seq INTEGER NOT NULL, pid INTEGER NOT NULL,
+                    tid INTEGER NOT NULL, cpu_user_s REAL NOT NULL,
+                    cpu_system_s REAL NOT NULL,
+                    PRIMARY KEY (sample_seq, pid, tid));
+                CREATE INDEX ix_detail_tid ON thread_samples(pid, tid, sample_seq);
+                CREATE TABLE child_samples (
+                    sample_seq INTEGER NOT NULL, pid INTEGER NOT NULL,
+                    created REAL NOT NULL, rss_bytes INTEGER,
+                    cpu_user_s REAL, cpu_system_s REAL,
+                    PRIMARY KEY (sample_seq, pid, created));
+                CREATE INDEX ix_detail_child ON child_samples(pid, created, sample_seq);
+                CREATE TABLE sensor_errors (
+                    seq INTEGER PRIMARY KEY AUTOINCREMENT,
+                    time_monotonic_ns INTEGER, code TEXT NOT NULL);
+            """)
+            conn.execute("INSERT INTO detail_metadata VALUES (2,?,?,?,?)",
+                         (self.pid, self.created, self.origin_ns, "RUNNING"))
+            conn.commit()
+            self.status = "RUNNING"
+            while not self.stop_event.is_set():
+                if self.samples >= self.max_samples or self.path.stat().st_size >= self.max_bytes:
+                    final = "CAPTURE_LIMIT_REACHED"
+                    break
+                try:
+                    x = self.collector(self.pid, self.created)
+                    if x["time_ns"] < self.origin_ns:
+                        raise DetailSensorError("INVALID_MONOTONIC_CLOCK")
+                    seq = self.samples + 1
+                    conn.execute(
+                        "INSERT INTO process_samples VALUES (" + ",".join(["?"]*19) + ")",
+                        (seq, x["time_ns"],
+                         (x["time_ns"]-self.origin_ns)//1_000_000,
+                         x["sampling_duration_ns"], x["rss_bytes"],
+                         x["private_bytes"], x["uss_bytes"], x["handle_count"],
+                         x["cpu_user_s"], x["cpu_system_s"], x["thread_count"],
+                         x["read_bytes"], x["write_bytes"], x["read_ops"],
+                         x["write_ops"], x["threads_omitted"], x["children_total"],
+                         x["children_omitted"], x["thread_status"]))
+                    conn.executemany("INSERT INTO thread_samples VALUES (?,?,?,?,?)",
+                                     ((seq, self.pid, t["tid"], t["cpu_user_s"],
+                                       t["cpu_system_s"]) for t in x["threads"]))
+                    conn.executemany("INSERT INTO child_samples VALUES (?,?,?,?,?,?)",
+                                     ((seq, c["pid"], c["created"], c["rss_bytes"],
+                                       c["cpu_user_s"], c["cpu_system_s"])
+                                      for c in x["children"]))
+                    conn.commit()
+                    self.samples += 1
+                except (DetailSensorError, KeyError, TypeError, ValueError) as exc:
+                    code = (str(exc) if isinstance(exc, DetailSensorError)
+                            else "SENSOR_DATA_INVALID")
+                    conn.execute("INSERT INTO sensor_errors(time_monotonic_ns,code) VALUES (?,?)",
+                                 (time.monotonic_ns(), code))
+                    conn.commit()
+                    self.error = code
+                    if code in ("PID_REUSED", "PROCESS_EXITED", "INVALID_MONOTONIC_CLOCK"):
+                        final = code
+                        break
+                self.stop_event.wait(self.interval_s)
+        except (sqlite3.Error, OSError, ValueError, TypeError) as exc:
+            final = "STORAGE_OR_SENSOR_FAILURE"
+            self.error = type(exc).__name__
+        finally:
+            if conn is not None:
+                try:
+                    conn.execute("UPDATE detail_metadata SET status=?", (final,))
+                    conn.commit()
+                except sqlite3.Error:
+                    pass
+                conn.close()
+            self.status = final
+
+
+def summarize_detail(folder: Path) -> dict | None:
+    """Read-only, bounded sidecar summary; never counts missing as zero."""
+    path = Path(folder) / "detail-v2.sqlite3"
+    if not path.is_file() or path.is_symlink():
+        return None
+    try:
+        with closing(sqlite3.connect(path.resolve().as_uri() + "?mode=ro",
+                                     uri=True, timeout=1)) as connection:
+            connection.execute("PRAGMA query_only=ON")
+            version, pid, status = connection.execute(
+                "SELECT schema_version, pid, status FROM detail_metadata LIMIT 1").fetchone()
+            if version != 2:
+                return {"status": "UNSUPPORTED_DETAILED_SCHEMA"}
+            samples, maxrss, max_private, max_handles = connection.execute(
+                "SELECT count(*), max(rss_bytes), max(private_bytes), "
+                "max(handles) FROM process_samples").fetchone()
+            thread_records = connection.execute(
+                "SELECT count(*) FROM thread_samples").fetchone()[0]
+            child_records = connection.execute(
+                "SELECT count(*) FROM child_samples").fetchone()[0]
+            errors = connection.execute(
+                "SELECT count(*) FROM sensor_errors").fetchone()[0]
+            return {"schema_version": 2, "status": status, "pid": pid,
+                    "samples": samples, "peak_rss_bytes": maxrss,
+                    "peak_private_bytes": max_private,
+                    "peak_handles": max_handles,
+                    "thread_records": thread_records,
+                    "child_records": child_records, "sensor_errors": errors,
+                    "source": "PSUTIL_EXTERNAL_READ_ONLY",
+                    "root_cause_proven": False,
+                    "tids_identity_attested": False}
+    except (sqlite3.Error, OSError, TypeError, ValueError):
+        return {"status": "DETAILED_READ_UNAVAILABLE"}
