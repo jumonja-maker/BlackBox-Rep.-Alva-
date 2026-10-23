@@ -60,6 +60,10 @@ RU = {
 "REPEAT ACTION":"ПОВТОРИТЬ ЗАМЕР",
 "Action state":"СОСТОЯНИЕ ЗАМЕРА",
 "completed repeats":"завершённых повторов",
+"AUTO INCIDENT CAPTURE: ON":"АВТОЗАХВАТ СОБЫТИЙ: ВКЛ",
+"AUTO INCIDENT CAPTURE: OFF":"АВТОЗАХВАТ СОБЫТИЙ: ВЫКЛ",
+"Automatic incident capture unavailable":"Автоматическая фиксация событий недоступна",
+
 "Action measurement unavailable":"Невозможно выполнить замер действия",
 "System messages":"Системные сообщения",
 "LATEST ACTIVITY":"ПОСЛЕДНИЕ СОБЫТИЯ",
