@@ -67,8 +67,10 @@ class IncidentUnitTests(unittest.TestCase):
                                    gap_ms=1000000, pre_ms=1000000)
         all_events = []
         for i in range(620):
+            # Each new incident requires an actual below-threshold recovery.
+            value = 0 if i % 10 == 9 else 100
             all_events.extend(detector.observe(
-                elapsed_ms=i, sample_seq=i+1, cpu_percent=100))
+                elapsed_ms=i, sample_seq=i+1, cpu_percent=value))
         self.assertEqual(detector.incidents, 3)
         self.assertEqual(len(detector._history), 512)
         self.assertGreater(detector.buffer_evictions, 0)
