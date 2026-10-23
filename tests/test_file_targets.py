@@ -130,8 +130,8 @@ class FileTargetGuiTests(unittest.TestCase):
         self._select(path)
         fake = SimpleNamespace(exe=lambda: str(path))
         with patch("blackbox_universal.window.find_running_executable",
-                   return_value=[(101, "running.exe")]), \\
-             patch("blackbox_universal.window.psutil.Process", return_value=fake), \\
+                   return_value=[(101, "running.exe")]), \
+             patch("blackbox_universal.window.psutil.Process", return_value=fake), \
              patch.object(self.window, "_attach_pid") as attach:
             self.window._attach_file_target()
             attach.assert_called_once_with(101)
@@ -140,8 +140,8 @@ class FileTargetGuiTests(unittest.TestCase):
         path = fake_pe(Path(self.tmp.name) / "stopped.exe")
         self._select(path)
         with patch("blackbox_universal.window.find_running_executable",
-                   return_value=[]), \\
-             patch("blackbox_universal.window.subprocess.Popen") as launched, \\
+                   return_value=[]), \
+             patch("blackbox_universal.window.subprocess.Popen") as launched, \
              patch.object(QMessageBox, "information", return_value=None):
             self.window._attach_file_target()
             launched.assert_not_called()
