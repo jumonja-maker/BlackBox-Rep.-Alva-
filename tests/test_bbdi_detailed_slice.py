@@ -7,6 +7,7 @@ from contextlib import closing
 import os
 from pathlib import Path
 import sqlite3
+from threading import Event
 import tempfile
 import time
 import unittest
@@ -86,6 +87,65 @@ class SidecarLifecycleTests(unittest.TestCase):
             with self.assertRaisesRegex(DetailSensorError, "DETAILED_SESSION_UNAVAILABLE"):
                 cap.start()
             self.assertEqual(planted.read_bytes(), b"KEEP")
+
+    def test_blocked_collector_retains_ownership_until_exit(self):
+        """A slow OS API must not permit rebind while old SQLite is open."""
+        entered, release = Event(), Event()
+
+        def slow_collector(pid, created):
+            entered.set()
+            release.wait(10)
+            raise DetailSensorError("SENSOR_UNAVAILABLE")
+
+        with tempfile.TemporaryDirectory() as directory:
+            probe = ReadOnlyProbe(output_root=Path(directory))
+            probe.attach(os.getpid())
+            probe.start()
+            cap = None
+            try:
+                with patch("blackbox_universal.monitor.DetailedCapture",
+                           side_effect=lambda folder, pid, created, origin: DetailedCapture(
+                               folder, pid, created, origin, interval_s=0.5,
+                               collector=slow_collector)):
+                    probe.set_detailed_capture(True)
+                cap = probe.detailed_capture
+                self.assertTrue(entered.wait(5))
+                probe.set_detailed_capture(False)
+                self.assertIsNone(probe.detailed_capture)
+                self.assertIs(probe._pending_detailed, cap)
+                self.assertEqual(probe.last_error, "DETAILED_CAPTURE_STOP_PENDING")
+                with self.assertRaisesRegex(RuntimeError, "DETAILED_CAPTURE_STOP_PENDING"):
+                    probe.set_detailed_capture(True)
+                probe.stop()
+                with self.assertRaisesRegex(RuntimeError, "DETAILED_CAPTURE_STOP_PENDING"):
+                    probe.attach(os.getpid())
+                with self.assertRaisesRegex(RuntimeError, "DETAILED_CAPTURE_STOP_PENDING"):
+                    probe.start()
+                release.set()
+                self.assertTrue(cap.stop(timeout=5))
+                self.assertEqual(summarize_detail(probe.session_folder)["status"], "STOPPED")
+                probe.attach(os.getpid())
+                self.assertIsNone(probe._pending_detailed)
+            finally:
+                release.set()
+                if cap is not None:
+                    cap.stop(timeout=5)
+                if probe.active:
+                    probe.stop()
+
+    def test_unexpected_collector_exception_is_not_clean_stop(self):
+        def failing_collector(pid, created):
+            raise RuntimeError("unexpected internal collector fault")
+
+        with tempfile.TemporaryDirectory() as directory:
+            cap = DetailedCapture(Path(directory), os.getpid(), 1.0,
+                                  time.monotonic_ns(), collector=failing_collector)
+            cap.start()
+            self.assertTrue(cap.stop(timeout=5))
+            self.assertEqual(cap.status, "SENSOR_INTERNAL_FAILURE")
+            self.assertEqual(cap.error, "RuntimeError")
+            self.assertEqual(summarize_detail(Path(directory))["status"],
+                             "SENSOR_INTERNAL_FAILURE")
 
     def test_qt_deep_control_is_optin_and_keeps_five_pages(self):
         from PySide6.QtWidgets import QApplication
