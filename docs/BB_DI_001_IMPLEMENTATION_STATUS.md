@@ -77,7 +77,7 @@ Status rules: **PASS** needs actual user-facing integration, automated tests and
 | M-063 | PARTIAL | src/blackbox_core/detailed_capture.py; tests/test_bbdi_detailed_slice.py | Thread/child/size limits; 8h performance not verified |
 | M-064 | NOT-IMPLEMENTED | — | Required full capability not present; see original order |
 | M-065 | NOT-IMPLEMENTED | — | Required full capability not present; see original order |
-| M-066 | PARTIAL | blackbox_universal/base_sample_worker.py; src/blackbox_core/event_journal.py; blackbox_universal/monitor.py; src/blackbox_core/storage.py; tests/test_bbdi_event_journal.py | Bounded FIFO SQLite event writer and periodic sample QThread, but no fully async action acknowledgements, global unified queue, deadlines, measured backpressure or hard quota |
+| M-066 | PARTIAL | blackbox_universal/base_sample_worker.py; src/blackbox_core/event_journal.py; src/blackbox_core/sampling_health.py; blackbox_universal/window.py; tests/test_bbdi_sampling_health.py | Bounded event FIFO, periodic QThread and observed Qt busy callback counts; still no guaranteed missing OS sample detection, unified owner queue, hard deadlines or quota |
 | M-067 | NOT-IMPLEMENTED | — | Required full capability not present; see original order |
 | M-068 | NOT-IMPLEMENTED | — | Required full capability not present; see original order |
 | M-069 | NOT-IMPLEMENTED | — | Required full capability not present; see original order |
@@ -141,6 +141,12 @@ Status rules: **PASS** needs actual user-facing integration, automated tests and
 | FIX-11 | NOT-RUN | — | No independent full-scenario Windows/EXE acceptance evidence for this exact item |
 | FIX-12 | NOT-RUN | — | No independent full-scenario Windows/EXE acceptance evidence for this exact item |
 
+## Bounded sampling backpressure evidence (still PARTIAL)
+
+- `src/blackbox_core/sampling_health.py`, `blackbox_universal/window.py` and `monitor.py`: deterministic, bounded count of delivered Qt timer callbacks skipped while the base sampler is in-flight, persisted **once per episode** before Stop, and exposed in live snapshots. An error persisting this observation ends the session as `STORAGE_ERROR`, not a false success.
+- `src/blackbox_core/report.py`: separate source-qualified busy Qt timer callback count and episode count in JSON/HTML; imported malformed counts rejected. These are **not** OS sample gaps, do **not** count callbacks Qt coalesced, and do **not** prove a Windows hang.
+- `tests/test_bbdi_sampling_health.py` and `docs/BB_DI_001_SAMPLING_BACKPRESSURE.md` document coverage, counter bounds, clock/interval anomalies, slow-sensor tests and limitations. Full monotonic measurement schedule coverage and 8-hour endurance are still NOT-RUN.
+
 ## Bounded GUI SQLite event journal slice (still PARTIAL)
 
 - `src/blackbox_core/event_journal.py` and `src/blackbox_core/storage.py`: one session-owned 64-slot FIFO for schema1 events, external SQLite worker connection, nonblocking lifecycle enqueue, **durable** action/incident/user marker acknowledgement before state changes, ordered barrier before session finish.
@@ -176,7 +182,7 @@ Status rules: **PASS** needs actual user-facing integration, automated tests and
 ## Release blockers / next implementation order
 
 1. Complete schema2 contracts, provenance/status/capability vocabulary, monotonic↔UTC mapping and V1 read-only/V2 readers with atomic lifecycle.
-2. Finish fully async UI actions/acknowledgements, owner-managed session writer across samples/events/finish and reports, stop/join deadlines, worker health metrics and dropped-tick records; periodic base sample INSERT and GUI event INSERT now run in worker-owned connections.
+2. Finish fully async UI actions/acknowledgements, owner-managed session writer across samples/events/finish and reports, stop/join deadlines and worker health metrics; **observed Qt busy-callback losses are now recorded**, but actual dropped OS samples / Qt-coalesced timer callbacks remain unknown.
 3. Extend the **new bounded adjacent-snapshot TID CPU%** to selected full-session intervals, per-field quality, tree/history, charts, CSV and compare. Existing table/HTML/JSON only covers a recent bounded window; TID birth identity is unverified.
 4. Add real bounded Windows HWND responsiveness and WCT with positive/negative Windows fixtures and explicit unsupported/denied states; opt-in ETW where capable.
 5. Build complete evidence-led Investigation/compare/timeline/experiment history; 8h Standard, 1h Detailed, 12 fixtures, AC-01..36.
