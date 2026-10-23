@@ -188,7 +188,8 @@ class ReadOnlyProbe:
         self.started_at = utc_stamp()
         self._event("OBSERVATION_STARTED")
 
-    def stop(self, reason: str = "USER_STOPPED") -> None:
+    def stop(self, reason: str = "USER_STOPPED", *,
+             defer_report: bool = False) -> None:
         if not self.active or self._store is None:
             return
         status = {
@@ -240,14 +241,30 @@ class ReadOnlyProbe:
             self._event("STORAGE_ERROR", exc.code)
         finally:
             store.close()
+        if not defer_report:
+            self.generate_report()
+
+    def generate_report(self) -> None:
+        """Compatibility sync report path for CLI. Qt uses ReportWorker."""
         if self.session_folder is None:
             return
         try:
-            self.report_result = write_report(self.session_folder)
-            self._event("EVIDENCE_SAVED", "SQLite, HTML, JSON")
+            report = write_report(self.session_folder)
+            self.complete_report(report, "")
         except (ObserverError, OSError, ValueError, TypeError):
+            self.complete_report(None, "REPORT_UNAVAILABLE")
+
+    def complete_report(self, report: dict | None, error: str) -> None:
+        """Accept an already finished report on the GUI-owning thread only."""
+        if self.active or self._store is not None:
+            raise RuntimeError("REPORT_NOT_READY")
+        if error or type(report) is not dict:
+            self.report_result = None
             self.last_error = "REPORT_UNAVAILABLE"
             self._event("REPORT_UNAVAILABLE", "SQLite data retained")
+        else:
+            self.report_result = report
+            self._event("EVIDENCE_SAVED", "SQLite, HTML, JSON")
 
     def _accept_persisted_sample(self, sample, seq: int) -> dict:
         """Apply an already committed sample on the owner (Qt) thread only.
