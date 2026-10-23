@@ -33,6 +33,7 @@ from PySide6.QtWidgets import (
 from .monitor import ReadOnlyProbe, available_processes, save_snapshot
 from .investigation_worker import InvestigationWorker, session_bounds
 from .thread_detail_worker import ThreadDetailWorker
+from .base_sample_worker import BaseSampleWorker
 from .investigation_view import title as investigation_title, interval_text as investigation_interval, fact_text as investigation_facts, finding_details, summary_text
 from .file_targets import InspectedFile, inspect_file, find_running_executable
 from .i18n import translate
@@ -128,6 +129,10 @@ class UniversalWindow(QMainWindow):
         self._investigation_result: dict | None = None
         self._investigation_busy = False
         self._thread_detail_worker: ThreadDetailWorker | None = None
+        self._base_sample_worker: BaseSampleWorker | None = None
+        self._pending_base_stop: str | None = None
+        self._base_sample_error: str | None = None
+        self._pending_close = False
         icon_dir = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent.parent))
         icon_file = icon_dir / "assets" / "blackbox.png"
         if icon_file.is_file():
@@ -142,7 +147,8 @@ class UniversalWindow(QMainWindow):
         self._navigate("dashboard")
         self._set_language(self.language)
         self._timer = QTimer(self)
-        self._timer.timeout.connect(self._tick)
+        # Production Qt ticks NEVER call the synchronous ReadOnlyProbe.tick().
+        self._timer.timeout.connect(self._request_background_sample)
         self._timer.start(1000)
         if self._prefs.value("check_updates_at_start", True, type=bool):
             QTimer.singleShot(1800, self._automatic_update_check)
@@ -1154,6 +1160,8 @@ class UniversalWindow(QMainWindow):
         self._attach_pid(int(pid_item.data(Qt.ItemDataRole.UserRole)))
 
     def _start(self) -> None:
+        if self._base_sample_worker is not None or self._pending_base_stop is not None:
+            return
         try:
             self.probe.start()
         except (psutil.Error, OSError, RuntimeError, ObserverError):
@@ -1170,10 +1178,79 @@ class UniversalWindow(QMainWindow):
         self._update_all()
 
     def _stop(self) -> None:
-        self.probe.stop()
+        # A worker may still hold the independent sample-writing SQLite
+        # connection. Do not close the owner store or export a partial report.
+        if self._base_sample_worker is not None:
+            self._pending_base_stop = "USER_STOPPED"
+            self._update_all()
+            return
+        self._complete_base_stop("USER_STOPPED")
+
+    def _complete_base_stop(self, reason: str) -> None:
+        self._pending_base_stop = None
+        self.probe.stop(reason)
         self._set_report_status(
             "saved" if self.probe.report_result is not None else "unavailable")
         self._update_all()
+
+    def _request_background_sample(self) -> None:
+        if not self.probe.active:
+            self._update_all()
+            return
+        if self._base_sample_worker is not None or self._pending_base_stop is not None:
+            return  # bounded backpressure: never accumulate a worker queue
+        core = self.probe._core
+        folder = self.probe.session_folder
+        if core is None or folder is None:
+            self._complete_base_stop("SAMPLE_UNAVAILABLE")
+            return
+        worker = BaseSampleWorker(core, folder, self)
+        self._base_sample_worker = worker
+        self._base_sample_error = None
+        worker.result_ready.connect(self._base_sample_ready)
+        worker.finished.connect(self._base_sample_finished)
+        worker.start()
+
+    def _base_sample_ready(self, payload: object, error: str) -> None:
+        if error:
+            self._base_sample_error = error
+            return
+        if type(payload) is not dict:
+            self._base_sample_error = "SAMPLE_UNAVAILABLE"
+            return
+        if (payload.get("folder") != str(self.probe.session_folder)
+                or self._pending_base_stop == "UI_CLOSED" and self.probe.pid is None):
+            self._base_sample_error = "INVALID_DATA"
+            return
+        try:
+            self.probe.accept_background_sample(payload["sample"], payload["seq"])
+        except (ObserverError, KeyError, TypeError, ValueError):
+            self._base_sample_error = "STORAGE_ERROR"
+        self._update_all()
+
+    def _base_sample_finished(self) -> None:
+        worker = self._base_sample_worker
+        self._base_sample_worker = None
+        if worker is not None:
+            worker.deleteLater()
+        code = self._base_sample_error
+        self._base_sample_error = None
+        stop_reason = self._pending_base_stop
+        if code:
+            # Worker error is not a normal user stop; persist an explicit
+            # lifecycle cause after its SQLite connection has been closed.
+            self._complete_base_stop(
+                code if code in ("PROCESS_EXITED", "PID_REUSED",
+                                 "ACCESS_DENIED", "SAMPLE_UNAVAILABLE",
+                                 "STORAGE_ERROR") else "SAMPLE_UNAVAILABLE")
+        elif stop_reason is not None:
+            self._complete_base_stop(stop_reason)
+        else:
+            self._update_all()
+        if self._pending_close:
+            self._pending_close = False
+            QTimer.singleShot(0, self.close)
+
 
     def _change_interval(self, index: int) -> None:
         if hasattr(self, "_timer"):
@@ -1238,10 +1315,12 @@ class UniversalWindow(QMainWindow):
         selected = self.probe.pid is not None
         running = self.probe.active
         self.start_btn.setEnabled(selected and not running)
-        self.stop_btn.setEnabled(running)
-        self.mark_problem_btn.setEnabled(running and self.probe.last_elapsed_ms is not None)
-        self.auto_capture_btn.setEnabled(running)
-        self.detailed_capture_btn.setEnabled(running)
+        stopping = self._pending_base_stop is not None
+        self.stop_btn.setEnabled(running and not stopping)
+        self.mark_problem_btn.setEnabled(running and not stopping and
+                                         self.probe.last_elapsed_ms is not None)
+        self.auto_capture_btn.setEnabled(running and not stopping)
+        self.detailed_capture_btn.setEnabled(running and not stopping)
         folder_for_threads = self.probe.session_folder
         self.thread_detail_refresh.setEnabled(
             self._thread_detail_worker is None and folder_for_threads is not None
@@ -1253,10 +1332,10 @@ class UniversalWindow(QMainWindow):
             "AUTO INCIDENT CAPTURE: ON" if self.probe.incident_capture is not None
             else "AUTO INCIDENT CAPTURE: OFF"))
         current_action = self.probe.actions.state
-        self.action_prepare_btn.setEnabled(running and current_action in ("IDLE", "COMPLETED", "ABORTED"))
-        self.action_repeat_btn.setEnabled(running and current_action == "COMPLETED")
-        self.action_begin_btn.setEnabled(running and self.probe.actions.ready_to_start())
-        self.action_end_btn.setEnabled(running and current_action == "RUNNING")
+        self.action_prepare_btn.setEnabled(running and not stopping and current_action in ("IDLE", "COMPLETED", "ABORTED"))
+        self.action_repeat_btn.setEnabled(running and not stopping and current_action == "COMPLETED")
+        self.action_begin_btn.setEnabled(running and not stopping and self.probe.actions.ready_to_start())
+        self.action_end_btn.setEnabled(running and not stopping and current_action == "RUNNING")
         repeat_count = len(self.probe.actions.completed)
         self.action_state_label.setText(
             self._t("Action state") + ": " + current_action +
@@ -1667,6 +1746,12 @@ class UniversalWindow(QMainWindow):
             "No cloud upload, tunneling, process injection or admin escalation.")
 
     def closeEvent(self, event) -> None:
+        if self._base_sample_worker is not None:
+            self._pending_base_stop = "UI_CLOSED"
+            self._pending_close = True
+            self._timer.stop()
+            event.ignore()
+            return
         if (self._thread_detail_worker is not None and
                 self._thread_detail_worker.isRunning()):
             event.ignore()
