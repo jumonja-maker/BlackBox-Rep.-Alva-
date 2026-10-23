@@ -1,8 +1,8 @@
 """The BLACK.BOX Universal desktop shell.
 
 Classic desktop window semantics + warm illustrated 90s palette.
-Visible application actions work independently of any privately provided
-optional diagnostics runtime. Platform provenance stays in technical reports.
+The application observes local process metrics and inspects file metadata
+without invoking an external diagnostic runtime.
 """
 from __future__ import annotations
 
@@ -22,13 +22,14 @@ from PySide6.QtCore import Qt, QTimer, QThread, Signal, QSettings, QUrl
 from PySide6.QtGui import QAction, QDesktopServices, QIcon
 from PySide6.QtWidgets import (
     QAbstractItemView, QCheckBox, QComboBox, QFileDialog, QFrame,
-    QGridLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
+    QGridLayout, QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit,
     QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QPushButton,
     QScrollArea, QStackedWidget, QTableWidget, QTableWidgetItem,
     QVBoxLayout, QWidget,
 )
 
 from .monitor import ReadOnlyProbe, available_processes, save_snapshot
+from .file_targets import InspectedFile, inspect_file, find_running_executable
 from .i18n import translate
 from .releases import (Release, NoOfficialRelease, check_latest_release, stage_release,
                        runtime_directory, MAINTENANCE_NAME)
@@ -121,6 +122,7 @@ class UniversalWindow(QMainWindow):
         if icon_file.is_file():
             self.setWindowIcon(QIcon(str(icon_file)))
         self._process_rows: list[dict] = []
+        self._selected_file: InspectedFile | None = None
         self._nav_buttons: dict[str, QPushButton] = {}
         self._page_ids: dict[str, int] = {}
         self._build()
@@ -376,6 +378,35 @@ class UniversalWindow(QMainWindow):
         refresh.clicked.connect(self._refresh_process_list)
         head.addWidget(refresh)
         content.addLayout(head)
+
+        file_row = QHBoxLayout()
+        file_row.setSpacing(8)
+        self.browse_file_button = _button("▣  SELECT APPLICATION FILE")
+        self.browse_file_button.clicked.connect(self._choose_application_file)
+        file_row.addWidget(self.browse_file_button)
+        self.selected_file_path = QLineEdit()
+        self.selected_file_path.setReadOnly(True)
+        self.selected_file_path.setPlaceholderText("No application file selected")
+        file_row.addWidget(self.selected_file_path, 1)
+        content.addLayout(file_row)
+
+        file_actions = QHBoxLayout()
+        file_actions.setSpacing(8)
+        self.find_file_process_button = _button("◈  FIND RUNNING EXE")
+        self.find_file_process_button.setEnabled(False)
+        self.find_file_process_button.clicked.connect(self._attach_file_target)
+        file_actions.addWidget(self.find_file_process_button)
+        self.launch_exe_button = _button("▶  LAUNCH SELECTED EXE")
+        self.launch_exe_button.setEnabled(False)
+        self.launch_exe_button.clicked.connect(self._launch_file_target)
+        file_actions.addWidget(self.launch_exe_button)
+        file_actions.addStretch()
+        content.addLayout(file_actions)
+        self.file_description = _label(
+            "Select any file to view its local metadata. Only running EXE files can be attached.",
+            "caption")
+        content.addWidget(self.file_description)
+
         self.process_search = QLineEdit()
         self.process_search.setPlaceholderText("Search by process name or PID…")
         self.process_search.setClearButtonEnabled(True)
@@ -534,7 +565,7 @@ class UniversalWindow(QMainWindow):
         changing = {self.target_name, self.target_pid, self.state_text,
                     self.live_badge, self.toolbar_state, self.clock,
                     self.session_location, self.process_count,
-                    self.report_status_label}
+                    self.report_status_label, self.file_description}
         from PySide6.QtWidgets import QLabel
         for label in self.findChildren(QLabel):
             if label in changing or label.objectName() == "metricValue":
@@ -573,6 +604,9 @@ class UniversalWindow(QMainWindow):
                 header.setText(self._t(str(original)))
         self.process_search.setPlaceholderText(
             self._t("Search by process name or PID…"))
+        self.selected_file_path.setPlaceholderText(
+            self._t("No application file selected"))
+        self._render_selected_file()
         for i in range(self.interval_combo.count()):
             seconds = self.interval_combo.itemData(i) // 1000
             source = f"Every {seconds} second" + ("s" if seconds > 1 else "")
@@ -809,6 +843,128 @@ class UniversalWindow(QMainWindow):
             f"{len(visible)} из {len(self._process_rows)} процессов" if self.language == "RU"
             else f"{len(visible)} shown / {len(self._process_rows)} available")
 
+    def _choose_application_file(self) -> None:
+        chosen, _ = QFileDialog.getOpenFileName(
+            self, self._t("Choose an application or another file"), "",
+            self._t("Applications and related files (*.exe *.com *.dll *.sys *.msi *.bat *.cmd *.ps1 *.py *.jar);;All files (*)"))
+        if not chosen:
+            return
+        try:
+            inspected = inspect_file(chosen)
+        except (OSError, ValueError, OverflowError):
+            QMessageBox.warning(
+                self, "BLACK.BOX Universal", self._t("Cannot read the selected file."))
+            return
+        self._selected_file = inspected
+        self.selected_file_path.setText(str(inspected.path))
+        self.selected_file_path.setToolTip(str(inspected.path))
+        self.find_file_process_button.setEnabled(inspected.executable_target)
+        self.launch_exe_button.setEnabled(
+            inspected.executable_target and os.name == "nt")
+        self._render_selected_file()
+
+    def _render_selected_file(self) -> None:
+        item = self._selected_file
+        if item is None:
+            self.file_description.setText(self._t(
+                "Select any file to view its local metadata. Only running EXE files can be attached."))
+            self.file_description.setToolTip("")
+            return
+        units = f"{item.size_bytes:,} bytes"
+        kind = item.kind
+        architecture = f" · {item.architecture}" if item.architecture else ""
+        details = f"{kind}{architecture} · {units} · {item.modified_utc}"
+        if item.executable_target:
+            note = self._t(
+                "EXE ready: find its running process, or explicitly launch it first.")
+        else:
+            note = self._t(
+                "Metadata only: this file is not a runnable Windows EXE target.")
+        self.file_description.setText(f"{details}\n{note}")
+        self.file_description.setToolTip(
+            "SHA-256: " + item.sha256 if item.sha256 else self._t(
+                "SHA-256 skipped for files larger than 16 MiB."))
+
+    def _attach_pid(self, pid: int) -> None:
+        try:
+            self.probe.attach(pid)
+        except (psutil.Error, OSError, ValueError, RuntimeError, ObserverError):
+            QMessageBox.warning(
+                self, self._t("Cannot attach"), self._t(
+                    "This process is unavailable or protected. Choose another one."))
+            return
+        self._update_all()
+        self._navigate("dashboard")
+
+    def _attach_file_target(self) -> None:
+        item = self._selected_file
+        if item is None or not item.executable_target:
+            return
+        if self.probe.active:
+            QMessageBox.information(
+                self, "BLACK.BOX Universal", self._t(
+                    "Stop observing before choosing another application."))
+            return
+        matches = find_running_executable(item.path)
+        if not matches:
+            QMessageBox.information(
+                self, "BLACK.BOX Universal", self._t(
+                    "This EXE is not running. You can launch it explicitly, or open it yourself and search again."))
+            return
+        if len(matches) > 1:
+            choices = [f"{name} · PID {pid}" for pid, name in matches]
+            choice, ok = QInputDialog.getItem(
+                self, self._t("Choose running instance"), self._t(
+                    "Several instances use this executable:"), choices, 0, False)
+            if not ok:
+                return
+            pid = matches[choices.index(choice)][0]
+        else:
+            pid = matches[0][0]
+        # Recheck the executable identity before attaching: a PID may have
+        # vanished or been reused after enumeration.
+        try:
+            process = psutil.Process(pid)
+            if os.path.normcase(os.path.realpath(process.exe())) != (
+                    os.path.normcase(os.path.realpath(str(item.path)))):
+                raise psutil.NoSuchProcess(pid)
+        except (psutil.Error, OSError, ValueError):
+            QMessageBox.warning(self, "BLACK.BOX Universal", self._t(
+                "The matched process changed or is inaccessible. Search again."))
+            return
+        self._attach_pid(pid)
+
+    def _launch_file_target(self) -> None:
+        item = self._selected_file
+        if item is None or not item.executable_target or os.name != "nt":
+            return
+        if self.probe.active:
+            QMessageBox.information(self, "BLACK.BOX Universal", self._t(
+                "Stop observing before choosing another application."))
+            return
+        confirmation = QMessageBox.question(
+            self, "BLACK.BOX Universal",
+            self._t("Run this EXE on your computer? BLACK.BOX cannot guarantee the file is safe.") +
+            "\n\n" + str(item.path),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No)
+        if confirmation != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            # Never use the shell, scripts, command interpreters, or implicit
+            # file association. Revalidate immediately before execution.
+            fresh = inspect_file(item.path)
+            if not fresh.executable_target or fresh.size_bytes != item.size_bytes or (
+                    item.sha256 is not None and fresh.sha256 != item.sha256):
+                raise ValueError("SELECTED_FILE_CHANGED")
+            process = subprocess.Popen(
+                [str(item.path)], cwd=str(item.path.parent), close_fds=True)
+        except (OSError, ValueError, subprocess.SubprocessError):
+            QMessageBox.warning(self, "BLACK.BOX Universal", self._t(
+                "Could not start the selected EXE. No observation was started."))
+            return
+        self._attach_pid(process.pid)
+
     def _attach_selected(self) -> None:
         selected = self.process_table.selectedItems()
         if not selected:
@@ -818,15 +974,7 @@ class UniversalWindow(QMainWindow):
         pid_item = self.process_table.item(selected[0].row(), 1)
         if pid_item is None:
             return
-        try:
-            self.probe.attach(int(pid_item.data(Qt.ItemDataRole.UserRole)))
-        except (psutil.Error, OSError, ValueError, RuntimeError, ObserverError):
-            QMessageBox.warning(
-                self, "Cannot attach",
-                "This process is unavailable or protected. Choose another one.")
-            return
-        self._update_all()
-        self._navigate("dashboard")
+        self._attach_pid(int(pid_item.data(Qt.ItemDataRole.UserRole)))
 
     def _start(self) -> None:
         try:
