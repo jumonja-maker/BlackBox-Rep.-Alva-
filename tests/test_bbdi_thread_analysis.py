@@ -109,6 +109,19 @@ class ThreadDeltaTests(unittest.TestCase):
             self.assertIn("THREAD_CPU_COUNTER_RESET", result["warnings"])
             self.assertIn("NON_ADJACENT_OR_INVALID_SAMPLE_GAPS", result["warnings"])
 
+    def test_duplicate_tid_in_corrupted_sidecar_is_rejected(self):
+        with tempfile.TemporaryDirectory() as root:
+            folder = Path(root)
+            path = fixture(folder)
+            with closing(sqlite3.connect(path)) as db:
+                db.execute("INSERT INTO thread_samples VALUES (?,?,?,?,?)",
+                           (2, 77, 101, 9.0, 0.0))
+                db.commit()
+            result = analyze_detail_threads(folder)
+            self.assertEqual(result["status"], "INVALID_DETAILED_DATA")
+            self.assertEqual(result["top_threads"], [])
+            self.assertIn("DUPLICATE_TID_SAMPLE", result["warnings"])
+
     def test_readonly_source_hash_is_unchanged_and_missing_is_not_zero(self):
         import hashlib
         with tempfile.TemporaryDirectory() as root:
