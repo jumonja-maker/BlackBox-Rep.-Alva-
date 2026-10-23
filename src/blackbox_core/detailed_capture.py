@@ -11,6 +11,11 @@ import sqlite3
 from threading import Event, Thread
 import time
 
+from .detail_contracts import (
+    ClockAnchor, FIELD_STATUS_COLUMNS, FIELD_UNITS, SOURCE_KIND,
+    VERIFICATION_CLASS, capture_clock_anchor, sample_field_statuses,
+)
+
 
 class DetailSensorError(ValueError):
     pass
@@ -33,24 +38,49 @@ def sample_process(pid: int, created: float, *, thread_limit: int = 256,
             thread_count = p.num_threads()
             try:
                 io = p.io_counters()
-            except (AttributeError, NotImplementedError, psutil.AccessDenied, OSError):
-                io = None
+                io_status = "OK"
+            except psutil.AccessDenied:
+                io, io_status = None, "ACCESS_DENIED"
+            except (AttributeError, NotImplementedError):
+                io, io_status = None, "UNSUPPORTED"
+            except OSError:
+                io, io_status = None, "NOT_OBSERVED"
             try:
                 tids = p.threads()
-            except (psutil.AccessDenied, NotImplementedError, OSError):
-                tids = None
+                threads_status = "OK"
+            except psutil.AccessDenied:
+                tids, threads_status = None, "ACCESS_DENIED"
+            except NotImplementedError:
+                tids, threads_status = None, "UNSUPPORTED"
+            except OSError:
+                tids, threads_status = None, "NOT_OBSERVED"
         try:
             full = p.memory_full_info()
             private = getattr(full, "private", None)
             uss = getattr(full, "uss", None)
-        except (psutil.AccessDenied, OSError, NotImplementedError):
+            private_status = "OK" if private is not None else "UNSUPPORTED"
+            uss_status = "OK" if uss is not None else "UNSUPPORTED"
+        except psutil.AccessDenied:
             private, uss = None, None
+            private_status = uss_status = "ACCESS_DENIED"
+        except NotImplementedError:
+            private, uss = None, None
+            private_status = uss_status = "UNSUPPORTED"
+        except OSError:
+            private, uss = None, None
+            private_status = uss_status = "NOT_OBSERVED"
         try:
             handles = p.num_handles() if hasattr(p, "num_handles") else None
-        except (psutil.AccessDenied, OSError, NotImplementedError):
-            handles = None
+            handle_status = "OK" if handles is not None else "UNSUPPORTED"
+        except psutil.AccessDenied:
+            handles, handle_status = None, "ACCESS_DENIED"
+        except NotImplementedError:
+            handles, handle_status = None, "UNSUPPORTED"
+        except OSError:
+            handles, handle_status = None, "NOT_OBSERVED"
         descendants = []
         children_total = None
+        children_status = "OK"
         try:
             all_children = p.children(recursive=True)
             children_total = len(all_children)
@@ -70,8 +100,10 @@ def sample_process(pid: int, created: float, *, thread_limit: int = 256,
                     })
                 except (psutil.NoSuchProcess, psutil.ZombieProcess, psutil.AccessDenied, OSError):
                     continue
-        except (psutil.NoSuchProcess, psutil.AccessDenied, OSError):
-            pass
+        except psutil.AccessDenied:
+            children_status = "ACCESS_DENIED"
+        except (psutil.NoSuchProcess, OSError):
+            children_status = "NOT_OBSERVED"
         if abs(float(p.create_time()) - created) > 0.000001:
             raise DetailSensorError("PID_REUSED")
         ended = time.monotonic_ns()
@@ -95,6 +127,12 @@ def sample_process(pid: int, created: float, *, thread_limit: int = 256,
             "children_omitted": (max(0, children_total-child_limit)
                                  if children_total is not None else None),
             "source": "PSUTIL_EXTERNAL_COUNTERS_NOT_CAUSAL_PROOF",
+            "sensor_status": {
+                "rss_bytes": "OK", "private_bytes": private_status,
+                "uss_bytes": uss_status, "handle_count": handle_status,
+                "io": io_status, "threads": threads_status,
+                "children": children_status,
+            },
         }
     except DetailSensorError:
         raise
@@ -203,9 +241,34 @@ class DetailedCapture:
                 CREATE TABLE sensor_errors (
                     seq INTEGER PRIMARY KEY AUTOINCREMENT,
                     time_monotonic_ns INTEGER, code TEXT NOT NULL);
+                -- Additive provenance tables: legacy v2 readers ignore them.
+                CREATE TABLE detail_clock_mapping (
+                    monotonic_anchor_ns INTEGER NOT NULL,
+                    utc_anchor_ns INTEGER NOT NULL,
+                    uncertainty_ns INTEGER NOT NULL,
+                    clock_source TEXT NOT NULL);
+                CREATE TABLE detail_capabilities (
+                    field_name TEXT PRIMARY KEY, source_kind TEXT NOT NULL,
+                    verification_class TEXT NOT NULL, unit TEXT NOT NULL);
+                CREATE TABLE detail_sample_quality (
+                    sample_seq INTEGER PRIMARY KEY,
+                    utc_estimate_ns INTEGER NOT NULL,
+                    source_kind TEXT NOT NULL,
+                    verification_class TEXT NOT NULL,
+                    rss_status TEXT NOT NULL, private_status TEXT NOT NULL,
+                    uss_status TEXT NOT NULL, handle_status TEXT NOT NULL,
+                    io_status TEXT NOT NULL, threads_status TEXT NOT NULL,
+                    children_status TEXT NOT NULL);
             """)
+            anchor = capture_clock_anchor()
             conn.execute("INSERT INTO detail_metadata VALUES (2,?,?,?,?)",
                          (self.pid, self.created, self.origin_ns, "RUNNING"))
+            conn.execute("INSERT INTO detail_clock_mapping VALUES (?,?,?,?)",
+                         (anchor.monotonic_ns, anchor.utc_ns,
+                          anchor.uncertainty_ns, anchor.source))
+            conn.executemany("INSERT INTO detail_capabilities VALUES (?,?,?,?)",
+                             ((field, SOURCE_KIND, VERIFICATION_CLASS, unit)
+                              for field, unit in FIELD_UNITS.items()))
             conn.commit()
             self.status = "RUNNING"
             while not self.stop_event.is_set():
@@ -217,6 +280,8 @@ class DetailedCapture:
                     if x["time_ns"] < self.origin_ns:
                         raise DetailSensorError("INVALID_MONOTONIC_CLOCK")
                     seq = self.samples + 1
+                    statuses = sample_field_statuses(x)
+                    utc_estimate_ns = anchor.estimate_utc_ns(x["time_ns"])
                     conn.execute(
                         "INSERT INTO process_samples VALUES (" + ",".join(["?"]*19) + ")",
                         (seq, x["time_ns"],
@@ -234,9 +299,19 @@ class DetailedCapture:
                                      ((seq, c["pid"], c["created"], c["rss_bytes"],
                                        c["cpu_user_s"], c["cpu_system_s"])
                                       for c in x["children"]))
+                    conn.execute(
+                        "INSERT INTO detail_sample_quality VALUES (" +
+                        ",".join("?" for _ in range(4 + len(FIELD_STATUS_COLUMNS))) +
+                        ")",
+                        (seq, utc_estimate_ns, SOURCE_KIND, VERIFICATION_CLASS,
+                         *(statuses[column] for column in FIELD_STATUS_COLUMNS)))
                     conn.commit()
                     self.samples += 1
                 except (DetailSensorError, KeyError, TypeError, ValueError) as exc:
+                    # A generator or field validation may fail AFTER the
+                    # parent process row was inserted. Never commit partial
+                    # samples along with the diagnostic error.
+                    conn.rollback()
                     code = (str(exc) if isinstance(exc, DetailSensorError)
                             else "SENSOR_DATA_INVALID")
                     conn.execute("INSERT INTO sensor_errors(time_monotonic_ns,code) VALUES (?,?)",
