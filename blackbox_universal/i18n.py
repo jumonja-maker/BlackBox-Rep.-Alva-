@@ -123,6 +123,7 @@ RU = {
 "◈  LOAD THREAD CPU":"◈  ЗАГРУЗИТЬ CPU ПОТОКОВ",
 "MEAN CPU %":"СРЕДНЯЯ CPU %","PEAK CPU %":"ПИК CPU %",
 "PAIRS":"ПАРЫ ЗАМЕРОВ",
+"SEGMENT":"СЕГМЕНТ",
 "Reading saved thread counters…":"Чтение сохранённых счётчиков потоков…",
 "Thread detail is unavailable; source data were not changed.":"Данные потоков недоступны; исходная запись не изменена.",
 "Thread CPU is derived from adjacent snapshots only.":"CPU потоков вычислен только по соседним измерениям.",

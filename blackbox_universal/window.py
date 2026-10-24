@@ -952,7 +952,7 @@ class UniversalWindow(QMainWindow):
         self.process_history_table.set_language(self.language)
         self._render_process_history_summary()
         if self._thread_detail_payload is not None:
-            self._thread_detail_ready(self._thread_detail_payload,"")
+            self._render_thread_detail_status(self._thread_detail_payload['analysis'])
         self.process_search.setPlaceholderText(
             self._t("Search by process name or PID…"))
         self.session_event_details.setPlaceholderText(self._t(
@@ -1799,9 +1799,11 @@ class UniversalWindow(QMainWindow):
         self._thread_detail_payload=payload
         v2_rows=any("cpu_seconds" in r for r in rows)
         self.thread_detail_table.setColumnCount(7 if v2_rows else 5)
-        self.thread_detail_table.setHorizontalHeaderLabels(
-            ("TID","SEGMENT","MEAN CPU %","PEAK CPU %","PAIRS","CPU seconds","OBSERVED %") if v2_rows else
-            ("TID","SEGMENT","MEAN CPU %","PEAK CPU %","PAIRS"))
+        headers=(("TID","SEGMENT","MEAN CPU %","PEAK CPU %","PAIRS","CPU seconds","OBSERVED %") if v2_rows else
+                 ("TID","SEGMENT","MEAN CPU %","PEAK CPU %","PAIRS"))
+        self.thread_detail_table.setHorizontalHeaderLabels(tuple(self._t(h) for h in headers))
+        for column,header in enumerate(headers):
+            self.thread_detail_table.horizontalHeaderItem(column).setData(Qt.ItemDataRole.UserRole,header)
         self.thread_detail_table.setRowCount(len(rows))
         for index, record in enumerate(rows):
             for column, name in enumerate(
@@ -1813,6 +1815,11 @@ class UniversalWindow(QMainWindow):
                 item.setToolTip(
                     "PSUTIL / DERIVED; TID reuse between samples cannot be excluded.")
                 self.thread_detail_table.setItem(index, column, item)
+        self._render_thread_detail_status(detail)
+
+    def _render_thread_detail_status(self,detail):
+        # Language changes must not replace the loaded cells or the user's
+        # selected TID. Headers are translated from stable English role data.
         warnings = ", ".join(detail.get("warnings", []))
         self.thread_detail_status.setText(
             self._t("Thread CPU is derived from adjacent snapshots only.") +

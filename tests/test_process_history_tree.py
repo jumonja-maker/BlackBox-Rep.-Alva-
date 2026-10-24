@@ -177,6 +177,33 @@ class ProcessHistoryTreeTests(unittest.TestCase):
                 window.close()
                 self.app.processEvents()
 
+    def test_loaded_tid_selection_and_localized_headers_survive_language_switch(self):
+        from PySide6.QtCore import Qt
+        from blackbox_universal.window import UniversalWindow
+        with tempfile.TemporaryDirectory() as temp:
+            folder=Path(temp);recorded_tree(folder)
+            window=UniversalWindow(isolated=False,allow_update_check=False)
+            window._timer.stop()
+            try:
+                window._set_language('EN');window._load_session_interval(folder)
+                end=time.monotonic()+12
+                while window._interval_worker is not None and time.monotonic()<end:
+                    self.app.processEvents();time.sleep(.005)
+                self.assertIsNone(window._interval_worker)
+                table=window.thread_detail_table
+                self.assertEqual(table.rowCount(),1)
+                table.selectRow(0);before=table.item(0,5).text()
+                for language,title in [('RU','СРЕДНЯЯ CPU %'),('EN','MEAN CPU %')]:
+                    window._set_language(language)
+                    self.assertEqual(table.horizontalHeaderItem(2).text(),title)
+                    self.assertEqual(table.horizontalHeaderItem(2).data(Qt.ItemDataRole.UserRole),'MEAN CPU %')
+                    self.assertEqual(table.currentRow(),0)
+                    self.assertTrue(table.selectionModel().selectedRows())
+                    self.assertEqual(table.item(0,5).text(),before)
+                    self.assertIn('PID 123',window.thread_detail_status.text())
+            finally:
+                window.close();self.app.processEvents()
+
 
 if __name__ == "__main__":
     unittest.main()
