@@ -5,7 +5,10 @@ No third-party screenshots, icon packs, fonts or proprietary artwork bundled.
 """
 from __future__ import annotations
 
-from PySide6.QtGui import QColor, QFont, QPalette
+import os
+from pathlib import Path
+
+from PySide6.QtGui import QColor, QFont, QFontInfo, QFontDatabase, QPalette, QRawFont, QTextLayout
 from PySide6.QtWidgets import QApplication
 
 COLORS = {
@@ -181,7 +184,7 @@ QLineEdit {
     selection-background-color: #078b84;
     selection-color: #ffffff;
 }
-QTableWidget {
+QTableWidget, QTreeWidget {
     background: #fffaf0;
     color: #302c43;
     gridline-color: #e2cdbf;
@@ -219,7 +222,58 @@ QToolTip {
 """
 
 
+def _load_windows_offscreen_fonts(app: QApplication) -> None:
+    """Qt's basic offscreen font database does not enumerate Windows fonts.
+
+    Register only installed OS fonts in this process, with no download, font
+    bundling or system installation. Native Windows uses its normal database.
+    """
+    if os.name != "nt" or app.platformName() != "offscreen":
+        return
+    if app.property("blackbox_offscreen_fonts_loaded"):
+        return
+    folder = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "Fonts"
+    for name in ("segoeui.ttf", "segoeuib.ttf", "consola.ttf", "consolab.ttf", "seguisym.ttf"):
+        path = folder / name
+        if path.is_file():
+            QFontDatabase.addApplicationFont(str(path))
+    app.setProperty("blackbox_offscreen_fonts_loaded", True)
+
+
+def font_coverage(app: QApplication) -> dict:
+    """QA evidence from the actual resolved font, not screenshot dimensions."""
+    cyrillic = "АБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯ"
+    alphabet = "BLACK.BOX 0123456789 " + cyrillic + cyrillic.lower()
+    rows = []
+    for family in ("Segoe UI", "Consolas"):
+        for weight in (QFont.Weight.Normal, QFont.Weight.Bold):
+            font = QFont(family, 10)
+            font.setWeight(weight)
+            raw = QRawFont.fromFont(font)
+            # Use the Unicode-codepoint overload. PySide's narrow-char overload
+            # rejects Cyrillic even when the font has its real glyphs.
+            missing = sorted({c for c in alphabet if not raw.supportsCharacter(ord(c))}) if raw.isValid() else sorted(set(alphabet))
+            rows.append({"requested_family": family, "weight": int(weight),
+                         "resolved_family": QFontInfo(font).family(),
+                         "valid": raw.isValid(), "missing_characters": missing})
+    # Check shaped fallback glyphs too: the alphabet alone cannot detect
+    # missing icons. These are the actual chrome symbols used by the shell.
+    symbols="▾●"  # all other chrome icons are original vectors, not glyphs
+    symbol_rows=[]
+    for symbol in symbols:
+        layout=QTextLayout(symbol,app.font());layout.beginLayout()
+        line=layout.createLine();line.setLineWidth(100);layout.endLayout()
+        runs=layout.glyphRuns()
+        valid=bool(runs) and all(run.rawFont().isValid() and all(run.glyphIndexes()) for run in runs)
+        symbol_rows.append({"text":symbol,"valid":valid,"families":[run.rawFont().familyName() for run in runs]})
+    alphabet_ok=all(r["valid"] and not r["missing_characters"] for r in rows)
+    symbols_ok=all(r["valid"] for r in symbol_rows)
+    return {"platform": app.platformName(), "ok":alphabet_ok and (symbols_ok or os.name!="nt"),
+            "alphabet_ok":alphabet_ok,"symbols_ok":symbols_ok,"fonts":rows,"symbols":symbol_rows}
+
+
 def set_retro_theme(app: QApplication) -> None:
+    _load_windows_offscreen_fonts(app)
     app.setStyle("Fusion")
     app.setFont(QFont("Segoe UI", 10))
     palette = app.palette()

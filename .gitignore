@@ -11,3 +11,6 @@ sessions/
 *.sqlite3-wal
 report.json
 report.html
+.qa-build/
+blackbox-qa-error.txt
+blackbox-smoke-progress.json

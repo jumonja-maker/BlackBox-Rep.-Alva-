@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:blackbox:bb-di-001:interval-report:2",
+  "title": "BLACK.BOX read-only selected interval report v2",
+  "description": "Format validation is not source authentication. Consumer trust is always UNVERIFIED_IMPORT; original producer claims are metadata.",
+  "type": "object",
+  "required": ["schema_version", "source_schema_version", "file_trust", "verification_class", "root_cause", "metadata", "selected_interval_ns", "metrics", "coverage", "timeline"],
+  "properties": {
+    "schema_version": {"const": 2},
+    "source_schema_version": {"enum": [1, 2]},
+    "file_trust": {"const": "UNVERIFIED_IMPORT"},
+    "verification_class": {"const": "DERIVED"},
+    "root_cause": {"const": "UNKNOWN"},
+    "selected_interval_ns": {"type": "array", "prefixItems": [{"$ref": "#/$defs/ns"}, {"$ref": "#/$defs/ns"}], "minItems": 2, "maxItems": 2},
+    "metadata": {"type": "object", "required": ["schema_version", "file_trust", "monotonic_origin_ns", "clock_quality", "warnings"], "properties": {"file_trust": {"const": "UNVERIFIED_IMPORT"}, "contract_version": {"enum": ["bb-di-001/session/2.0", "bb-di-001/session/2.1"]}}},
+    "metrics": {"type": "object", "additionalProperties": {"$ref": "#/$defs/statistic"}},
+    "coverage": {"type": "object", "required": ["selected_samples", "total_samples", "exact_missed_samples", "spacing_gap_pairs", "sensor_error_records", "limitations"], "properties": {"selected_samples": {"$ref": "#/$defs/count"}, "total_samples": {"$ref": "#/$defs/count"}, "exact_missed_samples": {"type": "null"}, "spacing_gap_pairs": {"$ref": "#/$defs/count"}, "sensor_error_records": {"$ref": "#/$defs/count"}}},
+    "timeline": {"type": "object", "required": ["method", "buckets", "tracks"], "properties": {"method": {"const": "FIRST_MIN_MAX_LAST"}, "buckets": {"type": "integer", "minimum": 1, "maximum": 2000}, "tracks": {"type": "object", "additionalProperties": {"type": "array", "items": {"$ref": "#/$defs/point"}}}}},
+    "quality_counts": {"type": "array", "items": {"type": "object", "required": ["metric", "measurement_status", "count"], "properties": {"count": {"$ref": "#/$defs/count"}, "measurement_status": {"$ref": "#/$defs/status"}}}},
+    "privacy": {"type": "object", "required": ["process_identifiers_included", "user_notes_included", "raw_databases_included", "traces_or_dumps_included"], "properties": {"process_identifiers_included": {"type": "boolean"}, "user_notes_included": {"type": "boolean"}, "raw_databases_included": {"const": false}, "traces_or_dumps_included": {"const": false}}},
+    "source_checksums": {"type": "object", "additionalProperties": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}
+  },
+  "$defs": {
+    "ns": {"type": "integer", "minimum": 0, "maximum": 9223372036854775807},
+    "count": {"type": "integer", "minimum": 0},
+    "nullable_number": {"type": ["number", "null"]},
+    "status": {"enum": ["OK", "NOT_OBSERVED", "NOT_APPLICABLE", "ACCESS_DENIED", "UNSUPPORTED", "SENSOR_TIMEOUT", "SAMPLED_GAP", "TRUNCATED", "INVALID"]},
+    "statistic": {"type": "object", "required": ["unit", "observed_count", "missing_count", "min", "max", "mean", "first", "last", "delta"], "properties": {"unit": {"type": "string", "minLength": 1}, "observed_count": {"$ref": "#/$defs/count"}, "missing_count": {"$ref": "#/$defs/count"}, "min": {"$ref": "#/$defs/nullable_number"}, "max": {"$ref": "#/$defs/nullable_number"}, "mean": {"$ref": "#/$defs/nullable_number"}, "first": {"$ref": "#/$defs/nullable_number"}, "last": {"$ref": "#/$defs/nullable_number"}, "delta": {"$ref": "#/$defs/nullable_number"}}},
+    "point": {"type": "object", "required": ["time_ns", "value", "segment"], "properties": {"time_ns": {"$ref": "#/$defs/ns"}, "value": {"type": "number", "minimum": 0}, "segment": {"$ref": "#/$defs/count"}}, "additionalProperties": false}
+  }
+}

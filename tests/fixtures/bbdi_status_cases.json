@@ -1,0 +1,140 @@
+{
+  "contract_version": "bb-di-001/session/2.1",
+  "synthetic_test_only": true,
+  "warning": "NOT REAL MEASUREMENTS. Contract validation fixtures only; never display as captured evidence.",
+  "cases": {
+    "OK": {
+      "sample": {
+        "rss_bytes": 0,
+        "private_bytes": 0,
+        "uss_bytes": 0,
+        "handle_count": 0,
+        "read_bytes": 0,
+        "write_bytes": 0,
+        "thread_status": "OK",
+        "threads_omitted": 0,
+        "children_total": 0,
+        "children_omitted": 0
+      },
+      "expected_statuses": {
+        "rss_status": "OK",
+        "private_status": "OK",
+        "uss_status": "OK",
+        "handle_status": "OK",
+        "io_status": "OK",
+        "threads_status": "OK",
+        "children_status": "OK"
+      }
+    },
+    "MISSING": {
+      "sample": {
+        "rss_bytes": null,
+        "private_bytes": null,
+        "uss_bytes": null,
+        "handle_count": null,
+        "read_bytes": null,
+        "write_bytes": null,
+        "thread_status": "NOT_OBSERVED",
+        "threads_omitted": null,
+        "children_total": null,
+        "children_omitted": null
+      },
+      "expected_statuses": {
+        "rss_status": "NOT_OBSERVED",
+        "private_status": "NOT_OBSERVED",
+        "uss_status": "NOT_OBSERVED",
+        "handle_status": "NOT_OBSERVED",
+        "io_status": "NOT_OBSERVED",
+        "threads_status": "NOT_OBSERVED",
+        "children_status": "NOT_OBSERVED"
+      }
+    },
+    "DENIED": {
+      "sample": {
+        "rss_bytes": null,
+        "private_bytes": null,
+        "uss_bytes": null,
+        "handle_count": null,
+        "read_bytes": null,
+        "write_bytes": null,
+        "thread_status": "NOT_OBSERVED",
+        "threads_omitted": null,
+        "children_total": null,
+        "children_omitted": null,
+        "sensor_status": {
+          "rss_bytes": "ACCESS_DENIED",
+          "private_bytes": "ACCESS_DENIED",
+          "uss_bytes": "ACCESS_DENIED",
+          "handle_count": "ACCESS_DENIED",
+          "io": "ACCESS_DENIED",
+          "threads": "ACCESS_DENIED",
+          "children": "ACCESS_DENIED"
+        }
+      },
+      "expected_statuses": {
+        "rss_status": "ACCESS_DENIED",
+        "private_status": "ACCESS_DENIED",
+        "uss_status": "ACCESS_DENIED",
+        "handle_status": "ACCESS_DENIED",
+        "io_status": "ACCESS_DENIED",
+        "threads_status": "ACCESS_DENIED",
+        "children_status": "ACCESS_DENIED"
+      }
+    },
+    "UNSUPPORTED": {
+      "sample": {
+        "rss_bytes": null,
+        "private_bytes": null,
+        "uss_bytes": null,
+        "handle_count": null,
+        "read_bytes": null,
+        "write_bytes": null,
+        "thread_status": "NOT_OBSERVED",
+        "threads_omitted": null,
+        "children_total": null,
+        "children_omitted": null,
+        "sensor_status": {
+          "rss_bytes": "UNSUPPORTED",
+          "private_bytes": "UNSUPPORTED",
+          "uss_bytes": "UNSUPPORTED",
+          "handle_count": "UNSUPPORTED",
+          "io": "UNSUPPORTED",
+          "threads": "UNSUPPORTED",
+          "children": "UNSUPPORTED"
+        }
+      },
+      "expected_statuses": {
+        "rss_status": "UNSUPPORTED",
+        "private_status": "UNSUPPORTED",
+        "uss_status": "UNSUPPORTED",
+        "handle_status": "UNSUPPORTED",
+        "io_status": "UNSUPPORTED",
+        "threads_status": "UNSUPPORTED",
+        "children_status": "UNSUPPORTED"
+      }
+    },
+    "PARTIAL": {
+      "sample": {
+        "rss_bytes": 0,
+        "private_bytes": 0,
+        "uss_bytes": 0,
+        "handle_count": 0,
+        "read_bytes": 0,
+        "write_bytes": 0,
+        "thread_status": "OK",
+        "threads_omitted": 44,
+        "children_total": 300,
+        "children_omitted": 44
+      },
+      "expected_statuses": {
+        "rss_status": "OK",
+        "private_status": "OK",
+        "uss_status": "OK",
+        "handle_status": "OK",
+        "io_status": "OK",
+        "threads_status": "TRUNCATED",
+        "children_status": "TRUNCATED"
+      }
+    }
+  }
+}

@@ -92,7 +92,7 @@ This offline analysis uses recorded CPU, RSS, I/O and other available counters t
 
 ## Scope and current quality status
 
-BLACK.BOX is **not** a PC cleaner, antivirus, automatic repair utility, crash-dump analyzer, or debugger of arbitrary third-party code. This build does not collect Windows ETW traces or internal call stacks. OS counters cannot prove internal program faults.
+BLACK.BOX is **not** a PC cleaner, antivirus, automatic repair utility, crash-dump analyzer, or debugger of arbitrary third-party code. The published v0.3.6 baseline does not collect Windows ETW traces or internal call stacks. OS counters cannot prove internal program faults.
 
 **Baseline QA for v0.3.2:** [GitHub Actions run #39872624116](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/actions/runs/39872624116) passed **new file-selection and existing process tests on Windows and Linux**, built the Windows executable, and passed frozen-EXE startup/smoke checks for commit [`6c8d9478`](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/commit/6c8d94785492e4373a80720b7812871b94856241). The newer v0.3.6 source, PE file picker, and packaged executable are subject to [current main CI](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/actions?query=branch%3Amain). Manual clean-Windows, update/rollback, antivirus and code-signing acceptance are **not established by these tests**. Distributed EXEs are currently unsigned; third-party package license notices also require final review.
 
@@ -145,3 +145,31 @@ See [Architecture](docs/ARCHITECTURE.md), [Product scope](docs/PRODUCT_SCOPE.md)
 The original source is available under [MIT](LICENSE). Packaged dependencies, including Qt/PySide6 and Python, retain their respective licenses; see [Licensing](docs/LICENSING.md).
 
 To report a problem, [open an issue](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/issues) with your BLACK.BOX version, Windows version, reproduction steps, and only **non-sensitive** report excerpts.
+
+### BB-DI-001 development branch (Draft PR #17, not a release)
+
+New recordings also write a normalized `session-v2.sqlite3` with a bounded owner
+writer. Reports → Load recorded session/Open saved session reads the whole
+selected interval, with peak/gap preserving zoom/pan/A-B tracks. Processes and
+Events show persisted history and cumulative TID CPU for the selected range.
+Export selected interval offers offline JSON/HTML/CSV/events, checksums and an
+explicit optional ZIP; identifiers and notes are off by default. Old sessions
+open read-only and retain their original hashes.
+
+Overview can opt into actual Windows HWND timeout observations and async WCT.
+Missing GUI is NOT_APPLICABLE; denied/unsupported WCT is explicit, not a fake
+chain. No titles, mutex names, privilege changes or ETW are collected. Settings
+lets users configure the CPU trigger threshold/duration. CPU 100% is one logical
+CPU; sustained load and memory growth do not prove a defect.
+
+Real-process QA: `python app.py --deep-smoke --qa-output <owned-output-dir>`
+drives three actions, actual TID CPU, an auto incident, selected-range analysis
+and privacy-selected exports. CI runs it in Python and the actual frozen EXE
+without Python on PATH. This does not certify all BB-DI-001 criteria: ETW, full
+resource repeat comparison/incident cards, full async stop, 8h/1h endurance and
+physical Windows 10/11 acceptance remain outstanding. See `docs/ADR-01*` through
+`ADR-04*` and `docs/BB_DI_001_IMPLEMENTATION_STATUS.md`.
+
+### Integrated research development patch — Draft PR #17 continuation
+
+The development branch adds an isolated recording owner, a verified application-preparation wizard, source-linked evidence, repeat statistics and portable investigation packages. Reports exposes explicit Windows/WCT snapshots, minidumps, named WPR, optional local EventPipe and offline symbol/dump tools. Overview retains continuous HWND/WCT; these controls are forwarded to the same isolated owner. Raw sources are opt-in and limitations remain visible. See [implementation and acceptance](docs/RESEARCH_PRODUCT_IMPLEMENTATION.md). This is separate from the published v0.3.6 release.

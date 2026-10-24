@@ -6,6 +6,7 @@ Only synthetic empty-interface data is captured. No user process metadata.
 """
 from __future__ import annotations
 import os
+import json
 from pathlib import Path
 import sys
 
@@ -14,7 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from PySide6.QtWidgets import QApplication
 from blackbox_universal.window import UniversalWindow
-from blackbox_universal.theme import set_retro_theme
+from blackbox_universal.theme import set_retro_theme, font_coverage
 
 
 def main() -> int:
@@ -24,7 +25,11 @@ def main() -> int:
     output.mkdir(parents=True, exist_ok=True)
     app = QApplication.instance() or QApplication([])
     set_retro_theme(app)
-    window = UniversalWindow()
+    fonts = font_coverage(app)
+    (output / "font-coverage.json").write_text(json.dumps(fonts, ensure_ascii=False, indent=2), encoding="utf-8")
+    if not fonts["ok"]:
+        raise RuntimeError("DPI_RU_EN_FONT_GLYPHS_MISSING: " + json.dumps(fonts, ensure_ascii=False))
+    window = UniversalWindow(allow_update_check=False)
     window._timer.stop()
     window.resize(1330, 850)
     window.show()
@@ -36,6 +41,7 @@ def main() -> int:
         for lang in ("EN", "RU"):
             window._set_language(lang)
             for page, _ in window.PAGES:
+                (output/"progress.json").write_text(json.dumps({"scale":scale,"language":lang,"page":page}),encoding="utf-8")
                 window._navigate(page)
                 app.processEvents()
                 shot = window.grab()
@@ -44,7 +50,9 @@ def main() -> int:
                 path = output / f"dpi-{scale}-{lang}-{page}.png"
                 if not shot.save(str(path), "PNG"):
                     raise RuntimeError("DPI_SCREENSHOT_WRITE_FAILED")
-        print(f"DPI offscreen capture PASS: scale={scale}, 10 snapshots")
+        from tools.qa_integrated_layout import capture_integrated_layout
+        capture_integrated_layout(window, app, output, scale)
+        print(f"DPI offscreen capture PASS: scale={scale}, 10 page and 8 expanded snapshots")
         return 0
     finally:
         window.close()

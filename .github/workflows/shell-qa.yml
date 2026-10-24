@@ -26,6 +26,8 @@ jobs:
       PYTHONUTF8: "1"
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -39,20 +41,44 @@ jobs:
         run: python -m unittest discover -s tests -v
       - name: Real Qt offscreen startup smoke
         run: python app.py --smoke
+      - name: Real Qt isolated research end-to-end
+        run: python app.py --research-e2e source-research-e2e
+      - name: Real process action thread incident and selected export (Python)
+        run: python app.py --deep-smoke --qa-output deep-smoke-python --qa-commit-sha "${{ github.event.pull_request.head.sha || github.sha }}"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: BLACKBOX-REAL-PROCESS-WINDOWS-PYTHON
+          path: deep-smoke-python/
+          if-no-files-found: warn
+          retention-days: 7
+      - name: Explicit real WPR guardian TTL on the disposable CI runner
+        env:
+          BB_QA_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: python tools/qa_trace_guardian.py trace-guardian-qa
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: BLACKBOX-WPR-GUARDIAN-QA
+          path: trace-guardian-qa/
+          if-no-files-found: warn
+          retention-days: 7
       - name: Offscreen RU/EN screenshots at simulated Windows DPI 100-200%
         shell: pwsh
         run: |
           foreach ($scale in @('1', '1.25', '1.5', '2')) {
             $env:QT_SCALE_FACTOR = $scale
-            python tools/qa_dpi_offscreen.py dpi-offscreen
-            if ($LASTEXITCODE -ne 0) { throw "Offscreen DPI capture failed at scale $scale" }
+            $job = Start-Process -FilePath (Get-Command python).Source -ArgumentList @('tools/qa_dpi_offscreen.py', 'dpi-offscreen') -PassThru
+            if (-not $job.WaitForExit(120000)) { $job.Kill(); throw "DPI capture exceeded deadline at scale $scale" }
+            if ($job.ExitCode -ne 0) { throw "Offscreen DPI capture failed at scale $scale" }
           }
           Remove-Item Env:\QT_SCALE_FACTOR -ErrorAction SilentlyContinue
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: BLACKBOX-OFFSCREEN-DPI-QA
-          path: dpi-offscreen/*.png
-          if-no-files-found: error
+          path: dpi-offscreen/
+          if-no-files-found: warn
           retention-days: 7
       - name: Validate human-first CLI (no platform command)
         shell: pwsh
@@ -70,6 +96,8 @@ jobs:
       PYTHONUTF8: "1"
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -87,6 +115,17 @@ jobs:
         run: python -m unittest discover -s tests -v
       - name: Qt offscreen startup smoke
         run: python app.py --smoke
+      - name: Real Qt isolated research end-to-end
+        run: python app.py --research-e2e source-research-e2e
+      - name: Real process action thread incident and selected export (Linux)
+        run: python app.py --deep-smoke --qa-output deep-smoke-linux --qa-commit-sha "${{ github.event.pull_request.head.sha || github.sha }}"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: BLACKBOX-REAL-PROCESS-LINUX
+          path: deep-smoke-linux/
+          if-no-files-found: warn
+          retention-days: 7
       - name: Validate independent observer CLI
         run: python -m blackbox_core --help
 
@@ -100,6 +139,8 @@ jobs:
       PYTHONUTF8: "1"
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -111,17 +152,21 @@ jobs:
           python -m pip install -e .
       - name: Generate original retro Windows icon
         run: python tools/generate_icon.py
+      - name: Record actual source identity for the frozen executable
+        run: python tools/write_build_provenance.py "${{ github.event.pull_request.head.sha || github.sha }}"
       - name: Build separate Windows maintenance EXE
-        run: python -m PyInstaller --noconfirm --clean --onefile --windowed --icon assets/blackbox.ico --name BLACK.BOX-Maintenance maintenance_entry.py
+        run: python -m PyInstaller --noconfirm --clean --paths src --paths . --onefile --windowed --icon assets/blackbox.ico --name BLACK.BOX-Maintenance maintenance_entry.py
       - name: Build BLACK.BOX Universal desktop with original icon
         shell: pwsh
         run: |
-          python -m PyInstaller --noconfirm --clean --onedir --windowed --collect-submodules blackbox_core --collect-submodules blackbox_investigation --collect-submodules blackbox_universal --icon assets/blackbox.ico --add-data "assets/blackbox.png;assets" --name BLACK.BOX-Universal app.py
+          python -m PyInstaller --noconfirm --clean --paths src --paths . --onedir --windowed --collect-submodules blackbox_core --collect-submodules blackbox_investigation --collect-submodules blackbox_universal --icon assets/blackbox.ico --add-data "assets/blackbox.png;assets" --add-data "src/blackbox_core/instrumentation.py;blackbox_core" --add-data ".qa-build/blackbox-build.json;." --name BLACK.BOX-Universal app.py
           if ($LASTEXITCODE -ne 0) { throw 'GUI build failed' }
           Copy-Item "dist/BLACK.BOX-Maintenance.exe" "dist/BLACK.BOX-Universal/BLACK.BOX-Maintenance.exe"
           Copy-Item ".blackbox-portable.json" "dist/BLACK.BOX-Universal/.blackbox-portable.json"
           if (-not (Test-Path "dist/BLACK.BOX-Universal/BLACK.BOX-Maintenance.exe")) { throw 'Maintenance helper missing' }
           if (-not (Test-Path "dist/BLACK.BOX-Universal/_internal/assets/blackbox.png")) { throw 'App icon missing' }
+      - name: Verify real embedded research modules before startup
+        run: python tools/verify_frozen_research.py "dist/BLACK.BOX-Universal/BLACK.BOX-Universal.exe"
       - name: Verify Explorer icon is the same as the taskbar icon for both EXEs
         shell: pwsh
         run: |
@@ -132,12 +177,76 @@ jobs:
         run: |
           $exe = Join-Path $PWD "dist\BLACK.BOX-Universal\BLACK.BOX-Universal.exe"
           if (-not (Test-Path $exe)) { throw "Missing portable EXE" }
-          $job = Start-Process -FilePath $exe -ArgumentList "--smoke" -PassThru -Wait
+          $job = Start-Process -FilePath $exe -ArgumentList "--smoke" -PassThru
+          if (-not $job.WaitForExit(120000)) { $job.Kill(); throw 'Frozen startup smoke exceeded deadline' }
           if ($job.ExitCode -ne 0) { throw "Frozen Windows GUI failed: $($job.ExitCode)" }
           Write-Host "Portable GUI smoke PASS"
           $maintenance = Join-Path $PWD "dist\BLACK.BOX-Universal\BLACK.BOX-Maintenance.exe"
-          $check = Start-Process -FilePath $maintenance -ArgumentList "--help" -PassThru -Wait
+          $check = Start-Process -FilePath $maintenance -ArgumentList "--help" -PassThru
+          if (-not $check.WaitForExit(60000)) { $check.Kill(); throw 'Maintenance startup exceeded deadline' }
           if ($check.ExitCode -ne 0) { throw "Maintenance EXE failed smoke: $($check.ExitCode)" }
+      - name: Full research roundtrip in the actual frozen EXE
+        shell: pwsh
+        run: |
+          $exe = Join-Path $PWD "dist\BLACK.BOX-Universal\BLACK.BOX-Universal.exe"
+          $evidence = Join-Path $PWD "frozen-research-e2e"
+          $job = Start-Process -FilePath $exe -ArgumentList @('--research-e2e', ('"' + $evidence + '"')) -PassThru
+          if (-not $job.WaitForExit(120000)) { $job.Kill(); throw 'Frozen research E2E exceeded deadline' }
+          if ($job.ExitCode -ne 0) { throw "Frozen research E2E failed: $($job.ExitCode)" }
+          $proof = Get-Content (Join-Path $evidence 'e2e.json') -Raw | ConvertFrom-Json
+          if ($proof.status -ne 'PASS' -or $proof.helper_pid -eq $proof.gui_pid) { throw 'Missing isolated research proof' }
+      - name: Frozen research with administrator SID and privileges removed
+        run: python tools/qa_standard_token.py "dist/BLACK.BOX-Universal/BLACK.BOX-Universal.exe" "frozen-standard-token-e2e"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: BLACKBOX-FROZEN-QA-DIAGNOSTICS
+          path: |
+            blackbox-qa-error.txt
+            blackbox-smoke-progress.json
+            frozen-research-e2e/*.json
+            frozen-standard-token-e2e/*.json
+          if-no-files-found: warn
+          retention-days: 7
+      - uses: actions/upload-artifact@v4
+        with:
+          name: BLACKBOX-FROZEN-RESEARCH-E2E
+          path: frozen-research-e2e/
+          if-no-files-found: error
+          retention-days: 7
+      - uses: actions/upload-artifact@v4
+        with:
+          name: BLACKBOX-STANDARD-TOKEN-E2E
+          path: frozen-standard-token-e2e/
+          if-no-files-found: error
+          retention-days: 7
+      - name: Deep test actual frozen EXE without Python on PATH or source working directory
+        shell: pwsh
+        run: |
+          $exe = Join-Path $PWD "dist\BLACK.BOX-Universal\BLACK.BOX-Universal.exe"
+          $evidence = Join-Path $PWD "deep-smoke-frozen"
+          New-Item -ItemType Directory -Path $evidence -Force | Out-Null
+          $savedPath = $env:PATH
+          try {
+            $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot"
+            $job = Start-Process -FilePath $exe -WorkingDirectory $evidence -ArgumentList @('--deep-smoke', '--qa-output', $evidence, '--qa-commit-sha', '${{ github.event.pull_request.head.sha || github.sha }}') -PassThru
+            if (-not $job.WaitForExit(120000)) { throw 'Frozen deep smoke exceeded 120s deadline' }
+            if ($job.ExitCode -ne 0) { throw "Frozen deep smoke failed: $($job.ExitCode)" }
+          } finally { $env:PATH = $savedPath }
+          $summaryFile = Get-ChildItem -Path $evidence -Filter qa-summary.json -Recurse | Select-Object -First 1
+          if (-not $summaryFile) { throw 'Frozen evidence summary missing' }
+          $summary = Get-Content -Raw $summaryFile.FullName | ConvertFrom-Json
+          if ($summary.result -ne 'PASS' -or -not $summary.frozen -or $summary.completed_actions -ne 3 -or $summary.thread_cpu_seconds -le 0 -or $summary.incidents -le 0) { throw 'Frozen vertical evidence incomplete' }
+          if ($summary.requested_head_sha -ne '${{ github.event.pull_request.head.sha || github.sha }}') { throw 'Frozen evidence head mismatch' }
+          if ($summary.actual_source_sha -ne '${{ github.event.pull_request.head.sha || github.sha }}' -or $summary.source_identity_status -ne 'VERIFIED_EXPECTED_HEAD') { throw 'Frozen build provenance mismatch' }
+          Get-FileHash -Algorithm SHA256 -LiteralPath $exe | Format-List
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: BLACKBOX-REAL-PROCESS-FROZEN
+          path: deep-smoke-frozen/
+          if-no-files-found: warn
+          retention-days: 14
       - name: Include public source license and distribution notices
         shell: pwsh
         run: |
