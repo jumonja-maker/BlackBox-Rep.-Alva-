@@ -12,7 +12,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from blackbox_core.process_tree import resource_tree_page
 from blackbox_core.session_v2 import FILENAME, SessionV2Writer
-from blackbox_core.session_view import SessionView
+from blackbox_core.session_view import SessionReadError, SessionView
 from test_investigation_v2 import ORIGIN, observation
 
 
@@ -91,6 +91,44 @@ class ProcessHistoryTreeTests(unittest.TestCase):
             self.assertIsNone(child["resources"]["cpu_seconds"])
             self.assertEqual(len(page["ancestors"]), 256)
             self.assertTrue(page["ancestor_context_truncated"])
+
+    def test_invalid_imported_process_scalars_are_rejected_without_source_mutation(self):
+        faults = (("pid", -1), ("pid", "bad-import"),
+                  ("creation_time", float("inf")), ("creation_time", "bad-import"),
+                  ("parent_pid", -1), ("parent_pid", 1.5),
+                  ("first_observed_ns", -1), ("first_observed_ns", "bad-import"),
+                  ("last_observed_ns", ORIGIN), ("last_observed_ns", "bad-import"),
+                  ("absence_observed_ns", -1), ("absence_observed_ns", "bad-import"),
+                  ("absence_observed_ns", ORIGIN+2*10**9))
+        for column, value in faults:
+            with self.subTest(column=column, value=value), tempfile.TemporaryDirectory() as temp:
+                folder = Path(temp)
+                recorded_tree(folder)
+                with closing(sqlite3.connect(folder/FILENAME)) as db:
+                    db.execute("PRAGMA ignore_check_constraints=ON")
+                    db.execute(f"UPDATE process_instances SET {column}=? WHERE instance_id=2", (value,))
+                    db.commit()
+                before = hashlib.sha256((folder/FILENAME).read_bytes()).hexdigest()
+                with SessionView.open(folder) as view:
+                    with self.assertRaisesRegex(SessionReadError, "INVALID_IMPORTED_PROCESS_INSTANCE"):
+                        view.process_page()
+                self.assertEqual(hashlib.sha256((folder/FILENAME).read_bytes()).hexdigest(), before)
+
+    def test_invalid_imported_ancestor_is_rejected_before_hierarchy_arithmetic(self):
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp)
+            recorded_tree(folder)
+            with closing(sqlite3.connect(folder/FILENAME)) as db:
+                db.execute("UPDATE process_instances SET last_observed_ns='bad-import' WHERE instance_id=2")
+                db.commit()
+            before = hashlib.sha256((folder/FILENAME).read_bytes()).hexdigest()
+            with SessionView.open(folder) as view:
+                # The resource row itself is valid; its separately fetched
+                # context ancestor must pass the same imported-data checks.
+                self.assertEqual(view.process_page(after=2, limit=1)["rows"][0]["instance_id"], 3)
+                with self.assertRaisesRegex(SessionReadError, "INVALID_IMPORTED_PROCESS_INSTANCE"):
+                    resource_tree_page(view, ORIGIN, ORIGIN+5*10**9, after=2, limit=1)
+            self.assertEqual(hashlib.sha256((folder/FILENAME).read_bytes()).hexdigest(), before)
 
     def test_real_qt_nested_context_language_and_cyclic_import(self):
         from PySide6.QtCore import Qt
@@ -203,6 +241,87 @@ class ProcessHistoryTreeTests(unittest.TestCase):
                     self.assertIn('PID 123',window.thread_detail_status.text())
             finally:
                 window.close();self.app.processEvents()
+
+    def test_thread_read_error_survives_language_switch_without_restoring_old_ok(self):
+        from blackbox_universal.window import UniversalWindow
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp)
+            recorded_tree(folder)
+            window = UniversalWindow(isolated=False, allow_update_check=False)
+            window._timer.stop()
+            try:
+                window._set_language("EN")
+                window._load_session_interval(folder)
+                end = time.monotonic()+12
+                while window._interval_worker is not None and time.monotonic()<end:
+                    self.app.processEvents()
+                    time.sleep(.005)
+                self.assertIsNone(window._interval_worker)
+                self.assertIn("PID 123", window.thread_detail_status.text())
+                table = window.thread_detail_table
+                self.assertEqual(table.rowCount(), 1)
+                table.selectRow(0)
+                before = table.item(0, 5).text()
+                # Exercise the worker's error delivery on a real loaded Qt
+                # view, retaining the last cells and the user's selection.
+                window._thread_detail_ready(None, "DETAIL_READ_UNAVAILABLE")
+                for language, text in (("RU", "Данные потоков недоступны; исходная запись не изменена."),
+                                       ("EN", "Thread detail is unavailable; source data were not changed.")):
+                    window._set_language(language)
+                    self.assertEqual(window.thread_detail_status.text(), text)
+                    self.assertNotIn("PID 123", window.thread_detail_status.text())
+                    self.assertEqual(table.item(0, 5).text(), before)
+                    self.assertTrue(table.selectionModel().selectedRows())
+            finally:
+                window.close()
+                self.app.processEvents()
+
+    def test_malformed_import_fails_in_worker_and_preserves_error_after_language_switch(self):
+        from blackbox_universal.window import UniversalWindow
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp)
+            recorded_tree(folder)
+            window = UniversalWindow(isolated=False, allow_update_check=False)
+            window._timer.stop()
+            def drain():
+                end = time.monotonic()+12
+                while window._interval_worker is not None and time.monotonic()<end:
+                    self.app.processEvents()
+                    time.sleep(.005)
+                self.assertIsNone(window._interval_worker)
+            try:
+                window._set_language("EN")
+                window._load_session_interval(folder)
+                drain()
+                self.assertIsNotNone(window._interval_packet)
+                self.assertTrue(window.export_interval_btn.isEnabled())
+                old_node = window.process_history_table.item_for_instance(1)
+                old_thread_cpu = window.thread_detail_table.item(0, 5).text()
+                with closing(sqlite3.connect(folder/FILENAME)) as db:
+                    db.execute("UPDATE process_instances SET first_observed_ns='bad-import' WHERE instance_id=1")
+                    db.commit()
+                before = hashlib.sha256((folder/FILENAME).read_bytes()).hexdigest()
+                with SessionView.open(folder) as view:
+                    with self.assertRaisesRegex(SessionReadError, "INVALID_IMPORTED_PROCESS_INSTANCE"):
+                        view.process_page()
+                window._load_session_interval(folder)
+                drain()
+                self.assertIsNone(window._interval_packet)
+                self.assertFalse(window.export_interval_btn.isEnabled())
+                # A rejected packet never reaches the tree or TID renderers.
+                self.assertIs(window.process_history_table.item_for_instance(1), old_node)
+                self.assertEqual(window.thread_detail_table.item(0, 5).text(), old_thread_cpu)
+                for language, text in (("RU", "Интервал недоступен; исходные файлы не изменены."),
+                                       ("EN", "Selected interval is unavailable; source files were not changed.")):
+                    window._set_language(language)
+                    self.assertEqual(window.interval_summary.text(), text)
+                    self.assertIsNone(window._interval_packet)
+                    self.assertFalse(window.export_interval_btn.isEnabled())
+                self.assertEqual(hashlib.sha256((folder/FILENAME).read_bytes()).hexdigest(), before)
+            finally:
+                drain()
+                window.close()
+                self.app.processEvents()
 
 
 if __name__ == "__main__":

@@ -1,4 +1,7 @@
 """Resource history by process instance; root and observed tree stay separate."""
+from .session_view import _validated_process_instance
+
+
 def resource_tree_page(view,start,end,*,after=0,limit=100):
  result=view.process_page(after=after,limit=limit)
  if not view.is_v2:return result
@@ -50,7 +53,7 @@ def resource_tree_page(view,start,end,*,after=0,limit=100):
    absence_observed_ns,substr(source_kind,1,64) AS source_kind
    FROM process_instances WHERE instance_id=?''',(identity,)).fetchone()
   if raw is None:continue
-  item=dict(raw);item['context_only']=True
+  item=_validated_process_instance(raw);item['context_only']=True
   item['resources']={'status':'ANCESTOR_CONTEXT_NOT_RESOURCE_PAGE'}
   _parent_link(view,item);context[identity]=item
   pending.append(item.get('parent_instance_candidate'))

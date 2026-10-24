@@ -141,11 +141,13 @@ class UniversalWindow(QMainWindow):
         self._investigation_busy = False
         self._thread_detail_worker: ThreadDetailWorker | None = None
         self._thread_detail_payload = None
+        self._thread_detail_state = "default"
         self._base_sample_worker: BaseSampleWorker | None = None
         self._report_worker: ReportWorker | None = None
         self._interval_worker = None
         self._interval_pending = None
         self._interval_packet = None
+        self._interval_read_error = False
         self._interval_folder = None
         self._interval_process = 1
         self._interval_export_worker = None
@@ -904,6 +906,7 @@ class UniversalWindow(QMainWindow):
                     self.target_binding_title, self.target_binding_detail,
                     self.investigation_info, self.action_state_label}
         changing.add(self.interval_summary)
+        changing.add(self.thread_detail_status)
         changing.add(self.window_capture_status)
         from PySide6.QtWidgets import QLabel
         for label in self.findChildren(QLabel):
@@ -951,8 +954,7 @@ class UniversalWindow(QMainWindow):
                 header.setText(self._t(str(original)))
         self.process_history_table.set_language(self.language)
         self._render_process_history_summary()
-        if self._thread_detail_payload is not None:
-            self._render_thread_detail_status(self._thread_detail_payload['analysis'])
+        self._render_thread_detail_status()
         self.process_search.setPlaceholderText(
             self._t("Search by process name or PID…"))
         self.session_event_details.setPlaceholderText(self._t(
@@ -1271,8 +1273,8 @@ class UniversalWindow(QMainWindow):
             return
         self.thread_detail_table.setRowCount(0)
         self._thread_detail_payload = None
-        self.thread_detail_status.setText(self._t(
-            "Record with DETAILED THREADS, then load TID CPU intervals."))
+        self._thread_detail_state = "default"
+        self._render_thread_detail_status()
         self._update_all()
         self._navigate("dashboard")
 
@@ -1391,6 +1393,8 @@ class UniversalWindow(QMainWindow):
         self._render_investigation_findings()
         self.thread_detail_table.setRowCount(0)
         self._thread_detail_payload = None
+        self._thread_detail_state = "default"
+        self._render_thread_detail_status()
         self._update_all()
 
     def _stop(self) -> None:
@@ -1548,7 +1552,8 @@ class UniversalWindow(QMainWindow):
         if (self._thread_detail_worker is not None or folder is None or
                 not (folder / "detail-v2.sqlite3").is_file()):
             return
-        self.thread_detail_status.setText(self._t("Reading saved thread counters…"))
+        self._thread_detail_state = "loading"
+        self._render_thread_detail_status()
         self.thread_detail_refresh.setEnabled(False)
         worker = ThreadDetailWorker(folder, self)
         self._thread_detail_worker = worker
@@ -1577,6 +1582,7 @@ class UniversalWindow(QMainWindow):
         if folder!=self._interval_folder:
             self.session_event_details.clear()
             self._thread_detail_payload=None
+            self._thread_detail_state="default"
         self._interval_folder=folder
         self._interval_process=instance_id
         args=(folder,interval,instance_id,event_cursor,process_after)
@@ -1584,6 +1590,7 @@ class UniversalWindow(QMainWindow):
             self._interval_pending=args
             self._interval_worker.requestInterruption()
             return
+        self._interval_read_error=False
         self.interval_summary.setText(self._t("Reading all selected observations…"))
         self.export_interval_btn.setEnabled(False)
         worker=SessionIntervalWorker(folder,self,interval=interval,instance_id=instance_id,
@@ -1594,6 +1601,9 @@ class UniversalWindow(QMainWindow):
         worker.start()
 
     def _render_interval_summary(self):
+        if self._interval_read_error:
+            self.interval_summary.setText(self._t("Selected interval is unavailable; source files were not changed."))
+            return
         if self._interval_packet is None:
             if self._interval_worker is None:
                 self.interval_summary.setText(self._t("Open a recorded session to inspect its full interval."))
@@ -1619,11 +1629,15 @@ class UniversalWindow(QMainWindow):
         if self._interval_pending is not None or self._pending_close:
             return
         if error or not isinstance(packet,dict):
-            self.interval_summary.setText(self._t("Selected interval is unavailable; source files were not changed."))
+            self._interval_packet=None
+            self._interval_read_error=True
+            self.export_interval_btn.setEnabled(False)
+            self._render_interval_summary()
             return
         if packet["folder"]!=str(self._interval_folder):
             return
         self._interval_packet=packet
+        self._interval_read_error=False
         result=packet["interval"]
         self._render_interval_summary()
         self.session_timeline.set_interval(result)
@@ -1785,8 +1799,8 @@ class UniversalWindow(QMainWindow):
 
     def _thread_detail_ready(self, payload: object, error: str) -> None:
         if error or type(payload) is not dict:
-            self.thread_detail_status.setText(self._t(
-                "Thread detail is unavailable; source data were not changed."))
+            self._thread_detail_state="error"
+            self._render_thread_detail_status()
             return
         if payload.get("folder") not in (str(self.probe.session_folder),str(self._interval_folder)):
             return
@@ -1797,6 +1811,7 @@ class UniversalWindow(QMainWindow):
         if type(rows) is not list:
             return
         self._thread_detail_payload=payload
+        self._thread_detail_state="loaded"
         v2_rows=any("cpu_seconds" in r for r in rows)
         self.thread_detail_table.setColumnCount(7 if v2_rows else 5)
         headers=(("TID","SEGMENT","MEAN CPU %","PEAK CPU %","PAIRS","CPU seconds","OBSERVED %") if v2_rows else
@@ -1815,11 +1830,18 @@ class UniversalWindow(QMainWindow):
                 item.setToolTip(
                     "PSUTIL / DERIVED; TID reuse between samples cannot be excluded.")
                 self.thread_detail_table.setItem(index, column, item)
-        self._render_thread_detail_status(detail)
+        self._render_thread_detail_status()
 
-    def _render_thread_detail_status(self,detail):
+    def _render_thread_detail_status(self):
         # Language changes must not replace the loaded cells or the user's
         # selected TID. Headers are translated from stable English role data.
+        messages={"default":"Record with DETAILED THREADS, then load TID CPU intervals.",
+                  "loading":"Reading saved thread counters…",
+                  "error":"Thread detail is unavailable; source data were not changed."}
+        if self._thread_detail_state in messages:
+            self.thread_detail_status.setText(self._t(messages[self._thread_detail_state]))
+            return
+        detail=self._thread_detail_payload["analysis"]
         warnings = ", ".join(detail.get("warnings", []))
         self.thread_detail_status.setText(
             self._t("Thread CPU is derived from adjacent snapshots only.") +

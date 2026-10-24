@@ -145,3 +145,13 @@ atomic_json остаётся durable по умолчанию для journal/libr
 Локальные новые atomic tests: 3 PASS + 1 Windows-only SKIP. Настоящие 100 детей/300 потоков/CPU переключение/память: 4 PASS. Windows должен подтвердить новый точный SHA, включая native sharing test, до frozen build.
 
 Локальный полный cf7fc11 запуск вернул exit 0, но log оборвался без unittest footer: он НЕ засчитан как полный PASS. Причина неполного журнала не установлена. Отдельный final-source deep cf7fc11 прошёл (43 samples, 42 thread rows, 3 actions, 1 incident), визуальный RU/EN с выбранным TID сохранён; эти результаты относятся только к cf7fc11.
+
+## Независимая проверка после зелёного 7165c7f
+
+7165c7f / CI 40128525843 завершён SUCCESS: Windows 458/6 SKIP/0 FAIL; Linux 458/16 SKIP/0 FAIL; actual open-reader test, source/frozen deep, standard-token/admin E2E, WPR/DPI/build/packaging прошли. Release SKIPPED. Это доказательство именно 7165c7f, не последующих исправлений.
+
+Дополнительный read-only review и воспроизведения выявили два P2: после ошибки обновления потоков RU/EN восстанавливал старый PID/OK из cache; текстовый first_observed_ns в импортированной БД доходил до Qt и вызывал TypeError после частичного обновления интерфейса. Аналогично Reports мог после read error восстановить старую сводку при смене языка.
+
+Внесены минимальные исправления: явные состояния default/loading/error/loaded для thread status; отдельное состояние ошибки interval reader, удаление устаревшего interval packet и запрет его экспорта. Reader валидирует instance/PID/PPID/creation и упорядоченные целочисленные lifetime поля как для страницы процессов, так и для context ancestors. Невалидный импорт отклоняется в worker до Qt, исходный файл не переписывается.
+
+Новые проверки включают 13 вариантов повреждённых scalar полей, отдельного повреждённого ancestor, реальный read worker/GUI, неизменность source SHA, ошибку после успешного чтения и RU/EN без возврата к старому OK. Целевой набор дерева 10 PASS; шесть смежных наборов 54 PASS. Полный новый набор 462 теста требует собственного exact-head source/frozen CI. Независимый report review также потребовал fresh evidence output, привязку artifact к run/head и явное исключение cf7 неполного локального log; эти уточнения вносятся во внешний QA-отчёт.

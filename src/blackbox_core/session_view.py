@@ -25,6 +25,22 @@ def _number(value):
     return (type(value) in (int,float) and math.isfinite(value) and value>=0)
 
 
+def _validated_process_instance(raw):
+    """Validate imported scalar metadata before hierarchy arithmetic or Qt."""
+    row=dict(raw)
+    identity,pid=row["instance_id"],row["pid"]
+    parent,created=row["parent_pid"],row["creation_time"]
+    first,last=row["first_observed_ns"],row["last_observed_ns"]
+    absent=row["absence_observed_ns"]
+    if (type(identity) is not int or identity<=0 or type(pid) is not int or pid<=0
+            or (parent is not None and (type(parent) is not int or parent<0))
+            or type(created) not in (int,float) or not math.isfinite(created) or created<=0
+            or type(first) is not int or first<0 or type(last) is not int or last<first
+            or (absent is not None and (type(absent) is not int or absent<last))):
+        raise SessionReadError("INVALID_IMPORTED_PROCESS_INSTANCE")
+    return row
+
+
 @dataclass
 class _Stats:
     count: int = 0
@@ -408,7 +424,7 @@ class SessionView:
             raise SessionReadError("INVALID_PAGE")
         if not self.is_v2:
             return {"rows":[],"has_more":False,"status":"LEGACY_LIMITED_DATA"}
-        rows=[dict(r) for r in self.db.execute("SELECT instance_id,pid,creation_time,parent_pid,"
+        rows=[_validated_process_instance(r) for r in self.db.execute("SELECT instance_id,pid,creation_time,parent_pid,"
             "substr(executable_name,1,512) AS executable_name,first_observed_ns,last_observed_ns,"
             "absence_observed_ns,substr(source_kind,1,64) AS source_kind FROM process_instances WHERE instance_id>? "
                                               "ORDER BY instance_id LIMIT ?",(after,limit+1))]
