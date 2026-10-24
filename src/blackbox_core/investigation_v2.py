@@ -66,6 +66,12 @@ def _research_findings(folder,start,end,coverage):
    user=r['source']=='USER_MARKER'
    yield _finding(r['kind'],r['monotonic_ns'],r['monotonic_ns'],ref='research.sqlite3:evidence:'+str(r['id']),
     facts=[{'code':'USER_STATEMENT' if user else 'SOURCE_STATUS','values':detail}],category='USER_REPORTED' if user else 'UNAVAILABLE',coverage=coverage)
+def research_tail(folder):
+ path=safe_path(Path(folder)/'research.sqlite3')
+ if not path.is_file():return None
+ with closing(readonly(path)) as db:
+  value=db.execute('SELECT max(monotonic_ns) FROM evidence').fetchone()[0]
+  return value if type(value) is int and 0<=value<2**63 else None
 def investigate(folder,*,start_ns=None,end_ns=None,instance_id=1,after=None,limit=50,question='ALL',sort_order='TIME_ASC'):
  if type(limit) is not int or not 1<=limit<=100 or question not in QUESTIONS or sort_order not in SORTS:raise SessionReadError('INVALID_FINDINGS_QUERY')
  length=3 if sort_order=='SEVERITY' else 2
@@ -76,7 +82,10 @@ def investigate(folder,*,start_ns=None,end_ns=None,instance_id=1,after=None,limi
   return (row['start_ns'],row['finding_id'])
  stats={'deadline':time.monotonic()+25,'derived_triggers_not_emitted':0,'derived_trigger_limit_reached':False}
  with SessionView.open(folder) as view:
-  series=_selected_series(view,instance_id);report=view.interval(start_ns,end_ns,series=series,instance_id=instance_id,buckets=128)
+  series=_selected_series(view,instance_id)
+  if end_ns is None:
+   tail=research_tail(folder);end_ns=max(view._range(start_ns,None,series,instance_id)[1],tail or 0)
+  report=view.interval(start_ns,end_ns,series=series,instance_id=instance_id,buckets=128)
   lo,hi=report['selected_interval_ns'];coverage=report['coverage'];total=0
   def rows():
    nonlocal total
@@ -116,10 +125,12 @@ def incident_card(folder,incident_id,*,pre_seconds=60,post_seconds=20,top_n=32):
   if hi<lo:lo=hi=max(first,min(last,trigger))
   begin=max(lo,min(hi,trigger));end=max(lo,min(hi,ended))
   from .event_stream import event_page
+  from .process_tree import resource_tree_page,tree_totals
+  children=resource_tree_page(view,lo,hi,limit=100);children['totals']=tree_totals(view,lo,hi)
   return {'schema_version':2,'status':'OBSERVATION_ONLY','incident':item,'range_ns':[lo,hi],
    'snapshots':{'before':_snapshot(view,begin,series),'at_end':_snapshot(view,end,series),'post':_snapshot(view,hi,series)},
    'resources':{'before':view.interval(lo,begin,series=series,buckets=32),'inside':view.interval(begin,end,series=series,buckets=32),'after':view.interval(end,hi,series=series,buckets=32)},
-   'threads':view.thread_summary(lo,hi,top_n=top_n),'process_tree':view.process_page(limit=100),
+   'threads':view.thread_summary(lo,hi,top_n=top_n),'process_tree':children,
    'events':event_page(folder,start_ns=lo,end_ns=hi,limit=50),
    'native_windows':event_page(folder,start_ns=lo,end_ns=hi,source='WIN32',limit=32),
    'wct':event_page(folder,start_ns=lo,end_ns=hi,source='WCT',limit=16),

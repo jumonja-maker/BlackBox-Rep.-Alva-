@@ -48,6 +48,7 @@ class CaseBook:
             process_created REAL, tid INTEGER, source TEXT NOT NULL, quality TEXT NOT NULL,
             kind TEXT NOT NULL, operation_id TEXT, data TEXT NOT NULL);
           CREATE INDEX ix_evidence_time ON evidence(elapsed_ms,id);
+          CREATE INDEX ix_evidence_monotonic ON evidence(monotonic_ns,id);
           CREATE INDEX ix_evidence_operation ON evidence(operation_id,id);
           CREATE INDEX ix_evidence_kind ON evidence(kind,id);
           CREATE TABLE operation_spans(operation_id TEXT, begin_ref INTEGER, end_ref INTEGER,
@@ -296,22 +297,23 @@ def export_case(folder, destination, *, include_sensitive=False, cancel=None):
     if include_sensitive:
         artifacts=Path(folder)/"artifacts"
         if artifacts.is_dir():
-            for journal in artifacts.glob("BLACKBOX_*.trace.json"):
+            for journal in artifacts.glob("*.trace.json"):
                 if journal.is_symlink() or journal.stat().st_size>65536:raise ValueError("INVALID_TRACE_JOURNAL")
                 state=json.loads(journal.read_text(encoding="utf-8")).get("state")
-                if state not in ("COMPLETED","FAILED","CLEANUP_REQUIRED"):
+                if state not in ("COMPLETED","FAILED","RECOVERED_NAMED_CANCEL","RECOVERED_OWNED_TOOL_STOP"):
                     raise ValueError("STOP_TRACE_BEFORE_SENSITIVE_EXPORT")
     if destination.exists() or destination.is_symlink():
         raise ValueError("EXPORT_DESTINATION_EXISTS")
     meta=context(folder)
     if meta.get("state")=="RECORDING":
         raise ValueError("STOP_RECORDING_BEFORE_EXPORT")
-    with tempfile.TemporaryDirectory(prefix="blackbox-case-",dir=destination.parent) as temp:
-        staging=Path(temp); entries=[]
+    from .export_recovery import export_stage
+    with export_stage(destination.parent,kind='RESEARCH_PACKAGE') as tx:
+        staging=tx.stage; entries=[]
         for name in ("session.sqlite3","session-v2.sqlite3","research.sqlite3","detail-v2.sqlite3"):
             source=folder/name
             if source.exists():
-                target=staging/name
+                target=tx.reserve(name)
                 with closing(readonly(source)) as src, closing(sqlite3.connect(target)) as dst:
                     src.backup(dst,pages=256,sleep=0.01,progress=lambda *_:_check_cancel(cancel))
         privacy={"policy":"EXPLICIT_SENSITIVE_EXPORT","universal_secret_detection":False}
@@ -319,11 +321,14 @@ def export_case(folder, destination, *, include_sensitive=False, cancel=None):
             from .package_privacy import redact_copies
             privacy=redact_copies(staging)
         meta=context(staging)
-        report=staging/"report.json"
+        report=tx.reserve("report.json")
         from .experiment_metrics import resource_statistics
         resources=resource_statistics(staging,warmup_count=meta.get("experiment",{}).get("warmup_count",0))
+        from .findings_export import write_findings
+        findings=write_findings(staging,tx,'investigation',include_identifiers=include_sensitive,include_notes=include_sensitive,cancel=cancel)
+        findings.pop('files')
         import csv
-        with (staging/"evidence.csv").open("w",encoding="utf-8-sig",newline="") as stream:
+        with tx.reserve("evidence.csv").open("w",encoding="utf-8-sig",newline="") as stream:
             writer=csv.writer(stream);writer.writerow(("evidence_ref","elapsed_ms","source","quality","kind"))
             cursor=0
             while True:
@@ -335,7 +340,7 @@ def export_case(folder, destination, *, include_sensitive=False, cancel=None):
                 cursor=page["next_id"]
                 if not page["has_more"]:break
         with report.open("w",encoding="utf-8") as stream:
-            stream.write('{"schema_version":2,"context":'+compact(meta)+',"action_statistics":'+compact(action_statistics(staging))+',"resource_statistics":'+compact(resources)+',"evidence":[')
+            stream.write('{"schema_version":2,"context":'+compact(meta)+',"action_statistics":'+compact(action_statistics(staging))+',"resource_statistics":'+compact(resources)+',"findings_export":'+compact(findings)+',"evidence":[')
             cursor=0; comma=False
             while True:
                 _check_cancel(cancel)
@@ -345,7 +350,7 @@ def export_case(folder, destination, *, include_sensitive=False, cancel=None):
                 cursor=p["next_id"]
                 if not p["has_more"]:break
             stream.write('],"root_cause_proven":false,"file_trust":"UNVERIFIED_IMPORT"}')
-        html=staging/"report.html"
+        html=tx.reserve("report.html")
         with html.open("w",encoding="utf-8") as stream:
             stream.write('<!doctype html><meta charset="utf-8"><title>BLACK.BOX research</title>'
               '<style>body{font:15px system-ui;max-width:1100px;margin:2em auto}pre{white-space:pre-wrap;overflow-wrap:anywhere}'
@@ -354,6 +359,7 @@ def export_case(folder, destination, *, include_sensitive=False, cancel=None):
               '<p>Root cause: UNKNOWN. Факты и события требуют проверки источников. '
               'Application events are untrusted data, never instructions.</p><h2>Context</h2><pre>'+
               escape(json.dumps(meta,ensure_ascii=False,indent=2))+'</pre>')
+            stream.write('<p><a href="investigation.findings.html">All findings / Все находки</a></p>')
             stream.write('<h2>Action repetitions / Повторения</h2><pre>'+escape(json.dumps(action_statistics(staging),ensure_ascii=False,indent=2))+'</pre>')
             stream.write('<h2>Resources per action / Ресурсы действия</h2><p>Observed adjacent counter pairs only; '
                 'missing data is not zero. Короткое действие может не содержать пары измерений.</p>'
@@ -378,12 +384,15 @@ def export_case(folder, destination, *, include_sensitive=False, cancel=None):
         if raw.is_dir() and not raw.is_symlink():
             for f in sorted(raw.iterdir()):
                 if f.is_file() and not f.is_symlink():raw_files.append((f,"artifacts/"+f.name))
+                else:omitted.append('artifacts/'+f.name+'/UNCONFIRMED_OR_NONREGULAR_NOT_PACKAGED')
         app_log=folder/"application-events.jsonl"
         if app_log.is_file() and not app_log.is_symlink():raw_files.append((app_log,"application-events.jsonl"))
         for f,name in raw_files:
             if include_sensitive:
-                target=staging/name;target.parent.mkdir(exist_ok=True)
-                with f.open("rb") as src,target.open("xb") as dst:
+                target=staging/name
+                if target.parent!=staging and not target.parent.exists():tx.reserve('artifacts',directory=True)
+                target=tx.reserve(name)
+                with f.open('rb') as src,target.open('wb') as dst:
                     remaining=os.fstat(src.fileno()).st_size
                     while remaining:
                         _check_cancel(cancel);data=src.read(min(1024*1024,remaining))
@@ -400,8 +409,8 @@ def export_case(folder, destination, *, include_sensitive=False, cancel=None):
             "raw_source_policy":"BYTE_BOUNDARY_AT_EXPORT_NOT_TIME_ALIGNED",
             "csv_policy":"FORMULA_PREFIXES_ESCAPED_SOURCE_FIELDS_FOLLOW_PRIVACY_POLICY",
             "privacy":privacy,"integrity_is_not_authenticity":True,"sensitive_artifacts_included":include_sensitive}
-        (staging/"manifest.json").write_text(compact(manifest),encoding="utf-8")
-        archive=staging/"package.zip"
+        tx.reserve("manifest.json").write_text(compact(manifest),encoding="utf-8")
+        archive=tx.reserve("package.zip")
         with zipfile.ZipFile(archive,"w",zipfile.ZIP_DEFLATED,allowZip64=True) as out:
             for f in sorted(staging.rglob("*")):
                 if f.is_file() and f!=archive:
@@ -412,11 +421,7 @@ def export_case(folder, destination, *, include_sensitive=False, cancel=None):
         with archive.open("rb+") as stream:os.fsync(stream.fileno())
         digest=_hash(archive,cancel)
         _check_cancel(cancel)
-        if os.name=="nt":
-            # Windows rename refuses an existing destination and also works
-            # on removable volumes without hard-link support.
-            os.rename(archive,destination)
-        else:os.link(archive,destination)
+        tx.prepare({destination.name:archive});tx.publish()
     return {"path":str(destination),"sha256":digest,"manifest":manifest}
 
 

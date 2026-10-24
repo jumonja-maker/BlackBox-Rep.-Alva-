@@ -24,10 +24,10 @@ def read_json(path, limit=16384):
     return data
 
 
-def atomic_json(path,data,*,exclusive=False):
+def atomic_json(path,data,*,exclusive=False,max_bytes=65536):
     path=checked(path);tmp=path.with_name(path.name+'.'+uuid4().hex+'.tmp')
     raw=json.dumps(data,ensure_ascii=True,allow_nan=False,separators=(',',':')).encode('ascii')
-    if len(raw)>65536:raise ValueError('LIBRARY_MARKER_TOO_LARGE')
+    if type(max_bytes) is not int or not 1<=max_bytes<=8*1024**2 or len(raw)>max_bytes:raise ValueError('LIBRARY_MARKER_TOO_LARGE')
     try:
         with tmp.open('xb') as f:f.write(raw);f.flush();os.fsync(f.fileno())
         if exclusive:os.link(tmp,path)

@@ -24,6 +24,7 @@ from .optional_jobs import OptionalJobs
 from .operation_worker import OPERATIONS, TARGET_OPERATIONS
 from .sensors import Capability, CallbackSensor, SensorRegistry
 from .capture_policy import validate_policy,profile_description
+from .contracts import ObserverError
 from .user_markers import UserMarkers
 
 
@@ -43,6 +44,7 @@ class ResearchSession:
         self.library_error=None;self._library_started_ns=None;self._library_experiment={};self._configuration_changed=False
         self.capture_policy=validate_policy();self.profile_info=profile_description(self.capture_policy);self.markers=UserMarkers();self._burst_until=None;self._burst_owned=False
         self._ui_seen=set()
+        self._library_budget=None;self._library_budget_at=0
         self.budget_bytes=1024**3;self.last_health=0;self.native_at=0
         self.last_command=None;self.command_latency_ms=None
         self.last_app_health=None
@@ -168,12 +170,13 @@ class ResearchSession:
             try:
                 helper_rss=p.memory_info().rss;helper_cpu=p.cpu_percent(None)
             except psutil.Error:pass
-        size=0
-        for f in self.probe.session_folder.iterdir():
-            if f.is_file() and not f.is_symlink():size+=f.stat().st_size
-        raw=self.probe.session_folder/"artifacts"
-        if raw.is_dir() and not raw.is_symlink():
-            size+=sum(f.stat().st_size for f in raw.iterdir() if f.is_file() and not f.is_symlink())
+        from .storage_budget import recording_size
+        measured=recording_size(self.probe.session_folder);size=measured['bytes']
+        if self._library_budget is None or time.monotonic()-self._library_budget_at>=60:
+            from .library_catalog import LibraryCatalog
+            try:self._library_budget=LibraryCatalog(self.probe.output_root).storage_budget(exclude_folder=self.probe.session_folder)
+            except (OSError,ValueError,sqlite3.Error):self._library_budget={'status':'INDEX_UNAVAILABLE'}
+            self._library_budget_at=time.monotonic()
         frontend_rss=frontend_cpu=None
         if self._frontend:
             try:
@@ -185,15 +188,19 @@ class ResearchSession:
             "helper_cpu_percent":helper_cpu,"session_top_level_bytes":size,
             "helper_sensor_status":"OBSERVED" if helper_rss is not None else "NOT_OBSERVED",
             "frontend_rss_bytes":frontend_rss,"frontend_cpu_percent":frontend_cpu,
-            "disk_budget_bytes":self.budget_bytes,"app_invalid_lines":self.tail.invalid if self.tail else None,
+            "disk_budget_bytes":self.budget_bytes,"storage_measurement":measured,"library_budget":self._library_budget,"budget_check_interval_s":5,"app_invalid_lines":self.tail.invalid if self.tail else None,
             "app_client_dropped":self.tail.client_dropped if self.tail else None,
             "event_loss_from_other_sources":None,
             "sensor_registry":self.sensors.health() if self.sensors else {},
             "optional_jobs":self.jobs.health(),
             "overhead_scope":"DIRECT_HELPER_USAGE_NOT_TOTAL_OBSERVER_EFFECT"})
-        if size>=self.budget_bytes:
-            self.book.put("observer.disk_budget",{"status":"BUDGET_EXHAUSTED"})
-            self.stop("STORAGE_ERROR")
+        library=self._library_budget or {};maximum=library.get('policy',{}).get('max_bytes',0)
+        local_exceeded=size is not None and size>=self.budget_bytes
+        global_exceeded=maximum and size is not None and library.get('known_bytes',0)+size>=maximum
+        if local_exceeded or global_exceeded:
+            self.book.put('observer.disk_budget',{'status':'BUDGET_EXHAUSTED','scope':'SESSION' if local_exceeded else 'LIBRARY_CACHED_KNOWN_BYTES',
+                'measurement':measured,'library':library,'hard_filesystem_quota':False,'deletion_performed':False})
+            self.stop('STORAGE_LIMIT_REACHED')
 
     def tick(self):
         p=self.probe
@@ -215,7 +222,9 @@ class ResearchSession:
                 for name in ("application", "detail", "windows", "optional"):
                     self.sensors.sample(name, budget_s=.1)
             else:self._application_events()
-            self._maybe_burst()
+            try:self._maybe_burst()
+            except (OSError,ValueError,RuntimeError) as exc:
+                self.book.put('observer.burst_unavailable',{'error':str(exc)[:200]},quality='UNAVAILABLE')
             if time.monotonic()-self.last_health>=5:
                 self.last_health=time.monotonic();self._health()
         if not p.active and self.book:self.stop(p.session_state)
@@ -270,15 +279,15 @@ class ResearchSession:
         def application(deadline):
             self._application_events()
             return {"status":"SOURCE_FAILED" if self.app_source_error else "READY" if self.tail.ready else "WAITING_FOR_CONTROL_EVENT"}
-        self.sensors.register(CallbackSensor(Capability("application", "APPLICATION_EVENT_READER", "AVAILABLE"), application))
-        self.sensors.register(CallbackSensor(Capability("detail", "PSUTIL_DETAILED", "AVAILABLE", "EXISTING_WORKER_HEALTH"),
+        self.sensors.register(CallbackSensor(Capability("application", "APPLICATION_EVENT_READER", "AVAILABLE",requires_optin=True), application))
+        self.sensors.register(CallbackSensor(Capability("detail", "PSUTIL_DETAILED", "AVAILABLE", "EXISTING_WORKER_HEALTH",requires_optin=True),
             lambda deadline:{"status":self.probe.detailed_capture.status,
                 "error":self.probe.detailed_capture.error,
                 "producer_heartbeat_ns":(self.probe.detailed_capture.latest_metrics or {}).get("time_ns")}, enabled=lambda:self.probe.detailed_capture is not None))
-        self.sensors.register(CallbackSensor(Capability("windows", "WIN32_HWND_WCT", "AVAILABLE" if os.name=="nt" else "UNSUPPORTED_PLATFORM", "EXISTING_WORKER_HEALTH"),
+        self.sensors.register(CallbackSensor(Capability("windows", "WIN32_HWND_WCT", "AVAILABLE" if os.name=="nt" else "UNSUPPORTED_PLATFORM", "EXISTING_WORKER_HEALTH",requires_optin=True,supported_os=("Windows",)),
             lambda deadline:{"status":self.probe.window_capture.snapshot()[0],
                 "producer_heartbeat_ns":self.probe.window_capture.last_poll_completed_ns}, enabled=lambda:self.probe.window_capture is not None))
-        self.sensors.register(CallbackSensor(Capability("optional", "DISPOSABLE_OPERATION_PROCESS", "AVAILABLE", "EXPLICIT_OPT_IN", "OWNED_PROCESS_HARD_DEADLINE"),
+        self.sensors.register(CallbackSensor(Capability("optional", "DISPOSABLE_OPERATION_PROCESS", "AVAILABLE", "EXPLICIT_OPT_IN", "OWNED_PROCESS_HARD_DEADLINE",requires_optin=True),
             lambda deadline:self.jobs.health()))
         self.sensors.start(self.context)
 
@@ -304,7 +313,7 @@ class ResearchSession:
             "folder":str(self.probe.session_folder) if self.probe.session_folder else None,
             "end_ms":self.probe.last_elapsed_ms or 1,"library_root":str(self.probe.output_root)}
         if op=="prepare_client":packet.update(event_path=str(self.tail.path),event_token=self.tail.token)
-        self.jobs.submit(command, packet, seconds=300 if op=="export" else 120 if op in ("library_plan_trash","library_apply_trash") else 75 if op in ("inspect_dump","verify","recover","library_scan","library_compare","investigation","incident_card","events_query") else 15)
+        self.jobs.submit(command, packet, seconds=300 if op in ("export","export_recover") else 120 if op in ("library_plan_trash","library_apply_trash","library_plan_purge","library_apply_purge") else 75 if op in ("inspect_dump","verify","recover","library_scan","library_compare","investigation","incident_card","events_query") else 15)
         if self.book:
             self.book.put("observer.operation_queued", {"op":op,"command_id":command.get("id"),
                 "issued_ns":command.get("issued_ns")}, source="BLACKBOX_COMMAND_OWNER")
@@ -356,9 +365,10 @@ class ResearchSession:
         self._cancelled_operations.extend(self.jobs.cancel())
         if self.sensors:self.sensors.stop()
         self._burst_until=None
+        if self.book and (not p.active or p._store is None):self.book.on_evidence=None
         if self.book:
             try:self.markers.close(self.book,reason=reason)
-            except (OSError,ValueError,sqlite3.Error) as exc:errors.append('USER_STAGES_FINALIZATION_UNCONFIRMED: '+str(exc)[:100])
+            except (OSError,ValueError,sqlite3.Error,ObserverError) as exc:errors.append('USER_STAGES_FINALIZATION_UNCONFIRMED: '+str(exc)[:100])
         app_coverage=self._drain_application_events() if self.book else {}
         if self.tail and (self.app_source_error or self.tail.invalid or self.tail.client_dropped or
                 self.tail.discontinuities or app_coverage.get("application_unread_bytes_at_stop") or
@@ -438,7 +448,7 @@ class ResearchSession:
                 self._changed_configuration()
             return n
         if op=="start":
-            self.markers=UserMarkers();self._ui_seen=set();self._burst_until=None
+            self.markers=UserMarkers();self._ui_seen=set();self._burst_until=None;self._library_budget=None
             self.context.update(profile=self.capture_policy["profile"],capture_policy=self.capture_policy)
             self.probe.start()
             self.probe._store.v2.max_bytes=self.budget_bytes
@@ -464,7 +474,13 @@ class ResearchSession:
                 except psutil.Error:self.book.set_context("worker_created",None)
             except BaseException:
                 self.research_state="INCOMPLETE";self.research_error="RESEARCH_SETUP_FAILED"
-                self.probe.stop("STORAGE_ERROR");raise
+                if self.book:self.book.on_evidence=None
+                self.probe.stop('STORAGE_ERROR')
+                if self.book:
+                    book=self.book;self.book=None
+                    try:book.close('INCOMPLETE')
+                    except Exception:book.db.close()
+                raise
             self._index_recording()
             return {"folder":str(self.probe.session_folder)}
         if op=="stop":
@@ -538,7 +554,7 @@ class ResearchSession:
                 if self.wpr and self.wpr.active:raise ValueError("WPR_ALREADY_ACTIVE")
                 self._identity()
                 self.wpr=TraceSupervisor(artifacts,seconds=a.get("seconds",30),
-                    max_output_bytes=a.get("max_output_bytes",256*1024**2),
+                    max_output_bytes=a.get("max_output_bytes",self.capture_policy["max_trace_mb"]*1024**2),
                     target={"pid":self.probe.pid,"created":self.probe._core.created})
                 result=self.wpr.start()
                 self.book.set_context("wpr_instance",self.wpr.instance)

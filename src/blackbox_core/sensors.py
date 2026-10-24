@@ -8,6 +8,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import time
 from typing import Protocol
+from collections import deque
 
 
 @dataclass(frozen=True)
@@ -17,6 +18,12 @@ class Capability:
     availability: str
     mode: str = 'PASSIVE'
     deadline_kind: str = 'COOPERATIVE_BUDGET'
+    permissions: str = 'CURRENT_USER'
+    requires_optin: bool = False
+    supported_os: tuple = ('Windows','Linux','Darwin')
+    accuracy: str = 'SOURCE_SPECIFIC_NOT_CONTINUOUS'
+    limitation: str = 'Activity between samples is not observed'
+    reason: str | None = None
 
 
 class Sensor(Protocol):
@@ -52,7 +59,7 @@ class SensorRegistry:
         if self.started or name not in self.allowed or name in self.entries: raise ValueError('INVALID_SENSOR_REGISTRATION')
         self.entries[name]={'sensor':sensor, 'capability':cap, 'status':'NOT_STARTED',
             'failures':0, 'consecutive_failures':0, 'overruns':0, 'samples':0,
-            'next_retry':0.0, 'last_attempt':None, 'last_success':None, 'error':None, 'sample_ms':None}
+            'next_retry':0.0, 'last_attempt':None, 'last_success':None, 'error':None, 'sample_ms':None,'latencies_ms':deque(maxlen=128),'latency_p95_ms':None}
     def start(self, context):
         self.started=True
         for row in self.entries.values():
@@ -72,6 +79,8 @@ class SensorRegistry:
             value=row['sensor'].sample(now+budget_s)
             if type(value) is not dict or type(value.get('status')) is not str: raise ValueError('INVALID_SENSOR_RESULT')
             row['sample_ms']=(self.clock()-now)*1000
+            row['latencies_ms'].append(row['sample_ms'])
+            times=sorted(row['latencies_ms']);row['latency_p95_ms']=times[int((len(times)-1)*.95)]
             row['status']=value['status']; row['last_success']=self.clock()
             row['samples']+=1; row['consecutive_failures']=0; row['error']=None
             if self.clock()>now+budget_s: row['overruns']+=1
@@ -81,9 +90,14 @@ class SensorRegistry:
         now=self.clock(); result={}
         for name,row in self.entries.items():
             cap=row['capability']; last=row['last_success']
-            producer=row['sensor'].health()
+            try:producer=row['sensor'].health()
+            except Exception as exc:producer={'status':'HEALTH_UNAVAILABLE','error':type(exc).__name__}
+            if not isinstance(producer,dict):producer={'status':'INVALID_SENSOR_HEALTH'}
             producer_ns=producer.get('producer_heartbeat_ns')
-            result[name]={'source':cap.source,'availability':cap.availability,'mode':cap.mode,
+            result[name]={'permissions':cap.permissions,'requires_optin':cap.requires_optin,
+                'supported_os':list(cap.supported_os),'accuracy':cap.accuracy,'limitations':cap.limitation,
+                'unavailable_reason':cap.reason,'latency_p95_ms':row['latency_p95_ms'],
+                'latency_window_count':len(row['latencies_ms']),'latency_window_limit':128,'source':cap.source,'availability':cap.availability,'mode':cap.mode,
                 'deadline_kind':cap.deadline_kind,'status':row['status'],
                 'heartbeat_age_ms':max(0,(now-last)*1000) if last is not None else None,
                 'heartbeat_kind':'SENSOR_SAMPLE_OR_HEALTH_READ_SEE_MODE',

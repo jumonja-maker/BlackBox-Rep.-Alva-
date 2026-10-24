@@ -146,7 +146,7 @@ class LibraryCatalog:
         except BaseException:db.close();raise
 
     def _folder(self,row):
-        if row['state'] in ('TRASH','MOVING_TO_TRASH','RESTORING') and row['trash_name']:
+        if row['state'] in ('TRASH','MOVING_TO_TRASH','RESTORING','PURGING','PURGE_PARTIAL','PURGED') and row['trash_name']:
             return checked(self.root/TRASH/row['trash_name']/'payload')
         if row['origin']=='LOCAL_APP_MARKED':
             name=row['folder_name']
@@ -197,7 +197,8 @@ class LibraryCatalog:
                 'folder_name':folder.name,'external_path':None,'origin':'LOCAL_APP_MARKED','marker_uid':marker['marker_uid']},metadata,size)
 
     def register(self,folder):
-        folder=checked(folder);meta=recording_metadata(folder);size=tree_summary(folder)
+        folder=checked(folder)
+        if folder.is_relative_to(self.root/TRASH):raise ValueError('LIBRARY_RESTORE_BEFORE_OPEN');meta=recording_metadata(folder);size=tree_summary(folder)
         with closing(self._connect(write=True)) as db:
             local=db.execute('SELECT * FROM entries WHERE locator=?',('LOCAL:'+folder.name,)).fetchone() if folder.parent==self.root else None
             if local:
@@ -213,8 +214,8 @@ class LibraryCatalog:
         if state not in ('ALL','COMPLETED','INCOMPLETE','ACTIVE','TRASH'):raise ValueError('LIBRARY_INVALID_QUERY')
         if not self.path.exists():return {'rows':[],'has_more':False,'next_cursor':None,'status':'EMPTY_INDEX','disk_scan':False}
         where=[];params=[]
-        if state=='TRASH':where.append("state IN ('TRASH','MOVING_TO_TRASH','RESTORING')")
-        else:where.append("state NOT IN ('TRASH','MOVING_TO_TRASH','RESTORING')")
+        if state=='TRASH':where.append("state IN ('TRASH','MOVING_TO_TRASH','RESTORING','PURGING','PURGE_PARTIAL','PURGED')")
+        else:where.append("state NOT IN ('TRASH','MOVING_TO_TRASH','RESTORING','PURGING','PURGE_PARTIAL','PURGED')")
         if state=='COMPLETED':where.append("state='COMPLETED'")
         elif state=='ACTIVE':where.append("state IN ('RECORDING','FINALIZATION_UNCONFIRMED')")
         elif state=='INCOMPLETE':where.append("state NOT IN ('RECORDING','COMPLETED','FINALIZATION_UNCONFIRMED')")
@@ -238,7 +239,7 @@ class LibraryCatalog:
         if row['origin']=='LOCAL_APP_MARKED':
             if not SESSION_NAME.fullmatch(row['folder_name'] or ''):raise ValueError('LIBRARY_INVALID_LOCAL_PATH')
             path=self.root/row['folder_name']
-            if row['state'] in ('TRASH','MOVING_TO_TRASH','RESTORING') and row['trash_name']:
+            if row['state'] in ('TRASH','MOVING_TO_TRASH','RESTORING','PURGING','PURGE_PARTIAL','PURGED') and row['trash_name']:
                 if not _uuid(row['trash_name']):raise ValueError('LIBRARY_INVALID_LOCAL_PATH')
                 path=self.root/TRASH/row['trash_name']/'payload'
         else:path=Path(row['external_path'])
@@ -256,7 +257,7 @@ class LibraryCatalog:
     def open_entry(self,entry_id,*,completed=False):
         """Resolve an indexed identifier, without changing the observed target."""
         row=self.entry(entry_id)
-        if row['state'] in ('TRASH','MOVING_TO_TRASH','RESTORING'):
+        if row['state'] in ('TRASH','MOVING_TO_TRASH','RESTORING','PURGING','PURGE_PARTIAL','PURGED'):
             raise ValueError('LIBRARY_RESTORE_BEFORE_OPEN')
         folder=self._folder(row)
         if row['origin']=='LOCAL_APP_MARKED':self._marker(folder,row)
@@ -302,7 +303,7 @@ class LibraryCatalog:
         policy=self.policy();deadline=time.time_ns()-policy['days']*86400*10**9 if policy['days'] else None
         if not self.path.exists():return {'policy':policy,'candidates':[],'automatic_deletion':False,'bytes_freed':0}
         with closing(self._connect()) as db:
-            totals=db.execute("SELECT sum(size_bytes),sum(size_bytes IS NULL),count(*) FROM entries WHERE origin='LOCAL_APP_MARKED' AND state NOT IN ('TRASH','MOVING_TO_TRASH','RESTORING')").fetchone()
+            totals=db.execute("SELECT sum(size_bytes),sum(size_bytes IS NULL),count(*) FROM entries WHERE origin='LOCAL_APP_MARKED' AND state NOT IN ('TRASH','MOVING_TO_TRASH','RESTORING','PURGING','PURGE_PARTIAL','PURGED')").fetchone()
             known=totals[0] or 0;excess=max(0,known-policy['max_bytes']) if policy['max_bytes'] else 0
             rows=db.execute("SELECT * FROM entries WHERE origin='LOCAL_APP_MARKED' AND state IN ("+','.join('?' for _ in TERMINAL)+") ORDER BY started_ns,entry_id LIMIT ?",(*sorted(TERMINAL),limit+1)).fetchall()
         candidates=[];selected=0
@@ -349,7 +350,7 @@ class LibraryCatalog:
             row=self.entry(entry_id);folder,marker,size=self._safe_finalized(row)
             items.append({'entry_id':entry_id,'folder_name':row['folder_name'],'marker_uid':marker['marker_uid'],
                 'identity':identity(folder),'fingerprint':size['fingerprint'],'bytes':size['bytes'],'folder':str(folder)})
-        token=uuid4().hex+uuid4().hex;now=time.time_ns();payload={'root_id':self._owner()['root_id'],'items':items}
+        token=uuid4().hex+uuid4().hex;now=time.time_ns();payload={'operation':'TRASH','root_id':self._owner()['root_id'],'items':items}
         with closing(self._connect(write=True)) as db:
             db.execute('DELETE FROM plans WHERE expires_ns<? OR used=1',(now,))
             if db.execute('SELECT count(*) FROM plans').fetchone()[0]>=128:raise ValueError('LIBRARY_CONFIRMATION_QUEUE_FULL')
@@ -364,6 +365,7 @@ class LibraryCatalog:
             plan=db.execute('SELECT * FROM plans WHERE token_hash=?',(hashlib.sha256(token.encode()).hexdigest(),)).fetchone()
             if not plan or plan['used'] or plan['expires_ns']<time.time_ns():raise ValueError('LIBRARY_CONFIRMATION_EXPIRED_OR_USED')
             payload=json.loads(plan['payload'])
+            if payload.get('operation','TRASH')!='TRASH':raise ValueError('LIBRARY_WRONG_CONFIRMATION_OPERATION')
             if payload['root_id']!=self._owner()['root_id']:raise ValueError('LIBRARY_ROOT_ID_MISMATCH')
             # Validate the entire selection before consuming consent/moving any item.
             for item in payload['items']:
@@ -432,3 +434,20 @@ class LibraryCatalog:
                 results.append({'entry_id':row['entry_id'],'state':state})
             else:results.append({'entry_id':row['entry_id'],'state':'MANUAL_RECOVERY_REQUIRED_NO_FILES_CHANGED'})
         return {'results':results,'scope':'INDEX_RECONCILIATION_ONLY_NO_DELETE'}
+
+    def plan_purge(self,entry_ids):
+        from .retention_delete import plan_purge
+        return plan_purge(self,entry_ids)
+
+    def apply_purge(self,token):
+        from .retention_delete import apply_purge
+        return apply_purge(self,token)
+
+    def storage_budget(self,*,exclude_folder=None):
+        policy=self.policy()
+        if not self.path.exists():return {'policy':policy,'known_bytes':0,'unknown_entries':0,'source':'CACHED_METADATA_NOT_PHYSICAL_QUOTA'}
+        where="origin='LOCAL_APP_MARKED' AND state!='PURGED'";params=[]
+        if exclude_folder is not None:where+=' AND folder_name!=?';params.append(Path(exclude_folder).name)
+        with closing(self._connect()) as db:
+            row=db.execute('SELECT coalesce(sum(size_bytes),0),coalesce(sum(size_bytes IS NULL),0) FROM entries WHERE '+where,params).fetchone()
+        return {'policy':policy,'known_bytes':row[0],'unknown_entries':row[1],'source':'CACHED_METADATA_NOT_PHYSICAL_QUOTA'}

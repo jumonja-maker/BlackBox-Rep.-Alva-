@@ -29,8 +29,25 @@ MESSAGES={
 }
 
 
+MESSAGES.update({
+ 'PURGE_REQUIRES_OWNED_TRASH':('Only finalized app-owned recordings in Trash can be permanently deleted. Move the selected recording to Trash first.','Окончательно удалить можно только завершённые собственные записи в корзине. Сначала переместите выбранную запись в корзину.'),
+ 'PURGE_OWNER_STILL_ACTIVE':('Another cleanup is running. Wait for it to finish, then refresh the list.','Другая очистка ещё выполняется. Дождитесь её завершения и обновите список.'),
+ 'PURGE_NEW_OR_REPLACED_FILE':('The folder now contains a new or replaced file. No stale deletion plan is accepted; review the folder.','В папке появился новый или заменённый файл. Прежний план удаления не принимается; проверьте содержимое папки.'),
+ 'EXPORT_RECOVERY_OWNER_ACTIVE':('The exporter is still running. Wait for it to exit before recovery.','Процесс экспорта ещё работает. Дождитесь его завершения перед восстановлением.'),
+ 'EXPORT_RECOVERY_BUILD_INCOMPLETE':('This export was not fully built, or new files are present. Preserve the journal and retry export from the original recording; only inventoried temporary files can be discarded.','Экспорт не был полностью построен либо появились новые файлы. Сохраните журнал и повторите экспорт исходной записи; удалить можно только проверенные временные файлы.'),
+ 'EXPORT_RECOVERY_FILE_CHANGED':('An export file changed. Keep the journal and inspect the files; automatic replacement is refused.','Файл экспорта изменился. Сохраните журнал и проверьте файлы; автоматическая замена запрещена.'),
+ 'EXPORT_DESTINATION_EXISTS':('The destination is occupied. Choose a different name or folder; existing files are preserved.','Путь уже занят. Выберите другое имя или папку; существующие файлы сохранены.'),
+ 'LIBRARY_CONFIRMATION_QUEUE_FULL':('Too many unfinished review plans. Wait up to five minutes for them to expire, then review again.','Слишком много незавершённых планов просмотра. Подождите до пяти минут, пока они истекут, затем повторите просмотр.'),
+ 'INVALID_CAPTURE_POLICY':('Check profile limits and keep at least one incident trigger selected. Stop recording before applying changes.','Проверьте лимиты профиля и оставьте хотя бы один триггер инцидентов. Перед изменением остановите запись.'),
+ 'USER_STAGE_LIMIT_OR_NAME':('Enter a stage name and finish an existing stage if the 32-stage limit is reached.','Укажите название этапа; при достижении лимита 32 этапов завершите один из открытых.'),
+ 'INVALID_INCIDENT_TRIGGERS':('Select at least one supported incident trigger.','Выберите хотя бы один поддерживаемый триггер инцидента.'),
+ 'STOP_BEFORE_RECONFIGURING':('Stop recording before changing this policy.','Остановите запись перед изменением политики.'),
+})
+
 def explain(error,language):
-    code=str(error).split(": ")[-1]
+    import re
+    raw=str(error)
+    code=next((key for key in sorted(MESSAGES,key=len,reverse=True) if re.search(r'(?<![A-Z0-9_])'+re.escape(key)+r'(?![A-Z0-9_])',raw)),None)
     text=MESSAGES.get(code)
     if text:return text[1 if language=="RU" else 0]+"\n\n"+str(error)
     return (("Не удалось подтвердить завершение операции. Проверьте код, состояние записи и контекст ошибки ниже."

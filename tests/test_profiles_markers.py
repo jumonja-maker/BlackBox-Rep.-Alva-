@@ -38,6 +38,22 @@ class ProfileMarkerTests(unittest.TestCase):
  def test_stop_with_trace_does_not_mirror_into_closed_primary_store(self):
   s=self.s;s.command({'op':'start'});s.tick();s.wpr=SimpleNamespace(active=False,stop=lambda:{'status':'COMPLETED'})
   s.stop();self.assertEqual(s.research_state,'COMPLETED')
+ def test_burst_has_real_short_ttl_can_resume_and_never_starts_traces(self):
+  s=self.s;s.command({'op':'capture_policy','args':{'policy':{'profile':'INCIDENT_BURST','burst_seconds':1}}});s.command({'op':'start'});s.tick()
+  self.assertIsNone(s.probe.detailed_capture)
+  for _ in range(2):
+   # TEST ONLY injected trigger boundary; real elapsed TTL and recorder writes.
+   s.probe.incident_events.append({'code':'AUTO_INCIDENT_STARTED','trigger_code':'TEST_ONLY_TRIGGER'})
+   s._maybe_burst();self.wait(lambda:s.probe.detailed_capture.samples>0)
+   time.sleep(1.02);s._policy_tick();self.assertIsNone(s.probe.detailed_capture)
+  self.assertIsNone(s.wpr);self.assertIsNone(s.runtime_trace)
+ def test_actual_logical_size_limit_stops_and_keeps_all_recorded_files(self):
+  from pathlib import Path
+  s=self.s;s.command({'op':'capture_policy','args':{'policy':{'max_session_mb':16}}});s.command({'op':'start'});s.tick()
+  path=s.probe.session_folder/'TEST_ONLY_LOGICAL_BYTES.bin'
+  with path.open('wb') as f:f.truncate(17*1024**2)
+  s._health();self.assertFalse(s.probe.active);self.assertEqual(s.research_state,'STORAGE_LIMIT_REACHED')
+  self.assertEqual(path.stat().st_size,17*1024**2);self.assertTrue((s.probe.session_folder/'session-v2.sqlite3').is_file())
  def test_real_time_limit_keeps_completed_observations(self):
   s=self.s;s.command({'op':'capture_policy','args':{'policy':{'session_seconds':1}}});s.command({'op':'start'});s.tick();time.sleep(1.02);s.tick()
   self.assertEqual(s.research_state,'TIME_LIMIT_REACHED');self.assertFalse(s.probe.active)

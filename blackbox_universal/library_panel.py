@@ -75,6 +75,8 @@ class LibraryPanel(QWidget):
         self.reconcile_button=self.button('Reconcile interrupted moves','Проверить прерванные перемещения',lambda:self.send('library_reconcile'))
         for b in (self.policy_button,self.preview_button,self.reconcile_button):row.addWidget(b)
         storage.addLayout(row)
+        self.purge_button=self.button('Permanently delete selected Trash entries…','Окончательно удалить выбранные из корзины…',self.plan_purge)
+        self.purge_button.setStyleSheet('color: #a43649;');storage.addWidget(self.purge_button)
         self.candidate_table=self.make_table(3,'libraryRetentionCandidates');self.candidate_table.setMinimumHeight(100);self.candidate_table.setMaximumHeight(165)
         self.candidate_table.itemSelectionChanged.connect(self.selection_changed);storage.addWidget(self.candidate_table)
         self.candidate_trash=self.button('Review selected candidates…','Рассмотреть выбранных кандидатов…',self.plan_candidates)
@@ -148,12 +150,14 @@ class LibraryPanel(QWidget):
         return [rows[i.row()] for i in table.selectionModel().selectedRows() if i.row()<len(rows)]
     def selection_changed(self):
         selected=self.selected();available=not self._busy
-        normal=all(r['state'] not in ('TRASH','MOVING_TO_TRASH','RESTORING') for r in selected)
+        normal=all(r['state'] not in ('TRASH','MOVING_TO_TRASH','RESTORING','PURGING','PURGE_PARTIAL','PURGED') for r in selected)
         self.open_button.setEnabled(available and len(selected)==1 and normal)
         self.compare_button.setEnabled(available and len(selected)==2 and normal and
             all(r['state'] not in ('RECORDING','FINALIZATION_UNCONFIRMED') for r in selected))
         self.trash_button.setEnabled(available and bool(selected) and all(r['trash_eligible'] for r in selected))
         self.restore_button.setEnabled(available and len(selected)==1 and selected[0]['state']=='TRASH')
+        readers=any(getattr(self.window,key,None) is not None for key in ('_interval_worker','_interval_export_worker','_thread_detail_worker','_investigation_worker'))
+        self.purge_button.setEnabled(available and not readers and bool(selected) and all(r['origin']=='LOCAL_APP_MARKED' and r['state'] in ('TRASH','PURGING','PURGE_PARTIAL') for r in selected))
         self.candidate_trash.setEnabled(available and bool(self.selected(self.candidate_table,self.candidates)))
         for b in (self.refresh_button,self.register_button,self.scan_button,self.policy_button,self.preview_button,self.reconcile_button):b.setEnabled(available)
         if len(selected)==1:
@@ -231,6 +235,17 @@ class LibraryPanel(QWidget):
     def restore_selected(self):
         rows=self.selected()
         if len(rows)==1:self.send('library_restore',entry_id=rows[0]['entry_id'])
+    def plan_purge(self):
+        rows=self.selected()
+        if self.purge_button.isEnabled() and rows:self.send('library_plan_purge',entry_ids=[r['entry_id'] for r in rows])
+    def confirm_purge(self,plan):
+        text=self.tr('Permanently delete the selected app-owned recordings from Trash? This cannot be undone. Original files outside these folders are not selected.',
+            'Безвозвратно удалить выбранные собственные записи из корзины? Отменить удаление нельзя. Файлы вне этих папок не выбраны.')
+        text+='\n\n'+'\n'.join(str(r['remaining_entries'])+' · '+r['folder'] for r in plan['items'])
+        box=QMessageBox(self);box.setIcon(QMessageBox.Icon.Warning);box.setWindowTitle(self.tr('Confirm permanent deletion','Подтвердить окончательное удаление'))
+        box.setTextFormat(Qt.TextFormat.PlainText);box.setText(text);box.setStandardButtons(QMessageBox.StandardButton.Yes|QMessageBox.StandardButton.No);box.setDefaultButton(QMessageBox.StandardButton.No)
+        if box.exec()==QMessageBox.StandardButton.Yes:self.send('library_apply_purge',confirmation_token=plan['confirmation_token'])
+
     def receive(self,op,result,error):
         if not op.startswith('library_') or op not in self._busy:return
         self._busy.discard(op)
@@ -269,7 +284,8 @@ class LibraryPanel(QWidget):
                     self.tr(' · Entries with unknown size: ',' · Записей неизвестного размера: ')+str(result.get('unknown_size_entries',0))+
                     (self.tr(' · First 50 eligible entries only.',' · Проверены первые 50 подходящих записей.') if result.get('preview_limited') else ''))
             elif op=='library_plan_trash':self.confirm_plan(result)
-            elif op in ('library_apply_trash','library_restore','library_register','library_reconcile'):
+            elif op=='library_plan_purge':self.confirm_purge(result)
+            elif op in ('library_apply_trash','library_restore','library_register','library_reconcile','library_apply_purge'):
                 self.candidates=[];self.candidate_table.setRowCount(0)
                 self.details.setPlainText(json.dumps(result,ensure_ascii=False,indent=2));self.refresh()
         self.selection_changed();self._update_paging()

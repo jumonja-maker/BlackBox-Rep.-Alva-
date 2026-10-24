@@ -75,6 +75,22 @@ class IsolatedGuiTests(unittest.TestCase):
         self.window._set_language("EN")
         self.assertEqual(self.window.research_panel.load.text(),"Load interval")
         self.assertEqual(self.window.library_panel.open_button.text(),"Open selected")
+    def test_permanent_trash_deletion_is_really_confirmed_in_ui(self):
+        self.start_recording();w=self.window;b=w.probe;folder=b.session_folder
+        w._stop();self.assertTrue(self.drain(lambda:not b.active and not b.pending))
+        p=w.library_panel;p.refresh();self.assertTrue(self.drain(lambda:bool(p.rows) and not p._busy))
+        row=next(r for r in p.rows if r['folder']==str(folder))
+        with patch.object(p,'confirm_plan',side_effect=lambda plan:p.send('library_apply_trash',confirmation_token=plan['confirmation_token'])):
+            p.send('library_plan_trash',entry_ids=[row['entry_id']]);self.assertTrue(self.drain(lambda:not p._busy))
+        p.filter.setCurrentIndex(p.filter.findData('TRASH'));self.assertTrue(self.drain(lambda:not p._busy and any(r['state']=='TRASH' for r in p.rows)))
+        index=next(i for i,r in enumerate(p.rows) if r['entry_id']==row['entry_id']);payload=Path(p.rows[index]['folder']);p.table.selectRow(index)
+        self.assertTrue(self.drain(lambda:p.purge_button.isEnabled()))
+        with patch('blackbox_universal.library_panel.QMessageBox.exec',return_value=QMessageBox.StandardButton.No):
+            p.purge_button.click();self.assertTrue(self.drain(lambda:not p._busy))
+        self.assertTrue(payload.exists())
+        with patch('blackbox_universal.library_panel.QMessageBox.exec',return_value=QMessageBox.StandardButton.Yes):
+            p.purge_button.click();self.assertTrue(self.drain(lambda:not p._busy and not payload.exists()))
+
     def test_new_user_markers_analysis_and_event_filters_use_real_isolated_owner(self):
         self.start_recording();w=self.window;b=w.probe
         w.marker_panel.name.setText('real GUI stage');w.marker_panel.send('STAGE_BEGIN')

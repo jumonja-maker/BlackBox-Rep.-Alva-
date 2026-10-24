@@ -152,26 +152,55 @@ def wait_chain(tid, *, timeout_s=0.25):
         _pending_wct.remove(state)
 
 
+def _write_dump_bounded(write,stream,*,attempts=3):
+    """Retry only ERROR_BAD_LENGTH, without downgrading requested flags.
+
+    HRESULT handling follows MiniDumpWriteDump's documented GetLastError
+    contract. Retrying a dynamic snapshot is our bounded recovery policy.
+    """
+    errors=[]
+    for attempt in range(attempts):
+        stream.seek(0);stream.truncate(0)
+        ok,error=write(stream)
+        if ok:return {'attempts':attempt+1,'retry_hresult':errors}
+        error=int(error)&0xffffffff;errors.append(error)
+        if error not in (24,0x80070018) or attempt==attempts-1:
+            raise OSError(error,'MINIDUMP_WRITE_FAILED_HRESULT_'+format(error,'08X'))
+        time.sleep(.05*(attempt+1))
+    raise OSError('MINIDUMP_WRITE_UNCONFIRMED')
+
+
 def minidump(pid, destination, *, full=False):
-    if os.name!="nt":raise OSError("UNSUPPORTED_PLATFORM")
-    import msvcrt
+    if os.name!='nt':raise OSError('UNSUPPORTED_PLATFORM')
+    if type(pid) is not int or pid<=0 or type(full) is not bool:raise ValueError('INVALID_DUMP_POLICY')
+    import msvcrt,psutil
+    from .export_recovery import export_stage
     path=Path(destination)
-    if path.exists() or path.is_symlink():raise ValueError("DUMP_DESTINATION_EXISTS")
-    kernel=C.WinDLL("kernel32",use_last_error=True);dbg=C.WinDLL("dbghelp",use_last_error=True)
+    if path.exists() or path.is_symlink():raise ValueError('DUMP_DESTINATION_EXISTS')
+    # Load only the Windows system DLL, never a same-named cwd/PATH file.
+    kernel=C.WinDLL('kernel32',use_last_error=True,winmode=0x800)
+    dbg=C.WinDLL('dbghelp',use_last_error=True,winmode=0x800)
     kernel.OpenProcess.argtypes=[W.DWORD,W.BOOL,W.DWORD];kernel.OpenProcess.restype=W.HANDLE
     kernel.CloseHandle.argtypes=[W.HANDLE];kernel.CloseHandle.restype=W.BOOL
-    dbg.MiniDumpWriteDump.argtypes=[W.HANDLE,W.DWORD,W.HANDLE,W.DWORD,C.c_void_p,C.c_void_p,C.c_void_p]
-    dbg.MiniDumpWriteDump.restype=W.BOOL
-    handle=kernel.OpenProcess(0x400|0x10|0x40,False,pid)
-    if not handle:raise OSError(C.get_last_error(),"OPEN_PROCESS_FOR_DUMP_FAILED")
+    dbg.MiniDumpWriteDump.argtypes=[W.HANDLE,W.DWORD,W.HANDLE,W.DWORD,C.c_void_p,C.c_void_p,C.c_void_p];dbg.MiniDumpWriteDump.restype=W.BOOL
+    created=psutil.Process(pid).create_time();handle=kernel.OpenProcess(0x400|0x10|0x40,False,pid)
+    if not handle:raise OSError(C.get_last_error(),'OPEN_PROCESS_FOR_DUMP_FAILED')
     try:
-        with path.open("xb") as stream:
-            flags=0x1000|0x800|(0x2 if full else 0)
-            if not dbg.MiniDumpWriteDump(handle,pid,msvcrt.get_osfhandle(stream.fileno()),flags,None,None,None):
-                raise OSError(C.get_last_error(),"MINIDUMP_WRITE_FAILED")
-            stream.flush();os.fsync(stream.fileno())
-        return {"source":"DBGHELP_MINIDUMP","path":path.name,"bytes":path.stat().st_size,
-                "full_memory":full,"status":"CAPTURED","symbol_resolution":"NOT_PERFORMED"}
+        with export_stage(path.parent,kind='EXPLICIT_SENSITIVE_MINIDUMP') as tx:
+            temporary=tx.reserve('snapshot.dmp')
+            with temporary.open('wb+') as stream:
+                flags=0x1000|0x800|(0x2 if full else 0)
+                def write(output):
+                    if abs(psutil.Process(pid).create_time()-created)>.000001:raise ValueError('TARGET_INSTANCE_CHANGED')
+                    C.set_last_error(0)
+                    ok=bool(dbg.MiniDumpWriteDump(handle,pid,msvcrt.get_osfhandle(output.fileno()),flags,None,None,None))
+                    return ok,C.get_last_error()
+                result=_write_dump_bounded(write,stream)
+                stream.flush();os.fsync(stream.fileno());stream.seek(0)
+                if stream.read(4)!=b'MDMP' or temporary.stat().st_size<32:raise OSError('MINIDUMP_HEADER_UNCONFIRMED')
+            size=temporary.stat().st_size;tx.prepare({path.name:temporary});tx.publish()
+        return {'source':'DBGHELP_MINIDUMP','path':path.name,'bytes':size,'full_memory':full,
+            'status':'CAPTURED','symbol_resolution':'NOT_PERFORMED',**result}
     finally:kernel.CloseHandle(handle)
 
 

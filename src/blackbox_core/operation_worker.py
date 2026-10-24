@@ -13,9 +13,9 @@ import time
 
 LIBRARY_OPERATIONS = frozenset({'library_query','library_register','library_scan','library_open',
     'library_compare','library_policy','library_retention','library_plan_trash',
-    'library_apply_trash','library_restore','library_reconcile'})
+    'library_apply_trash','library_restore','library_reconcile','library_plan_purge','library_apply_purge'})
 OPERATIONS = LIBRARY_OPERATIONS | frozenset({'native', 'symbols', 'inspect_dump', 'inspect', 'prepare_client',
-    'episode', 'evidence_page', 'export', 'compare', 'verify', 'recover', 'dump', 'processes','investigation','incident_card','events_query'})
+    'episode', 'evidence_page', 'export', 'compare', 'verify', 'recover', 'dump', 'processes','investigation','incident_card','events_query','export_recovery_scan','export_recover'})
 TARGET_OPERATIONS = frozenset({'native', 'symbols', 'inspect', 'dump'})
 MAX_RESULT_BYTES = 4 * 1024 * 1024
 
@@ -62,6 +62,14 @@ def execute(packet):
         elif op=='library_apply_trash':result=catalog.apply_trash(a['confirmation_token'])
         elif op=='library_restore':result=catalog.restore(a['entry_id'])
         elif op=='library_reconcile':result=catalog.reconcile()
+        elif op=='library_plan_purge':result=catalog.plan_purge(a['entry_ids'])
+        elif op=='library_apply_purge':result=catalog.apply_purge(a['confirmation_token'])
+    elif op=='export_recovery_scan':
+        from .export_recovery import scan_exports
+        result=scan_exports(a['folder'])
+    elif op=='export_recover':
+        from .export_recovery import recover_export
+        result=recover_export(a['journal'],action=a['action'],confirmed=a.get('confirmed',False))
     elif op=='investigation':
         from .investigation_v2 import investigate
         result=investigate(a.get('folder') or folder,start_ns=a.get('start_ns'),end_ns=a.get('end_ns'),after=a.get('after'),limit=a.get('limit',50),question=a.get('question','ALL'),sort_order=a.get('sort_order','TIME_ASC'),instance_id=a.get('instance_id',1))

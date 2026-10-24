@@ -11,7 +11,7 @@ from pathlib import Path
 import re
 import sqlite3
 
-_PRIVATE={'application_event_path','command_line','cmdline','environment_variables','environ',
+_PRIVATE={'note','comment','application_event_path','command_line','cmdline','environment_variables','environ',
     'window_title','title_text','url','full_path','pdb_path','dump_path','source_folder','preview'}
 _PATH=re.compile(r'(?:[A-Za-z]:[\\/]|\\\\[^\\\s]+\\|https?://|file://|/(?:home|workspace|Users|tmp|var|opt)/)[^\s\"<>]*',re.IGNORECASE)
 

@@ -30,6 +30,40 @@ class LibraryTests(unittest.TestCase):
         if root==self.root:entry=self.catalog.record_owned(folder,meta,finalized=finalized)
         else:entry=self.catalog.register(folder)
         return folder,entry
+    def test_permanent_purge_is_separate_single_use_and_keeps_other_files(self):
+        folder,row=self.recording();outside=self.root/'KEEP.bin';outside.write_bytes(b'KEEP')
+        plan=self.catalog.plan_trash([row['entry_id']]);self.catalog.apply_trash(plan['confirmation_token'])
+        purge=self.catalog.plan_purge([row['entry_id']]);payload=Path(self.catalog.entry(row['entry_id'])['folder'])
+        self.assertTrue(payload.exists());self.assertFalse(purge['automatic_deletion'])
+        with self.assertRaisesRegex(ValueError,'WRONG_CONFIRMATION'):self.catalog.apply_trash(purge['confirmation_token'])
+        result=self.catalog.apply_purge(purge['confirmation_token']);self.assertEqual(result['results'][0]['status'],'PURGED')
+        self.assertFalse(payload.exists());self.assertEqual(outside.read_bytes(),b'KEEP');self.assertIsNone(result['bytes_freed'])
+        with self.assertRaisesRegex(ValueError,'EXPIRED_OR_USED'):self.catalog.apply_purge(purge['confirmation_token'])
+
+    def test_interrupted_purge_can_resume_with_fresh_review(self):
+        folder,row=self.recording();(folder/'extra.bin').write_bytes(b'public QA')
+        self.catalog.apply_trash(self.catalog.plan_trash([row['entry_id']])['confirmation_token'])
+        plan=self.catalog.plan_purge([row['entry_id']])
+        from blackbox_core.retention_delete import remove_entry
+        calls=[]
+        def fail_second(*args):
+            calls.append(args)
+            if len(calls)==2:raise OSError('TEST_ONLY_INTERRUPTION')
+            return remove_entry(*args)
+        with patch('blackbox_core.retention_delete.remove_entry',side_effect=fail_second):
+            result=self.catalog.apply_purge(plan['confirmation_token'])
+        self.assertEqual(result['results'][0]['status'],'PURGE_PARTIAL')
+        again=self.catalog.plan_purge([row['entry_id']]);result=self.catalog.apply_purge(again['confirmation_token'])
+        self.assertEqual(result['results'][0]['status'],'PURGED')
+
+    def test_uninventoried_file_after_purge_plan_stops_before_first_delete(self):
+        folder,row=self.recording();self.catalog.apply_trash(self.catalog.plan_trash([row['entry_id']])['confirmation_token'])
+        payload=Path(self.catalog.entry(row['entry_id'])['folder']);plan=self.catalog.plan_purge([row['entry_id']])
+        (payload/'KEEP_NEW.bin').write_bytes(b'new file')
+        with patch('blackbox_core.retention_delete.remove_entry',side_effect=AssertionError('must validate first')):
+            with self.assertRaisesRegex(ValueError,'NEW_OR_REPLACED'):self.catalog.apply_purge(plan['confirmation_token'])
+        self.assertTrue((payload/'session.sqlite3').is_file())
+
     def test_empty_query_and_default_policy_have_no_automatic_deletion(self):
         self.assertEqual(self.catalog.query()['rows'],[])
         self.assertFalse(self.catalog.policy()['automatic_deletion'])

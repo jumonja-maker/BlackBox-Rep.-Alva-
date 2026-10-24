@@ -111,6 +111,8 @@ def human_html(report,threads):
             safe(report["metrics"][key]["unit"])+"</p><svg viewBox='0 0 800 110' role='img' "
             "aria-label='First min max last, gaps retained'><path fill='none' stroke='#246d70' "
             "stroke-width='2' d='"+" ".join(paths)+"'/></svg>")
+    findings=report.get('findings_export',{})
+    finding_link=("<h2>Все находки / All findings</h2><p><a href='"+safe(findings.get('html_file',''))+"'>"+safe(findings.get('count',0))+" findings / находок</a>. Full JSON/CSV included.</p>") if findings else ''
     return ("<!doctype html><html lang='ru'><meta charset='utf-8'>"
         "<meta http-equiv='Content-Security-Policy' content=\"default-src 'none'; style-src 'unsafe-inline'\">"
         "<title>BLACK.BOX — selected interval</title><style>body{font:15px sans-serif;max-width:1100px;"
@@ -130,7 +132,7 @@ def human_html(report,threads):
         "<th>Mean CPU %</th><th>Peak CPU %</th><th>Observed presence %</th></tr>"+rows+"</table>"
         "<h2>Windows / WCT</h2><p>Recorded producer observations; source file is UNVERIFIED_IMPORT.</p>"
         "<table><tr><th>Source</th><th>Observation</th><th>Status</th><th>Count</th></tr>"+native+"</table>"
-        "<h2>Что нельзя установить / Limitations</h2><p>Root cause: UNKNOWN. "
+        +finding_link+"<h2>Что нельзя установить / Limitations</h2><p>Root cause: UNKNOWN. "
         "Memory growth is not proof of a leak; a CPU sample is not WCT or Windows UI evidence. "
         "TID reuse cannot be excluded. Bounds exclude partial counter pairs; activity between samples is unknown.</p>"
         "<pre>"+safe(json.dumps(report["coverage"],ensure_ascii=False,indent=2))+"</pre>"
@@ -148,7 +150,8 @@ def export_interval(folder: Path,output: Path,*,interval=None,series=None,instan
     prefix=prefix or "interval-"+uuid4().hex
     if not re.fullmatch(r"[A-Za-z0-9_-]{1,80}",prefix):
         raise ValueError("INVALID_EXPORT_PREFIX")
-    stage={}
+    from .export_recovery import ExportTransaction
+    tx=ExportTransaction(output,kind='INTERVAL_REPORT');stage={}
     published=[]
     try:
         with SessionView.open(folder,cancel=cancel) as view:
@@ -175,9 +178,7 @@ def export_interval(folder: Path,output: Path,*,interval=None,series=None,instan
                     row.pop("pid",None)
                     row.pop("tid",None)
             def stage_file(suffix):
-                fd,name=tempfile.mkstemp(prefix=".bb-interval-",suffix=".tmp",dir=output)
-                os.close(fd)
-                path=Path(name)
+                path=tx.reserve(prefix+suffix)
                 stage[prefix+suffix]=path
                 return path
             csv_path=stage_file(".csv")
@@ -231,6 +232,10 @@ def export_interval(folder: Path,output: Path,*,interval=None,series=None,instan
                     cursor=page["next_cursor"]
             report["event_export"]={"count":event_count,"file":prefix+".events.jsonl",
                                     "sha256":digest(event_path)}
+            from .findings_export import write_findings
+            findings=write_findings(folder,tx,prefix,interval=(lo,hi),instance_id=instance_id,
+                include_identifiers=include_identifiers,include_notes=include_notes,cancel=cancel)
+            stage.update(findings.pop('files'));report['findings_export']=findings
             stage_file(".html").write_text(human_html(report,threads),encoding="utf-8")
             stage_file(".json").write_text(json.dumps(report,ensure_ascii=False,allow_nan=False,indent=2)+"\n",encoding="utf-8")
             manifest={"schema_version":2,"privacy":report["privacy"],"files":[
@@ -243,28 +248,15 @@ def export_interval(folder: Path,output: Path,*,interval=None,series=None,instan
                 with zipfile.ZipFile(archive,"w",compression=zipfile.ZIP_DEFLATED) as z:
                     for name,path in members:
                         z.write(path,name)
-            for name,path in stage.items():
-                # Windows FlushFileBuffers requires a writable descriptor.
-                # These are our staged output files, never the source DB.
-                with path.open("rb+") as f:
-                    os.fsync(f.fileno())
-                destination=output/name
-                os.link(path,destination)
-                published.append((path,destination))
+            tx.prepare(stage);tx.publish()
+            published=[(path,output/name) for name,path in stage.items()]
             return {"schema_version":2,"files":[str(target) for _,target in published],
                     "sample_count":report["coverage"]["selected_samples"],"event_count":event_count,
                     "manifest":str(output/(prefix+".manifest.json")),"report":report}
     except Exception:
-        for path,target in reversed(published):
-            try:
-                if os.path.samestat(path.stat(),target.lstat()):
-                    target.unlink()
-            except OSError:
-                pass
+        try:tx.abort()
+        except (OSError,ValueError):pass
         raise
-    finally:
-        for path in stage.values():
-            path.unlink(missing_ok=True)
 
 
 def math_isfinite(value):

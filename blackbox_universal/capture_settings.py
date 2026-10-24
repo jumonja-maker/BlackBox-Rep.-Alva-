@@ -63,7 +63,9 @@ class CaptureSettings(QWidget):
   return validate_policy(p)
  def commit(self):
   try:self.bridge.send('capture_policy',policy=self.values())
-  except (ValueError,RuntimeError) as exc:self.status.setText(str(exc))
+  except (ValueError,RuntimeError) as exc:
+   from .research_messages import explain
+   self.status.setText(explain(str(exc),self.window.language))
  def refresh(self):self.apply.setEnabled(not self.bridge.active and not self.bridge.pending);self.form_widget.setEnabled(not self.bridge.active);self.profile.setEnabled(not self.bridge.active)
  def receive(self,op,result,error):
   if op!='capture_policy':return

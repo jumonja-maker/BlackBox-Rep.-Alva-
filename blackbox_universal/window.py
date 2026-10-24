@@ -577,15 +577,16 @@ class UniversalWindow(QMainWindow):
         threads_panel.content.addWidget(self.thread_detail_table)
         content.addWidget(threads_panel)
         history_panel = WindowPanel("Recorded process tree", "PID + BIRTH / READ ONLY")
-        self.process_history_table = QTableWidget(0,6)
+        self.process_history_table = QTableWidget(0,11)
         self.process_history_table.setHorizontalHeaderLabels(
-            ("PID","BIRTH","PARENT PID","NAME","FIRST ns","LAST / ABSENT ns"))
+            ("PID","BIRTH","PARENT PID","NAME","FIRST ns","LAST / ABSENT ns","CPU seconds","RSS peak B","PRIVATE peak B","USS peak B","HANDLES peak"))
         self.process_history_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
         self.process_history_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.process_history_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.process_history_table.setMinimumHeight(170)
         self.process_history_table.itemSelectionChanged.connect(self._history_process_selected)
         history_panel.content.addWidget(self.process_history_table)
+        self.process_history_summary=QLabel();self.process_history_summary.setWordWrap(True);history_panel.content.addWidget(self.process_history_summary)
         self.process_history_more = _button("NEXT PROCESS PAGE")
         self.process_history_more.clicked.connect(self._next_process_page)
         self.process_history_more.setEnabled(False)
@@ -808,6 +809,9 @@ class UniversalWindow(QMainWindow):
         page, content = _page()
         from .capture_settings import CaptureSettings
         self.capture_settings=CaptureSettings(self);content.addWidget(self.capture_settings)
+        from .recovery_panel import RecoveryPanel
+        recovery=WindowPanel('Interrupted exports / Прерванные экспорты','LOCAL RECOVERY')
+        self.recovery_panel=RecoveryPanel(self);recovery.content.addWidget(self.recovery_panel);content.addWidget(recovery)
         content.addWidget(_label("CONTROL PANEL / PREFERENCES", "eyebrow", False))
         setting = WindowPanel("Observation settings", "LOCAL CONFIGURATION")
         setting.content.addWidget(_label("SAMPLE INTERVAL", "cardTitle"))
@@ -976,6 +980,7 @@ class UniversalWindow(QMainWindow):
             self.library_toggle.setText("БИБЛИОТЕКА ИССЛЕДОВАНИЙ / ЭКСПЕРИМЕНТОВ" if language=="RU"
                                         else "SAVED RESEARCH / EXPERIMENT LIBRARY")
         if hasattr(self,'capture_settings'):self.capture_settings.retranslate()
+        if hasattr(self,'recovery_panel'):self.recovery_panel.retranslate()
         if hasattr(self,'marker_panel'):self.marker_panel.retranslate()
         if hasattr(self,'analysis_panel'):self.analysis_panel.retranslate()
         if hasattr(self,'events_panel'):self.events_panel.retranslate()
@@ -1612,13 +1617,17 @@ class UniversalWindow(QMainWindow):
         self.process_history_table.blockSignals(True)
         self.process_history_table.setRowCount(len(rows))
         for index,row in enumerate(rows):
-            values=(row["pid"],row["creation_time"],row["parent_pid"],row["executable_name"],
-                    row["first_observed_ns"],row["absence_observed_ns"] or row["last_observed_ns"])
+            r=row.get('resources',{})
+            values=(row['pid'],row['creation_time'],row['parent_pid'],row['executable_name'],row['first_observed_ns'],row['absence_observed_ns'] or row['last_observed_ns'],
+                r.get('cpu_seconds'),r.get('rss_peak_bytes'),r.get('private_peak_bytes'),r.get('uss_peak_bytes'),r.get('handles_peak'))
             for column,value in enumerate(values):
                 item=QTableWidgetItem(str(value if value is not None else "UNAVAILABLE"))
                 item.setData(Qt.ItemDataRole.UserRole,row["instance_id"])
                 self.process_history_table.setItem(index,column,item)
         self.process_history_table.blockSignals(False)
+        tree=result.get('process_tree_totals',{})
+        self.process_history_summary.setText('Root / observed tree RSS peak: '+str(tree.get('root_rss_peak_bytes'))+' / '+str(tree.get('observed_tree_rss_peak_bytes'))+' B · '+
+            ('Общая RSS может повторно учитывать общие страницы.' if self.language=='RU' else 'Summed RSS can count shared pages more than once.'))
         self.process_history_more.setEnabled(packet["processes"]["has_more"])
         self.session_event_table.blockSignals(True)
         events=packet["events"]["rows"]
@@ -1636,6 +1645,7 @@ class UniversalWindow(QMainWindow):
     def _session_interval_finished(self):
         worker=self._interval_worker
         self._interval_worker=None
+        self.library_panel.selection_changed()
         if worker:
             worker.deleteLater()
         if self._pending_close:
@@ -1784,6 +1794,7 @@ class UniversalWindow(QMainWindow):
 
     def _thread_detail_finished(self) -> None:
         self._thread_detail_worker = None
+        self.library_panel.selection_changed()
         self._update_all()
 
     def _tick(self) -> None:

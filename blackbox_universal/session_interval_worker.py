@@ -24,11 +24,17 @@ class SessionIntervalWorker(QThread):
                     view.bounds("DETAILED",self.instance_id)[2] else
                     "STANDARD" if self.instance_id==1 else "CHILD")
                 start,end=self.interval or (None,None)
+                if self.interval is None:
+                    from blackbox_core.investigation_v2 import research_tail
+                    tail=research_tail(self.folder)
+                    if tail is not None:end=max(view._range(None,None,series,self.instance_id)[1],tail)
                 report=view.interval(start,end,series=series,instance_id=self.instance_id)
                 from blackbox_core.event_stream import event_tracks
                 report['timeline']['events']=event_tracks(view,*report['selected_interval_ns'],folder=self.folder)
                 threads=view.thread_summary(start,end,instance_id=self.instance_id)
-                processes=view.process_page(after=self.process_after)
+                from blackbox_core.process_tree import resource_tree_page,tree_totals
+                processes=resource_tree_page(view,*report['selected_interval_ns'],after=self.process_after)
+                report['process_tree_totals']=tree_totals(view,*report['selected_interval_ns'])
                 lo,hi=report["selected_interval_ns"]
                 events=view.event_page(lo,hi,after=self.event_cursor)
                 self.result_ready.emit({"folder":str(self.folder),"interval":report,
