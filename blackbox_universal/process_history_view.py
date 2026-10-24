@@ -1,6 +1,7 @@
 """Bounded recorded process hierarchy. No sensor or filesystem work on Qt."""
 from __future__ import annotations
 
+import html
 import math
 
 from PySide6.QtCore import Qt
@@ -21,6 +22,12 @@ def _number(value, *, scale=1, precision=3):
     if type(value) not in (int, float) or not math.isfinite(value):
         return "—"
     return f"{value / scale:.{precision}f}"
+
+
+def _tooltip(text):
+    # Qt tooltips support rich text; imported names must remain literal data,
+    # never markup or an image URL that makes Qt read another local file.
+    return "<qt>" + html.escape(text).replace("\n", "<br>") + "</qt>"
 
 
 class RecordedProcessTree(QTreeWidget):
@@ -111,10 +118,10 @@ class RecordedProcessTree(QTreeWidget):
                     raw += "\n" + ("Контекст предка; ресурсные значения не загружены на этой странице."
                                     if ru else "Ancestor context; resources not loaded in this page.")
                 for column, value in enumerate(values):
-                    item.setToolTip(column, str(value) + "\n" + raw)
+                    item.setToolTip(column, _tooltip(str(value) + "\n" + raw))
                     if 0 < column < 10:
                         item.setTextAlignment(column, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-                item.setToolTip(8, raw + "\n" + row.get("age_quality", "NOT_OBSERVED"))
+                item.setToolTip(8, _tooltip(raw + "\n" + row.get("age_quality", "NOT_OBSERVED")))
                 self._items[identity] = item
             for identity, row in records.items():
                 parent = row.get("parent_instance_candidate")
@@ -134,7 +141,7 @@ class RecordedProcessTree(QTreeWidget):
                 else:
                     self.addTopLevelItem(item)
                     if cycle:
-                        item.setToolTip(0, item.toolTip(0) + "\nINVALID_CYCLIC_PARENT_CANDIDATE")
+                        item.setToolTip(0, item.toolTip(0) + "<br>INVALID_CYCLIC_PARENT_CANDIDATE")
             # Finite page, keyboard expansion stays available for deeper nodes.
             self.expandToDepth(1)
             if selected_instance in self._items:

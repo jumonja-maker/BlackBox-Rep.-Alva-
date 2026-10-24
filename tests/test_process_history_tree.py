@@ -120,6 +120,11 @@ class ProcessHistoryTreeTests(unittest.TestCase):
                 widget.apply_page(page)
                 self.assertEqual(widget.topLevelItemCount(), 3)
                 self.assertIn("INVALID_CYCLIC", widget.item_for_instance(3).toolTip(0))
+                page['rows'][0]['executable_name']='<img src="file:///TEST_ONLY_PRIVATE.png">'
+                widget.apply_page(page)
+                tip=widget.item_for_instance(3).toolTip(0)
+                self.assertNotIn('<img',tip)
+                self.assertIn('&lt;img',tip)
             finally:
                 widget.close()
                 widget.deleteLater()
