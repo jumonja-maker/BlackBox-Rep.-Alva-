@@ -83,6 +83,7 @@ def sample_process(pid: int, created: float, *, thread_limit: int = 256,
         descendants = []
         children_total = None
         children_status = "OK"
+        children_failed = 0
         try:
             all_children = p.children(recursive=True)
             children_total = len(all_children)
@@ -106,6 +107,7 @@ def sample_process(pid: int, created: float, *, thread_limit: int = 256,
                         except (psutil.AccessDenied, NotImplementedError, OSError):
                             child_handles = None
                     if abs(float(psutil.Process(child.pid).create_time()) - child_created) > 0.000001:
+                        children_failed += 1
                         continue
                     descendants.append({
                         "pid": child.pid, "created": child_created,
@@ -122,11 +124,14 @@ def sample_process(pid: int, created: float, *, thread_limit: int = 256,
                         "write_ops": getattr(child_io,"write_count",None),
                     })
                 except (psutil.NoSuchProcess, psutil.ZombieProcess, psutil.AccessDenied, OSError):
+                    children_failed += 1
                     continue
         except psutil.AccessDenied:
             children_status = "ACCESS_DENIED"
         except (psutil.NoSuchProcess, OSError):
             children_status = "NOT_OBSERVED"
+        if children_status == "OK" and children_failed:
+            children_status = "TRUNCATED"
         if abs(float(psutil.Process(pid).create_time()) - created) > 0.000001:
             raise DetailSensorError("PID_REUSED")
         ended = time.monotonic_ns()
@@ -150,6 +155,7 @@ def sample_process(pid: int, created: float, *, thread_limit: int = 256,
             "children": descendants, "children_total": children_total,
             "children_omitted": (max(0, children_total-len(descendants))
                                  if children_total is not None else None),
+            "children_failed": children_failed,
             "source": "PSUTIL_EXTERNAL_COUNTERS_NOT_CAUSAL_PROOF",
             "sensor_status": {
                 "rss_bytes": "OK", "private_bytes": private_status,
@@ -172,11 +178,11 @@ class DetailedCapture:
     """Independent thread with independent SQLite v2 sidecar connection."""
 
     def __init__(self, folder: Path, pid: int, created: float, origin_ns: int,
-                 *, interval_s: float = 2.0, max_samples: int = 14400,
+                 *, interval_s: float = 2.0, max_samples: int | None = None,
                  max_bytes: int = 256 * 1024 * 1024, collector=None):
         if (type(origin_ns) is not int or origin_ns < 0 or
                 not 0.5 <= interval_s <= 30 or
-                type(max_samples) is not int or not 1 <= max_samples <= 20000):
+                (max_samples is not None and (type(max_samples) is not int or not 1 <= max_samples <= 20000))):
             raise ValueError("INVALID_DETAILED_CAPTURE_POLICY")
         self.folder = Path(folder)
         self.path = self.folder / "detail-v2.sqlite3"
@@ -297,7 +303,8 @@ class DetailedCapture:
             conn.commit()
             self.status = "RUNNING"
             while not self.stop_event.is_set():
-                if self.samples >= self.max_samples or self._storage_bytes() >= self.max_bytes:
+                if ((self.max_samples is not None and self.samples >= self.max_samples) or
+                        self._storage_bytes() >= self.max_bytes):
                     final = "CAPTURE_LIMIT_REACHED"
                     break
                 try:

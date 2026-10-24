@@ -29,7 +29,7 @@ def main() -> int:
     (output / "font-coverage.json").write_text(json.dumps(fonts, ensure_ascii=False, indent=2), encoding="utf-8")
     if not fonts["ok"]:
         raise RuntimeError("DPI_RU_EN_FONT_GLYPHS_MISSING: " + json.dumps(fonts, ensure_ascii=False))
-    window = UniversalWindow()
+    window = UniversalWindow(allow_update_check=False)
     window._timer.stop()
     window.resize(1330, 850)
     window.show()
@@ -41,6 +41,7 @@ def main() -> int:
         for lang in ("EN", "RU"):
             window._set_language(lang)
             for page, _ in window.PAGES:
+                (output/"progress.json").write_text(json.dumps({"scale":scale,"language":lang,"page":page}),encoding="utf-8")
                 window._navigate(page)
                 app.processEvents()
                 shot = window.grab()

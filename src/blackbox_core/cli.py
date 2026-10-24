@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+import sys
 from .contracts import ObserverError
 from .probe import list_processes
 from .recorder import record
@@ -10,8 +11,17 @@ from .report import summarize, write_report, compare
 
 
 def main(argv: list[str] | None = None) -> int:
+    actual = list(sys.argv[1:] if argv is None else argv)
+    if actual and actual[0] == "research":
+        from .research_cli import main as research_main
+        try:
+            return research_main(actual[1:])
+        except (OSError, ValueError, ObserverError) as exc:
+            print(json.dumps({"status":"error","code":str(exc)[:512],"stage":"research"}))
+            return 2
     p = argparse.ArgumentParser(prog="blackbox-rep")
     sub = p.add_subparsers(dest="command", required=True)
+    sub.add_parser("research", help="Action-centred research, packages, recovery and fixtures")
     sub.add_parser("list", help="List accessible processes (psutil optional dependency)")
     r = sub.add_parser("record", help="Read-only process sampling")
     r.add_argument("--pid", type=int, required=True)

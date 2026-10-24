@@ -112,12 +112,16 @@ class UniversalWindow(QMainWindow):
         ("settings", "05  SETTINGS"),
     )
 
-    def __init__(self):
+    def __init__(self, *, isolated=False, output_root=None, allow_update_check=False):
         super().__init__()
         self.setWindowTitle("BLACK.BOX Universal | Retro Workstation")
         self.setMinimumSize(1020, 690)
         self.resize(1330, 850)
-        self.probe = ReadOnlyProbe(background_events=True)
+        # The public app entry point uses an isolated owner. The synchronous
+        # constructor remains an explicit compatibility API for embedders.
+        from .research_bridge import ResearchBridge
+        self.probe = ResearchBridge(self,output_root=output_root) if isolated else ReadOnlyProbe(output_root=output_root,background_events=True)
+        self._isolated = isolated
         self._prefs = QSettings("BlackBox", "BLACK.BOX Universal")
         saved_language = self._prefs.value("language", "EN")
         self.language = saved_language if saved_language in ("RU", "ENG", "EN") else "EN"
@@ -157,6 +161,10 @@ class UniversalWindow(QMainWindow):
         self._nav_buttons: dict[str, QPushButton] = {}
         self._page_ids: dict[str, int] = {}
         self._build()
+        if isolated:
+            self.probe.updated.connect(self._research_updated)
+            self.probe.terminated.connect(self._research_terminated)
+            self.probe.result_ready.connect(self._research_result)
         self._refresh_process_list()
         self._update_all()
         self._navigate("dashboard")
@@ -165,7 +173,7 @@ class UniversalWindow(QMainWindow):
         # Production Qt ticks NEVER call the synchronous ReadOnlyProbe.tick().
         self._timer.timeout.connect(self._request_background_sample)
         self._timer.start(1000)
-        if self._prefs.value("check_updates_at_start", True, type=bool):
+        if allow_update_check and self._prefs.value("check_updates_at_start", True, type=bool):
             QTimer.singleShot(1800, self._automatic_update_check)
 
     def _build(self) -> None:
@@ -700,34 +708,34 @@ class UniversalWindow(QMainWindow):
         self.report_status_label = _label(
             "Local evidence will be saved after Stop.", "caption")
         content.addWidget(self.report_status_label)
-        controls = QHBoxLayout()
+        controls = QGridLayout()
         self.open_report_button = _button("▣  OPEN HTML REPORT")
         self.open_report_button.clicked.connect(self._open_saved_report)
-        controls.addWidget(self.open_report_button)
+        controls.addWidget(self.open_report_button,0,0)
         self.session_location = _label("No persisted session yet", "caption")
-        controls.addWidget(self.session_location, 1)
+        controls.addWidget(self.session_location,1,0,1,2)
         compare_button = _button("≍  COMPARE TWO SESSIONS")
         compare_button.clicked.connect(self._compare_sessions)
-        controls.addWidget(compare_button)
+        controls.addWidget(compare_button,0,1)
         content.addLayout(controls)
 
-        investigation_actions = QHBoxLayout()
+        investigation_actions = QGridLayout()
         self.investigate_current_btn = _button("◈  INVESTIGATE SESSION", "primary")
         self.investigate_current_btn.clicked.connect(
             lambda: self._begin_investigation(choose=False))
-        investigation_actions.addWidget(self.investigate_current_btn)
+        investigation_actions.addWidget(self.investigate_current_btn,0,0)
         self.investigate_saved_btn = _button("▣  INVESTIGATE SAVED…")
         self.investigate_saved_btn.clicked.connect(
             lambda: self._begin_investigation(choose=True))
-        investigation_actions.addWidget(self.investigate_saved_btn)
+        investigation_actions.addWidget(self.investigate_saved_btn,0,1)
         self.investigate_interval_btn = _button("◫  INVESTIGATE INTERVAL…")
         self.investigate_interval_btn.setObjectName("investigateInterval")
         self.investigate_interval_btn.clicked.connect(self._select_investigation_interval)
-        investigation_actions.addWidget(self.investigate_interval_btn)
+        investigation_actions.addWidget(self.investigate_interval_btn,1,0)
         self.open_investigation_btn = _button("▣  OPEN INVESTIGATION HTML")
         self.open_investigation_btn.setEnabled(False)
         self.open_investigation_btn.clicked.connect(self._open_investigation_html)
-        investigation_actions.addWidget(self.open_investigation_btn)
+        investigation_actions.addWidget(self.open_investigation_btn,1,1)
         content.addLayout(investigation_actions)
         self.investigation_info = _label(
             "Run a separate, read-only analysis of a completed session.", "caption")
@@ -768,6 +776,14 @@ class UniversalWindow(QMainWindow):
             "Automatic SQLite, HTML and JSON session reports are saved "
             "when you press STOP. Manual JSON exports are optional. "
             "Inspect process names and PIDs before sharing.", "caption"))
+        from .research_panel import ResearchPanel
+        self.research_panel = ResearchPanel(self)
+        self.research_toggle = _button("ACTION INVESTIGATION / APPLICATION PREPARATION")
+        self.research_toggle.setCheckable(True)
+        self.research_toggle.toggled.connect(self.research_panel.setVisible)
+        self.research_panel.setVisible(False)
+        content.insertWidget(1,self.research_toggle)
+        content.insertWidget(2,self.research_panel)
         return page
 
     def _build_settings(self) -> QWidget:
@@ -840,6 +856,11 @@ class UniversalWindow(QMainWindow):
         return translate(original, self.language)
 
     def _set_language(self, language: str) -> None:
+        if hasattr(self, "research_panel"):
+            self.language = language
+            self.research_panel.retranslate()
+            self.research_toggle.setText("ИССЛЕДОВАНИЕ ДЕЙСТВИЯ / ПОДГОТОВКА ПРОГРАММЫ" if language=="RU"
+                                         else "ACTION INVESTIGATION / APPLICATION PREPARATION")
         if language not in ("EN", "RU"):
             return
         self.language = language
@@ -926,6 +947,10 @@ class UniversalWindow(QMainWindow):
         self._refresh_update_button()
         self._update_all()
         self._filter_processes(self.process_search.text())
+        if hasattr(self,"research_panel"):
+            self.research_panel.retranslate()
+            self.research_toggle.setText("ИССЛЕДОВАНИЕ ДЕЙСТВИЯ / ПОДГОТОВКА ПРОГРАММЫ" if language=="RU"
+                                         else "ACTION INVESTIGATION / APPLICATION PREPARATION")
         if self.stack.currentIndex() == self._page_ids["reports"]:
             self._update_report_preview()
 
@@ -1124,6 +1149,9 @@ class UniversalWindow(QMainWindow):
             self._update_event_table()
 
     def _refresh_process_list(self) -> None:
+        if self._isolated:
+            self.probe.send("processes")
+            return
         self._process_rows = available_processes()
         self._filter_processes(self.process_search.text())
 
@@ -1288,6 +1316,12 @@ class UniversalWindow(QMainWindow):
         self._attach_pid(int(pid_item.data(Qt.ItemDataRole.UserRole)))
 
     def _start(self) -> None:
+        if self._isolated:
+            if self.probe.pending:
+                return
+            self.probe.start()
+            self._set_report_status("recording")
+            return
         if (self._base_sample_worker is not None or
                 self._pending_base_stop is not None or
                 self._report_worker is not None):
@@ -1309,6 +1343,11 @@ class UniversalWindow(QMainWindow):
         self._update_all()
 
     def _stop(self) -> None:
+        if self._isolated:
+            if self.probe.active:
+                self.probe.stop()
+                self._set_report_status("saving")
+            return
         if not self.probe.active or self._report_worker is not None:
             return  # idempotent: never overwrite a previously saved report
         # A worker may still hold the independent sample-writing SQLite
@@ -1366,6 +1405,9 @@ class UniversalWindow(QMainWindow):
             QTimer.singleShot(0, self.close)
 
     def _request_background_sample(self) -> None:
+        if self._isolated:
+            self._update_all()
+            return
         if not self.probe.active:
             self._update_all()
             return
@@ -1447,6 +1489,8 @@ class UniversalWindow(QMainWindow):
     def _change_interval(self, index: int) -> None:
         if hasattr(self, "_timer"):
             self._timer.setInterval(int(self.interval_combo.itemData(index)))
+            if self._isolated:
+                self.probe.send("interval", milliseconds=int(self.interval_combo.itemData(index)))
 
     def _load_thread_detail(self) -> None:
         folder = self.probe.session_folder
@@ -1713,7 +1757,8 @@ class UniversalWindow(QMainWindow):
         selected = self.probe.pid is not None
         running = self.probe.active
         stopping = (self._pending_base_stop is not None or
-                    self._report_worker is not None)
+                    self._report_worker is not None or
+                    (self._isolated and self.probe.pending))
         self.start_btn.setEnabled(selected and not running and not stopping)
         self.stop_btn.setEnabled(running and not stopping)
         self.mark_problem_btn.setEnabled(running and not stopping and
@@ -1733,13 +1778,13 @@ class UniversalWindow(QMainWindow):
             current=[(self.window_selector.itemText(i),self.window_selector.itemData(i))
                      for i in range(self.window_selector.count())]
             if [(self._t("Probe up to 4 windows"),None),*entries]!=current:
-                selected=self.window_selector.currentData()
+                selected_hwnd=self.window_selector.currentData()
                 self.window_selector.blockSignals(True)
                 self.window_selector.clear()
                 self.window_selector.addItem(self._t("Probe up to 4 windows"),None)
                 for label,hwnd in entries:
                     self.window_selector.addItem(label,hwnd)
-                index=self.window_selector.findData(selected)
+                index=self.window_selector.findData(selected_hwnd)
                 self.window_selector.setCurrentIndex(max(0,index))
                 self.window_selector.blockSignals(False)
         else:
@@ -1764,7 +1809,8 @@ class UniversalWindow(QMainWindow):
         self.action_repeat_btn.setToolTip(limit_tip)
         self.action_begin_btn.setEnabled(running and not stopping and self.probe.actions.ready_to_start())
         self.action_end_btn.setEnabled(running and not stopping and current_action == "RUNNING")
-        repeat_count = len(self.probe.actions.completed)
+        repeat_count = (self.probe.data.get("completed_actions_total",0) if self._isolated
+                        else self.probe.actions.completed_total)
         self.action_state_label.setText(
             self._t("Action state") + ": " + current_action +
             (f" · {repeat_count} " + self._t("completed repeats") if repeat_count else ""))
@@ -2144,6 +2190,10 @@ class UniversalWindow(QMainWindow):
         second = QFileDialog.getExistingDirectory(self, "Choose second saved session")
         if not second:
             return
+        if self._isolated:
+            self.probe.send("compare", before=first, after=second)
+            self._navigate("reports")
+            return
         try:
             result = compare_sessions(Path(first), Path(second))
         except (ObserverError, OSError, ValueError, TypeError):
@@ -2188,6 +2238,9 @@ class UniversalWindow(QMainWindow):
             "JSON files (*.json)")
         if not name:
             return
+        if self._isolated:
+            self.probe.send("snapshot_export", destination=name)
+            return
         try:
             save_snapshot(Path(name), self.probe.snapshot())
         except (OSError, TypeError, ValueError):
@@ -2204,10 +2257,18 @@ class UniversalWindow(QMainWindow):
             "BLACK.BOX Universal v0.3.6 — reliability and visual fixes.\n\n"
             "Offline monitoring, human-readable HTML and JSON reports: available.\n"
             "Diagnostics use local operating-system observations.\n"
-            "Windows ETW and crash dump collection: NOT IMPLEMENTED.\n\n"
-            "No cloud upload, tunneling, process injection or admin escalation.")
+            "Research: action episodes, local instrumentation, Windows HWND/WCT, "
+            "explicit ETW/minidump capture and portable evidence packages.\n"
+            "Source capabilities and access restrictions are reported per session.\n\n"
+            "No background cloud upload or hidden process injection.")
 
     def closeEvent(self, event) -> None:
+        if self._isolated and self.probe.alive:
+            self._pending_close = True
+            self._timer.stop()
+            self.probe.shutdown()
+            event.ignore()
+            return
         if self._interval_export_worker is not None:
             self._pending_close = True
             self._interval_export_worker.requestInterruption()
@@ -2254,7 +2315,8 @@ class UniversalWindow(QMainWindow):
             self._complete_base_stop("UI_CLOSED")
             event.ignore()
             return
-        owners=(self.probe._pending_windows,self.probe._pending_detailed,self.probe._pending_v2)
+        owners=(() if self._isolated else
+                (self.probe._pending_windows,self.probe._pending_detailed,self.probe._pending_v2))
         if any(owner is not None and owner.thread is not None and owner.thread.is_alive() for owner in owners):
             self._pending_close=True
             self._timer.stop()
@@ -2263,3 +2325,28 @@ class UniversalWindow(QMainWindow):
             return
         self._timer.stop()
         super().closeEvent(event)
+
+    def _research_updated(self) -> None:
+        if self.probe.active:
+            self._set_report_status("recording")
+        elif self.probe.report_result is not None and self.probe.data.get("research_state") not in ("INCOMPLETE","FINALIZATION_UNCONFIRMED"):
+            self._set_report_status("saved")
+        elif self.probe.session_folder is not None and not self.probe.pending:
+            self._set_report_status("unavailable")
+        self._update_all()
+
+    def _research_terminated(self) -> None:
+        if self._pending_close:
+            self._pending_close = False
+            QTimer.singleShot(0, self.close)
+
+    def _research_result(self, op: str, payload: object, error: str) -> None:
+        if error:
+            return
+        if op == "processes" and isinstance(payload, list):
+            self._process_rows = payload
+            self._filter_processes(self.process_search.text())
+        elif op == "compare":
+            self.report_preview.setPlainText(json.dumps(payload, ensure_ascii=False, indent=2))
+        elif op == "snapshot_export":
+            self._refresh_report_status()

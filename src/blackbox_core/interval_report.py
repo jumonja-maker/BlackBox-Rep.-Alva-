@@ -244,7 +244,9 @@ def export_interval(folder: Path,output: Path,*,interval=None,series=None,instan
                     for name,path in members:
                         z.write(path,name)
             for name,path in stage.items():
-                with path.open("r+b") as f:
+                # Windows FlushFileBuffers requires a writable descriptor.
+                # These are our staged output files, never the source DB.
+                with path.open("rb+") as f:
                     os.fsync(f.fileno())
                 destination=output/name
                 os.link(path,destination)

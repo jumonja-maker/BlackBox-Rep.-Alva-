@@ -188,3 +188,7 @@ Status rules: **PASS** needs actual user-facing integration, automated tests and
 
 **Gate:** PR #17 stays Draft. No full PASS or order acceptance is claimed.
 Do not merge main or publish a release without the owner's explicit decision.
+
+## Continuation: isolated owner and cooperative evidence
+
+See `BB_DI_001_COORDINATOR_CONTINUATION.md`. Public `app.py` now uses an isolated session owner for attach/start/actions/SQLite finish/report; synchronous APIs remain for embedders. Current 2.1 source/clock/privacy fixes are preserved, optional application events are explicitly unauthenticated. Quit acknowledgement no longer cancels the native-owner exit deadline. The base 4e048be Windows job timed out at DPI 200% and did not build a portable EXE; successful base unit/Python deep steps are not a successful frozen result. This section is an implementation delta, not promotion of every related row to full PASS. Exact new CI is pending.

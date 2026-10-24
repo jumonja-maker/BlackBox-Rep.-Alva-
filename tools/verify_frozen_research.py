@@ -1,0 +1,23 @@
+"""Build gate: PyInstaller can exit zero despite missing hidden imports."""
+from pathlib import Path
+import sys
+from PyInstaller.archive.readers import CArchiveReader
+
+
+def verify(path):
+    path=Path(path)
+    executable=CArchiveReader(str(path))
+    archive=executable.open_embedded_archive("PYZ.pyz")
+    required=("blackbox_core.research_worker","blackbox_core.casebook",
+        "blackbox_core.instrumentation","blackbox_core.session_v2",
+        "blackbox_core.session_view","blackbox_core.windows_research",
+        "blackbox_investigation.engine","blackbox_investigation.sqlite_adapter",
+        "blackbox_universal.research_bridge","blackbox_universal.preparation_dialog")
+    missing=[name for name in required if name not in archive.toc]
+    if missing:raise RuntimeError("FROZEN_MODULES_MISSING: "+", ".join(missing))
+    source=path.parent/"_internal"/"blackbox_core"/"instrumentation.py"
+    if not source.is_file():raise RuntimeError("FROZEN_CLIENT_SOURCE_MISSING")
+    print("PASS: real embedded research modules and standalone event client")
+
+
+if __name__=="__main__":verify(sys.argv[1])

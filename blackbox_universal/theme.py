@@ -8,7 +8,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from PySide6.QtGui import QColor, QFont, QFontInfo, QFontDatabase, QPalette, QRawFont
+from PySide6.QtGui import QColor, QFont, QFontInfo, QFontDatabase, QPalette, QRawFont, QTextLayout
 from PySide6.QtWidgets import QApplication
 
 COLORS = {
@@ -233,7 +233,7 @@ def _load_windows_offscreen_fonts(app: QApplication) -> None:
     if app.property("blackbox_offscreen_fonts_loaded"):
         return
     folder = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "Fonts"
-    for name in ("segoeui.ttf", "segoeuib.ttf", "consola.ttf", "consolab.ttf"):
+    for name in ("segoeui.ttf", "segoeuib.ttf", "consola.ttf", "consolab.ttf", "seguisym.ttf"):
         path = folder / name
         if path.is_file():
             QFontDatabase.addApplicationFont(str(path))
@@ -256,8 +256,20 @@ def font_coverage(app: QApplication) -> dict:
             rows.append({"requested_family": family, "weight": int(weight),
                          "resolved_family": QFontInfo(font).family(),
                          "valid": raw.isValid(), "missing_characters": missing})
-    return {"platform": app.platformName(), "ok": all(r["valid"] and not r["missing_characters"] for r in rows),
-            "fonts": rows}
+    # Check shaped fallback glyphs too: the alphabet alone cannot detect
+    # missing icons. These are the actual chrome symbols used by the shell.
+    symbols="▾↻⌂✉▦▣▶■⚑◈≍◫□×●"
+    symbol_rows=[]
+    for symbol in symbols:
+        layout=QTextLayout(symbol,app.font());layout.beginLayout()
+        line=layout.createLine();line.setLineWidth(100);layout.endLayout()
+        runs=layout.glyphRuns()
+        valid=bool(runs) and all(run.rawFont().isValid() and all(run.glyphIndexes()) for run in runs)
+        symbol_rows.append({"text":symbol,"valid":valid,"families":[run.rawFont().familyName() for run in runs]})
+    alphabet_ok=all(r["valid"] and not r["missing_characters"] for r in rows)
+    symbols_ok=all(r["valid"] for r in symbol_rows)
+    return {"platform": app.platformName(), "ok":alphabet_ok and (symbols_ok or os.name!="nt"),
+            "alphabet_ok":alphabet_ok,"symbols_ok":symbols_ok,"fonts":rows,"symbols":symbol_rows}
 
 
 def set_retro_theme(app: QApplication) -> None:

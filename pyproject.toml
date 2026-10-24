@@ -19,4 +19,6 @@ process = ["psutil>=6,<8"]
 blackbox = "blackbox_core.cli:main"
 
 [tool.setuptools.packages.find]
-where = ["src"]
+where = ["src", "."]
+include = ["blackbox_core*", "blackbox_investigation*", "blackbox_universal*"]
+namespaces = false
