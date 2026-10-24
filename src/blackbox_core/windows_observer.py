@@ -207,6 +207,7 @@ class WindowCapture:
         self.status="NOT_STARTED"
         self._windows={}
         self._view=()
+        self.last_poll_completed_ns=None
         self._lock=Lock()
 
     def snapshot(self):
@@ -233,6 +234,7 @@ class WindowCapture:
                     self.status="TARGET_IDENTITY_UNAVAILABLE"
                     break
                 self.poll()
+                self.last_poll_completed_ns=time.monotonic_ns()
                 self.stop_event.wait(self.interval_s)
         except RuntimeError as exc:
             self.status=str(exc) if str(exc) in ("UNSUPPORTED_OS","UNSUPPORTED_WINDOWS_ABI") else "SENSOR_FAILURE"

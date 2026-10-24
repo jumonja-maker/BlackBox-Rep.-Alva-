@@ -13,6 +13,16 @@ def _qa_checkpoint(stage: str) -> None:
         Path("blackbox-smoke-progress.json").write_text(
             __import__("json").dumps({"stage": stage, "pid": os.getpid()}), encoding="utf-8")
 
+if __name__ == "__main__" and "--trace-owner" in sys.argv:
+    from blackbox_core.trace_owner import run as trace_main
+    raise SystemExit(trace_main(sys.argv[sys.argv.index("--trace-owner")+1]))
+
+# Optional diagnostics use a disposable child of the same frozen executable.
+if __name__ == "__main__" and "--research-operation" in sys.argv:
+    from blackbox_core.operation_worker import main as operation_main
+    operation_index = sys.argv.index("--research-operation")
+    raise SystemExit(operation_main(*sys.argv[operation_index+1:]))
+
 # Dispatch before importing Qt. The same packaged EXE owns the session child.
 if __name__ == "__main__" and "--research-worker" in sys.argv:
     worker_parser = argparse.ArgumentParser()

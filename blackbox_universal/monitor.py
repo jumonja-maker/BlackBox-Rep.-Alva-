@@ -241,9 +241,11 @@ class ReadOnlyProbe:
             self.detailed_capture = None
         # Close a partially captured CPU episode as incomplete, not successful.
         if self.incident_capture is not None:
-            for finding in self.incident_capture.stop(
-                    elapsed_ms=self.last_elapsed_ms or 0,
-                    sample_seq=self.total_samples or 1):
+            capture = self.incident_capture
+            boundaries = (capture.process_exited(elapsed_ms=self.last_elapsed_ms or 0,
+                sample_seq=self.total_samples or 1) if reason=="PROCESS_EXITED" else [])
+            boundaries += capture.stop(elapsed_ms=self.last_elapsed_ms or 0, sample_seq=self.total_samples or 1)
+            for finding in boundaries:
                 try:
                     self._store.write_event(finding)
                 except ObserverError:
@@ -320,10 +322,16 @@ class ReadOnlyProbe:
         try:
             if self.incident_capture is not None:
                 try:
+                    detail = self.detailed_capture.latest_metrics if self.detailed_capture else None
+                    if detail and time.monotonic_ns()-detail["time_ns"] > max(5, self.detailed_capture.interval_s*3)*1e9:
+                        detail = None
                     boundaries = self.incident_capture.observe(
-                        elapsed_ms=sample.elapsed_ms,
-                        sample_seq=self.total_samples + 1,
-                        cpu_percent=sample.cpu_percent)
+                        elapsed_ms=sample.elapsed_ms, sample_seq=self.total_samples + 1,
+                        cpu_percent=sample.cpu_percent, rss_bytes=sample.rss_bytes,
+                        private_bytes=detail.get("private_bytes") if detail else None,
+                        handle_count=detail.get("handle_count") if detail else None,
+                        read_bytes=sample.read_bytes, write_bytes=sample.write_bytes,
+                        detail_ref=detail.get("correlation_key") if detail else None)
                     for boundary in boundaries:
                         try:
                             self._store.write_event(boundary)

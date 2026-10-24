@@ -198,6 +198,7 @@ class DetailedCapture:
         self.status = "NOT_STARTED"
         self.error: str | None = None
         self.samples = 0
+        self.latest_metrics = None  # one immutable, already committed metrics DTO
         self.session_writer = None
 
     def start(self) -> None:
@@ -339,6 +340,8 @@ class DetailedCapture:
                          *(statuses[column] for column in FIELD_STATUS_COLUMNS)))
                     conn.commit()
                     self.samples += 1
+                    self.latest_metrics = {k:x.get(k) for k in ("time_ns","private_bytes","handle_count")}
+                    self.latest_metrics["correlation_key"] = f"detail-v2:{seq}"
                     if self.session_writer is not None:
                         field_status = {
                             "rss_bytes": statuses["rss_status"],

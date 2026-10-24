@@ -52,6 +52,17 @@ jobs:
           path: deep-smoke-python/
           if-no-files-found: warn
           retention-days: 7
+      - name: Explicit real WPR guardian TTL on the disposable CI runner
+        env:
+          BB_QA_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: python tools/qa_trace_guardian.py trace-guardian-qa
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: BLACKBOX-WPR-GUARDIAN-QA
+          path: trace-guardian-qa/
+          if-no-files-found: warn
+          retention-days: 7
       - name: Offscreen RU/EN screenshots at simulated Windows DPI 100-200%
         shell: pwsh
         run: |

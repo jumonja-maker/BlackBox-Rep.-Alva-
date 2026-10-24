@@ -46,6 +46,7 @@ from .releases import (Release, NoOfficialRelease, check_latest_release, stage_r
                        runtime_directory, MAINTENANCE_NAME)
 from .shortcuts import create_shortcut
 from .theme import COLORS
+from .chrome_icons import ChromeButton
 from .widgets import DesktopMark, MetricCard, SparkleBorder, TrendChart, WindowPanel
 
 
@@ -58,7 +59,7 @@ def _label(text: str, kind: str = "", wrap: bool = True) -> QLabel:
 
 
 def _button(text: str, kind: str = "") -> QPushButton:
-    b = QPushButton(text)
+    b = ChromeButton(text)
     if kind:
         b.setObjectName(kind)
     b.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -213,7 +214,7 @@ class UniversalWindow(QMainWindow):
         header = QHBoxLayout(chrome)
         header.setContentsMargins(12, 4, 7, 4)
         header.setSpacing(5)
-        header.addWidget(_label("▣  BLACK.BOX UNIVERSAL  /  MONITOR.EXE", "chromeTitle", False))
+        header.addWidget(_label("BLACK.BOX UNIVERSAL  /  MONITOR.EXE", "chromeTitle", False))
         header.addStretch()
         for glyph, action in (
             ("_", self.showMinimized),
@@ -267,7 +268,7 @@ class UniversalWindow(QMainWindow):
         side = QVBoxLayout(sidebar)
         side.setContentsMargins(0, 14, 0, 11)
         side.setSpacing(3)
-        brand = _label("  ▧  SYSTEM DISK (C:)", wrap=False)
+        brand = _label("  SYSTEM DISK (C:)", wrap=False)
         brand.setStyleSheet("font: bold 11px 'Consolas'; color: #736b7e; padding: 5px;")
         side.addWidget(brand)
         for key, name in self.PAGES:
@@ -337,10 +338,10 @@ class UniversalWindow(QMainWindow):
         start_menu.addAction("Exit", self.close)
         start.setMenu(start_menu)
         tbar.addWidget(start)
-        self.task_active = _label("▣  BLACK.BOX UNIVERSAL", "taskText", False)
+        self.task_active = _label("BLACK.BOX UNIVERSAL", "taskText", False)
         tbar.addWidget(self.task_active)
         tbar.addStretch()
-        self.task_privacy = _label("◎  OFFLINE / LOCAL", "taskText", False)
+        self.task_privacy = _label("OFFLINE / LOCAL", "taskText", False)
         tbar.addWidget(self.task_privacy)
         self.clock = _label("", "taskText", False)
         tbar.addWidget(self.clock)

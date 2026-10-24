@@ -24,13 +24,20 @@ def privilege():
     return {"mode":"ADMINISTRATOR" if C.windll.shell32.IsUserAnAdmin() else "STANDARD","windows":True}
 
 
+def wpr_tool():
+    if os.name!="nt":return None
+    # WPR is an OS/ADK component, never execute a same-named file from cwd/PATH.
+    path=Path(os.environ.get("SystemRoot", "C:/Windows"))/"System32"/"wpr.exe"
+    return str(path) if path.is_file() and not path.is_symlink() else None
+
+
 def capabilities():
     win=os.name=="nt"
     return {"privilege":privilege(),"process_counters":"AVAILABLE",
         "hwnd":"AVAILABLE" if win else "UNSUPPORTED_PLATFORM",
         "wct":"REQUIRES_PROBE_AND_DEBUG_PRIVILEGE" if win else "UNSUPPORTED_PLATFORM",
         "minidump":"EXPLICIT_OPT_IN" if win else "UNSUPPORTED_PLATFORM",
-        "etw_wpr":"AVAILABLE_TOOL" if win and shutil.which("wpr.exe") else "TOOL_UNAVAILABLE",
+        "etw_wpr":"AVAILABLE_TOOL" if win and wpr_tool() else "TOOL_UNAVAILABLE",
         "dotnet_trace":"AVAILABLE_TOOL" if shutil.which("dotnet-trace") else "TOOL_UNAVAILABLE",
         "native_symbols":"LOCAL_SYMBOLS_REQUIRED_FOR_NAMES",
         "loss_counters":"UNKNOWN_UNLESS_REPORTED_BY_SOURCE"}
@@ -172,7 +179,7 @@ class WprCapture:
     """An explicitly named, private WPR instance; never stop the global one."""
     def __init__(self, folder):
         self.folder=Path(folder);self.instance="BLACKBOX_"+uuid4().hex
-        self.tool=shutil.which("wpr.exe") if os.name=="nt" else None
+        self.tool=wpr_tool()
         self.active=False
 
     def _run(self,args,timeout=20):
@@ -191,6 +198,7 @@ class WprCapture:
 
     def start(self):
         if self.active:raise ValueError("WPR_ALREADY_ACTIVE")
+        if not self.tool:raise OSError("WPR_TOOL_UNAVAILABLE")
         self.active=True
         try:
             self._run(["-start","GeneralProfile.Light"])

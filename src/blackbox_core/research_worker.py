@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+from collections import deque
 import queue
 import sys
 from threading import Thread,Event
@@ -18,6 +19,10 @@ from .instrumentation import EventTail
 from .preparation import inspect_target, write_preparation
 from .windows_research import capabilities, window_observations, wait_chain, enable_debug_privilege, minidump, WprCapture
 from .runtime_trace import DotnetTrace
+from .trace_owner import TraceSupervisor
+from .optional_jobs import OptionalJobs
+from .operation_worker import OPERATIONS, TARGET_OPERATIONS
+from .sensors import Capability, CallbackSensor, SensorRegistry
 
 
 class ResearchSession:
@@ -26,6 +31,9 @@ class ResearchSession:
         self.probe=ReadOnlyProbe(output_root=Path(os.path.abspath(output_root)) if output_root is not None else None)
         self.book=None;self.tail=None;self.wpr=None
         self.runtime_trace=None
+        self.jobs=OptionalJobs()
+        self.sensors=None
+        self._cancelled_operations=deque(maxlen=8)
         self.cancel=Event()
         self.interval_ms=1000;self.native_enabled=False
         self.context={"scenario":"","workload":"","target_version":"","profile":"STANDARD","interval_ms":1000,"warmup_count":0}
@@ -70,7 +78,8 @@ class ResearchSession:
             app_source_error=self.app_source_error,
             helper_pid=os.getpid(),last_command=self.last_command,
             research_state=self.research_state,research_error=self.research_error,
-            command_latency_ms=self.command_latency_ms)
+            command_latency_ms=self.command_latency_ms,
+            optional_jobs=self.jobs.health(), sensor_health=self.sensors.health() if self.sensors else {})
         return data
 
     def _identity(self):
@@ -108,6 +117,8 @@ class ResearchSession:
             "disk_budget_bytes":self.budget_bytes,"app_invalid_lines":self.tail.invalid if self.tail else None,
             "app_client_dropped":self.tail.client_dropped if self.tail else None,
             "event_loss_from_other_sources":None,
+            "sensor_registry":self.sensors.health() if self.sensors else {},
+            "optional_jobs":self.jobs.health(),
             "overhead_scope":"DIRECT_HELPER_USAGE_NOT_TOTAL_OBSERVER_EFFECT"})
         if size>=self.budget_bytes:
             self.book.put("observer.disk_budget",{"status":"BUDGET_EXHAUSTED"})
@@ -116,13 +127,22 @@ class ResearchSession:
     def tick(self):
         p=self.probe
         if not p.active:return
-        p.tick(requested_interval_ms=self.interval_ms)
+        if self.sensors:
+            if self.sensors.sample("base",budget_s=self.interval_ms/1000) is None:
+                raise RuntimeError("BASE_SENSOR_UNAVAILABLE")
+        else:p.tick(requested_interval_ms=self.interval_ms)
         if self.book:
             self.book.sync_legacy()
+            if self.wpr:
+                trace_result=self.wpr.poll()
+                if trace_result:self.book.put("trace.stopped",trace_result,source="ETW_WPR",quality=trace_result["status"])
             if self.runtime_trace:
                 result=self.runtime_trace.poll()
                 if result:self.book.put("eventpipe.stopped",result,source="EVENTPIPE_DOTNET_TRACE",quality=result["status"])
-            self._application_events()
+            if self.sensors:
+                for name in ("application", "detail", "windows", "optional"):
+                    self.sensors.sample(name, budget_s=.1)
+            else:self._application_events()
             if time.monotonic()-self.last_health>=5:
                 self.last_health=time.monotonic();self._health()
         if not p.active and self.book:self.stop(p.session_state)
@@ -167,6 +187,68 @@ class ResearchSession:
             "application_partial_line_bytes":len(t.pending),
             "application_source_discontinuities":t.discontinuities}
 
+    def _start_registry(self):
+        self.sensors=SensorRegistry(("base", "application", "detail", "windows", "optional"))
+        def base(deadline):
+            result=self.probe.tick(requested_interval_ms=self.interval_ms)
+            return {"status":"OBSERVED" if result is not None else self.probe.session_state,
+                "committed_sample_seq":self.probe.total_samples}
+        self.sensors.register(CallbackSensor(Capability("base","PSUTIL_PROCESS_COUNTERS","AVAILABLE","PRIMARY_RECORDING"),base))
+        def application(deadline):
+            self._application_events()
+            return {"status":"SOURCE_FAILED" if self.app_source_error else "READY" if self.tail.ready else "WAITING_FOR_CONTROL_EVENT"}
+        self.sensors.register(CallbackSensor(Capability("application", "APPLICATION_EVENT_READER", "AVAILABLE"), application))
+        self.sensors.register(CallbackSensor(Capability("detail", "PSUTIL_DETAILED", "AVAILABLE", "EXISTING_WORKER_HEALTH"),
+            lambda deadline:{"status":self.probe.detailed_capture.status,
+                "error":self.probe.detailed_capture.error,
+                "producer_heartbeat_ns":(self.probe.detailed_capture.latest_metrics or {}).get("time_ns")}, enabled=lambda:self.probe.detailed_capture is not None))
+        self.sensors.register(CallbackSensor(Capability("windows", "WIN32_HWND_WCT", "AVAILABLE" if os.name=="nt" else "UNSUPPORTED_PLATFORM", "EXISTING_WORKER_HEALTH"),
+            lambda deadline:{"status":self.probe.window_capture.snapshot()[0],
+                "producer_heartbeat_ns":self.probe.window_capture.last_poll_completed_ns}, enabled=lambda:self.probe.window_capture is not None))
+        self.sensors.register(CallbackSensor(Capability("optional", "DISPOSABLE_OPERATION_PROCESS", "AVAILABLE", "EXPLICIT_OPT_IN", "OWNED_PROCESS_HARD_DEADLINE"),
+            lambda deadline:self.jobs.health()))
+        self.sensors.start(self.context)
+
+    def submit_optional(self, command):
+        op=command.get("op");a=command.get("args", {})
+        if type(a) is not dict:raise ValueError("INVALID_COMMAND_ARGUMENTS")
+        if op in ("native", "dump", "prepare_client", "inspect_dump") and not self.book:raise ValueError("START_RECORDING_FIRST")
+        if op in TARGET_OPERATIONS:self._identity()
+        # Context and token are sent directly to our own disposable process;
+        # neither is returned in the sensor health or command audit record.
+        packet={"op":op,"args":a,"pid":self.probe.pid,
+            "created":self.probe._core.created if self.probe._core else None,
+            "folder":str(self.probe.session_folder) if self.probe.session_folder else None,
+            "end_ms":self.probe.last_elapsed_ms or 1}
+        if op=="prepare_client":packet.update(event_path=str(self.tail.path),event_token=self.tail.token)
+        self.jobs.submit(command, packet, seconds=300 if op=="export" else 75 if op in ("inspect_dump","verify","recover") else 15)
+        if self.book:
+            self.book.put("observer.operation_queued", {"op":op,"command_id":command.get("id"),
+                "issued_ns":command.get("issued_ns")}, source="BLACKBOX_COMMAND_OWNER")
+
+    def poll_optional(self):
+        results=list(self._cancelled_operations);self._cancelled_operations.clear()
+        results+=self.jobs.poll()
+        for result in results:
+            command=result["command"];op=command.get("op")
+            if not result.get("error") and op in TARGET_OPERATIONS:
+                try:self._identity()
+                except Exception:result["result"]=None;result["error"]="TARGET_INSTANCE_CHANGED_RESULT_NOT_COMMITTED"
+            if not self.book:continue
+            value=result.get("result")
+            if result.get("error"):
+                self.book.put("observer.operation_failed", {"op":op,"error":result["error"],
+                    "operation_ms":result.get("operation_ms")}, source="DISPOSABLE_OPERATION_PROCESS", quality="NOT_CONFIRMED")
+            elif op=="native":
+                r=value["windows"];self.book.put("windows.response",r,source="WIN32_HWND",quality=r["status"])
+                for r in value["wait_chains"]:self.book.put("thread.wait_chain",r,source="WIN32_WCT",quality=r["status"],tid=r.get("tid"))
+                self.book.set_context("configuration_changed",True)
+            elif op in ("dump","symbols","inspect_dump"):
+                kind,source={"dump":("snapshot.captured","DBGHELP_MINIDUMP"),"symbols":("symbols.identity","DBGHELP_SYMSRV_FILE_INDEX"),
+                    "inspect_dump":("stack.offline","CDB_OFFLINE_DUMP")}[op]
+                self.book.put(kind,value,source=source,quality=value.get("status","OBSERVED"))
+        return results
+
     def capture_native(self):
         import psutil
         self._identity()
@@ -188,6 +270,8 @@ class ResearchSession:
 
     def stop(self, reason="USER_STOPPED"):
         p=self.probe;errors=[]
+        self._cancelled_operations.extend(self.jobs.cancel())
+        if self.sensors:self.sensors.stop()
         app_coverage=self._drain_application_events() if self.book else {}
         if self.tail and (self.app_source_error or self.tail.invalid or self.tail.client_dropped or
                 self.tail.discontinuities or app_coverage.get("application_unread_bytes_at_stop") or
@@ -196,15 +280,16 @@ class ResearchSession:
         if self.runtime_trace:
             result=self.runtime_trace.stop()
             if result and self.book:self.book.put("eventpipe.stopped",result,source="EVENTPIPE_DOTNET_TRACE",quality=result["status"])
-        if self.wpr and self.wpr.active:
+        # No more base samples are expected after the user's Stop command.
+        # Finish the primary recording before awaiting the optional guardian.
+        if p.active:p.stop(reason,defer_report=True)
+        if self.wpr:
             try:
                 r=self.wpr.stop()
-                if self.book:self.book.put("trace.stopped",r,source="ETW_WPR")
-            except (OSError,ValueError) as exc:
-                errors.append(str(exc)[:300])
-                try:self.wpr.cancel()
-                except (OSError,ValueError):errors.append("WPR_CLEANUP_UNCONFIRMED")
-        if p.active:p.stop(reason)
+                if r and self.book:self.book.put("trace.stopped",r,source="ETW_WPR",quality=r["status"])
+                if r and r["status"]!="COMPLETED":errors.append("WPR_"+r["status"])
+            except (OSError,ValueError) as exc:errors.append(str(exc)[:300])
+        if p.session_folder and p.report_result is None:p.generate_report()
         if self.book:
             book=self.book;self.book=None
             try:
@@ -270,6 +355,7 @@ class ResearchSession:
                 self.tail=EventTail(self.probe.session_folder/"application-events.jsonl",uuid4().hex,self.probe.pid)
                 self.book.set_context("application_event_path",str(self.tail.path))
                 self.book.set_context("worker_pid",os.getpid())
+                self._start_registry()
                 import psutil
                 try:self.book.set_context("worker_created",psutil.Process().create_time())
                 except psutil.Error:self.book.set_context("worker_created",None)
@@ -343,10 +429,15 @@ class ResearchSession:
             artifacts=self.probe.session_folder/"artifacts";artifacts.mkdir(exist_ok=True)
             if a.get("enabled"):
                 if self.wpr and self.wpr.active:raise ValueError("WPR_ALREADY_ACTIVE")
-                self.wpr=WprCapture(artifacts)
+                self._identity()
+                self.wpr=TraceSupervisor(artifacts,seconds=a.get("seconds",30),
+                    max_output_bytes=a.get("max_output_bytes",256*1024**2),
+                    target={"pid":self.probe.pid,"created":self.probe._core.created})
                 result=self.wpr.start()
                 self.book.set_context("wpr_instance",self.wpr.instance)
-            else:result=self.wpr.stop()
+            else:
+                if not self.wpr:raise ValueError("WPR_NOT_ACTIVE")
+                self.wpr.request_stop();result={"source":"ETW_WPR","status":"STOP_REQUESTED","instance":self.wpr.instance}
             self.book.put("trace.state",result,source="ETW_WPR")
             self.book.set_context("configuration_changed",True)
             return result
@@ -430,12 +521,25 @@ def main(output_root=None):
     def emit(packet):
         out.write(compact(packet)+"\n");out.flush()
     emit({"type":"snapshot","snapshot":session.snapshot()})
+    def acknowledge(command, result=None, error=None):
+        emit({"type":"result","id":command.get("id"),"op":command.get("op"),"result":result,"error":error})
     try:
         while True:
+            finished_operations=session.poll_optional()
+            for finished in finished_operations:
+                acknowledge(finished["command"],finished.get("result"),finished.get("error"))
+            if finished_operations:emit({"type":"snapshot","snapshot":session.snapshot()})
             try:command=commands.get(timeout=0.1)
             except queue.Empty:command=None
             if command:
                 try:
+                    if command.get("op") in OPERATIONS:
+                        session.submit_optional(command)
+                        emit({"type":"snapshot","snapshot":session.snapshot()})
+                        continue
+                    if command.get("op") in ("attach","start","stop","quit"):
+                        for pending in session.jobs.cancel():
+                            acknowledge(pending["command"],None,pending["error"])
                     result=session.command(command)
                     if session.book:session.book.sync_legacy()
                     emit({"type":"result","id":command.get("id"),"op":command.get("op"),"result":result,"error":None})
@@ -452,6 +556,7 @@ def main(output_root=None):
                 next_tick=time.monotonic()+session.interval_ms/1000
                 emit({"type":"snapshot","snapshot":session.snapshot()})
     finally:
+        session.jobs.cancel()
         session.stop("UI_CLOSED")
     return 0
 

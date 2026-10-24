@@ -6,6 +6,8 @@ are NEVER translated: only interface chrome and explanatory text.
 from __future__ import annotations
 
 RU = {
+"  SYSTEM DISK (C:)":"  СИСТЕМНЫЙ ДИСК (C:)",
+"OFFLINE / LOCAL":"АВТОНОМНО / ЛОКАЛЬНО",
 "INVESTIGATION SUMMARY":"ИТОГИ РАССЛЕДОВАНИЯ",
 "FULL SELECTED INTERVAL / READ ONLY":"ВЕСЬ ВЫБРАННЫЙ ИНТЕРВАЛ / ЧТЕНИЕ",
 "RECORDED PROCESS TREE":"ИСТОРИЯ ДЕРЕВА ПРОЦЕССОВ",

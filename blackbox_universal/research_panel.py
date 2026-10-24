@@ -120,13 +120,18 @@ class ResearchPanel(QWidget):
         mode_text={"STANDARD":self.tr("Standard user","Обычные права"),
                    "ADMINISTRATOR":self.tr("Administrator","Администратор")}.get(mode,self.tr("Checking…","Проверяем…"))
         ready=self.tr("Control event received","Проверочное событие получено") if data.get("app_ready") else self.tr("Waiting for application event","Ожидается событие приложения")
-        self.status.setText(mode_text+" · "+ready+" · "+(self.bridge.last_error or ""))
+        jobs=data.get("optional_jobs",{})
+        busy=jobs.get("current_op")
+        progress=(self.tr(" · Diagnostic: "," · Диагностика: ")+str(busy)+
+            self.tr(" · queued "," · в очереди ")+str(jobs.get("queued",0))) if busy else ""
+        self.status.setText(mode_text+" · "+ready+progress+" · "+(self.bridge.last_error or ""))
         caps=data.get("capabilities",{})
         for name,key in (("Windows snapshot","hwnd"),("ETW recording","etw_wpr"),
                          ("EventPipe 10 s","dotnet_trace"),("Capture minidump","minidump")):
             status=caps.get(key,"UNKNOWN")
             self.by_action[name].setEnabled(status not in ("UNSUPPORTED_PLATFORM","TOOL_UNAVAILABLE"))
             self.by_action[name].setToolTip(status)
+        self.status.setToolTip(json.dumps(data.get("sensor_health",{}),ensure_ascii=False,indent=2))
     def send(self,op,**args):
         try:return self.bridge.send(op,**args)
         except (RuntimeError,ValueError) as exc:self.details.setPlainText(str(exc))
@@ -152,8 +157,8 @@ class ResearchPanel(QWidget):
     def etw(self):
         on=not self.bridge.data.get("wpr_active",False)
         if on and QMessageBox.question(self,"BLACK.BOX",self.tr(
-                "Record a system-wide ETW trace? It may include other processes and changes measurement overhead.",
-                "Записать системную ETW-трассу? Она может содержать данные других процессов и влиять на измерения."))!=QMessageBox.StandardButton.Yes:return
+                "Record a system-wide ETW trace for up to 30 seconds? It may include other processes and changes measurement overhead. Recording stops automatically.",
+                "Записать системную ETW-трассу до 30 секунд? Она может содержать данные других процессов и влиять на измерения. Остановка выполняется автоматически."))!=QMessageBox.StandardButton.Yes:return
         self.send("wpr",enabled=on)
     def dump(self):
         if QMessageBox.question(self,"BLACK.BOX",self.tr(

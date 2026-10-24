@@ -258,7 +258,7 @@ def font_coverage(app: QApplication) -> dict:
                          "valid": raw.isValid(), "missing_characters": missing})
     # Check shaped fallback glyphs too: the alphabet alone cannot detect
     # missing icons. These are the actual chrome symbols used by the shell.
-    symbols="▾↻⌂✉▦▣▶■⚑◈≍◫□×●"
+    symbols="▾●"  # all other chrome icons are original vectors, not glyphs
     symbol_rows=[]
     for symbol in symbols:
         layout=QTextLayout(symbol,app.font());layout.beginLayout()

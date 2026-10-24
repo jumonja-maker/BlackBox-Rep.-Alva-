@@ -285,6 +285,14 @@ def export_case(folder, destination, *, include_sensitive=False, cancel=None):
     """Consistent SQLite backups, streamed pages, exclusive final publication."""
     folder,destination=Path(folder),Path(destination)
     _check_cancel(cancel)
+    if include_sensitive:
+        artifacts=Path(folder)/"artifacts"
+        if artifacts.is_dir():
+            for journal in artifacts.glob("BLACKBOX_*.trace.json"):
+                if journal.is_symlink() or journal.stat().st_size>65536:raise ValueError("INVALID_TRACE_JOURNAL")
+                state=json.loads(journal.read_text(encoding="utf-8")).get("state")
+                if state not in ("COMPLETED","FAILED","CLEANUP_REQUIRED"):
+                    raise ValueError("STOP_TRACE_BEFORE_SENSITIVE_EXPORT")
     if destination.exists() or destination.is_symlink():
         raise ValueError("EXPORT_DESTINATION_EXISTS")
     meta=context(folder)

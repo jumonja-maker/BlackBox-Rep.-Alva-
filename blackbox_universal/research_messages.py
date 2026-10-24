@@ -1,5 +1,9 @@
 """Stable machine codes plus concise bilingual next actions."""
 MESSAGES={
+ "OPTIONAL_OPERATION_TIMEOUT":("This diagnostic exceeded its deadline. Its owned worker was stopped; the base recording continues.","Диагностика превысила время ожидания. Её вспомогательный процесс остановлен; базовая запись продолжается."),
+ "OPTIONAL_QUEUE_FULL":("The diagnostic queue is full. Wait for an operation to finish.","Очередь диагностики заполнена. Дождитесь завершения операции."),
+ "OPTIONAL_OPERATION_CANCELLED_RESULT_UNCONFIRMED":("The diagnostic was cancelled. Completion of its output is unconfirmed.","Диагностика отменена. Завершённость её результата не подтверждена."),
+ "STOP_TRACE_BEFORE_SENSITIVE_EXPORT":("Wait for the trace guardian to finish before including raw artifacts.","Дождитесь завершения записи трассы перед экспортом исходных материалов."),
  "START_RECORDING_FIRST":("Start a recording, then repeat this operation.","Начните запись и повторите действие."),
  "STOP_RECORDING_BEFORE_EXPORT":("Stop recording before packaging the investigation.","Остановите запись перед сохранением пакета исследования."),
  "STOP_BEFORE_RECONFIGURING":("Stop recording to change the experiment context.","Остановите запись, чтобы изменить условия эксперимента."),
