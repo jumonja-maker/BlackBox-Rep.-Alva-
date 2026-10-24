@@ -118,6 +118,7 @@ RU = {
 "DETAILED THREADS: ON":"ПОДРОБНЫЕ ПОТОКИ: ВКЛ",
 "DETAILED THREADS: OFF":"ПОДРОБНЫЕ ПОТОКИ: ВЫКЛ",
 "Threads of selected PID":"Потоки выбранного PID",
+"THREADS OF SELECTED PID":"ПОТОКИ ВЫБРАННОГО PID",
 "Record with DETAILED THREADS, then load TID CPU intervals.":"Включите подробный сбор, затем загрузите интервалы CPU потоков.",
 "◈  LOAD THREAD CPU":"◈  ЗАГРУЗИТЬ CPU ПОТОКОВ",
 "MEAN CPU %":"СРЕДНЯЯ CPU %","PEAK CPU %":"ПИК CPU %",

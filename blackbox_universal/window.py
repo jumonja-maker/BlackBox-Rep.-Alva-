@@ -140,6 +140,7 @@ class UniversalWindow(QMainWindow):
         self._investigation_result: dict | None = None
         self._investigation_busy = False
         self._thread_detail_worker: ThreadDetailWorker | None = None
+        self._thread_detail_payload = None
         self._base_sample_worker: BaseSampleWorker | None = None
         self._report_worker: ReportWorker | None = None
         self._interval_worker = None
@@ -950,6 +951,8 @@ class UniversalWindow(QMainWindow):
                 header.setText(self._t(str(original)))
         self.process_history_table.set_language(self.language)
         self._render_process_history_summary()
+        if self._thread_detail_payload is not None:
+            self._thread_detail_ready(self._thread_detail_payload,"")
         self.process_search.setPlaceholderText(
             self._t("Search by process name or PID…"))
         self.session_event_details.setPlaceholderText(self._t(
@@ -1267,6 +1270,7 @@ class UniversalWindow(QMainWindow):
                     "This process is unavailable or protected. Choose another one."))
             return
         self.thread_detail_table.setRowCount(0)
+        self._thread_detail_payload = None
         self.thread_detail_status.setText(self._t(
             "Record with DETAILED THREADS, then load TID CPU intervals."))
         self._update_all()
@@ -1386,6 +1390,7 @@ class UniversalWindow(QMainWindow):
         self._refresh_investigation_info()
         self._render_investigation_findings()
         self.thread_detail_table.setRowCount(0)
+        self._thread_detail_payload = None
         self._update_all()
 
     def _stop(self) -> None:
@@ -1571,6 +1576,7 @@ class UniversalWindow(QMainWindow):
         folder=Path(folder)
         if folder!=self._interval_folder:
             self.session_event_details.clear()
+            self._thread_detail_payload=None
         self._interval_folder=folder
         self._interval_process=instance_id
         args=(folder,interval,instance_id,event_cursor,process_after)
@@ -1790,6 +1796,7 @@ class UniversalWindow(QMainWindow):
         rows = detail.get("top_threads", [])
         if type(rows) is not list:
             return
+        self._thread_detail_payload=payload
         v2_rows=any("cpu_seconds" in r for r in rows)
         self.thread_detail_table.setColumnCount(7 if v2_rows else 5)
         self.thread_detail_table.setHorizontalHeaderLabels(

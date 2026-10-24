@@ -165,6 +165,12 @@ class ProcessHistoryTreeTests(unittest.TestCase):
                 self.assertFalse(window.probe.active)
                 window._set_language("RU")
                 self.assertEqual(window.process_history_table.selected_instance(), 2)
+                self.assertIn("PID 200", window.thread_detail_status.text())
+                self.assertIn("не записывались", window.thread_detail_status.text())
+                self.assertNotIn("Включите подробный сбор", window.thread_detail_status.text())
+                window._set_language("EN")
+                self.assertIn("PID 200", window.thread_detail_status.text())
+                self.assertIn("were not captured", window.thread_detail_status.text())
                 self.assertEqual(hashlib.sha256((folder/FILENAME).read_bytes()).hexdigest(), before)
             finally:
                 drain()
