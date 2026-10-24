@@ -14,6 +14,7 @@ import sys
 from threading import Event, Thread
 import time
 from uuid import uuid4
+from .library_files import replace_owned_status
 
 MAX_JOURNAL_BYTES=65536
 
@@ -33,7 +34,7 @@ def _write(path,data):
     if len(raw)>MAX_JOURNAL_BYTES:raise ValueError('TRACE_JOURNAL_BUDGET')
     try:
         with temp.open('xb') as f:f.write(raw);f.flush();os.fsync(f.fileno())
-        os.replace(temp,path)
+        replace_owned_status(temp,path)
     finally:
         if temp.exists():temp.unlink()
 

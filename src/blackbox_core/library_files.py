@@ -24,14 +24,36 @@ def read_json(path, limit=16384):
     return data
 
 
-def atomic_json(path,data,*,exclusive=False,max_bytes=65536):
+def replace_owned_status(source,destination):
+    """Replace the caller's status/journal, with a finite Windows share wait.
+
+    An ordinary open reader can temporarily deny deletion on Windows. Retry
+    only native access/share/lock codes, recheck path boundaries each time,
+    and propagate the original failure after at most 280ms of backoff.
+    This is never a no-clobber publication primitive for user output files.
+    """
+    for attempt in range(8):
+        source,destination=checked(source),checked(destination)
+        try:
+            os.replace(source,destination)
+            return
+        except OSError as exc:
+            if getattr(exc,'winerror',None) not in (5,32,33) or attempt==7:
+                raise
+            time.sleep(.01*(attempt+1))
+
+
+def atomic_json(path,data,*,exclusive=False,max_bytes=65536,durable=True):
     path=checked(path);tmp=path.with_name(path.name+'.'+uuid4().hex+'.tmp')
     raw=json.dumps(data,ensure_ascii=True,allow_nan=False,separators=(',',':')).encode('ascii')
+    if type(durable) is not bool:raise ValueError('INVALID_STATUS_DURABILITY')
     if type(max_bytes) is not int or not 1<=max_bytes<=8*1024**2 or len(raw)>max_bytes:raise ValueError('LIBRARY_MARKER_TOO_LARGE')
     try:
-        with tmp.open('xb') as f:f.write(raw);f.flush();os.fsync(f.fileno())
+        with tmp.open('xb') as f:
+            f.write(raw);f.flush()
+            if durable:os.fsync(f.fileno())
         if exclusive:os.link(tmp,path)
-        else:os.replace(tmp,path)
+        else:replace_owned_status(tmp,path)
     finally:
         if tmp.exists():tmp.unlink()
 

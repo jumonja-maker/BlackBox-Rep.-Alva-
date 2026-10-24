@@ -7,6 +7,7 @@ from __future__ import annotations
 import argparse,csv,json,os,platform,statistics,time
 from pathlib import Path
 import psutil
+from blackbox_core.library_files import atomic_json
 
 def quantiles(values):
  values=sorted(v for v in values if type(v) in (int,float));n=len(values)
@@ -16,7 +17,7 @@ def quantiles(values):
  return {'n':n,'median':q(.5),'p95':q(.95),'minimum':q(0),'maximum':q(1),'small_sample':n<20}
 
 def write(path,data):
- temp=path.with_suffix('.writing');temp.write_text(json.dumps(data,ensure_ascii=False,indent=2,allow_nan=False),encoding='utf-8');os.replace(temp,path)
+ atomic_json(path,data,max_bytes=256*1024,durable=False)
 
 def counters(process):
  try:

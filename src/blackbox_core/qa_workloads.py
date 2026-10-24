@@ -6,11 +6,13 @@ threads, handles, child processes and files are changed. No network or injector.
 from __future__ import annotations
 import argparse,hashlib,json,os,subprocess,sys,threading,time
 from pathlib import Path
+from .library_files import atomic_json
 
 MODES=('cpu','threads','children','memory','handles','io','longrun')
 
 def write(path,data):
- temp=path.with_suffix('.writing');temp.write_text(json.dumps(data),encoding='utf-8');os.replace(temp,path)
+ # Heartbeat/control status is atomic but is not a disk-durability benchmark.
+ atomic_json(path,data,durable=False)
 
 def run(mode,directory,*,count=2,seconds=60):
  if mode not in MODES or type(count) is not int or not 1<=count<=1024 or not 0<seconds<=86400:raise ValueError('INVALID_QA_WORKLOAD')
