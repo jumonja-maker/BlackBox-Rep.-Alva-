@@ -52,8 +52,8 @@ def capture_integrated_layout(window, app, output: Path, scale: str) -> None:
             for button in menu_buttons:
                 rect = button.geometry()
                 text_width = button.fontMetrics().horizontalAdvance(button.text())
-                original = button.property("bb_english")
-                row = {"source": str(original), "text": button.text(),
+                source_key = button.property("bb_english")
+                row = {"source": str(source_key), "text": button.text(),
                        "width": button.width(), "text_width": text_width,
                        "hint_width": button.sizeHint().width(),
                        "native_indicator_only": "▾" not in button.text(),
@@ -62,7 +62,7 @@ def capture_integrated_layout(window, app, output: Path, scale: str) -> None:
                 menu_rows.append(row)
                 if (not row["native_indicator_only"] or not row["contained"] or
                         button.width() < text_width + 40):
-                    failures.append([language, "menu", str(original), "CLIPPED_MENU_LABEL"])
+                    failures.append([language, "menu", str(source_key), "CLIPPED_MENU_LABEL"])
             result.setdefault("menus", {})[language] = menu_rows
             if len(menu_rows) < 3:
                 failures.append([language, "menu", "MISSING_MENU"])
