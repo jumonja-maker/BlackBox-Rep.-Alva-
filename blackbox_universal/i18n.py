@@ -125,6 +125,7 @@ RU = {
 "Reading saved thread counters…":"Чтение сохранённых счётчиков потоков…",
 "Thread detail is unavailable; source data were not changed.":"Данные потоков недоступны; исходная запись не изменена.",
 "Thread CPU is derived from adjacent snapshots only.":"CPU потоков вычислен только по соседним измерениям.",
+"Thread counters were not captured for this process instance.":"Счётчики потоков этого экземпляра процесса не записывались.",
 "Thread analysis is finishing; close again after it completes.":"Завершается анализ потоков; закройте окно повторно после завершения.",
 
 "Detailed sampling unavailable":"Углублённый сбор данных недоступен",

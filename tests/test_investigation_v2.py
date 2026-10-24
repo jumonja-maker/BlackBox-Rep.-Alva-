@@ -54,6 +54,28 @@ class Investigation2Tests(unittest.TestCase):
   for kwargs in ({'source':'FAKE'},{'limit':201},{'after':[0,1]},{'start_ms':-1}):
    with self.assertRaises(ValueError):event_page(self.folder,**kwargs)
   with self.assertRaises(ValueError):incident_card(self.folder,999)
+ def test_10003_imported_events_have_exact_counts_and_complete_bounded_pages(self):
+  with closing(sqlite3.connect(self.folder/FILENAME)) as db:
+   db.executemany("""INSERT INTO events(recorded_ns,observed_ns,instance_id,event_type,source_kind,
+    verification_class,timestamp_precision,correlation_key,measurement_status,detail_json)
+    VALUES(?,?,1,'TEST_ONLY_EVENT','WIN32','OS_OBSERVED','TEST_ONLY','TEST_ONLY','OK','{}')""",
+    ((ORIGIN+10**9+n*1000,ORIGIN+10**9+n*1000) for n in range(10003)))
+   db.commit()
+  before=hashlib.sha256((self.folder/FILENAME).read_bytes()).hexdigest()
+  cursor=None;seen=set();first=None;last=None
+  while True:
+   page=event_page(self.folder,after=cursor,limit=200)
+   self.assertEqual(page['total_matching'],10003);self.assertLessEqual(len(page['rows']),200)
+   for row in page['rows']:
+    self.assertNotIn(row['evidence_ref'],seen);seen.add(row['evidence_ref'])
+    self.assertEqual(row['verification_class'],'UNVERIFIED_IMPORT')
+    if first is None:first=row['time_ns']
+    last=row['time_ns']
+   if not page['has_more']:break
+   cursor=page['next_cursor']
+  self.assertEqual(len(seen),10003);self.assertEqual(first,ORIGIN+10**9)
+  self.assertEqual(last,ORIGIN+10**9+10002*1000)
+  self.assertEqual(hashlib.sha256((self.folder/FILENAME).read_bytes()).hexdigest(),before)
  def test_unknown_coverage_and_stable_memory_are_not_leak_proof(self):
   result=investigate(self.folder);self.assertIsNone(result['coverage']['exact_missed_samples'])
   self.assertFalse(result['root_cause_proven']);self.assertFalse(any('LEAK' in r['code'] for r in result['findings']))

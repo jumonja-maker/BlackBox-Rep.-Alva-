@@ -184,7 +184,7 @@ QLineEdit {
     selection-background-color: #078b84;
     selection-color: #ffffff;
 }
-QTableWidget {
+QTableWidget, QTreeWidget {
     background: #fffaf0;
     color: #302c43;
     gridline-color: #e2cdbf;

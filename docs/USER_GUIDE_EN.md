@@ -39,3 +39,6 @@ Trash does not free space. Permanent deletion requires separate review/confirmat
 ## Acceptance limits
 
 PR #17 remains Draft / NOT ACCEPTED. Short automatic tests are not real 8h Standard/1h Detailed, physical Win10/11, accessibility or installed upgrade/uninstall acceptance. See BB_DI_001_IMPLEMENTATION_STATUS.md and BB_DI_001_PRODUCTION_QA_RU.md for the unchanged 128 requirements and reproducible harness commands.
+
+### Recorded process tree
+Processes shows an expandable saved hierarchy using candidate PPID/lifetime links. PID plus creation time identifies an instance; lineage is not continuously attested. Select a row to inspect its own history and available thread counters without changing the recording target. Ancestors outside the current page are labelled context and have no invented resource values; ambiguous parents remain unlinked. Peak CPU is percent of one CPU and may exceed 100%; age is an anchored UTC estimate and observed span is not lifetime. Absence is not an exact exit time. Missing descendant thread captures are explicit, never replaced by the root's TIDs.

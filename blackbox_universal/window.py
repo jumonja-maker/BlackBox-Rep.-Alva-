@@ -39,6 +39,7 @@ from .base_sample_worker import BaseSampleWorker
 from .report_worker import ReportWorker
 from .session_interval_worker import SessionIntervalWorker, SessionExportWorker
 from .timeline import SessionTimeline
+from .process_history_view import RecordedProcessTree
 from .investigation_view import title as investigation_title, interval_text as investigation_interval, fact_text as investigation_facts, finding_details, summary_text
 from .file_targets import InspectedFile, inspect_file, find_running_executable
 from .i18n import translate
@@ -584,13 +585,7 @@ class UniversalWindow(QMainWindow):
         threads_panel.content.addWidget(self.thread_detail_table)
         content.addWidget(threads_panel)
         history_panel = WindowPanel("Recorded process tree", "PID + BIRTH / READ ONLY")
-        self.process_history_table = QTableWidget(0,11)
-        self.process_history_table.setHorizontalHeaderLabels(
-            ("PID","BIRTH","PARENT PID","NAME","FIRST ns","LAST / ABSENT ns","CPU seconds","RSS peak B","PRIVATE peak B","USS peak B","HANDLES peak"))
-        self.process_history_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
-        self.process_history_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self.process_history_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        self.process_history_table.setMinimumHeight(170)
+        self.process_history_table = RecordedProcessTree(self)
         self.process_history_table.itemSelectionChanged.connect(self._history_process_selected)
         history_panel.content.addWidget(self.process_history_table)
         self.process_history_summary=QLabel();self.process_history_summary.setWordWrap(True);history_panel.content.addWidget(self.process_history_summary)
@@ -942,7 +937,7 @@ class UniversalWindow(QMainWindow):
                 action.setProperty("bb_english", original)
             action.setText(self._t(str(original)))
         for table in (self.process_table, self.event_table,
-                      self.thread_detail_table, self.process_history_table,
+                      self.thread_detail_table,
                       self.session_event_table):
             for i in range(table.columnCount()):
                 header = table.horizontalHeaderItem(i)
@@ -953,6 +948,8 @@ class UniversalWindow(QMainWindow):
                     original = header.text()
                     header.setData(Qt.ItemDataRole.UserRole, original)
                 header.setText(self._t(str(original)))
+        self.process_history_table.set_language(self.language)
+        self._render_process_history_summary()
         self.process_search.setPlaceholderText(
             self._t("Search by process name or PID…"))
         self.session_event_details.setPlaceholderText(self._t(
@@ -1630,20 +1627,8 @@ class UniversalWindow(QMainWindow):
         rows=packet["processes"]["rows"]
         self.analysis_panel.apply_interval(packet['folder'],tuple(result['selected_interval_ns']),origin=result['metadata']['monotonic_origin_ns'])
         self.events_panel.apply_interval(packet['folder'],tuple(result['selected_interval_ns']),origin=result['metadata']['monotonic_origin_ns'],processes=rows)
-        self.process_history_table.blockSignals(True)
-        self.process_history_table.setRowCount(len(rows))
-        for index,row in enumerate(rows):
-            r=row.get('resources',{})
-            values=(row['pid'],row['creation_time'],row['parent_pid'],row['executable_name'],row['first_observed_ns'],row['absence_observed_ns'] or row['last_observed_ns'],
-                r.get('cpu_seconds'),r.get('rss_peak_bytes'),r.get('private_peak_bytes'),r.get('uss_peak_bytes'),r.get('handles_peak'))
-            for column,value in enumerate(values):
-                item=QTableWidgetItem(str(value if value is not None else "UNAVAILABLE"))
-                item.setData(Qt.ItemDataRole.UserRole,row["instance_id"])
-                self.process_history_table.setItem(index,column,item)
-        self.process_history_table.blockSignals(False)
-        tree=result.get('process_tree_totals',{})
-        self.process_history_summary.setText('Root / observed tree RSS peak: '+str(tree.get('root_rss_peak_bytes'))+' / '+str(tree.get('observed_tree_rss_peak_bytes'))+' B · '+
-            ('Общая RSS может повторно учитывать общие страницы.' if self.language=='RU' else 'Summed RSS can count shared pages more than once.'))
+        self.process_history_table.apply_page(packet['processes'],selected_instance=self._interval_process)
+        self._render_process_history_summary()
         self.process_history_more.setEnabled(packet["processes"]["has_more"])
         self.session_event_table.blockSignals(True)
         events=packet["events"]["rows"]
@@ -1684,10 +1669,29 @@ class UniversalWindow(QMainWindow):
             self._load_session_interval(self._interval_folder)
 
     def _history_process_selected(self):
-        row=self.process_history_table.currentRow()
-        item=self.process_history_table.item(row,0)
-        if item and self._interval_folder:
-            self._load_session_interval(self._interval_folder,instance_id=item.data(Qt.ItemDataRole.UserRole))
+        identity=self.process_history_table.selected_instance()
+        if identity is not None and self._interval_folder:
+            self._load_session_interval(self._interval_folder,instance_id=identity)
+
+    def _render_process_history_summary(self):
+        if self._interval_packet is None:
+            return
+        packet=self._interval_packet;page=packet['processes']
+        tree=packet['interval'].get('process_tree_totals',{})
+        ru=self.language=='RU'
+        def memory(value):
+            return f'{value/1048576:.2f}' if value is not None else ('неизвестно' if ru else 'unknown')
+        self.process_history_summary.setText(
+            ('На странице / записано экземпляров: ' if ru else 'Page / recorded instances: ')+
+            f"{len(page.get('rows',[]))} / {page.get('total_instances','?')} · "+
+            ('Контекст предков: ' if ru else 'Ancestor context: ')+str(len(page.get('ancestors',[])))+'\n'+
+            ('Пик RSS корня / наблюдаемого дерева: ' if ru else 'Root / observed tree RSS peak: ')+
+            memory(tree.get('root_rss_peak_bytes'))+' / '+memory(tree.get('observed_tree_rss_peak_bytes'))+
+            (' МиБ. Общая RSS может повторно учитывать общие страницы. Связи PPID предполагаемые.' if ru else
+             ' MiB. Summed RSS can count shared pages more than once. PPID links are candidates.')+
+            (('\nКонтекст предков ограничен 256 узлами; остальные не загружены.' if ru else
+              '\nAncestor context is capped at 256 nodes; remaining ancestors were not loaded.')
+             if page.get('ancestor_context_truncated') else ''))
 
     def _next_process_page(self):
         packet=self._interval_packet
@@ -1805,7 +1809,9 @@ class UniversalWindow(QMainWindow):
         warnings = ", ".join(detail.get("warnings", []))
         self.thread_detail_status.setText(
             self._t("Thread CPU is derived from adjacent snapshots only.") +
-            " · " + str(detail.get("status")) +
+            (" · PID " + str(detail["pid"]) if detail.get("pid") is not None else "") +
+            " · " + (self._t("Thread counters were not captured for this process instance.") if
+                      detail.get("status")=="THREADS_NOT_OBSERVED_FOR_INSTANCE" else str(detail.get("status"))) +
             ((" · " + warnings) if warnings else ""))
 
     def _thread_detail_finished(self) -> None:

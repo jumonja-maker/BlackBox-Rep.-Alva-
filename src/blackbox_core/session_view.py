@@ -375,12 +375,16 @@ class SessionView:
             FROM measurements_quality q JOIN samples s USING(sample_id) WHERE s.instance_id=?
             AND s.series='DETAILED' AND s.monotonic_ns BETWEEN ? AND ? AND q.metric='thread_counters'
             GROUP BY measurement_status""",args)]
+        process=self.db.execute("SELECT pid,creation_time FROM process_instances WHERE instance_id=?",(instance_id,)).fetchone()
         for row in ranked:
-            pid=self.db.execute("SELECT pid FROM process_instances WHERE instance_id=?",(instance_id,)).fetchone()[0]
+            pid=process[0]
             row.update(pid=pid,source_kind="PSUTIL",verification_class="DERIVED",
                        tid_reuse_uncertain=True,
                        observed_presence_percent=100*row["observed_samples"]/selected_count if selected_count else None)
-        return {"status":"OK" if totals[1] is not None else "NO_COMPARABLE_THREAD_INTERVALS",
+        return {"status":"OK" if totals[1] is not None else
+                        "THREADS_NOT_OBSERVED_FOR_INSTANCE" if selected_count==0 else "NO_COMPARABLE_THREAD_INTERVALS",
+            "instance_id":instance_id,"pid":process[0] if process else None,
+            "creation_time":process[1] if process else None,
             "top_threads":ranked,"threads_ranked":totals[0],"top_n":top_n,
             "omitted_from_top":max(0,totals[0]-len(ranked)),"truncated":totals[0]>len(ranked) or bool(omitted),
             "recorded_omitted_thread_observations":omitted,
@@ -404,7 +408,9 @@ class SessionView:
             raise SessionReadError("INVALID_PAGE")
         if not self.is_v2:
             return {"rows":[],"has_more":False,"status":"LEGACY_LIMITED_DATA"}
-        rows=[dict(r) for r in self.db.execute("SELECT * FROM process_instances WHERE instance_id>? "
+        rows=[dict(r) for r in self.db.execute("SELECT instance_id,pid,creation_time,parent_pid,"
+            "substr(executable_name,1,512) AS executable_name,first_observed_ns,last_observed_ns,"
+            "absence_observed_ns,substr(source_kind,1,64) AS source_kind FROM process_instances WHERE instance_id>? "
                                               "ORDER BY instance_id LIMIT ?",(after,limit+1))]
         return {"rows":rows[:limit],"has_more":len(rows)>limit,
                 "limitations":["ABSENCE_IS_NOT_EXACT_EXIT_TIME","SHORT_LIVED_CHILDREN_MAY_BE_MISSED",

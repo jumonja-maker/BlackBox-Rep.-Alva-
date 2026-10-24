@@ -387,7 +387,7 @@ class IntervalQtTests(unittest.TestCase):
                 drain()
                 self.assertEqual(window._interval_packet["interval"]["coverage"]["selected_samples"],61)
                 self.assertEqual(window.probe.pid,98765)
-                self.assertGreater(window.process_history_table.rowCount(),0)
+                self.assertGreater(window.process_history_table.topLevelItemCount(),0)
                 self.assertIn("UNKNOWN",window.interval_summary.text())
                 self.assertIn("61/6000 отсчётов",window.interval_summary.text())
                 packet=window._interval_packet
