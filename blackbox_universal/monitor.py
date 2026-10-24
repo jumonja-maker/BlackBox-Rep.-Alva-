@@ -84,6 +84,8 @@ class ReadOnlyProbe:
         self.events: deque[dict] = deque(maxlen=300)
         self.actions = ActionCycle()
         self.incident_capture: IncidentCapture | None = None
+        self.detail_policy={};self._stopped_detail=None
+        self.incident_events=deque(maxlen=32)
         self.detailed_capture: DetailedCapture | None = None
         # Retain ownership of a worker whose blocking OS call outlived stop().
         self._pending_detailed: DetailedCapture | None = None
@@ -214,6 +216,7 @@ class ReadOnlyProbe:
         self.window_capture = None
         # PsutilProbe computes each elapsed_ms from its own monotonic origin.
         self._recording_origin_ns = core.origin_ns
+        self._stopped_detail=None;self.incident_events.clear()
         self.active = True
         self.started_at = utc_stamp()
         self._event("OBSERVATION_STARTED")
@@ -227,6 +230,7 @@ class ReadOnlyProbe:
             "PROCESS_EXITED": "PROCESS_EXITED", "PID_REUSED": "PID_REUSED",
             "ACCESS_DENIED": "ACCESS_DENIED", "SAMPLE_UNAVAILABLE": "SAMPLE_UNAVAILABLE",
             "STORAGE_ERROR": "STORAGE_ERROR",
+            "TIME_LIMIT_REACHED":"TIME_LIMIT_REACHED", "STORAGE_LIMIT_REACHED":"STORAGE_LIMIT_REACHED",
         }.get(reason, "INTERRUPTED")
         # Separate sidecar worker is owned by this recording and stopped first.
         if self.window_capture is not None:
@@ -335,6 +339,7 @@ class ReadOnlyProbe:
                     for boundary in boundaries:
                         try:
                             self._store.write_event(boundary)
+                            self.incident_events.append(boundary)
                             self.events.append({
                                 "timestamp_utc": utc_stamp(),
                                 "code": boundary["code"],
@@ -507,7 +512,8 @@ class ReadOnlyProbe:
                     raise RuntimeError("DETAILED_TARGET_MISSING")
                 capture = DetailedCapture(
                     self._store.folder, self.pid, self._core.created,
-                    self._recording_origin_ns)
+                    self._recording_origin_ns, **self.detail_policy,
+                    **({"resume_from":self._stopped_detail} if self._stopped_detail else {}))
                 capture.session_writer = self._store.v2
                 capture.start()
                 self.detailed_capture = capture
@@ -515,6 +521,7 @@ class ReadOnlyProbe:
                             "Opt-in v2 sidecar; psutil process/threads/children")
         elif self.detailed_capture is not None:
             capture = self.detailed_capture
+            self._stopped_detail=capture
             stopped = capture.stop(timeout=0.5)
             if not stopped:
                 self._pending_detailed = capture

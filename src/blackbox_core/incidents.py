@@ -15,13 +15,19 @@ class IncidentCapture:
                  cooldown_ms=30000, max_incidents=20,
                  memory_growth_bytes=32*1024*1024, handle_growth=128,
                  growth_window_ms=10000, io_rate_bytes_s=64*1024*1024,
-                 gap_incidents=False):
+                 gap_incidents=False, enabled_triggers=None, cpu_reference="ABSOLUTE"):
         if (type(threshold) not in (float,int) or not math.isfinite(threshold) or not 0<threshold<=6400 or
             any(type(x) is not int or x<0 for x in (min_duration_ms,gap_ms,pre_ms,post_ms,cooldown_ms,
                 memory_growth_bytes,handle_growth,growth_window_ms,io_rate_bytes_s)) or
-            type(max_incidents) is not int or not 1<=max_incidents<=100 or post_ms>60000 or
+            type(max_incidents) is not int or not 1<=max_incidents<=1000 or post_ms>60000 or
             growth_window_ms>60000 or type(gap_incidents) is not bool):
             raise ValueError('INVALID_INCIDENT_POLICY')
+        from .capture_policy import TRIGGERS
+        if enabled_triggers is not None and (type(enabled_triggers) not in (list,tuple) or not enabled_triggers or any(t not in TRIGGERS for t in enabled_triggers)):
+            raise ValueError('INVALID_INCIDENT_TRIGGERS')
+        if cpu_reference not in ('ABSOLUTE','BASELINE_DELTA'):raise ValueError('INVALID_CPU_REFERENCE')
+        self.enabled_triggers=frozenset(TRIGGERS if enabled_triggers is None else enabled_triggers)
+        self.cpu_reference=cpu_reference;self._baseline_cpu=[]
         self.threshold=float(threshold);self.min_duration_ms=min_duration_ms;self.gap_ms=gap_ms
         self.pre_ms=pre_ms;self.post_ms=post_ms;self.cooldown_ms=cooldown_ms;self.max_incidents=max_incidents
         self.memory_growth_bytes=memory_growth_bytes;self.handle_growth=handle_growth
@@ -54,7 +60,12 @@ class IncidentCapture:
                 'end_ms':elapsed_ms,'gap_ms':elapsed_ms-previous,'source':'BLACKBOX_LOCAL_MONOTONIC_SAMPLING',
                 'interpretation':'OBSERVED_GAP_NOT_TARGET_HANG'})
             if self.gap_incidents:candidates.append(('SAMPLING_GAP',{'gap_ms':elapsed_ms-previous}))
-        if cpu_percent is not None and cpu_percent>=self.threshold:
+        threshold=self.threshold
+        if self.cpu_reference=='BASELINE_DELTA':
+            from statistics import median
+            if cpu_percent is not None and len(self._baseline_cpu)<30:self._baseline_cpu.append(cpu_percent)
+            threshold=(median(self._baseline_cpu)+self.threshold) if len(self._baseline_cpu)>=3 else float('inf')
+        if cpu_percent is not None and cpu_percent>=threshold:
             if self._cpu_since is None:self._cpu_since=elapsed_ms
             if elapsed_ms-self._cpu_since>=self.min_duration_ms:
                 candidates.append(('CPU_SUSTAINED',{'threshold_percent_one_cpu':self.threshold,'observed_percent':cpu_percent}))
@@ -87,6 +98,7 @@ class IncidentCapture:
             self._previous_io=(elapsed_ms,read_bytes,write_bytes)
         else:self._previous_io=None
         if 'IO_BURST' not in active_codes:self._latched.discard('IO_BURST')
+        candidates=[(c,d) for c,d in candidates if c in self.enabled_triggers]
         ready=[(c,d) for c,d in candidates if c not in self._latched]
         if self._active is not None:
             for code,data in candidates:
@@ -133,7 +145,7 @@ class IncidentCapture:
     def process_exited(self,*,elapsed_ms,sample_seq):
         events=[]
         if self._active:events.append(self._complete(sample_seq,elapsed_ms,status='INCOMPLETE_PROCESS_EXITED'))
-        if self.incidents<self.max_incidents:
+        if self.incidents<self.max_incidents and "PROCESS_EXIT_OBSERVED" in self.enabled_triggers:
             events.append(self._begin('PROCESS_EXIT_OBSERVED',{'exit_code':None,
                 'interpretation':'PROCESS_EXIT_NOT_PROVEN_CRASH'},sample_seq,elapsed_ms))
             events.append(self._complete(sample_seq,elapsed_ms,status='NO_POST_TARGET_EXITED'))

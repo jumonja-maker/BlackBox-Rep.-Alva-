@@ -786,6 +786,8 @@ class UniversalWindow(QMainWindow):
         content.insertWidget(1,self.research_toggle)
         content.insertWidget(2,self.research_panel)
         from .library_panel import LibraryPanel
+        from .marker_panel import MarkerPanel
+        self.marker_panel=MarkerPanel(self);content.addWidget(self.marker_panel)
         self.library_panel=LibraryPanel(self)
         self.library_toggle=_button("SAVED RESEARCH / EXPERIMENT LIBRARY")
         self.library_toggle.setCheckable(True)
@@ -798,6 +800,8 @@ class UniversalWindow(QMainWindow):
 
     def _build_settings(self) -> QWidget:
         page, content = _page()
+        from .capture_settings import CaptureSettings
+        self.capture_settings=CaptureSettings(self);content.addWidget(self.capture_settings)
         content.addWidget(_label("CONTROL PANEL / PREFERENCES", "eyebrow", False))
         setting = WindowPanel("Observation settings", "LOCAL CONFIGURATION")
         setting.content.addWidget(_label("SAMPLE INTERVAL", "cardTitle"))
@@ -965,6 +969,8 @@ class UniversalWindow(QMainWindow):
             self.library_panel.retranslate()
             self.library_toggle.setText("БИБЛИОТЕКА ИССЛЕДОВАНИЙ / ЭКСПЕРИМЕНТОВ" if language=="RU"
                                         else "SAVED RESEARCH / EXPERIMENT LIBRARY")
+        if hasattr(self,'capture_settings'):self.capture_settings.retranslate()
+        if hasattr(self,'marker_panel'):self.marker_panel.retranslate()
         if self.stack.currentIndex() == self._page_ids["reports"]:
             self._update_report_preview()
 

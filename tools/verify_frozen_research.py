@@ -8,7 +8,8 @@ def verify(path):
     path=Path(path)
     executable=CArchiveReader(str(path))
     archive=executable.open_embedded_archive("PYZ.pyz")
-    required=("blackbox_core.research_worker","blackbox_core.operation_worker",
+    required=("blackbox_core.capture_policy","blackbox_core.user_markers","blackbox_universal.capture_settings","blackbox_universal.marker_panel",
+        "blackbox_core.research_worker","blackbox_core.operation_worker",
         "blackbox_core.optional_jobs","blackbox_core.trace_owner","blackbox_core.sensors","blackbox_core.casebook",
         "blackbox_core.experiment_metrics","blackbox_core.package_privacy","blackbox_universal.experiment_view",
         "blackbox_core.library_catalog","blackbox_core.library_files","blackbox_universal.library_panel",

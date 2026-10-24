@@ -330,7 +330,7 @@ class SessionV2Writer:
         kind = data.get("kind","")
         # This classification is determined by the producer entry point/kind,
         # never trusted from the incoming source/verification_class fields.
-        user = kind in ("action_marker","user_problem","user_marker")
+        user = kind in ("action_marker","user_problem","user_marker") or (kind=="research_evidence_ref" and data.get("reported_source")=="USER_MARKER")
         source = "USER" if user else "BLACKBOX_OBSERVER"
         verification = "USER_DECLARED" if user else "DERIVED"
         if native_source in ("WIN32","WCT"):

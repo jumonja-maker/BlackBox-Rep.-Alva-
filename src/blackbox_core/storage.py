@@ -130,7 +130,7 @@ class SessionStore:
         if self.finished:
             return
         if code not in ("COMPLETED", "PROCESS_EXITED", "ACCESS_DENIED", "PID_REUSED",
-                        "SAMPLE_UNAVAILABLE", "STORAGE_ERROR", "INTERRUPTED"):
+                        "SAMPLE_UNAVAILABLE", "STORAGE_ERROR", "INTERRUPTED", "TIME_LIMIT_REACHED", "STORAGE_LIMIT_REACHED"):
             raise ObserverError("INVALID_DATA", "storage")
         if self._journal is not None:
             self._journal.flush()

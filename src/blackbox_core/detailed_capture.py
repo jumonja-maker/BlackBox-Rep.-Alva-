@@ -179,7 +179,7 @@ class DetailedCapture:
 
     def __init__(self, folder: Path, pid: int, created: float, origin_ns: int,
                  *, interval_s: float = 2.0, max_samples: int | None = None,
-                 max_bytes: int = 256 * 1024 * 1024, collector=None):
+                 max_bytes: int = 256 * 1024 * 1024, collector=None, resume_from=None, thread_limit=256, child_limit=256):
         if (type(origin_ns) is not int or origin_ns < 0 or
                 not 0.5 <= interval_s <= 30 or
                 (max_samples is not None and (type(max_samples) is not int or not 1 <= max_samples <= 20000))):
@@ -192,7 +192,9 @@ class DetailedCapture:
         self.interval_s = interval_s
         self.max_samples = max_samples
         self.max_bytes = max_bytes
-        self.collector = collector or sample_process
+        from functools import partial
+        self.collector = collector or partial(sample_process,thread_limit=thread_limit,child_limit=child_limit)
+        self._resume=resume_from;self._identity=None;self._owns=False
         self.stop_event = Event()
         self.thread: Thread | None = None
         self.status = "NOT_STARTED"
@@ -202,13 +204,18 @@ class DetailedCapture:
         self.session_writer = None
 
     def start(self) -> None:
-        if (self.thread is not None or not self.folder.is_dir() or
-                self.folder.is_symlink() or self.path.exists() or self.path.is_symlink()):
-            raise DetailSensorError("DETAILED_SESSION_UNAVAILABLE")
-        # Exclusive file reservation, even if a competing local writer races.
-        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-        fd = os.open(self.path, flags, 0o600)
-        os.close(fd)
+        if self.thread is not None or not self.folder.is_dir() or self.folder.is_symlink() or self.path.is_symlink():
+            raise DetailSensorError('DETAILED_SESSION_UNAVAILABLE')
+        old=self._resume
+        if old is not None:
+            if (not isinstance(old,DetailedCapture) or old.path!=self.path or old.pid!=self.pid or old.created!=self.created or old.origin_ns!=self.origin_ns or old.thread is None or old.thread.is_alive() or old._identity is None):
+                raise DetailSensorError('DETAILED_RESUME_NOT_OWNED')
+            stat=self.path.stat()
+            if (stat.st_dev,stat.st_ino)!=old._identity:raise DetailSensorError('DETAILED_RESUME_IDENTITY_CHANGED')
+        else:
+            flags=os.O_WRONLY|os.O_CREAT|os.O_EXCL
+            fd=os.open(self.path,flags,0o600);os.close(fd)
+        stat=self.path.stat();self._identity=(stat.st_dev,stat.st_ino)
         self.thread = Thread(target=self._run, name="blackbox-detailed-sampler",
                              daemon=True)
         self.thread.start()
@@ -239,69 +246,78 @@ class DetailedCapture:
             conn = sqlite3.connect(self.path, timeout=2)
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA synchronous=NORMAL")
-            conn.executescript("""
-                CREATE TABLE detail_metadata (
-                    schema_version INTEGER NOT NULL,
-                    pid INTEGER NOT NULL,
-                    created REAL NOT NULL,
-                    monotonic_origin_ns INTEGER NOT NULL,
-                    status TEXT NOT NULL);
-                CREATE TABLE process_samples (
-                    seq INTEGER PRIMARY KEY,
-                    time_monotonic_ns INTEGER NOT NULL,
-                    elapsed_ms INTEGER NOT NULL,
-                    sampling_duration_ns INTEGER NOT NULL,
-                    rss_bytes INTEGER, private_bytes INTEGER, uss_bytes INTEGER,
-                    handles INTEGER, cpu_user_s REAL, cpu_system_s REAL,
-                    threads_reported INTEGER, read_bytes INTEGER,
-                    write_bytes INTEGER, read_ops INTEGER, write_ops INTEGER,
-                    threads_omitted INTEGER, children_total INTEGER,
-                    children_omitted INTEGER, thread_status TEXT);
-                CREATE INDEX ix_detail_samples_time ON process_samples(time_monotonic_ns);
-                CREATE TABLE thread_samples (
-                    sample_seq INTEGER NOT NULL, pid INTEGER NOT NULL,
-                    tid INTEGER NOT NULL, cpu_user_s REAL NOT NULL,
-                    cpu_system_s REAL NOT NULL,
-                    PRIMARY KEY (sample_seq, pid, tid));
-                CREATE INDEX ix_detail_tid ON thread_samples(pid, tid, sample_seq);
-                CREATE TABLE child_samples (
-                    sample_seq INTEGER NOT NULL, pid INTEGER NOT NULL,
-                    created REAL NOT NULL, rss_bytes INTEGER,
-                    cpu_user_s REAL, cpu_system_s REAL,
-                    PRIMARY KEY (sample_seq, pid, created));
-                CREATE INDEX ix_detail_child ON child_samples(pid, created, sample_seq);
-                CREATE TABLE sensor_errors (
-                    seq INTEGER PRIMARY KEY AUTOINCREMENT,
-                    time_monotonic_ns INTEGER, code TEXT NOT NULL);
-                -- Additive provenance tables: legacy v2 readers ignore them.
-                CREATE TABLE detail_clock_mapping (
-                    monotonic_anchor_ns INTEGER NOT NULL,
-                    utc_anchor_ns INTEGER NOT NULL,
-                    uncertainty_ns INTEGER NOT NULL,
-                    clock_source TEXT NOT NULL);
-                CREATE TABLE detail_capabilities (
-                    field_name TEXT PRIMARY KEY, source_kind TEXT NOT NULL,
-                    verification_class TEXT NOT NULL, unit TEXT NOT NULL);
-                CREATE TABLE detail_sample_quality (
-                    sample_seq INTEGER PRIMARY KEY,
-                    utc_estimate_ns INTEGER NOT NULL,
-                    source_kind TEXT NOT NULL,
-                    verification_class TEXT NOT NULL,
-                    rss_status TEXT NOT NULL, private_status TEXT NOT NULL,
-                    uss_status TEXT NOT NULL, handle_status TEXT NOT NULL,
-                    io_status TEXT NOT NULL, threads_status TEXT NOT NULL,
-                    children_status TEXT NOT NULL);
-            """)
-            anchor = capture_clock_anchor()
-            conn.execute("INSERT INTO detail_metadata VALUES (2,?,?,?,?)",
-                         (self.pid, self.created, self.origin_ns, "RUNNING"))
-            conn.execute("INSERT INTO detail_clock_mapping VALUES (?,?,?,?)",
-                         (anchor.monotonic_ns, anchor.utc_ns,
-                          anchor.uncertainty_ns, anchor.source))
-            conn.executemany("INSERT INTO detail_capabilities VALUES (?,?,?,?)",
-                             ((field, SOURCE_KIND, VERIFICATION_CLASS, unit)
-                              for field, unit in FIELD_UNITS.items()))
-            conn.commit()
+            if self._resume is not None:
+                row=conn.execute('SELECT schema_version,pid,created,monotonic_origin_ns FROM detail_metadata').fetchone()
+                if row!=(2,self.pid,self.created,self.origin_ns):raise DetailSensorError('DETAILED_RESUME_METADATA_CHANGED')
+                self.samples=conn.execute('SELECT coalesce(max(seq),0) FROM process_samples').fetchone()[0]
+                clock=conn.execute('SELECT monotonic_anchor_ns,utc_anchor_ns,uncertainty_ns,clock_source FROM detail_clock_mapping').fetchone()
+                anchor=ClockAnchor(*clock)
+                conn.execute("UPDATE detail_metadata SET status='RUNNING'");conn.commit()
+            else:
+                conn.executescript("""
+                    CREATE TABLE detail_metadata (
+                        schema_version INTEGER NOT NULL,
+                        pid INTEGER NOT NULL,
+                        created REAL NOT NULL,
+                        monotonic_origin_ns INTEGER NOT NULL,
+                        status TEXT NOT NULL);
+                    CREATE TABLE process_samples (
+                        seq INTEGER PRIMARY KEY,
+                        time_monotonic_ns INTEGER NOT NULL,
+                        elapsed_ms INTEGER NOT NULL,
+                        sampling_duration_ns INTEGER NOT NULL,
+                        rss_bytes INTEGER, private_bytes INTEGER, uss_bytes INTEGER,
+                        handles INTEGER, cpu_user_s REAL, cpu_system_s REAL,
+                        threads_reported INTEGER, read_bytes INTEGER,
+                        write_bytes INTEGER, read_ops INTEGER, write_ops INTEGER,
+                        threads_omitted INTEGER, children_total INTEGER,
+                        children_omitted INTEGER, thread_status TEXT);
+                    CREATE INDEX ix_detail_samples_time ON process_samples(time_monotonic_ns);
+                    CREATE TABLE thread_samples (
+                        sample_seq INTEGER NOT NULL, pid INTEGER NOT NULL,
+                        tid INTEGER NOT NULL, cpu_user_s REAL NOT NULL,
+                        cpu_system_s REAL NOT NULL,
+                        PRIMARY KEY (sample_seq, pid, tid));
+                    CREATE INDEX ix_detail_tid ON thread_samples(pid, tid, sample_seq);
+                    CREATE TABLE child_samples (
+                        sample_seq INTEGER NOT NULL, pid INTEGER NOT NULL,
+                        created REAL NOT NULL, rss_bytes INTEGER,
+                        cpu_user_s REAL, cpu_system_s REAL,
+                        PRIMARY KEY (sample_seq, pid, created));
+                    CREATE INDEX ix_detail_child ON child_samples(pid, created, sample_seq);
+                    CREATE TABLE sensor_errors (
+                        seq INTEGER PRIMARY KEY AUTOINCREMENT,
+                        time_monotonic_ns INTEGER, code TEXT NOT NULL);
+                    -- Additive provenance tables: legacy v2 readers ignore them.
+                    CREATE TABLE detail_clock_mapping (
+                        monotonic_anchor_ns INTEGER NOT NULL,
+                        utc_anchor_ns INTEGER NOT NULL,
+                        uncertainty_ns INTEGER NOT NULL,
+                        clock_source TEXT NOT NULL);
+                    CREATE TABLE detail_capabilities (
+                        field_name TEXT PRIMARY KEY, source_kind TEXT NOT NULL,
+                        verification_class TEXT NOT NULL, unit TEXT NOT NULL);
+                    CREATE TABLE detail_sample_quality (
+                        sample_seq INTEGER PRIMARY KEY,
+                        utc_estimate_ns INTEGER NOT NULL,
+                        source_kind TEXT NOT NULL,
+                        verification_class TEXT NOT NULL,
+                        rss_status TEXT NOT NULL, private_status TEXT NOT NULL,
+                        uss_status TEXT NOT NULL, handle_status TEXT NOT NULL,
+                        io_status TEXT NOT NULL, threads_status TEXT NOT NULL,
+                        children_status TEXT NOT NULL);
+                """)
+                anchor = capture_clock_anchor()
+                conn.execute("INSERT INTO detail_metadata VALUES (2,?,?,?,?)",
+                             (self.pid, self.created, self.origin_ns, "RUNNING"))
+                conn.execute("INSERT INTO detail_clock_mapping VALUES (?,?,?,?)",
+                             (anchor.monotonic_ns, anchor.utc_ns,
+                              anchor.uncertainty_ns, anchor.source))
+                conn.executemany("INSERT INTO detail_capabilities VALUES (?,?,?,?)",
+                                 ((field, SOURCE_KIND, VERIFICATION_CLASS, unit)
+                                  for field, unit in FIELD_UNITS.items()))
+                conn.commit()
+            self._owns=True
             self.status = "RUNNING"
             while not self.stop_event.is_set():
                 if ((self.max_samples is not None and self.samples >= self.max_samples) or
@@ -386,7 +402,7 @@ class DetailedCapture:
             final = "SENSOR_INTERNAL_FAILURE"
             self.error = type(exc).__name__
         finally:
-            if conn is not None:
+            if conn is not None and self._owns:
                 # A failed thread/child insert can leave a process row in the
                 # same uncommitted transaction. Never publish that partial row
                 # while updating the final metadata state.
@@ -399,7 +415,7 @@ class DetailedCapture:
                     conn.commit()
                 except sqlite3.Error:
                     pass
-                conn.close()
+            if conn is not None:conn.close()
             self.status = final
 
 

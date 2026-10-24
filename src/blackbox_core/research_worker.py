@@ -23,6 +23,8 @@ from .trace_owner import TraceSupervisor
 from .optional_jobs import OptionalJobs
 from .operation_worker import OPERATIONS, TARGET_OPERATIONS
 from .sensors import Capability, CallbackSensor, SensorRegistry
+from .capture_policy import validate_policy,profile_description
+from .user_markers import UserMarkers
 
 
 class ResearchSession:
@@ -39,6 +41,8 @@ class ResearchSession:
         self.interval_ms=1000;self.native_enabled=False
         self.context={"scenario":"","scenario_version":"","workload":"","target_version":"","profile":"STANDARD","interval_ms":1000,"warmup_count":0}
         self.library_error=None;self._library_started_ns=None;self._library_experiment={};self._configuration_changed=False
+        self.capture_policy=validate_policy();self.profile_info=profile_description(self.capture_policy);self.markers=UserMarkers();self._burst_until=None;self._burst_owned=False
+        self._ui_seen=set()
         self.budget_bytes=1024**3;self.last_health=0;self.native_at=0
         self.last_command=None;self.command_latency_ms=None
         self.last_app_health=None
@@ -83,8 +87,42 @@ class ResearchSession:
             research_state=self.research_state,research_error=self.research_error,
             command_latency_ms=self.command_latency_ms,
             optional_jobs=self.jobs.health(), sensor_health=self.sensors.health() if self.sensors else {},
+            capture_policy=self.capture_policy,profile_description=self.profile_info,active_stages=self.markers.snapshot(),
             library_health={"status":"INDEX_ERROR" if self.library_error else "AVAILABLE", "error":self.library_error})
         return data
+
+    def _start_policy(self):
+        c=self.capture_policy;p=self.probe
+        p.detail_policy={'interval_s':c['detail_interval_ms']/1000,'thread_limit':c['thread_limit'],
+            'child_limit':c['child_limit'],'max_bytes':self.budget_bytes}
+        if c['profile']=='DETAILED':p.set_detailed_capture(True)
+        if c['windows_enabled']:p.set_window_capture(True)
+        if c['incident_enabled'] or c['profile']=='INCIDENT_BURST':p.set_incident_capture(True,policy=c['incident'])
+
+    def _policy_tick(self):
+        p=self.probe;c=self.capture_policy
+        if self._burst_until and time.monotonic()>=self._burst_until:
+            if self._burst_owned and p.detailed_capture:self._last_detail_capture=p.detailed_capture;p.set_detailed_capture(False)
+            elif p.detailed_capture:p.detailed_capture.interval_s=c['detail_interval_ms']/1000
+            self._burst_until=None;self.book.put('observer.burst_stopped',{'reason':'TTL_EXPIRED'})
+        if c['session_seconds'] and time.monotonic_ns()-p._recording_origin_ns>=c['session_seconds']*10**9:
+            self.book.put('observer.time_limit',{'seconds':c['session_seconds']});self.stop('TIME_LIMIT_REACHED');return False
+        return True
+
+    def _maybe_burst(self):
+        p=self.probe;c=self.capture_policy;trigger=False
+        while p.incident_events:
+            event=p.incident_events.popleft()
+            trigger=trigger or event['code']=='AUTO_INCIDENT_STARTED'
+        if p.window_capture:
+            rows=p.window_capture.snapshot()[1];current={(r['hwnd'],r['tid']) for r in rows if r.get('unresponsive_observed')}
+            trigger=trigger or bool(current-self._ui_seen) and 'UI_TIMEOUT' in c['incident']['enabled_triggers'];self._ui_seen=current
+        if c['profile']!='INCIDENT_BURST' or not trigger or self._burst_until:return
+        self._burst_owned=p.detailed_capture is None
+        if self._burst_owned:p.set_detailed_capture(True)
+        p.detailed_capture.interval_s=c['burst_interval_ms']/1000
+        self._burst_until=time.monotonic()+c['burst_seconds']
+        self.book.put('observer.burst_started',{'duration_seconds':c['burst_seconds'],'etw_started':False,'dump_started':False})
 
     def _changed_configuration(self):
         self._configuration_changed=True
@@ -160,6 +198,7 @@ class ResearchSession:
     def tick(self):
         p=self.probe
         if not p.active:return
+        if not self._policy_tick():return
         if self.sensors:
             if self.sensors.sample("base",budget_s=self.interval_ms/1000) is None:
                 raise RuntimeError("BASE_SENSOR_UNAVAILABLE")
@@ -176,6 +215,7 @@ class ResearchSession:
                 for name in ("application", "detail", "windows", "optional"):
                     self.sensors.sample(name, budget_s=.1)
             else:self._application_events()
+            self._maybe_burst()
             if time.monotonic()-self.last_health>=5:
                 self.last_health=time.monotonic();self._health()
         if not p.active and self.book:self.stop(p.session_state)
@@ -315,6 +355,10 @@ class ResearchSession:
         p=self.probe;errors=[]
         self._cancelled_operations.extend(self.jobs.cancel())
         if self.sensors:self.sensors.stop()
+        self._burst_until=None
+        if self.book:
+            try:self.markers.close(self.book,reason=reason)
+            except (OSError,ValueError,sqlite3.Error) as exc:errors.append('USER_STAGES_FINALIZATION_UNCONFIRMED: '+str(exc)[:100])
         app_coverage=self._drain_application_events() if self.book else {}
         if self.tail and (self.app_source_error or self.tail.invalid or self.tail.client_dropped or
                 self.tail.discontinuities or app_coverage.get("application_unread_bytes_at_stop") or
@@ -325,6 +369,7 @@ class ResearchSession:
             if result and self.book:self.book.put("eventpipe.stopped",result,source="EVENTPIPE_DOTNET_TRACE",quality=result["status"])
         # No more base samples are expected after the user's Stop command.
         # Finish the primary recording before awaiting the optional guardian.
+        if self.book:self.book.on_evidence=None
         if p.active:p.stop(reason,defer_report=True)
         if self.wpr:
             try:
@@ -357,13 +402,24 @@ class ResearchSession:
         op=command.get("op");a=command.get("args",{})
         if type(a) is not dict:raise ValueError("INVALID_COMMAND_ARGUMENTS")
         issued=self._receive_command(command)
+        if op=='capture_policy':
+            if a:
+                if self.probe.active:raise ValueError('STOP_BEFORE_RECONFIGURING')
+                if set(a)!={'policy'}:raise ValueError('INVALID_CAPTURE_POLICY')
+                self.capture_policy=validate_policy(a['policy']);self.profile_info=profile_description(self.capture_policy);self.budget_bytes=self.capture_policy['max_session_mb']*1024**2
+                self.context.update(profile=self.capture_policy['profile'],capture_policy=self.capture_policy)
+            return {'policy':self.capture_policy,'description':profile_description(self.capture_policy)}
+        if op=='user_marker':return self.markers.write(self.book,self.probe,a,issued_ns=issued)
         if op=="attach":
             if self.book:self.stop()
             return self.probe.attach(int(a["pid"]))
         if op=="configure":
             if self.probe.active:raise ValueError("STOP_BEFORE_RECONFIGURING")
             for key in ("scenario","scenario_version","workload","target_version","profile"):
-                if key in a:self.context[key]=str(a[key])[:256]
+                if key in a:
+                    if key=='profile':
+                        self.capture_policy=validate_policy({**self.capture_policy,'profile':a[key]});self.profile_info=profile_description(self.capture_policy)
+                    self.context[key]=str(a[key])[:256]
             if "warmup_count" in a:
                 n=a["warmup_count"]
                 if type(n) is not int or not 0<=n<=10000:raise ValueError("INVALID_WARMUP_COUNT")
@@ -371,7 +427,7 @@ class ResearchSession:
             if "budget_mb" in a:
                 n=a["budget_mb"]
                 if type(n) is not int or not 16<=n<=1024*1024:raise ValueError("INVALID_DISK_BUDGET")
-                self.budget_bytes=n*1024**2
+                self.budget_bytes=n*1024**2;self.capture_policy["max_session_mb"]=n
             return self.context
         if op=="interval":
             n=a["milliseconds"]
@@ -382,6 +438,8 @@ class ResearchSession:
                 self._changed_configuration()
             return n
         if op=="start":
+            self.markers=UserMarkers();self._ui_seen=set();self._burst_until=None
+            self.context.update(profile=self.capture_policy["profile"],capture_policy=self.capture_policy)
             self.probe.start()
             self.probe._store.v2.max_bytes=self.budget_bytes
             self.native_enabled=False;self.runtime_trace=None;self.wpr=None;self._last_detail_capture=None
@@ -399,6 +457,7 @@ class ResearchSession:
                 self.tail=EventTail(self.probe.session_folder/"application-events.jsonl",uuid4().hex,self.probe.pid)
                 self.book.set_context("application_event_path",str(self.tail.path))
                 self.book.set_context("worker_pid",os.getpid())
+                self._start_policy()
                 self._start_registry()
                 import psutil
                 try:self.book.set_context("worker_created",psutil.Process().create_time())
