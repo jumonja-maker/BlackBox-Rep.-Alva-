@@ -37,7 +37,8 @@ class ResearchSession:
         self._cancelled_operations=deque(maxlen=8)
         self.cancel=Event()
         self.interval_ms=1000;self.native_enabled=False
-        self.context={"scenario":"","workload":"","target_version":"","profile":"STANDARD","interval_ms":1000,"warmup_count":0}
+        self.context={"scenario":"","scenario_version":"","workload":"","target_version":"","profile":"STANDARD","interval_ms":1000,"warmup_count":0}
+        self.library_error=None;self._library_started_ns=None;self._library_experiment={};self._configuration_changed=False
         self.budget_bytes=1024**3;self.last_health=0;self.native_at=0
         self.last_command=None;self.command_latency_ms=None
         self.last_app_health=None
@@ -81,8 +82,38 @@ class ResearchSession:
             helper_pid=os.getpid(),last_command=self.last_command,
             research_state=self.research_state,research_error=self.research_error,
             command_latency_ms=self.command_latency_ms,
-            optional_jobs=self.jobs.health(), sensor_health=self.sensors.health() if self.sensors else {})
+            optional_jobs=self.jobs.health(), sensor_health=self.sensors.health() if self.sensors else {},
+            library_health={"status":"INDEX_ERROR" if self.library_error else "AVAILABLE", "error":self.library_error})
         return data
+
+    def _changed_configuration(self):
+        self._configuration_changed=True
+        if self.book:self.book.set_context("configuration_changed",True)
+
+    def _index_recording(self,*,finalized=False):
+        """Optional lifecycle checkpoint; no history scan or per-sample work."""
+        from .library_catalog import LibraryCatalog
+        p=self.probe
+        if self._library_started_ns is None or p.session_folder is None:return
+        try:
+            LibraryCatalog(p.output_root).record_owned(p.session_folder,{
+                **self._library_experiment,"started_ns":self._library_started_ns,
+                "state":self.research_state if finalized or self.book else "FINALIZATION_UNCONFIRMED",
+                "target_name":p.name,"samples":p.total_samples,"completed_runs":p.actions.completed_total,
+                "configuration_changed":self._configuration_changed,"owner_pid":os.getpid(),
+                "owner_created":self._observer.create_time() if self._observer else None},finalized=finalized)
+            self.library_error=None
+        except Exception as exc:
+            # An unavailable/full/locked optional index must not stop recording.
+            self.library_error=(type(exc).__name__+": "+str(exc))[:300]
+
+    def _recording_resources_closed(self):
+        p=self.probe
+        return (not p.active and p._store is None and
+            not any(cap and cap.thread.is_alive() for cap in
+                (p._pending_detailed,p._pending_windows,p._pending_v2)) and
+            not (self.wpr and self.wpr.active) and
+            not (self.runtime_trace and self.runtime_trace.process is not None))
 
     def _identity(self):
         import psutil
@@ -231,9 +262,9 @@ class ResearchSession:
         packet={"op":op,"args":a,"pid":self.probe.pid,
             "created":self.probe._core.created if self.probe._core else None,
             "folder":str(self.probe.session_folder) if self.probe.session_folder else None,
-            "end_ms":self.probe.last_elapsed_ms or 1}
+            "end_ms":self.probe.last_elapsed_ms or 1,"library_root":str(self.probe.output_root)}
         if op=="prepare_client":packet.update(event_path=str(self.tail.path),event_token=self.tail.token)
-        self.jobs.submit(command, packet, seconds=300 if op=="export" else 75 if op in ("inspect_dump","verify","recover") else 15)
+        self.jobs.submit(command, packet, seconds=300 if op=="export" else 120 if op in ("library_plan_trash","library_apply_trash") else 75 if op in ("inspect_dump","verify","recover","library_scan","library_compare") else 15)
         if self.book:
             self.book.put("observer.operation_queued", {"op":op,"command_id":command.get("id"),
                 "issued_ns":command.get("issued_ns")}, source="BLACKBOX_COMMAND_OWNER")
@@ -254,7 +285,7 @@ class ResearchSession:
             elif op=="native":
                 r=value["windows"];self.book.put("windows.response",r,source="WIN32_HWND",quality=r["status"])
                 for r in value["wait_chains"]:self.book.put("thread.wait_chain",r,source="WIN32_WCT",quality=r["status"],tid=r.get("tid"))
-                self.book.set_context("configuration_changed",True)
+                self._changed_configuration()
             elif op in ("dump","symbols","inspect_dump"):
                 kind,source={"dump":("snapshot.captured","DBGHELP_MINIDUMP"),"symbols":("symbols.identity","DBGHELP_SYMSRV_FILE_INDEX"),
                     "inspect_dump":("stack.offline","CDB_OFFLINE_DUMP")}[op]
@@ -315,6 +346,7 @@ class ResearchSession:
                 book.close("INCOMPLETE" if errors or p.last_error else p.session_state)
                 self.research_state="INCOMPLETE" if errors or p.last_error else p.session_state
                 self.research_error="; ".join(errors) if errors else p.last_error
+                self._index_recording(finalized=self._recording_resources_closed())
             except BaseException:
                 self.research_state="FINALIZATION_UNCONFIRMED"
                 self.research_error="RESEARCH_FINALIZATION_UNCONFIRMED"
@@ -330,7 +362,7 @@ class ResearchSession:
             return self.probe.attach(int(a["pid"]))
         if op=="configure":
             if self.probe.active:raise ValueError("STOP_BEFORE_RECONFIGURING")
-            for key in ("scenario","workload","target_version","profile"):
+            for key in ("scenario","scenario_version","workload","target_version","profile"):
                 if key in a:self.context[key]=str(a[key])[:256]
             if "warmup_count" in a:
                 n=a["warmup_count"]
@@ -347,7 +379,7 @@ class ResearchSession:
             self.interval_ms=n;self.context["interval_ms"]=n
             if self.book:
                 self.book.put("observer.interval_changed",{"interval_ms":n})
-                self.book.set_context("configuration_changed",True)
+                self._changed_configuration()
             return n
         if op=="start":
             self.probe.start()
@@ -355,11 +387,14 @@ class ResearchSession:
             self.native_enabled=False;self.runtime_trace=None;self.wpr=None;self._last_detail_capture=None
             self.app_source_error=None
             self.research_state="RECORDING";self.research_error=None
+            self._configuration_changed=False;self._library_started_ns=None
             try:
                 self.book=CaseBook(self.probe.session_folder,self.probe.pid,self.probe._core.created,
                                   {**self.context,"origin_monotonic_ns":self.probe._recording_origin_ns},
                                   on_evidence=self.probe._store.write_event)
                 self.book.origin=self.probe._recording_origin_ns
+                self._library_started_ns=self.book.anchor.utc_ns
+                self._library_experiment=dict(self.context)
                 self.book.set_context("capabilities",capabilities())
                 self.tail=EventTail(self.probe.session_folder/"application-events.jsonl",uuid4().hex,self.probe.pid)
                 self.book.set_context("application_event_path",str(self.tail.path))
@@ -371,6 +406,7 @@ class ResearchSession:
             except BaseException:
                 self.research_state="INCOMPLETE";self.research_error="RESEARCH_SETUP_FAILED"
                 self.probe.stop("STORAGE_ERROR");raise
+            self._index_recording()
             return {"folder":str(self.probe.session_folder)}
         if op=="stop":
             result=self.stop(a.get("reason","USER_STOPPED"));self.cancel.clear();return result
@@ -392,17 +428,17 @@ class ResearchSession:
             if self.probe.detailed_capture is not None:
                 self._last_detail_capture=self.probe.detailed_capture
                 self.probe.detailed_capture.max_bytes=self.budget_bytes
-            self.book.set_context("configuration_changed",True)
+            self._changed_configuration()
             return result
         if op=="incidents":
             result=self.probe.set_incident_capture(bool(a["enabled"]),policy=a.get("policy"))
             if self.book:
                 self.book.put("observer.incident_policy",{"enabled":bool(a["enabled"]),"policy":a.get("policy")})
-                self.book.set_context("configuration_changed",True)
+                self._changed_configuration()
             return result
         if op=="windows":
             result=self.probe.set_window_capture(bool(a["enabled"]))
-            if self.book:self.book.set_context("configuration_changed",True)
+            if self.book:self._changed_configuration()
             return result
         if op=="select_window":
             cap=self.probe.window_capture
@@ -432,7 +468,7 @@ class ResearchSession:
             return result
         if op=="native":
             if not self.book:raise ValueError("START_RECORDING_FIRST")
-            self.book.set_context("configuration_changed",True)
+            self._changed_configuration()
             # Continuous HWND/WCT observation is owned by WindowCapture.
             # This explicit snapshot must not start a second periodic sampler.
             return self.capture_native()
@@ -451,7 +487,7 @@ class ResearchSession:
                 if not self.wpr:raise ValueError("WPR_NOT_ACTIVE")
                 self.wpr.request_stop();result={"source":"ETW_WPR","status":"STOP_REQUESTED","instance":self.wpr.instance}
             self.book.put("trace.state",result,source="ETW_WPR")
-            self.book.set_context("configuration_changed",True)
+            self._changed_configuration()
             return result
         if op=="eventpipe":
             if not self.book:raise ValueError("START_RECORDING_FIRST")
@@ -460,7 +496,7 @@ class ResearchSession:
             artifacts=self.probe.session_folder/"artifacts";artifacts.mkdir(exist_ok=True)
             self.runtime_trace=DotnetTrace(artifacts,self.probe.pid,a.get("seconds",10))
             result=self.runtime_trace.start();self.book.put("eventpipe.started",result,source="EVENTPIPE_DOTNET_TRACE")
-            self.book.set_context("configuration_changed",True)
+            self._changed_configuration()
             return result
         if op=="dump":
             if not self.book:raise ValueError("START_RECORDING_FIRST")
@@ -492,6 +528,9 @@ class ResearchSession:
             save_snapshot(Path(a["destination"]),self.probe.snapshot())
             return {"path":a["destination"]}
         if op=="status":return self.snapshot()
+        if op.startswith("library_") and op in OPERATIONS:
+            from .operation_worker import execute
+            return execute({"op":op,"args":a,"library_root":str(self.probe.output_root)})
         if op=="quit":return self.stop("UI_CLOSED")
         raise ValueError("UNKNOWN_RESEARCH_COMMAND")
 

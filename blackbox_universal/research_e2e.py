@@ -21,6 +21,11 @@ def run_e2e(app,window,destination):
         if op=="compare":
             state["compared"]=(payload.get("experiments",{}).get("before",{}).get("repeats")==1 and
                                payload.get("experiments",{}).get("after",{}).get("repeats")==1)
+        if op=='library_open':state['library_open']=payload['folder']
+        if op=='library_compare':state['library_compare']=payload['comparison'].get('experiments',{}).get('before',{}).get('repeats')==1
+        if op=='library_plan_trash':state['trash_plan']=payload
+        if op=='library_apply_trash':state['trashed']=all(r['status']=='MOVED_TO_TRASH' for r in payload['results'])
+        if op=='library_restore':state['restored']=payload['status']=='RESTORED'
     bridge.result_ready.connect(result)
     def finalized():
         if state.get("proof"):
@@ -42,7 +47,7 @@ def run_e2e(app,window,destination):
         if step==0:window._attach_pid(os.getpid())
         elif step==1:
             if bridge.pid!=os.getpid():return
-            bridge.send("configure",scenario="Frozen EXE action roundtrip",workload="local-self",target_version="QA")
+            bridge.send("configure",scenario="Frozen EXE action roundtrip",scenario_version="QA1",workload="local-self",target_version="QA")
         elif step==2:window.start_btn.click()
         elif step==3:
             if not bridge.active:return
@@ -94,11 +99,57 @@ def run_e2e(app,window,destination):
             bridge.send("compare",before=state["first"],after=str(bridge.session_folder))
         elif step==19:
             if not state["compared"]:fail("COMPARISON_MISSING");return
+            window.library_toggle.setChecked(True)
+        elif step==20:
+            panel=window.library_panel
+            if len(panel.rows)!=2:fail('LIBRARY_INDEX_MISSING_RECORDINGS');return
+            ids={r['folder']:r['entry_id'] for r in panel.rows};state['library_ids']=ids
+            if state['first'] not in ids:fail('LIBRARY_FIRST_RECORDING_MISSING');return
+            from blackbox_core.casebook import _hash
+            state['original_digest']=_hash(Path(state['first'])/'session.sqlite3')
+            row=next(i for i,r in enumerate(panel.rows) if r['folder']==state['first'])
+            panel.table.selectRow(row);panel.open_button.click()
+        elif step==21:
+            if state.get('library_open')!=state['first'] or window._interval_packet is None:return
+            if bridge.pid!=os.getpid():fail('LIBRARY_CHANGED_RECORDING_TARGET');return
+            bridge.send('library_compare',before_id=state['library_ids'][state['first']],after_id=state['library_ids'][str(bridge.session_folder)])
+        elif step==22:
+            if not state.get('library_compare'):fail('LIBRARY_COMPARISON_MISSING');return
+            bridge.send('library_plan_trash',entry_ids=[state['library_ids'][state['first']]])
+        elif step==23:
+            plan=state.get('trash_plan')
+            if not plan or not Path(state['first']).is_dir() or plan['bytes_freed']!=0:fail('LIBRARY_PLAN_MUTATED_SOURCE');return
+            # Explicit automated QA consent, not the production default. The
+            # Qt confirmation's default-No/cancel paths are tested separately.
+            bridge.send('library_apply_trash',confirmation_token=plan['confirmation_token'])
+        elif step==24:
+            if not state.get('trashed') or Path(state['first']).exists():fail('LIBRARY_MOVE_MISSING');return
+            panel=window.library_panel;panel.filter.setCurrentIndex(panel.filter.findData('TRASH'))
+        elif step==25:
+            panel=window.library_panel
+            if len(panel.rows)!=1 or panel.rows[0]['state']!='TRASH':fail('LIBRARY_TRASH_VIEW_MISSING');return
+            panel.table.selectRow(0);panel.restore_button.click()
+        elif step==26:
+            from blackbox_core.casebook import _hash
+            if not state.get('restored') or _hash(Path(state['first'])/'session.sqlite3')!=state['original_digest']:
+                fail('LIBRARY_RESTORE_CHANGED_EVIDENCE');return
+            panel=window.library_panel;panel.filter.setCurrentIndex(panel.filter.findData('ALL'))
+        elif step==27:
+            if len(window.library_panel.rows)!=2:fail('LIBRARY_RESTORED_INDEX_MISSING');return
+            window._navigate('reports');window.research_toggle.setChecked(False)
+            window.library_panel.storage_toggle.setChecked(True);window.resize(1330,850)
+        elif step==28:
+            for language in ('RU','EN'):
+                window._set_language(language);app.processEvents()
+                if not window.grab().save(str(destination/('library-'+language+'.png'))):fail('LIBRARY_SCREENSHOT_FAILED');return
             if window.stack.count()!=5:fail("PAGE_COUNT");return
             state["proof"]={"status":"AWAITING_HELPER_SHUTDOWN","scenario":"REAL_QT_ISOLATED_ACTION_PACKAGE_ROUNDTRIP",
                 "folder":str(bridge.session_folder),"helper_pid":bridge.data.get("helper_pid"),"gui_pid":os.getpid(),
                 "privilege":bridge.capabilities.get("privilege"),"verified":True,
-                "generated_client":True,"application_control_event":True,"two_recordings_compared":True}
+                "generated_client":True,"application_control_event":True,"two_recordings_compared":True,
+                "indexed_library_two_records":True,"library_open_target_unchanged":True,
+                "indexed_id_comparison":True,"reversible_trash_restore_hash_preserved":True,
+                "trash_bytes_freed":0}
             (destination/"e2e.json").write_text(json.dumps(state["proof"]),encoding="utf-8")
             timer.stop();window.close();return
         state["step"]+=1

@@ -78,13 +78,13 @@ class ResearchPanel(QWidget):
         layout=QVBoxLayout(self);layout.setContentsMargins(0,0,0,0)
         self.status=QLabel();self.status.setWordWrap(True);layout.addWidget(self.status)
         context=QGridLayout()
-        self.scenario=QLineEdit();self.workload=QLineEdit();self.version=QLineEdit()
-        for i,(field,en,ru) in enumerate(((self.scenario,"Scenario","Сценарий"),(self.workload,"Workload / input identity","Нагрузка / идентификатор входных данных"),(self.version,"Target version","Версия программы"))):
+        self.scenario=QLineEdit();self.scenario_version=QLineEdit();self.workload=QLineEdit();self.version=QLineEdit()
+        for i,(field,en,ru) in enumerate(((self.scenario,"Scenario","Сценарий"),(self.scenario_version,"Scenario version","Версия сценария"),(self.workload,"Workload / input identity","Нагрузка / идентификатор входных данных"),(self.version,"Target version","Версия программы"))):
             label=QLabel();self._labels.append((label,en,ru));context.addWidget(label,i,0);context.addWidget(field,i,1)
         self.budget=QSpinBox();self.budget.setRange(16,1048576);self.budget.setValue(1024);self.budget.setSuffix(" MiB")
-        label=QLabel();self._labels.append((label,"Session disk budget","Бюджет записи на диске"));context.addWidget(label,3,0);context.addWidget(self.budget,3,1)
+        label=QLabel();self._labels.append((label,"Session disk budget","Бюджет записи на диске"));context.addWidget(label,4,0);context.addWidget(self.budget,4,1)
         self.warmups=QSpinBox();self.warmups.setRange(0,10000)
-        label=QLabel();self._labels.append((label,"Warm-up repetitions to exclude","Исключить разогревочные повторы"));context.addWidget(label,4,0);context.addWidget(self.warmups,4,1)
+        label=QLabel();self._labels.append((label,"Warm-up repetitions to exclude","Исключить разогревочные повторы"));context.addWidget(label,5,0);context.addWidget(self.warmups,5,1)
         layout.addLayout(context)
         buttons=QGridLayout();self.buttons=[];self.by_action={}
         entries=(("Context / capabilities","Контекст / доступность",self.inspect),
@@ -163,7 +163,7 @@ class ResearchPanel(QWidget):
         try:return self.bridge.send(op,**args)
         except (RuntimeError,ValueError) as exc:self.details.setPlainText(str(exc))
     def configure(self):
-        self.send("configure",scenario=self.scenario.text(),workload=self.workload.text(),target_version=self.version.text(),budget_mb=self.budget.value(),warmup_count=self.warmups.value())
+        self.send("configure",scenario=self.scenario.text(),scenario_version=self.scenario_version.text(),workload=self.workload.text(),target_version=self.version.text(),budget_mb=self.budget.value(),warmup_count=self.warmups.value())
     def inspect(self):self.send("inspect")
     def prepare(self):
         if self.preparation_dialog is not None:
@@ -234,10 +234,12 @@ class ResearchPanel(QWidget):
             for j,key in enumerate(("elapsed_ms","source","quality","kind")):
                 item=QTableWidgetItem(str(r[key]));item.setData(Qt.ItemDataRole.UserRole,r);self.table.setItem(i,j,item)
     def receive(self,op,result,error):
+        if op.startswith("library_"):return
         if error:
             from .research_messages import explain
             self.details.setPlainText(explain(error,self.window.language));return
-        if op=="episode" and type(result) is dict:
+        if op=="start":self.folder=None
+        elif op=="episode" and type(result) is dict:
             self.result=result;self.timeline.set_data(result);self.render_page(result["evidence"])
             self.details.setPlainText(json.dumps({"facts":result["facts"],"limitations":result["limitations"],
                 "more_evidence_available":result["evidence"]["has_more"]},ensure_ascii=False,indent=2))

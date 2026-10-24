@@ -785,6 +785,15 @@ class UniversalWindow(QMainWindow):
         self.research_panel.setVisible(False)
         content.insertWidget(1,self.research_toggle)
         content.insertWidget(2,self.research_panel)
+        from .library_panel import LibraryPanel
+        self.library_panel=LibraryPanel(self)
+        self.library_toggle=_button("SAVED RESEARCH / EXPERIMENT LIBRARY")
+        self.library_toggle.setCheckable(True)
+        self.library_toggle.toggled.connect(self.library_panel.activated)
+        self.library_panel.setVisible(False)
+        self.library_panel.open_requested.connect(self._open_library_recording)
+        content.insertWidget(1,self.library_toggle)
+        content.insertWidget(2,self.library_panel)
         return page
 
     def _build_settings(self) -> QWidget:
@@ -952,6 +961,10 @@ class UniversalWindow(QMainWindow):
             self.research_panel.retranslate()
             self.research_toggle.setText("ИССЛЕДОВАНИЕ ДЕЙСТВИЯ / ПОДГОТОВКА ПРОГРАММЫ" if language=="RU"
                                          else "ACTION INVESTIGATION / APPLICATION PREPARATION")
+        if hasattr(self,"library_panel"):
+            self.library_panel.retranslate()
+            self.library_toggle.setText("БИБЛИОТЕКА ИССЛЕДОВАНИЙ / ЭКСПЕРИМЕНТОВ" if language=="RU"
+                                        else "SAVED RESEARCH / EXPERIMENT LIBRARY")
         if self.stack.currentIndex() == self._page_ids["reports"]:
             self._update_report_preview()
 
@@ -1510,6 +1523,15 @@ class UniversalWindow(QMainWindow):
         folder=QFileDialog.getExistingDirectory(self,self._t("Open saved session"))
         if folder:
             self._load_session_interval(Path(folder))
+
+    def _open_library_recording(self,result):
+        # Historic selection must never call attach or replace the live target.
+        folder=Path(result["folder"])
+        self._load_session_interval(folder)
+        if result.get("has_research"):
+            self.research_panel.folder=folder
+            self.research_panel.begin.setValue(0)
+            self.research_panel.end.setValue(max(.001,(result["metadata"].get("duration_ms") or 0)/1000))
 
     def _load_session_interval(self,folder,interval=None,*,instance_id=1,event_cursor=(0,0),process_after=0):
         if folder is None:

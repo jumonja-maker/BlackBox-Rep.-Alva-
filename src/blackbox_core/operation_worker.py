@@ -11,7 +11,10 @@ from pathlib import Path
 import sys
 import time
 
-OPERATIONS = frozenset({'native', 'symbols', 'inspect_dump', 'inspect', 'prepare_client',
+LIBRARY_OPERATIONS = frozenset({'library_query','library_register','library_scan','library_open',
+    'library_compare','library_policy','library_retention','library_plan_trash',
+    'library_apply_trash','library_restore','library_reconcile'})
+OPERATIONS = LIBRARY_OPERATIONS | frozenset({'native', 'symbols', 'inspect_dump', 'inspect', 'prepare_client',
     'episode', 'evidence_page', 'export', 'compare', 'verify', 'recover', 'dump', 'processes'})
 TARGET_OPERATIONS = frozenset({'native', 'symbols', 'inspect', 'dump'})
 MAX_RESULT_BYTES = 4 * 1024 * 1024
@@ -31,7 +34,35 @@ def execute(packet):
     pid, created = packet.get('pid'), packet.get('created')
     if op in TARGET_OPERATIONS: validate_identity(pid, created)
     folder = Path(packet['folder']) if packet.get('folder') else None
-    if op == 'native':
+    if op in LIBRARY_OPERATIONS:
+        from .library_catalog import LibraryCatalog
+        # The root is assigned by the session owner, never by an operation's args.
+        catalog=LibraryCatalog(packet['library_root'])
+        if op=='library_query':
+            result=catalog.query(search=a.get('search',''),state=a.get('state','ALL'),after=a.get('after'),limit=a.get('limit',50))
+            result['request_key']=a.get('request_key')
+        elif op=='library_register':result={'entry':catalog.register(a['folder'])}
+        elif op=='library_scan':result=catalog.scan(after=a.get('after',''),limit=a.get('limit',50))
+        elif op=='library_open':result=catalog.open_entry(a['entry_id'])
+        elif op=='library_compare':
+            if a['before_id']==a['after_id']:raise ValueError('LIBRARY_SELECT_TWO_RECORDINGS')
+            before=catalog.open_entry(a['before_id'],completed=True)
+            after=catalog.open_entry(a['after_id'],completed=True)
+            if before['has_research'] and after['has_research']:
+                from .casebook import compare_cases
+                comparison=compare_cases(before['folder'],after['folder'])
+            else:
+                from .report import compare
+                comparison=compare(Path(before['folder']),Path(after['folder']))
+            result={'before':before['entry'],'after':after['entry'],'comparison':comparison,
+                'source_trust':'UNVERIFIED_IMPORT','source_observations_modified':False}
+        elif op=='library_policy':result=catalog.policy(a.get('values'))
+        elif op=='library_retention':result=catalog.retention_preview(limit=a.get('limit',50))
+        elif op=='library_plan_trash':result=catalog.plan_trash(a['entry_ids'])
+        elif op=='library_apply_trash':result=catalog.apply_trash(a['confirmation_token'])
+        elif op=='library_restore':result=catalog.restore(a['entry_id'])
+        elif op=='library_reconcile':result=catalog.reconcile()
+    elif op == 'native':
         import psutil
         from .windows_research import window_observations, wait_chain, enable_debug_privilege
         windows = window_observations(pid)

@@ -16,6 +16,8 @@ def comparison_text(result,language):
         ('Условия совпадают.' if ru else 'Recorded conditions match.') if result.get('comparable_context') else
         ('Условия различаются или заполнены не полностью: ' if ru else 'Conditions differ or are incomplete: ')+', '.join(result.get('context_mismatches',[])),
         '']
+    if result.get('context_warnings'):
+        lines.append(('Не все метаданные условий записаны: ' if ru else 'Some context metadata was not recorded: ')+', '.join(result['context_warnings']))
     def value(v,unit):
         if v is None:return 'не наблюдалось' if ru else 'not observed'
         if unit=='bytes':return f'{v/1048576:.3g} MiB'

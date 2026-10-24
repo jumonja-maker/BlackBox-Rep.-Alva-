@@ -1,5 +1,14 @@
 """Stable machine codes plus concise bilingual next actions."""
 MESSAGES={
+ "LIBRARY_ACTIVE_OR_EXTERNAL_RECORDING":("Only finalized, app-marked local recordings can be moved. Stop recording first; external folders stay read-only.","Перемещать можно только завершённые локальные записи, помеченные приложением. Сначала остановите запись; внешние папки доступны только для чтения."),
+ "LIBRARY_FINALIZATION_UNCONFIRMED":("Some recording resources have not confirmed shutdown. Keep the folder and finish or recover the investigation first.","Завершение части источников не подтверждено. Сохраните папку; сначала завершите или восстановите исследование."),
+ "LIBRARY_TRACE_STILL_ACTIVE":("A trace journal still indicates an active or interrupted capture. Finish or recover it before moving this recording.","Журнал трассы указывает на активную или прерванную запись. Завершите или восстановите её перед перемещением."),
+ "LIBRARY_RECORDING_CHANGED_REVIEW_AGAIN":("The recording changed after review. Refresh it and prepare a new confirmation; no stale plan is accepted.","Запись изменилась после просмотра. Обновите список и получите новое подтверждение: прежний план не принимается."),
+ "LIBRARY_CONFIRMATION_EXPIRED_OR_USED":("The confirmation expired or was already used. Review the selected recordings again.","Подтверждение истекло или уже использовано. Повторно просмотрите выбранные записи."),
+ "LIBRARY_DESTINATION_EXISTS":("The original folder name is occupied. Both folders are preserved. Resolve the conflict before restoring.","Исходное имя папки занято. Обе папки сохранены. Устраните конфликт перед восстановлением."),
+ "LIBRARY_RESTORE_BEFORE_OPEN":("Restore the recording from Trash before opening or comparing it.","Восстановите запись из корзины перед открытием или сравнением."),
+ "LIBRARY_STOP_BEFORE_COMPARE":("Stop or recover this recording before comparing completed experiments.","Остановите или восстановите запись перед сравнением завершённых экспериментов."),
+ "LIBRARY_SELECT_TWO_RECORDINGS":("Select two different completed recordings and choose the Before/After order.","Выберите две разные завершённые записи и укажите порядок «до/после»."),
  "OPTIONAL_OPERATION_TIMEOUT":("This diagnostic exceeded its deadline. Its owned worker was stopped; the base recording continues.","Диагностика превысила время ожидания. Её вспомогательный процесс остановлен; базовая запись продолжается."),
  "OPTIONAL_QUEUE_FULL":("The diagnostic queue is full. Wait for an operation to finish.","Очередь диагностики заполнена. Дождитесь завершения операции."),
  "OPTIONAL_OPERATION_CANCELLED_RESULT_UNCONFIRMED":("The diagnostic was cancelled. Completion of its output is unconfirmed.","Диагностика отменена. Завершённость её результата не подтверждена."),

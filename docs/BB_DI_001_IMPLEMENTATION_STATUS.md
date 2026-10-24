@@ -6,7 +6,7 @@
 
 **Evidence:** measurement/ownership source `854cd6bef1d35b1e541cbca77e6ff5a7dcea68f4`, [CI 40041993181](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/actions/runs/40041993181), SUCCESS: Windows 252 PASS + 1 SKIP; Linux 248 PASS + 5 SKIP; Python/native and actual frozen workflow/portable ZIP PASS; release SKIPPED. Its offscreen screenshots had missing-font boxes and are **not legibility evidence**. The subsequent font/glyph QA fix requires its own checked-out SHA in [current PR checks](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/pull/17/checks); see [evidence, commands, artifacts and rollback](BB_DI_001_QA_20261024.md).
 
-**Current conservative counts:** PARTIAL: 81; NOT-IMPLEMENTED: 13; NOT-RUN: 32; CONDITIONAL-PASS: 2. These are acceptance states, not code completion percentages. Initial handoff counts were 50/29/49; none of the remaining MUSTs is implicitly accepted.
+**Current conservative counts:** PARTIAL: 82; NOT-IMPLEMENTED: 12; NOT-RUN: 32; CONDITIONAL-PASS: 2. These are acceptance states, not code completion percentages. Initial handoff counts were 50/29/49; none of the remaining MUSTs is implicitly accepted.
 
 Status rules: **PASS** needs actual user-facing integration, automated tests and full required acceptance evidence. **PARTIAL** means only a verified code path/subfeature, **not** a complete MUST. **NOT-IMPLEMENTED** means the specified capability is absent from the reviewed slices. **NOT-RUN** means independent full-contract verification is absent; it does not assert absence of all legacy code. No item is yet promoted to full PASS based solely on a unit test. Evidence paths point to implementation/tests for **subfeatures**; they are **not** per-item sign-off certificates.
 
@@ -34,7 +34,7 @@ Status rules: **PASS** needs actual user-facing integration, automated tests and
 | M-018 | PARTIAL | src/blackbox_core/actions.py; blackbox_universal/window.py; tests/test_bbdi_action_slice.py | Three real Qt/frozen action cycles persisted; full ABORTED/state/interval acceptance remains incomplete |
 | M-019 | PARTIAL | src/blackbox_core/actions.py; tests/test_bbdi_action_slice.py | Real USER-command monotonic timestamps; no OS execution attestation |
 | M-020 | PARTIAL | blackbox_universal/monitor.py; src/blackbox_core/actions.py | Problem marker exists; no app instrumented channel and all marker types |
-| M-021 | PARTIAL | src/blackbox_core/actions.py; src/blackbox_core/session_v2.py; tests/test_bbdi_action_slice.py | Persistent runs with 20-repeat UI/core limit, existing median/p95/MAD; scenario/app versions, saved experiment library and resource compare incomplete |
+| M-021 | PARTIAL | src/blackbox_core/library_catalog.py; src/blackbox_core/experiment_metrics.py; blackbox_universal/library_panel.py; tests/test_library_workflow.py | Saved scenario/app versions, indexed experiment history and resource comparison integrated; complete profiles/environment UI/full acceptance remain |
 | M-022 | PARTIAL | src/blackbox_core/experiments.py; src/blackbox_core/report.py | Duration aggregation/compare partial; no resource delta comparability |
 | M-023 | PARTIAL | src/blackbox_core/incidents.py; src/blackbox_core/windows_observer.py; blackbox_universal/window.py | CPU/gap plus native UI timeout; CPU threshold/duration Settings; all memory/handles/IO/exit/burst policies still incomplete |
 | M-024 | PARTIAL | src/blackbox_core/incidents.py | Pre/post sample sequence bounded; not full multi-sensor ring |
@@ -48,7 +48,7 @@ Status rules: **PASS** needs actual user-facing integration, automated tests and
 | M-032 | PARTIAL | src/blackbox_core/detail_contracts.py; src/blackbox_core/session_view.py; tests/test_bbdi_schema2_sessions.py | NS read tags/brackets, anchored UTC estimate plus reported resolution, observation-time event alignment; individual TID read/birth and calibrated UTC accuracy unavailable |
 | M-033 | PARTIAL | src/blackbox_core/session_view.py; blackbox_universal/session_interval_worker.py; tests/test_bbdi_schema2_sessions.py | All selected v2/v1 rows streamed, exact statistics, first/min/max/last plots, full CSV; accelerated 100001-row early-minute test passed locally; 8h hardware latency pending |
 | M-034 | PARTIAL | src/blackbox_core/detailed_capture.py; tests/test_bbdi_detailed_slice.py; tests/test_bbdi_detail_contracts.py | Sample/quality rows atomic on malformed data and WAL+soft quota remain; power-loss recovery/checkpoint/8h NOT RUN |
-| M-035 | NOT-IMPLEMENTED | — | Required full capability not present; see original order |
+| M-035 | PARTIAL | src/blackbox_core/library_catalog.py; src/blackbox_core/library_files.py; blackbox_universal/library_panel.py; tests/test_library_catalog.py; tests/test_research_gui.py | Explicit retention preview, confirmed reversible Trash/Restore and interrupted-move reconciliation; no permanent deletion/automatic hard quota, bytes_freed=0; full storage acceptance pending |
 | M-036 | PARTIAL | blackbox_universal/window.py; blackbox_universal/monitor.py | Action and incident controls; no complete status architecture |
 | M-037 | PARTIAL | blackbox_universal/timeline.py; blackbox_universal/window.py; tests/test_bbdi_schema2_sessions.py | Nine resource tracks, wheel/key zoom, A/B drag, pan/reset and full range requery; native Windows/ETW tracks absent |
 | M-038 | PARTIAL | blackbox_universal/timeline.py; src/blackbox_core/session_view.py | Peak-preserving buckets, gap segment breaks, cancellable background range reload; full endurance/physical Windows pending |
@@ -57,7 +57,7 @@ Status rules: **PASS** needs actual user-facing integration, automated tests and
 | M-041 | PARTIAL | blackbox_universal/window.py; src/blackbox_core/session_view.py | Paged observation-time timeline, native/user source distinction and selected event evidence/WCT nodes in UI; full filters/ETW stream absent |
 | M-042 | PARTIAL | blackbox_universal/window.py; src/blackbox_core/interval_report.py | Human selected-interval summary before hidden raw JSON; saved-session open and privacy-selected exports; full findings/cards/compare pending |
 | M-043 | PARTIAL | blackbox_universal/window.py | Partial controls; complete profiles/privacy/quota UI missing |
-| M-044 | PARTIAL | blackbox_universal/window.py; src/blackbox_core/session_view.py | Open saved session and paged process/event histories work; local indexed session library/delete/experiment history not implemented |
+| M-044 | PARTIAL | blackbox_universal/library_panel.py; src/blackbox_core/library_catalog.py; tests/test_research_gui.py | Indexed search, keyset paging, explicit legacy import, open without target rebind, ID-based comparison, Trash/Restore; full experiment metadata/deletion/endurance acceptance remain |
 | M-045 | NOT-RUN | — | Not yet independently audited end-to-end against full original criterion |
 | M-046 | PARTIAL | .github/workflows/shell-qa.yml | Offscreen DPI screenshots; full keyboard/screen reader/physical Windows NOT RUN |
 | M-047 | PARTIAL | src/blackbox_investigation/engine.py; src/blackbox_investigation/sqlite_adapter.py | Legacy investigation, no full v2 timeline |
@@ -204,3 +204,7 @@ must be reviewed before promoting a row; no original mandatory requirement has
 been removed. Real WPR raw capture/TTL is now evidenced on 2b6a7a3, separately
 from independent provider-content, size-hard-quota and orphan-recovery acceptance.
 The order is still NOT ACCEPTED; this appendix is not a blanket PASS update.
+
+## Indexed research library continuation
+
+See [Russian technical report](BB_DI_001_LIBRARY_CONTINUATION_20261024_RU.md). New app recordings are indexed at lifecycle boundaries, never per sample. Explicit search/import/open/compare and storage preview use disposable operations. Reversible Trash does not delete files or free space. M-035 is promoted only to PARTIAL; no complete acceptance is claimed. Source, Qt and frozen paths require the current commit's own CI evidence.

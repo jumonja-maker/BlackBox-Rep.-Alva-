@@ -228,6 +228,8 @@ def compare_cases(first, second):
     required=("scenario","workload","profile","interval_ms")
     ca,cb=a.get("experiment",{}),b.get("experiment",{})
     reasons=[k for k in required if not ca.get(k) or ca.get(k)!=cb.get(k)]
+    if (ca.get("scenario_version") or cb.get("scenario_version")) and ca.get("scenario_version")!=cb.get("scenario_version"):
+        reasons.append("scenario_version")
     if ca.get("warmup_count",0)!=cb.get("warmup_count",0):reasons.append("warmup_count")
     if a.get("environment") != b.get("environment"):
         reasons.append("environment")
@@ -242,6 +244,7 @@ def compare_cases(first, second):
     keys=("peak_rss_bytes","peak_cpu_percent","elapsed_ms")
     return {"schema_version":2,"comparison":"OBSERVATION_ONLY",
         "comparable_context":not reasons,"context_mismatches":reasons,
+        "context_warnings":[] if ca.get("scenario_version") and cb.get("scenario_version") else ["scenario_version_not_recorded"],
         "target_versions":{"before":ca.get("target_version"),"after":cb.get("target_version")},
         "resource_experiments":{"before":ra,"after":rb},
         "resource_comparison":compare_resources(ra,rb),
