@@ -462,6 +462,15 @@ class ResearchSession:
         op=command.get("op");a=command.get("args",{})
         if type(a) is not dict:raise ValueError("INVALID_COMMAND_ARGUMENTS")
         issued=self._receive_command(command)
+        if op=='capture_profile':
+            if self.probe.active:raise ValueError('STOP_BEFORE_RECONFIGURING')
+            if set(a)!={'profile'}:raise ValueError('INVALID_CAPTURE_PROFILE')
+            # Merge at the authoritative owner. GUI command ACK and the next
+            # snapshot can arrive separately; the GUI copy may still be stale.
+            self.capture_policy=validate_policy({**self.capture_policy,'profile':a['profile']})
+            self.profile_info=profile_description(self.capture_policy)
+            self.context.update(profile=self.capture_policy['profile'],capture_policy=self.capture_policy)
+            return {'policy':self.capture_policy,'description':self.profile_info}
         if op=='capture_policy':
             if a:
                 if self.probe.active:raise ValueError('STOP_BEFORE_RECONFIGURING')

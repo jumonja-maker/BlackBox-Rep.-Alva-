@@ -74,6 +74,13 @@ def tree_summary(folder,*,max_files=10000,max_seconds=.5):
     return {'bytes':size,'files':files,'status':'METADATA_ESTIMATE','fingerprint':digest.hexdigest()}
 
 
+def windows_move_error(code,destination):
+    """Normalize atomic native collision without hiding its original code."""
+    error=(FileExistsError(errno.EEXIST,'LIBRARY_DESTINATION_EXISTS',str(destination))
+        if code in (80,183) else OSError(code,'LIBRARY_MOVE_FAILED',str(destination)))
+    error.winerror=code
+    return error
+
 def move_no_replace(source,destination):
     """Atomic same-volume rename that refuses an existing destination."""
     source,destination=checked(source),checked(destination)
@@ -83,7 +90,7 @@ def move_no_replace(source,destination):
         k=ctypes.WinDLL('kernel32',use_last_error=True)
         k.MoveFileW.argtypes=[W.LPCWSTR,W.LPCWSTR];k.MoveFileW.restype=W.BOOL
         if not k.MoveFileW(str(source),str(destination)):
-            raise OSError(ctypes.get_last_error(),'LIBRARY_MOVE_FAILED')
+            raise windows_move_error(ctypes.get_last_error(),destination)
     elif os.name=='posix':
         libc=ctypes.CDLL(None,use_errno=True)
         rename=getattr(libc,'renameat2',None)

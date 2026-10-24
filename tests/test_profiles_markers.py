@@ -17,6 +17,16 @@ class ProfileMarkerTests(unittest.TestCase):
   for value in ({'profile':'fake'},{'burst_seconds':61},{'windows_enabled':1},{'incident':{'enabled_triggers':['fake']}},{'thread_limit':0}):
    with self.assertRaises(ValueError):validate_policy(value)
   self.s.command({'op':'start'});self.s.tick();self.assertIsNone(self.s.probe.detailed_capture);self.assertIsNone(self.s.wpr);self.assertIsNone(self.s.runtime_trace)
+ def test_profile_only_command_atomically_preserves_authoritative_policy(self):
+  s=self.s;s.command({'op':'capture_policy','args':{'policy':{'child_limit':25,'top_threads':8,'incident':{'threshold':42}}}})
+  result=s.command({'op':'capture_profile','args':{'profile':'DETAILED'}})
+  self.assertEqual(result['policy']['child_limit'],25);self.assertEqual(result['policy']['top_threads'],8)
+  self.assertEqual(result['policy']['incident']['threshold'],42);self.assertFalse(s.probe.active)
+  before=s.capture_policy.copy()
+  with self.assertRaises(ValueError):s.command({'op':'capture_profile','args':{'profile':'WRONG'}})
+  self.assertEqual(s.capture_policy,before)
+  s.command({'op':'start'})
+  with self.assertRaisesRegex(ValueError,'STOP_BEFORE'):s.command({'op':'capture_profile','args':{'profile':'STANDARD'}})
  def test_detailed_reenable_keeps_existing_rows_and_sample_sequence(self):
   s=self.s;s.command({'op':'capture_policy','args':{'policy':{'profile':'DETAILED','detail_interval_ms':500}}});s.command({'op':'start'})
   self.wait(lambda:s.probe.detailed_capture.samples>=1);path=s.probe.detailed_capture.path

@@ -36,6 +36,7 @@ class EvidencePanel(QWidget):
   self.table=QTableWidget(0,4);self.table.setObjectName('unifiedEvents' if events else 'investigation2Findings')
   self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers);self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows);self.table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
   self.table.horizontalHeader().setSectionResizeMode(1,QHeaderView.ResizeMode.Stretch);self.table.setMinimumHeight(170)
+  for column in (0,2,3):self.table.horizontalHeader().setSectionResizeMode(column,QHeaderView.ResizeMode.ResizeToContents)
   self.table.itemSelectionChanged.connect(self.selected);box.addWidget(self.table)
   row=QGridLayout();self.previous=QPushButton();self.next=QPushButton();self.card=QPushButton();self.navigate=QPushButton()
   for i,(b,en,ru,fn) in enumerate(((self.previous,'Previous page','Предыдущая страница',self.back),(self.next,'Next page','Следующая страница',self.forward),
@@ -52,6 +53,10 @@ class EvidencePanel(QWidget):
  def label(self,w,en,ru):self.labels.append((w,en,ru));w.setText(self.tr(en,ru))
  def retranslate(self):
   for w,en,ru in self.labels:w.setText(self.tr(en,ru))
+  for combo,labels in ((self.question,{'ALL':('All findings','Все находки'),'CPU':('CPU','Нагрузка CPU'),'UI':('UI response','Отклик интерфейса'),'MEMORY':('Memory / handles','Память / дескрипторы'),'IO':('I/O','Ввод-вывод'),'COVERAGE':('Coverage','Полнота наблюдений')}),
+    (self.sort,{'TIME_ASC':('Earliest first','Сначала ранние'),'TIME_DESC':('Latest first','Сначала поздние'),'SEVERITY':('Severity first','Сначала важные')})):
+   for i in range(combo.count()):
+    en,ru=labels[combo.itemData(i)];combo.setItemText(i,self.tr(en,ru))
   self.table.setHorizontalHeaderLabels((self.tr('Time (s)','Время (с)'),self.tr('Code','Код'),self.tr('Source / class','Источник / класс'),self.tr('Severity','Уровень')))
   self.search.setPlaceholderText(self.tr('Literal event code or note…','Код события или текст заметки…'))
   if self.packet:self.render()
@@ -126,12 +131,15 @@ class EvidencePanel(QWidget):
   self.table.blockSignals(True);self.table.setRowCount(len(rows))
   for i,row in enumerate(rows):
    stamp=row['time_ns'] if self.events else row['start_ns']
-   for j,value in enumerate((f'{(stamp-self.origin)/1e9:.3f}',row['code'],row['source'] if self.events else row['confidence_class'],row['severity'])):self.table.setItem(i,j,QTableWidgetItem(str(value)))
+   for j,value in enumerate((f'{(stamp-self.origin)/1e9:.3f}',row['code'],row['source'] if self.events else row['confidence_class'],row['severity'])):
+    item=QTableWidgetItem(str(value));item.setToolTip(str(value));self.table.setItem(i,j,item)
   self.table.clearSelection();self.table.blockSignals(False);self._more=p['has_more'];self._next=p['next_cursor']
   total=p['total_matching' if self.events else 'findings_total'];self.status.setText(self.tr('Shown / matching: ','Показано / найдено: ')+f'{len(rows)} / {total} · UNVERIFIED_IMPORT')
   if not self.events:
    cov=p['coverage'];metrics=p['summary']['support']['metrics'];self.summaries[0].setText(self.tr('Samples / findings: ','Измерений / находок: ')+f"{cov['selected_samples']} / {total}")
-   self.summaries[1].setText(self.tr('Observed CPU peak (% of one CPU), RSS peak (bytes): ','Наблюдавшийся пик CPU (% одного CPU), RSS (байт): ')+str(metrics['cpu_interval_percent']['max'])+' / '+str(metrics['rss_bytes']['max'])+self.tr('; gaps: ','; разрывы: ')+str(cov['spacing_gap_pairs']))
+   cpu,rss=metrics['cpu_interval_percent']['max'],metrics['rss_bytes']['max'];unknown=self.tr('not observed','не наблюдалось')
+   self.summaries[1].setText(self.tr('Observed CPU peak: ','Наблюдавшийся пик CPU: ')+(f'{cpu:.2f}%'+self.tr(' of one CPU',' одного CPU') if cpu is not None else unknown)+
+    self.tr(' · RSS peak: ',' · Пик RSS: ')+(f'{rss/1048576:.2f} MiB' if rss is not None else unknown)+self.tr(' · gaps: ',' · разрывы: ')+str(cov['spacing_gap_pairs']))
    self.summaries[2].setText(self.tr('Root cause, memory leak and between-sample activity are not established. Imported source claims are not authenticated.',
     'Причина, утечка памяти и активность между опросами не установлены. Заявления источника в импортированном файле не удостоверяют его подлинность.'))
    io=p.get('application_io_latency',{})

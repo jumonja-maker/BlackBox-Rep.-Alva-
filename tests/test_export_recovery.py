@@ -3,6 +3,13 @@ import json,os,subprocess,sys,tempfile,unittest
 from pathlib import Path
 from blackbox_core.export_recovery import ExportTransaction,scan_exports,recover_export
 class ExportRecoveryTests(unittest.TestCase):
+ def test_native_destination_race_keeps_file_exists_contract_and_win32_code(self):
+  from blackbox_core.library_files import windows_move_error
+  import errno
+  for code in (80,183):
+   error=windows_move_error(code,'TEST_ONLY_DESTINATION')
+   self.assertIsInstance(error,FileExistsError);self.assertEqual(error.errno,errno.EEXIST);self.assertEqual(error.winerror,code)
+  error=windows_move_error(5,'TEST_ONLY_DESTINATION');self.assertNotIsInstance(error,FileExistsError);self.assertEqual(error.winerror,5)
  def setUp(self):self.temp=tempfile.TemporaryDirectory();self.root=Path(self.temp.name)
  def tearDown(self):self.temp.cleanup()
  def interrupted(self,prepare=True):

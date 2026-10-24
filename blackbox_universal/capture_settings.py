@@ -69,7 +69,7 @@ class CaptureSettings(QWidget):
    self.status.setText(explain(str(exc),self.window.language))
  def refresh(self):self.apply.setEnabled(not self.bridge.active and not self.bridge.pending);self.form_widget.setEnabled(not self.bridge.active);self.profile.setEnabled(not self.bridge.active)
  def receive(self,op,result,error):
-  if op!='capture_policy':return
+  if op not in ('capture_policy','capture_profile'):return
   if error:self.status.setText(error);return
   self.status.setText(self.tr('Policy applied. ETW and dumps remain explicit.','Политика применена. ETW и дампы запускаются отдельно.'))
   p=result['policy'];self.profile.setCurrentIndex(self.profile.findData(p['profile']))

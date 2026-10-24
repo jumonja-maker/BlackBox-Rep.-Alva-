@@ -1361,8 +1361,7 @@ class UniversalWindow(QMainWindow):
 
     def _apply_dashboard_profile(self,index):
         if not self._isolated or self.probe.active or self.probe.pending:return
-        policy=dict(self.probe.data.get('capture_policy',{}));policy['profile']=self.dashboard_profile.itemData(index)
-        try:self.probe.send('capture_policy',policy=policy)
+        try:self.probe.send('capture_profile',profile=self.dashboard_profile.itemData(index))
         except (ValueError,RuntimeError) as exc:self.recent_messages.appendPlainText(str(exc))
 
     def _start(self) -> None:
