@@ -14,6 +14,7 @@ from PySide6.QtGui import QColor,QPainter,QPen
 from PySide6.QtWidgets import (QWidget,QVBoxLayout,QHBoxLayout,QGridLayout,QLabel,QPushButton,
     QLineEdit,QSpinBox,QDoubleSpinBox,QFileDialog,QPlainTextEdit,QTableWidget,QTableWidgetItem,
     QHeaderView,QMessageBox,QCheckBox,QDialog,QDialogButtonBox)
+from .action_grid import ActionGrid
 
 
 class EvidenceTimeline(QWidget):
@@ -86,7 +87,7 @@ class ResearchPanel(QWidget):
         self.warmups=QSpinBox();self.warmups.setRange(0,10000)
         label=QLabel();self._labels.append((label,"Warm-up repetitions to exclude","Исключить разогревочные повторы"));context.addWidget(label,5,0);context.addWidget(self.warmups,5,1)
         layout.addLayout(context)
-        buttons=QGridLayout();self.buttons=[];self.by_action={}
+        buttons=ActionGrid(max_columns=2);self.action_grid=buttons;self.buttons=[];self.by_action={}
         entries=(("Context / capabilities","Контекст / доступность",self.inspect),
             ("Apply context","Применить контекст",self.configure),
             ("Prepare my application","Подготовить мою программу",self.prepare),
@@ -105,7 +106,7 @@ class ResearchPanel(QWidget):
             ("Recover interrupted session…","Восстановить прерванный сеанс…",self.recover),
             ("Open saved session…","Открыть сохранённый сеанс…",self.open_session))
         for i,(en,ru,callback) in enumerate(entries):
-            b=QPushButton();b.clicked.connect(callback);buttons.addWidget(b,i//2,i%2)
+            b=QPushButton();b.clicked.connect(callback);buttons.addWidget(b)
             self._labels.append((b,en,ru));self.buttons.append(b)
             self.by_action[en]=b
         layout.addLayout(buttons)
@@ -142,6 +143,7 @@ class ResearchPanel(QWidget):
     def retranslate(self):
         for widget,en,ru in self._labels:widget.setText(self.tr(en,ru))
         self.table.setHorizontalHeaderLabels(("ms",self.tr("SOURCE","ИСТОЧНИК"),self.tr("QUALITY","КАЧЕСТВО"),self.tr("EVENT","СОБЫТИЕ")))
+        self.action_grid.invalidate()
         self._render_comparison()
     def refresh(self):
         data=getattr(self.bridge,"data",{})

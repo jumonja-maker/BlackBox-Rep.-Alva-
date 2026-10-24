@@ -8,6 +8,7 @@ from uuid import uuid4
 from datetime import datetime, timezone
 from .contracts import ObserverError, Sample, bounded
 from .event_journal import BoundedEventJournal
+from .session_completion import CompletionNotConfirmed, confirm_v2_completion
 
 
 def _utc() -> str:
@@ -135,12 +136,31 @@ class SessionStore:
         if self._journal is not None:
             self._journal.flush()
         v2_error = False
+        completion_failure = None
         if self.v2 is not None:
             try:
                 self.v2.finish(code)
+                # A stopped thread alone does not prove a durable CLOSED row.
+                # Verify the same session before primary metadata claims success.
+                confirm_v2_completion(
+                    self.v2.path, session_uuid=self.v2.session_uuid,
+                    origin_ns=self.v2.origin_ns, exit_code=code)
+            except CompletionNotConfirmed as exc:
+                self.v2.failure = self.v2.failure or str(exc)
+                code, v2_error = "STORAGE_ERROR", True
+                completion_failure = str(exc)
             except ObserverError:
                 code, v2_error = "STORAGE_ERROR", True
         try:
+            if completion_failure is not None:
+                # Keep the reason and primary failure state in one transaction.
+                # Do not mirror back into a closed/failed v2 writer.
+                self.db.execute("INSERT INTO events(data) VALUES (?)", (
+                    bounded({"kind": "observer_error", "code": "STORAGE_ERROR",
+                             "stage": "storage", "elapsed_ms": 0,
+                             "reason": completion_failure,
+                             "source": "BLACKBOX_LOCAL_OBSERVATION",
+                             "confidence": "OBSERVED_BOUNDARY_ONLY"}).decode("ascii"),))
             self.db.execute("UPDATE metadata SET ended_utc=?, exit_code=?",
                             (_utc(), code))
             self.db.commit()
