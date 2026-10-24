@@ -230,6 +230,14 @@ class ResearchSession:
             if self.sensors.sample("base",budget_s=self.interval_ms/1000) is None:
                 raise RuntimeError("BASE_SENSOR_UNAVAILABLE")
         else:p.tick(requested_interval_ms=self.interval_ms)
+        # A target may exit (or a primary write may fail) during this exact
+        # sample. ReadOnlyProbe.tick() then closes its SessionStore. Do NOT
+        # attempt another CaseBook.on_evidence mirror into that closed SQLite
+        # connection: finalize first, including all committed legacy events.
+        if not p.active:
+            if self.book:
+                self.stop(p.session_state)
+            return
         if self.book:
             self.book.sync_legacy()
             if self.wpr:
