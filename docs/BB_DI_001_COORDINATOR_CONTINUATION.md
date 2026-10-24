@@ -189,3 +189,10 @@ the common close-and-drain helper, which asserts every real owner is finished;
 there is no ignore_errors/retry-delete or suppressed assertion. Product close
 already defers while those owners exist. Final detail counters are retained
 after capture stops instead of displaying zero for an actual completed capture.
+
+
+The Reports evidence timeline now consumes normalized counter-pair segments
+when available. NULL/nonfinite values break a curve rather than becoming zero;
+separate gap segments are not connected. A real zero is preserved. Its footer
+describes the plotted CPU axis, not a fabricated observed maximum. Dedicated
+presentation regressions distinguish all three cases.

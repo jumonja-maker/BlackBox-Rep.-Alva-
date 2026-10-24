@@ -3,6 +3,7 @@ from __future__ import annotations
 import ctypes
 from html import escape
 import json
+import math
 import os
 from pathlib import Path
 import subprocess
@@ -22,19 +23,42 @@ class EvidenceTimeline(QWidget):
         self.rows=[];self.start=0;self.end=1000;self.anchor=None
         self.setToolTip("Drag: select interval · Wheel: zoom / Перетащите: интервал · Колесо: масштаб")
     def set_data(self,result):
-        self.rows=result.get("chart",[]);self.start,self.end=result["range_ms"];self.update()
+        normal=result.get("normalised_interval")
+        origin=normal.get("metadata",{}).get("monotonic_origin_ns") if isinstance(normal,dict) else None
+        points=normal.get("timeline",{}).get("tracks",{}).get("cpu_interval_percent") if isinstance(normal,dict) else None
+        if type(origin) is int and isinstance(points,list):
+            self.rows=[{"elapsed_ms":(p["time_ns"]-origin)/1e6,"cpu_percent":p["value"],
+                "segment":p["segment"]} for p in points]
+        else:self.rows=result.get("chart",[])
+        self.start,self.end=result["range_ms"];self.update()
     def _time(self,x):return int(self.start+max(0,min(1,x/max(1,self.width())))*(self.end-self.start))
     def paintEvent(self,event):
         painter=QPainter(self);painter.fillRect(self.rect(),QColor("#f0ecdb"))
-        high=max([float(r["cpu_percent"] or 0) for r in self.rows]+[100.0])
-        painter.setPen(QPen(QColor("#078b84"),2));previous=None
-        for r in self.rows:
-            x=int((r["elapsed_ms"]-self.start)/max(1,self.end-self.start)*self.width())
-            y=int(self.height()-20-(r["cpu_percent"] or 0)/high*(self.height()-30))
-            if previous:painter.drawLine(previous[0],previous[1],x,y)
-            previous=(x,y)
+        segments=self.curve_segments()
+        high=max([value for segment in segments for _,value in segment]+[100.0])
+        painter.setPen(QPen(QColor("#078b84"),2))
+        for segment in segments:
+            previous=None
+            for stamp,value in segment:
+                x=int((stamp-self.start)/max(1,self.end-self.start)*self.width())
+                y=int(self.height()-20-value/high*(self.height()-30))
+                if previous:painter.drawLine(previous[0],previous[1],x,y)
+                else:painter.drawPoint(x,y)
+                previous=(x,y)
         painter.setPen(QColor("#363344"))
-        painter.drawText(8,self.height()-4,f"{self.start/1000:.2f} — {self.end/1000:.2f} s · CPU max {high:.1f}%")
+        painter.drawText(8,self.height()-4,f"{self.start/1000:.2f} — {self.end/1000:.2f} s · CPU 0–{high:.1f}%")
+    def curve_segments(self):
+        segments=[];current=[];identity=None
+        for row in self.rows:
+            value=row.get("cpu_percent");stamp=row.get("elapsed_ms");group=row.get("segment")
+            valid=(type(value) in (int,float) and math.isfinite(value) and value>=0 and
+                type(stamp) in (int,float) and math.isfinite(stamp))
+            if not valid or current and group!=identity:
+                if current:segments.append(current);current=[]
+            if valid:current.append((stamp,float(value)));identity=group
+        if current:segments.append(current)
+        return segments
+
     def mousePressEvent(self,event):self.anchor=self._time(event.position().x())
     def mouseReleaseEvent(self,event):
         if self.anchor is not None:
