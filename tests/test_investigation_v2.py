@@ -57,5 +57,14 @@ class Investigation2Tests(unittest.TestCase):
  def test_unknown_coverage_and_stable_memory_are_not_leak_proof(self):
   result=investigate(self.folder);self.assertIsNone(result['coverage']['exact_missed_samples'])
   self.assertFalse(result['root_cause_proven']);self.assertFalse(any('LEAK' in r['code'] for r in result['findings']))
+ def test_action_resource_coincidence_is_not_causation_and_uses_recorded_top_n(self):
+  from blackbox_core.casebook import CaseBook
+  b=CaseBook(self.folder,123,1.,{'capture_policy':{'top_threads':1}});b.db.close()
+  with closing(sqlite3.connect(self.folder/FILENAME)) as db:
+   db.execute("INSERT INTO action_intervals VALUES('a','e','COMPLETED',?,?,?,?,'USER_DECLARED')",(ORIGIN,ORIGIN+10**9,ORIGIN+5*10**9,ORIGIN+6*10**9));db.commit()
+  result=investigate(self.folder);row=next(r for r in result['findings'] if r['code']=='ACTION_RESOURCE_COINCIDENCE')
+  self.assertFalse(row['detail']['causal_claim']);self.assertEqual(row['detail']['action_boundary_source'],'USER_DECLARED')
+  self.assertIn('TEMPORAL_COINCIDENCE_NOT_CAUSATION',row['limitations'])
+  self.assertEqual(result['thread_analysis']['top_n'],1)
 if __name__=='__main__':unittest.main()
 

@@ -34,3 +34,19 @@ def profile_description(value):
  'overhead':'EXTRA_THREAD_CHILD_MEMORY_QUERIES' if p['profile']=='DETAILED' else 'BOUNDED_DETAIL_ON_INCIDENT' if p['profile']=='INCIDENT_BURST' else 'BASE_PROCESS_COUNTERS',
  'estimate_not_benchmark':True,'burst_limit_seconds':p['burst_seconds']}
 
+def recorded_top_threads(folder):
+ """Use this recording's preference, never the current live target's policy."""
+ from pathlib import Path
+ from contextlib import closing
+ from .casebook import readonly
+ import json,sqlite3
+ path=Path(folder)/'research.sqlite3'
+ if not path.is_file():return DEFAULT['top_threads']
+ try:
+  with closing(readonly(path)) as db:
+   row=db.execute("SELECT substr(data,1,65537) FROM context WHERE key='experiment'").fetchone()
+  if not row or len(row[0])>65536:return DEFAULT['top_threads']
+  n=json.loads(row[0]).get('capture_policy',{}).get('top_threads',DEFAULT['top_threads'])
+  return n if type(n) is int and 1<=n<=256 else DEFAULT['top_threads']
+ except (OSError,ValueError,TypeError,AttributeError,sqlite3.Error):return DEFAULT['top_threads']
+

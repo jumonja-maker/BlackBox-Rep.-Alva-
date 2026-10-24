@@ -55,6 +55,22 @@ def _counter_findings(view,start,end,series,instance_id,coverage,stats):
     yield _finding('OBSERVATION_GAP',origin+event['start_ms']*1000000,row['time_ns'],ref='samples:'+series+':'+str(ordinal+1),facts=[event],category='DERIVED',severity='WARNING',coverage=coverage)
  stats['derived_triggers_not_emitted']=detector.dropped_triggers
  stats['derived_trigger_limit_reached']=detector.dropped_triggers>0
+
+def _action_findings(view,start,end,coverage):
+ if not view.is_v2:return
+ from .experiment_metrics import measure_interval
+ for row in view.db.execute("SELECT * FROM action_intervals WHERE state='COMPLETED' AND start_ns<=? AND end_ns>=? ORDER BY start_ns,action_id",(end,start)):
+  if row['start_ns'] is None or row['end_ns'] is None or row['end_ns']<row['start_ns']:continue
+  lo=max(start,row['start_ns']);hi=min(end,row['end_ns'])
+  resources=measure_interval(view,lo,hi,series='STANDARD');detail=measure_interval(view,lo,hi,series='DETAILED')
+  item=_finding('ACTION_RESOURCE_COINCIDENCE',lo,hi,ref='session-v2.sqlite3:action_intervals:'+row['action_id'],
+   facts=[{'code':'RESOURCES_INSIDE_USER_ACTION_INTERVAL','resources':resources,'detailed_resources':detail}],
+   category='DERIVED',coverage=coverage,extra={'action_id':row['action_id'],'experiment_id':row['experiment_id'],'action_boundary_source':row['verification_class'],
+    'partial_action_interval':lo!=row['start_ns'] or hi!=row['end_ns'],'timing_uncertainty':'USER_COMMAND_BOUNDARIES_NOT_OS_ACTION_EXECUTION','causal_claim':False})
+  item['hypotheses']=[{'code':'INSTRUMENT_VOLUNTARY_ACTION_STAGES','class':'CANDIDATE','recommendation_type':'NEXT_MEASUREMENT'}]
+  item['alternative_explanations']=['EXPECTED_WORK','BACKGROUND_WORK','UNOBSERVED_ACTIVITY_BETWEEN_SAMPLES']
+  item['limitations']+=['TEMPORAL_COINCIDENCE_NOT_CAUSATION','NO_BOUNDARY_EXTRAPOLATION']
+  yield item
 def _research_findings(folder,start,end,coverage):
  path=safe_path(Path(folder)/'research.sqlite3')
  if not path.is_file():return
@@ -89,13 +105,14 @@ def investigate(folder,*,start_ns=None,end_ns=None,instance_id=1,after=None,limi
   lo,hi=report['selected_interval_ns'];coverage=report['coverage'];total=0
   def rows():
    nonlocal total
-   for stream in (_persisted_findings(view,lo,hi,coverage),_counter_findings(view,lo,hi,series,instance_id,coverage,stats),_research_findings(folder,lo,hi,coverage)):
+   for stream in (_persisted_findings(view,lo,hi,coverage),_counter_findings(view,lo,hi,series,instance_id,coverage,stats),_research_findings(folder,lo,hi,coverage),_action_findings(view,lo,hi,coverage) if instance_id==1 else ()):
     for item in stream:
      if question!='ALL' and item['group']!=question:continue
      total+=1
      if total%128==0 and time.monotonic()>stats['deadline']:raise SessionReadError('INVESTIGATION_INTERVAL_BUDGET')
      if after is None or key(item)>tuple(after):yield item
-  found=heapq.nsmallest(limit+1,rows(),key=key);page=found[:limit];threads=view.thread_summary(lo,hi,instance_id=instance_id)
+  from .capture_policy import recorded_top_threads
+  found=heapq.nsmallest(limit+1,rows(),key=key);page=found[:limit];threads=view.thread_summary(lo,hi,instance_id=instance_id,top_n=recorded_top_threads(folder))
   from .instrumentation_analysis import io_latency_statistics
   io=io_latency_statistics(folder,start_ns=lo,end_ns=hi)
   return {'schema_version':2,'engine':'BLACKBOX_INVESTIGATION_2','metadata':view.metadata,'selected_interval_ns':[lo,hi],
@@ -112,7 +129,10 @@ def _snapshot(view,stamp,series):
  if stamp-row['monotonic_ns']>max(2*row['requested_interval_ns'],row['requested_interval_ns']+500000000):return {'status':'SAMPLED_GAP','nearest_observed_ns':row['monotonic_ns']}
  return {'status':'OBSERVED_NEAR_BOUNDARY_NOT_INTERPOLATED','observed_ns':row['monotonic_ns'],'offset_ns':stamp-row['monotonic_ns'],
   'values':{k:row[k] for k in ('rss_bytes','private_bytes','uss_bytes','handle_count','thread_count','cpu_user_s','cpu_system_s','read_bytes','write_bytes')}}
-def incident_card(folder,incident_id,*,pre_seconds=60,post_seconds=20,top_n=32):
+def incident_card(folder,incident_id,*,pre_seconds=60,post_seconds=20,top_n=None):
+ if top_n is None:
+  from .capture_policy import recorded_top_threads
+  top_n=recorded_top_threads(folder)
  if type(incident_id) is not int or incident_id<1 or type(pre_seconds) is not int or not 0<=pre_seconds<=300 or type(post_seconds) is not int or not 0<=post_seconds<=60:raise SessionReadError('INVALID_INCIDENT_CARD')
  with SessionView.open(folder) as view:
   if not view.is_v2:return {'status':'LEGACY_LIMITED_DATA','root_cause':'UNKNOWN','schema_version':2}
@@ -137,6 +157,7 @@ def incident_card(folder,incident_id,*,pre_seconds=60,post_seconds=20,top_n=32):
    'native_windows':event_page(folder,start_ns=lo,end_ns=hi,source='WIN32',limit=32),
    'wct':event_page(folder,start_ns=lo,end_ns=hi,source='WCT',limit=16),
    'trace_evidence':event_page(folder,start_ns=lo,end_ns=hi,source='ETW',limit=16),
+   'runtime_evidence':event_page(folder,start_ns=lo,end_ns=hi,source='EVENTPIPE',limit=16),
    'capabilities':view.metadata.get('capabilities',[]),'post_context_complete':item['end_ns'] is not None and last>=ended+post_seconds*10**9,
    'next_actions':['INSPECT_AVAILABLE_WCT','REPEAT_EQUIVALENT_WORKLOAD','ADD_VOLUNTARY_STAGE_EVENTS'],
    'hypotheses':[{'code':'INSPECT_COINCIDENT_WORK_OR_WAITS','class':'CANDIDATE'}],'limitations':LIMITATIONS+['PRE_POST_MAY_BE_PARTIAL'],

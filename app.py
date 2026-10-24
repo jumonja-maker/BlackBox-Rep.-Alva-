@@ -13,6 +13,14 @@ def _qa_checkpoint(stage: str) -> None:
         Path("blackbox-smoke-progress.json").write_text(
             __import__("json").dumps({"stage": stage, "pid": os.getpid()}), encoding="utf-8")
 
+if __name__=='__main__' and '--qa-workload' in sys.argv:
+    from blackbox_core.qa_workloads import main as workload_main
+    raise SystemExit(workload_main(sys.argv[sys.argv.index('--qa-workload')+1:]))
+
+if __name__=='__main__' and '--qa-production' in sys.argv:
+    from blackbox_universal.production_qa import main as production_main
+    raise SystemExit(production_main(sys.argv[sys.argv.index('--qa-production')+1:]))
+
 if __name__ == "__main__" and "--trace-owner" in sys.argv:
     from blackbox_core.trace_owner import run as trace_main
     raise SystemExit(trace_main(sys.argv[sys.argv.index("--trace-owner")+1]))

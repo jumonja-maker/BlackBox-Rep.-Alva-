@@ -31,7 +31,8 @@ class SessionIntervalWorker(QThread):
                 report=view.interval(start,end,series=series,instance_id=self.instance_id)
                 from blackbox_core.event_stream import event_tracks
                 report['timeline']['events']=event_tracks(view,*report['selected_interval_ns'],folder=self.folder)
-                threads=view.thread_summary(start,end,instance_id=self.instance_id)
+                from blackbox_core.capture_policy import recorded_top_threads
+                threads=view.thread_summary(start,end,instance_id=self.instance_id,top_n=recorded_top_threads(self.folder))
                 from blackbox_core.process_tree import resource_tree_page,tree_totals
                 processes=resource_tree_page(view,*report['selected_interval_ns'],after=self.process_after)
                 report['process_tree_totals']=tree_totals(view,*report['selected_interval_ns'])
