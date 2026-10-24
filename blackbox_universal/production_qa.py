@@ -92,7 +92,7 @@ def run(mode,pid,output,*,phase_seconds=60,warmup_seconds=10,sample_seconds=.5,p
    plan=[('OFF_1',phase_seconds),('STANDARD',phase_seconds),('OFF_2',phase_seconds),('DETAILED',phase_seconds),('OFF_3',phase_seconds)] if mode=='benchmark' else [(profile,duration)]
    for phase,seconds in plan:
     if phase in ('STANDARD','DETAILED'):
-     bridge.send('capture_policy',policy={'profile':phase});wait(lambda:not bridge.pending)
+     bridge.send('capture_policy',policy={'profile':phase,'adaptive_throttle':mode!='benchmark'});wait(lambda:not bridge.pending)
      if bridge.last_error:raise RuntimeError(bridge.last_error)
      window._start();wait(lambda:bridge.active and not bridge.pending)
     pump(warmup_seconds);begin=time.monotonic_ns();deadline=time.monotonic()+seconds;previous=measurement(target);phase_rows=[];last_progress=0

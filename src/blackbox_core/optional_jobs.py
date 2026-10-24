@@ -16,7 +16,7 @@ from .operation_worker import OPERATIONS, MAX_RESULT_BYTES
 class OwnedProcess:
     """A kill boundary confined to our operation and its own descendants."""
     def __init__(self, args, *, stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,env=None):
-        self.job = None
+        self.job = None;self._closed=False
         options = dict(stdin=stdin,stdout=stdout,stderr=stderr,env=env)
         if os.name == 'nt':
             import ctypes as C
@@ -56,6 +56,7 @@ class OwnedProcess:
             raise
 
     def close(self, *, kill=False):
+        if self._closed:return
         if kill or self.process.poll() is None:
             if os.name == 'nt': self.kernel.TerminateJobObject(self.job, 1)
             else:
@@ -66,6 +67,7 @@ class OwnedProcess:
         if self.job:
             self.kernel.TerminateJobObject(self.job,1)
             self.kernel.CloseHandle(self.job); self.job=None
+        self._closed=self.process.poll() is not None and self.job is None
 
 
 class OptionalJobs:

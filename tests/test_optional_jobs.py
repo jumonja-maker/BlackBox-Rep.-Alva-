@@ -10,6 +10,12 @@ from blackbox_core.optional_jobs import OptionalJobs, OwnedProcess
 from blackbox_core.operation_worker import execute
 
 class OptionalJobsTests(unittest.TestCase):
+    def test_owned_process_close_is_idempotent_and_never_signals_again(self):
+        from unittest.mock import patch
+        owner=OwnedProcess([sys.executable,'-c','import time;time.sleep(20)'])
+        owner.close(kill=True);self.assertIsNotNone(owner.process.poll())
+        with patch('blackbox_core.optional_jobs.os.killpg',side_effect=AssertionError('second signal forbidden'),create=True):
+            owner.close(kill=True)
     def drain(self,jobs,timeout=12):
         end=time.monotonic()+timeout
         while time.monotonic()<end:

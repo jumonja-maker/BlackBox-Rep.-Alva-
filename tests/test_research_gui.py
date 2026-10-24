@@ -75,6 +75,16 @@ class IsolatedGuiTests(unittest.TestCase):
         self.window._set_language("EN")
         self.assertEqual(self.window.research_panel.load.text(),"Load interval")
         self.assertEqual(self.window.library_panel.open_button.text(),"Open selected")
+    def test_overview_profile_changes_only_profile_and_never_auto_starts_capture(self):
+        w=self.window;b=w.probe;b.send('capture_policy',policy={'child_limit':25,'top_threads':8})
+        self.assertTrue(self.drain(lambda:not b.pending))
+        w.dashboard_profile.setCurrentIndex(w.dashboard_profile.findData('DETAILED'))
+        w._apply_dashboard_profile(w.dashboard_profile.currentIndex())
+        self.assertTrue(self.drain(lambda:not b.pending and b.data.get('capture_policy',{}).get('profile')=='DETAILED'))
+        self.assertFalse(b.active);self.assertEqual(b.data['capture_policy']['child_limit'],25)
+        self.assertEqual(b.data['capture_policy']['top_threads'],8);self.assertFalse(b.data['wpr_active'])
+        self.start_recording();self.assertTrue(self.drain(lambda:b.data.get('detail_enabled')))
+        self.assertFalse(w.dashboard_profile.isEnabled())
     def test_permanent_trash_deletion_is_really_confirmed_in_ui(self):
         self.start_recording();w=self.window;b=w.probe;folder=b.session_folder
         w._stop();self.assertTrue(self.drain(lambda:not b.active and not b.pending))

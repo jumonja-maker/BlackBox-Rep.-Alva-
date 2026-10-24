@@ -26,6 +26,15 @@ def comparison_text(result,language):
         if v is None:return 'не наблюдалось' if ru else 'not observed'
         if unit=='bytes':return f'{v/1048576:.3g} MiB'
         return f'{v:.4g}'+(' s' if unit=='seconds' else '')
+    duration=result.get('duration_comparison')
+    if duration:
+        lines.append(('Длительность действия: ' if ru else 'Action duration: ')+value(duration['before_median'],'milliseconds')+' → '+value(duration['after_median'],'milliseconds')+' ms')
+        lines.append('  Δ '+value(duration.get('absolute_delta'),'milliseconds')+' ms · N '+str(duration['before_repeats'])+' / '+str(duration['after_repeats']))
+        for label,key in (('До' if ru else 'Before','before_variability'),('После' if ru else 'After','after_variability')):
+            variation=duration.get(key)
+            if variation:lines.append('  '+label+' · IQR '+value(variation['iqr'],'milliseconds')+' ms · σ '+value(variation['sample_stddev'],'milliseconds')+' ms')
+    flags=result.get('comparison_flags',{})
+    if flags:lines.append(('Ограничения сравнения: ' if ru else 'Comparison flags: ')+', '.join(k for k,v in flags.items() if v))
     for key,row in result.get('resource_comparison',{}).items():
         name=LABELS.get(key,(key,key))[int(ru)]
         lines.append(name+': '+value(row.get('before_median'),row['unit'])+' → '+value(row.get('after_median'),row['unit']))

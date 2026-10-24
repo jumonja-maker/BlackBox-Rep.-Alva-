@@ -27,6 +27,7 @@ from .capture_policy import validate_policy,profile_description
 from .contracts import ObserverError
 from .user_markers import UserMarkers
 from .capability_catalog import inventory
+from .observer_budget import ObserverBudget
 
 
 class ResearchSession:
@@ -40,7 +41,7 @@ class ResearchSession:
         self.sensors=None
         self._cancelled_operations=deque(maxlen=8)
         self.cancel=Event()
-        self.interval_ms=1000;self.native_enabled=False
+        self.interval_ms=1000;self.native_enabled=False;self.observer_budget=ObserverBudget();self._cpu_health_primed=False;self._overhead_notified=False
         self.context={"scenario":"","scenario_version":"","workload":"","target_version":"","profile":"STANDARD","interval_ms":1000,"warmup_count":0}
         self.library_error=None;self._library_started_ns=None;self._library_experiment={};self._configuration_changed=False
         self.capture_policy=validate_policy();self.profile_info=profile_description(self.capture_policy);self.markers=UserMarkers();self._burst_until=None;self._burst_owned=False
@@ -92,6 +93,7 @@ class ResearchSession:
             optional_jobs=self.jobs.health(), sensor_health=self.sensors.health() if self.sensors else {},
             capture_policy=self.capture_policy,profile_description=self.profile_info,active_stages=self.markers.snapshot(),
             library_health={"status":"INDEX_ERROR" if self.library_error else "AVAILABLE", "error":self.library_error})
+        data['observer_budget']=self.observer_budget.latest
         return data
 
     def _start_policy(self):
@@ -185,6 +187,9 @@ class ResearchSession:
                     frontend_rss=self._frontend.memory_info().rss
                     frontend_cpu=self._frontend.cpu_percent(None)
             except psutil.Error:pass
+        if self._cpu_health_primed:
+            self._observe_overhead(helper_cpu,frontend_cpu,cores=psutil.cpu_count() or 1,frontend_expected=self._frontend is not None)
+        self._cpu_health_primed=True
         self.book.put("observer.health",{"helper_rss_bytes":helper_rss,
             "helper_cpu_percent":helper_cpu,"session_top_level_bytes":size,
             "helper_sensor_status":"OBSERVED" if helper_rss is not None else "NOT_OBSERVED",
@@ -202,6 +207,20 @@ class ResearchSession:
             self.book.put('observer.disk_budget',{'status':'BUDGET_EXHAUSTED','scope':'SESSION' if local_exceeded else 'LIBRARY_CACHED_KNOWN_BYTES',
                 'measurement':measured,'library':library,'hard_filesystem_quota':False,'deletion_performed':False})
             self.stop('STORAGE_LIMIT_REACHED')
+
+    def _observe_overhead(self,helper_cpu,frontend_cpu,*,cores,frontend_expected=False):
+        if not self.observer_budget.observe(helper_cpu,frontend_cpu,cores=cores,profile=self.capture_policy['profile'],frontend_expected=frontend_expected):return
+        before=self.interval_ms;detail=self.probe.detailed_capture;old_detail=detail.interval_s if detail else None
+        if self.capture_policy['adaptive_throttle']:
+            self.interval_ms=max(before,min(5000,max(2000,before*2)))
+            if detail:detail.interval_s=max(detail.interval_s,min(5.,detail.interval_s*2))
+        changed=self.interval_ms!=before or detail is not None and detail.interval_s!=old_detail
+        self.observer_budget.latest.update(adaptive_enabled=self.capture_policy['adaptive_throttle'],interval_ms=self.interval_ms,
+            detail_interval_s=detail.interval_s if detail else None,frequency_reduced=changed)
+        if changed:self._changed_configuration()
+        if self.book and (changed or not self._overhead_notified):
+            self.book.put('observer.usage_warning',self.observer_budget.latest,source='PSUTIL_OBSERVER_SELF_COUNTERS',quality='SAMPLED_USAGE_NOT_OFF_ON_EFFECT')
+            self._overhead_notified=True
 
     def tick(self):
         p=self.probe
@@ -480,6 +499,7 @@ class ResearchSession:
             return n
         if op=="start":
             self._capabilities=capabilities();self._capability_inventory=inventory(self._capabilities);self._optional_source_results={}
+            self.observer_budget=ObserverBudget();self._cpu_health_primed=False;self._overhead_notified=False
             self.markers=UserMarkers();self._ui_seen=set();self._burst_until=None;self._library_budget=None
             self.context.update(profile=self.capture_policy["profile"],capture_policy=self.capture_policy)
             self.probe.start()

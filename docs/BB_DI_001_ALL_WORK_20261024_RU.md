@@ -97,3 +97,15 @@ Windows d7e2db7 / run 40115280533: 426 тестов, 1 FAIL, 4 SKIP; Linux PASS.
 Закрыт дополнительный crash window экспорта: если stage уже очищен и процесс погиб перед удалением COMMITTED-журнала, FINISH заново проверяет native ID+SHA всех опубликованных файлов и сохраняет их. DISCARD не удаляет уже committed выдачу. Это проверено настоящим дочерним os._exit ровно в этой точке. Все 7 recovery/export тестов PASS.
 
 Вновь затронутые исходники требуют общего exact-head CI/EXE. Отдельно прошли 10 SDK/recovery, 2 capability, 8 crash/decoder checks (1 Windows SKIP) и Qt 12; это не независимая Windows/full-order приёмка.
+
+## Общий кандидат: профиль, нагрузка и вариативность
+
+На Overview добавлен быстрый профиль, сохраняющий все остальные параметры политики; переключение не запускает запись или глубокие источники. Во время записи выбор заблокирован. Реальный isolated Qt scenario проверяет сохранение child/top-N limits и явный Start Detailed.
+
+Наблюдатель отслеживает собственные доступные GUI/helper CPU counters в машинных процентах. Три подряд высоких окна дают предупреждение. Опциональное adaptive_throttle снижает частоту до 5 секунд, сохраняет факт изменения условий и не трогает target/ETW. Первое неинициализированное CPU-окно не используется; отсутствие frontend не считается нулём. Это sampled own usage, не доказанный OFF/ON effect и не полная стоимость всех вспомогательных процессов. Benchmark отключает adaptive и использует базовый интервал 2 секунды, чтобы не скрыть превышение бюджета изменением условий. Endurance сохраняет штатную политику.
+
+Сравнение дополнено duration delta, IQR/sample stddev, числом попыток и явными insufficient_repeats/incomparable_config/partial_coverage. Welford variance потоковая; маленькая разница не объявляется доказанным ускорением. Повторное Close owned operation стало идемпотентным.
+
+Общий локальный набор текущего кода: **445 tests, 16 SKIP, 0 FAIL/ERROR, 154.268s**. Windows/native/frozen для публикуемого SHA ещё требуются. Добавлены USER_GUIDE_RU/EN, SDK_GUIDE и обновлена матрица ровно 128 исходных требований. PARTIAL — состояние неполной нормативной приёмки, не процент написанного кода. Physical Windows/8ч/1ч остаются NOT-RUN; заказ не объявляется принятым.
+
+Hosted Windows checkpoint d4ddcd0, run 40116662584, job 120939242700: **440 tests, 6 SKIP, 0 FAIL/ERROR (563.210s)**. Впервые подтверждены фактические EventLog query и независимое чтение собственного настоящего ETL с 12 EventWrite headers через tracerpt. Также PASS: 300 настоящих потоков, 100 настоящих потомков, corrected high-resolution SDK и offline C# EventSource fixture build/run. dotnet-trace отсутствует — настоящий EventPipe capture явно SKIP. Linux job этого checkpoint SUCCESS. Frozen job ещё выполняется на момент этой записи; результаты не переносятся на последующие изменения профиля/бюджета/сравнения.

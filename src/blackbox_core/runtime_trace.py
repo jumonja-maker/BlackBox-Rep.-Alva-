@@ -10,7 +10,7 @@ def runtime_capability(pid):
  from .preparation import inspect_target
  data=inspect_target(pid);runtime='dotnet' in data['runtime_candidates'];tool=shutil.which('dotnet-trace')
  return {'source':'EVENTPIPE_DOTNET_TRACE','status':'TOOL_UNAVAILABLE' if not tool else
-  'RUNTIME_CANDIDATE_REQUIRES_TOOL_HANDSHAKE' if runtime else 'UNSUPPORTED_TARGET_RUNTIME' if data['detection_status']=='OBSERVED_MODULE_NAMES_NOT_PROOF_OF_PRIMARY_RUNTIME' else 'RUNTIME_UNCONFIRMED',
+  'RUNTIME_CANDIDATE_REQUIRES_TOOL_HANDSHAKE' if runtime else 'RUNTIME_NOT_SUPPORTED' if data['detection_status']=='OBSERVED_MODULE_NAMES_NOT_PROOF_OF_PRIMARY_RUNTIME' else 'RUNTIME_UNCONFIRMED',
   'target_pid':pid,'created':data['created'],'runtime_candidate':runtime,'runtime_detection':data['detection_status'],
   'tool_available':bool(tool),'requires_optin':True,'permissions':'TARGET_DIAGNOSTIC_PORT_ACCESS',
   'supported_os':['Windows','Linux','Darwin'],'profiles':list(PROFILES),'decoded':False,'lost_events':None}
@@ -37,7 +37,7 @@ def run(journal):
   if not tool:raise OSError('DOTNET_TRACE_TOOL_UNAVAILABLE')
   if not same_target(data):raise ValueError('TARGET_INSTANCE_CHANGED')
   data['capability']=runtime_capability(data['target']['pid'])
-  if data['capability']['status']=='UNSUPPORTED_TARGET_RUNTIME':raise ValueError('UNSUPPORTED_TARGET_RUNTIME')
+  if data['capability']['status']=='RUNTIME_NOT_SUPPORTED':raise ValueError('RUNTIME_NOT_SUPPORTED')
   h=hashlib.sha256()
   with Path(tool).open('rb') as f:
    for block in iter(lambda:f.read(1024*1024),b''):h.update(block)

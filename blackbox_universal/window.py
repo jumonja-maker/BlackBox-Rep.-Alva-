@@ -422,6 +422,13 @@ class UniversalWindow(QMainWindow):
         select_btn = _button("▣  CHOOSE APPLICATION", "primary")
         select_btn.clicked.connect(lambda: self._navigate("processes"))
         status.content.addWidget(select_btn)
+        self.dashboard_profile=QComboBox()
+        self.dashboard_profile.setAccessibleName('Capture profile / Профиль сбора')
+        for value in ('STANDARD','DETAILED','INCIDENT_BURST'):self.dashboard_profile.addItem(value,value)
+        self.dashboard_profile.setToolTip('Standard / Detailed / Incident Burst · ETW and dumps require separate consent / ETW и дампы включаются отдельно')
+        self.dashboard_profile.activated.connect(self._apply_dashboard_profile)
+        status.content.addWidget(self.dashboard_profile)
+        self.overhead_note=_label('', 'caption');self.overhead_note.hide();status.content.addWidget(self.overhead_note)
         self.start_btn = _button("▶  START OBSERVING", "accent")
         self.start_btn.clicked.connect(self._start)
         status.content.addWidget(self.start_btn)
@@ -1352,6 +1359,12 @@ class UniversalWindow(QMainWindow):
             return
         self._attach_pid(int(pid_item.data(Qt.ItemDataRole.UserRole)))
 
+    def _apply_dashboard_profile(self,index):
+        if not self._isolated or self.probe.active or self.probe.pending:return
+        policy=dict(self.probe.data.get('capture_policy',{}));policy['profile']=self.dashboard_profile.itemData(index)
+        try:self.probe.send('capture_policy',policy=policy)
+        except (ValueError,RuntimeError) as exc:self.recent_messages.appendPlainText(str(exc))
+
     def _start(self) -> None:
         if self._isolated:
             if self.probe.pending:
@@ -1817,6 +1830,14 @@ class UniversalWindow(QMainWindow):
                     self._report_worker is not None or
                     (self._isolated and self.probe.pending))
         self.start_btn.setEnabled(selected and not running and not stopping)
+        self.dashboard_profile.setEnabled(self._isolated and not running and not stopping)
+        current=getattr(self.probe,'data',{}).get('capture_policy',{}).get('profile','STANDARD')
+        self.dashboard_profile.setCurrentIndex(max(0,self.dashboard_profile.findData(current)))
+        overhead=getattr(self.probe,'data',{}).get('observer_budget',{})
+        self.overhead_note.setVisible(overhead.get('status')=='OBSERVER_USAGE_HIGH')
+        self.overhead_note.setText(('Высокая измеренная нагрузка наблюдателя. Частоту можно снизить в настройках.' if self.language=='RU' else 'High sampled observer usage. Lower sampling frequency in Settings.')+
+            (' · '+str(overhead.get('interval_ms'))+' ms' if overhead.get('interval_ms') else ''))
+        self.overhead_note.setToolTip('Sampled GUI/helper usage; not a measured OFF/ON effect / Нагрузка GUI/helper, не доказанный прирост против OFF')
         self.stop_btn.setEnabled(running and not stopping)
         self.mark_problem_btn.setEnabled(running and not stopping and
                                          self.probe.last_elapsed_ms is not None)

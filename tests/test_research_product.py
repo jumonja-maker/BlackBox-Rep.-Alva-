@@ -205,6 +205,9 @@ class CaseTests(unittest.TestCase):
         result=action_statistics(self.folder)
         self.assertEqual(result["repeats"],101);self.assertEqual(result["duration_ms"]["median"],50)
         self.assertEqual(result["duration_ms"]["p95"],95)
+        self.assertEqual(result['variability_ms']['iqr'],50)
+        self.assertAlmostEqual(result['variability_ms']['sample_stddev'],858.5**.5)
+        self.assertFalse(result['variability_ms']['statistical_significance_proven'])
         warmed=action_statistics(self.folder,warmup_count=1)
         self.assertEqual(warmed["repeats"],100);self.assertEqual(warmed["duration_ms"]["minimum"],1)
         experiment=context(self.folder)["experiment"]

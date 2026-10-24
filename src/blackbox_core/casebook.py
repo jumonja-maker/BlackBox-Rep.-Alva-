@@ -243,6 +243,11 @@ def compare_cases(first, second):
     ra=resource_statistics(first,warmup_count=ca.get("warmup_count",0))
     rb=resource_statistics(second,warmup_count=cb.get("warmup_count",0))
     sa,sb=summarize(first),summarize(second)
+    ta,tb=action_statistics(first),action_statistics(second)
+    am,bm=(ta.get('duration_ms') or {}).get('median'),(tb.get('duration_ms') or {}).get('median')
+    delta=bm-am if am is not None and bm is not None else None
+    partial=any(r.get('resource_unobserved_runs') or any(v.get('missing_repeats') or
+        v.get('minimum_observed_fraction') is not None and v['minimum_observed_fraction']<.8 for v in r.get('metrics',{}).values()) for r in (ra,rb))
     keys=("peak_rss_bytes","peak_cpu_percent","elapsed_ms")
     return {"schema_version":2,"comparison":"OBSERVATION_ONLY",
         "comparable_context":not reasons,"context_mismatches":reasons,
@@ -250,9 +255,13 @@ def compare_cases(first, second):
         "target_versions":{"before":ca.get("target_version"),"after":cb.get("target_version")},
         "resource_experiments":{"before":ra,"after":rb},
         "resource_comparison":compare_resources(ra,rb),
+        "duration_comparison":{"unit":"milliseconds","before_median":am,"after_median":bm,"absolute_delta":delta,
+            "percent_delta":100*delta/abs(am) if delta is not None and am else None,"before_repeats":ta['repeats'],"after_repeats":tb['repeats'],
+            "before_variability":ta.get('variability_ms'),"after_variability":tb.get('variability_ms'),"speedup_proven":False},
+        "comparison_flags":{"insufficient_repeats":min(ta['repeats'],tb['repeats'])<2,"incomparable_config":bool(reasons),"partial_coverage":partial},
         "metrics":{k:{"before":sa[k],"after":sb[k],
                      "delta":sb[k]-sa[k] if sa[k] is not None and sb[k] is not None else None} for k in keys},
-        "experiments":{"before":action_statistics(first),"after":action_statistics(second)},
+        "experiments":{"before":ta,"after":tb},
         "speedup_proven":False,"causal_link_proven":False}
 
 
@@ -272,8 +281,15 @@ def action_statistics(folder, *, warmup_count=None):
             vals=[r[0] for r in db.execute(cte+"SELECT duration_ns FROM measured ORDER BY duration_ns LIMIT ? OFFSET ?",(warmup,hi-lo+1,lo))]
             return (vals[0]+(vals[-1]-vals[0])*(index-lo))/1_000_000
         middle=quantile(.5)
+        mean=m2=0.;count=0
+        for row in db.execute(cte+'SELECT duration_ns/1000000.0 FROM measured',(warmup,)):
+            count+=1;diff=row[0]-mean;mean+=diff/count;m2+=diff*(row[0]-mean)
+        q1,q3=quantile(.25),quantile(.75)
+        import math
         return {"repeats":n,"total_repeats":total,"warmups_excluded":warmup,
             "duration_ms":{"minimum":quantile(0),"median":middle,"p95":quantile(.95),"maximum":quantile(1)},
+            "variability_ms":{"mean":mean,"sample_stddev":math.sqrt(max(0.,m2)/(count-1)) if count>=2 else None,
+                "q1":q1,"q3":q3,"iqr":q3-q1,"statistical_significance_proven":False},
             "source":"USER_COMMAND_DURATION_NOT_INTERNAL_FUNCTION_RUNTIME",
             "warnings":["P95_UNSTABLE_SMALL_SAMPLE"] if n<20 else [],"speedup_proven":False}
 

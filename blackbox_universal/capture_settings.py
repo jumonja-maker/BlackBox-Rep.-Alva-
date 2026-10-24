@@ -35,11 +35,12 @@ class CaptureSettings(QWidget):
    for key,(en,ru,lo,hi) in fields.items():
     box=QDoubleSpinBox() if key=='threshold' else QSpinBox();box.setRange(lo,hi);box.setValue(DEFAULT['incident'][key] if prefix else DEFAULT[key])
     label=QLabel();label.setWordWrap(True);self.labels.append((label,en,ru));form.addRow(label,box);self.boxes[prefix+key]=box
-  self.windows=QCheckBox();self.incidents=QCheckBox();self.gaps=QCheckBox();self.reference=QComboBox()
+  self.windows=QCheckBox();self.incidents=QCheckBox();self.gaps=QCheckBox();self.adaptive=QCheckBox();self.adaptive.setChecked(True);self.reference=QComboBox()
   self.reference.addItems(('ABSOLUTE','BASELINE_DELTA'))
   for w,en,ru in ((self.windows,'Observe Windows responsiveness / WCT','Наблюдать отзывчивость Windows / WCT'),(self.incidents,'Enable incident detection','Включить обнаружение инцидентов'),(self.gaps,'Create incidents for sampling gaps','Создавать инциденты разрывов опроса')):
    self.labels.append((w,en,ru));form.addRow(w)
   form.addRow('CPU reference',self.reference)
+  self.labels.append((self.adaptive,'Reduce sampling frequency on sustained observer usage','Снижать частоту при длительной нагрузке наблюдателя'));form.addRow(self.adaptive)
   for trigger in TRIGGERS:
    box=QCheckBox(trigger);box.setChecked(trigger in DEFAULT['incident']['enabled_triggers']);self.triggers[trigger]=box;form.addRow(box)
   layout.addWidget(self.form_widget);self.form_widget.hide();toggle.toggled.connect(self.form_widget.setVisible)
@@ -59,7 +60,7 @@ class CaptureSettings(QWidget):
    if key.startswith('incident.'):incident[key.split('.')[1]]=box.value()
    else:p[key]=box.value()
   incident.update(enabled_triggers=[k for k,w in self.triggers.items() if w.isChecked()],cpu_reference=self.reference.currentText(),gap_incidents=self.gaps.isChecked())
-  p.update(profile=self.profile.currentData(),windows_enabled=self.windows.isChecked(),incident_enabled=self.incidents.isChecked(),incident=incident)
+  p.update(profile=self.profile.currentData(),windows_enabled=self.windows.isChecked(),incident_enabled=self.incidents.isChecked(),adaptive_throttle=self.adaptive.isChecked(),incident=incident)
   return validate_policy(p)
  def commit(self):
   try:self.bridge.send('capture_policy',policy=self.values())
@@ -74,6 +75,7 @@ class CaptureSettings(QWidget):
   p=result['policy'];self.profile.setCurrentIndex(self.profile.findData(p['profile']))
   for key,box in self.boxes.items():box.setValue(p['incident'][key.split('.')[1]] if key.startswith('incident.') else p[key])
   self.windows.setChecked(p['windows_enabled']);self.incidents.setChecked(p['incident_enabled']);self.gaps.setChecked(p['incident']['gap_incidents'])
+  self.adaptive.setChecked(p['adaptive_throttle'])
   self.reference.setCurrentText(p['incident']['cpu_reference'])
   for key,box in self.triggers.items():box.setChecked(key in p['incident']['enabled_triggers'])
 
