@@ -232,6 +232,7 @@ def compare_cases(first, second):
     if (ca.get("scenario_version") or cb.get("scenario_version")) and ca.get("scenario_version")!=cb.get("scenario_version"):
         reasons.append("scenario_version")
     if ca.get("warmup_count",0)!=cb.get("warmup_count",0):reasons.append("warmup_count")
+    if ca.get("capture_policy")!=cb.get("capture_policy"):reasons.append("capture_policy")
     if a.get("environment") != b.get("environment"):
         reasons.append("environment")
     if a.get("capabilities",{}).get("privilege")!=b.get("capabilities",{}).get("privilege"):
@@ -245,7 +246,7 @@ def compare_cases(first, second):
     keys=("peak_rss_bytes","peak_cpu_percent","elapsed_ms")
     return {"schema_version":2,"comparison":"OBSERVATION_ONLY",
         "comparable_context":not reasons,"context_mismatches":reasons,
-        "context_warnings":[] if ca.get("scenario_version") and cb.get("scenario_version") else ["scenario_version_not_recorded"],
+        "context_warnings":([] if ca.get("scenario_version") and cb.get("scenario_version") else ["scenario_version_not_recorded"])+([] if ca.get("capture_policy") and cb.get("capture_policy") else ["capture_policy_not_recorded"]),
         "target_versions":{"before":ca.get("target_version"),"after":cb.get("target_version")},
         "resource_experiments":{"before":ra,"after":rb},
         "resource_comparison":compare_resources(ra,rb),
@@ -324,6 +325,8 @@ def export_case(folder, destination, *, include_sensitive=False, cancel=None):
         report=tx.reserve("report.json")
         from .experiment_metrics import resource_statistics
         resources=resource_statistics(staging,warmup_count=meta.get("experiment",{}).get("warmup_count",0))
+        from .instrumentation_analysis import io_latency_statistics
+        io_stats=io_latency_statistics(folder)
         from .findings_export import write_findings
         findings=write_findings(staging,tx,'investigation',include_identifiers=include_sensitive,include_notes=include_sensitive,cancel=cancel)
         findings.pop('files')
@@ -340,7 +343,7 @@ def export_case(folder, destination, *, include_sensitive=False, cancel=None):
                 cursor=page["next_id"]
                 if not page["has_more"]:break
         with report.open("w",encoding="utf-8") as stream:
-            stream.write('{"schema_version":2,"context":'+compact(meta)+',"action_statistics":'+compact(action_statistics(staging))+',"resource_statistics":'+compact(resources)+',"findings_export":'+compact(findings)+',"evidence":[')
+            stream.write('{"schema_version":2,"context":'+compact(meta)+',"action_statistics":'+compact(action_statistics(staging))+',"resource_statistics":'+compact(resources)+',"application_io_latency":'+compact(io_stats)+',"findings_export":'+compact(findings)+',"evidence":[')
             cursor=0; comma=False
             while True:
                 _check_cancel(cancel)

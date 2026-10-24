@@ -33,7 +33,7 @@ class ResearchSession:
         from blackbox_universal.monitor import ReadOnlyProbe
         self.probe=ReadOnlyProbe(output_root=Path(os.path.abspath(output_root)) if output_root is not None else None)
         self.book=None;self.tail=None;self.wpr=None
-        self.runtime_trace=None
+        self.runtime_trace=None;self._capabilities=capabilities()
         self._last_detail_capture=None
         self.jobs=OptionalJobs()
         self.sensors=None
@@ -79,7 +79,7 @@ class ResearchSession:
             window_capture_enabled=p.window_capture is not None,window_capture_status=state,
             observed_windows=windows,selected_hwnd=p.window_capture.selected_hwnd if p.window_capture else None,
             detail_status=detail.status if detail is not None else "DISABLED",
-            report_result=p.report_result,capabilities=capabilities(),
+            report_result=p.report_result,capabilities=self._capabilities,
             experiment_context=self.context,native_enabled=self.native_enabled,
             wpr_active=bool(self.wpr and self.wpr.active),
             eventpipe_active=bool(self.runtime_trace and self.runtime_trace.process is not None),
@@ -313,7 +313,7 @@ class ResearchSession:
             "folder":str(self.probe.session_folder) if self.probe.session_folder else None,
             "end_ms":self.probe.last_elapsed_ms or 1,"library_root":str(self.probe.output_root)}
         if op=="prepare_client":packet.update(event_path=str(self.tail.path),event_token=self.tail.token)
-        self.jobs.submit(command, packet, seconds=300 if op in ("export","export_recover") else 120 if op in ("library_plan_trash","library_apply_trash","library_plan_purge","library_apply_purge") else 75 if op in ("inspect_dump","verify","recover","library_scan","library_compare","investigation","incident_card","events_query") else 15)
+        self.jobs.submit(command, packet, seconds=300 if op in ("export","export_recover") else 120 if op in ("library_plan_trash","library_apply_trash","library_plan_purge","library_apply_purge","library_trace_recover") else 75 if op in ("inspect_dump","verify","recover","library_scan","library_compare","investigation","incident_card","events_query") else 15)
         if self.book:
             self.book.put("observer.operation_queued", {"op":op,"command_id":command.get("id"),
                 "issued_ns":command.get("issued_ns")}, source="BLACKBOX_COMMAND_OWNER")
@@ -374,13 +374,12 @@ class ResearchSession:
                 self.tail.discontinuities or app_coverage.get("application_unread_bytes_at_stop") or
                 app_coverage.get("application_partial_line_bytes")):
             errors.append("APPLICATION_EVENT_COVERAGE_INCOMPLETE")
+        if self.book:self.book.on_evidence=None
+        if p.active:p.stop(reason,defer_report=True)
         if self.runtime_trace:
             result=self.runtime_trace.stop()
             if result and self.book:self.book.put("eventpipe.stopped",result,source="EVENTPIPE_DOTNET_TRACE",quality=result["status"])
-        # No more base samples are expected after the user's Stop command.
-        # Finish the primary recording before awaiting the optional guardian.
-        if self.book:self.book.on_evidence=None
-        if p.active:p.stop(reason,defer_report=True)
+            if result and result.get('status')!='COMPLETED':errors.append('EVENTPIPE_'+result.get('status','CLEANUP_UNCONFIRMED'))
         if self.wpr:
             try:
                 r=self.wpr.stop()
@@ -448,6 +447,7 @@ class ResearchSession:
                 self._changed_configuration()
             return n
         if op=="start":
+            self._capabilities=capabilities()
             self.markers=UserMarkers();self._ui_seen=set();self._burst_until=None;self._library_budget=None
             self.context.update(profile=self.capture_policy["profile"],capture_policy=self.capture_policy)
             self.probe.start()
@@ -463,7 +463,7 @@ class ResearchSession:
                 self.book.origin=self.probe._recording_origin_ns
                 self._library_started_ns=self.book.anchor.utc_ns
                 self._library_experiment=dict(self.context)
-                self.book.set_context("capabilities",capabilities())
+                self.book.set_context("capabilities",self._capabilities)
                 self.tail=EventTail(self.probe.session_folder/"application-events.jsonl",uuid4().hex,self.probe.pid)
                 self.book.set_context("application_event_path",str(self.tail.path))
                 self.book.set_context("worker_pid",os.getpid())
@@ -569,8 +569,12 @@ class ResearchSession:
             self._identity()
             if self.runtime_trace and self.runtime_trace.process is not None:raise ValueError("EVENTPIPE_ALREADY_ACTIVE")
             artifacts=self.probe.session_folder/"artifacts";artifacts.mkdir(exist_ok=True)
-            self.runtime_trace=DotnetTrace(artifacts,self.probe.pid,a.get("seconds",10))
-            result=self.runtime_trace.start();self.book.put("eventpipe.started",result,source="EVENTPIPE_DOTNET_TRACE")
+            self.runtime_trace=DotnetTrace(artifacts,self.probe.pid,a.get("seconds",10),profile=a.get("profile","gc-collect"),max_bytes=self.capture_policy["max_trace_mb"]*1024**2)
+            try:result=self.runtime_trace.start()
+            except Exception as exc:
+                self.book.put('eventpipe.start_failed',{'error':str(exc)[:200]},source='EVENTPIPE_DOTNET_TRACE',quality='UNAVAILABLE');raise
+            finally:self._changed_configuration()
+            self.book.put('eventpipe.started',result,source='EVENTPIPE_DOTNET_TRACE')
             self._changed_configuration()
             return result
         if op=="dump":

@@ -15,9 +15,9 @@ from .operation_worker import OPERATIONS, MAX_RESULT_BYTES
 
 class OwnedProcess:
     """A kill boundary confined to our operation and its own descendants."""
-    def __init__(self, args):
+    def __init__(self, args, *, stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,env=None):
         self.job = None
-        options = dict(stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        options = dict(stdin=stdin,stdout=stdout,stderr=stderr,env=env)
         if os.name == 'nt':
             import ctypes as C
             from ctypes import wintypes as W

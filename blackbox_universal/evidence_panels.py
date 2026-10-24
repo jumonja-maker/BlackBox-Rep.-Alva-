@@ -134,6 +134,10 @@ class EvidencePanel(QWidget):
    self.summaries[1].setText(self.tr('Observed CPU peak (% of one CPU), RSS peak (bytes): ','Наблюдавшийся пик CPU (% одного CPU), RSS (байт): ')+str(metrics['cpu_interval_percent']['max'])+' / '+str(metrics['rss_bytes']['max'])+self.tr('; gaps: ','; разрывы: ')+str(cov['spacing_gap_pairs']))
    self.summaries[2].setText(self.tr('Root cause, memory leak and between-sample activity are not established. Imported source claims are not authenticated.',
     'Причина, утечка памяти и активность между опросами не установлены. Заявления источника в импортированном файле не удостоверяют его подлинность.'))
+   io=p.get('application_io_latency',{})
+   if io.get('groups'):
+    self.summaries[1].setText(self.summaries[1].text()+' · '+self.tr('App-reported I/O median / p95 (ns): ','I/O со слов приложения, медиана / p95 (нс): ')+
+     '; '.join(r['io_kind']+': '+str(r['median'])+' / '+str(r['p95']) for r in io['groups']))
   self.controls()
  def receive(self,op,result,error):
   if op not in ((self.op,'incident_card') if not self.events else (self.op,)) or not self._busy:return

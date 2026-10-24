@@ -75,6 +75,27 @@ class EventWriter:
         finally:
             self.emit("operation.end", operation_id=operation_id)
 
+    @contextmanager
+    def stage(self,name,*,parent_id=None):
+        sid=uuid4().hex;start=time.monotonic_ns();status='COMPLETED'
+        self.emit('stage.begin',operation_id=sid,parent_id=parent_id,name=str(name)[:128])
+        try:yield sid
+        except BaseException:status='ERROR';raise
+        finally:self.emit('stage.end',operation_id=sid,parent_id=parent_id,duration_ns=time.monotonic_ns()-start,status=status)
+
+    @contextmanager
+    def io_operation(self,kind,*,byte_count=None,parent_id=None):
+        """App-supplied wall latency; not independently measured device time."""
+        if kind not in ('READ','WRITE','FLUSH','CUSTOM'):raise ValueError('INVALID_IO_KIND')
+        if byte_count is not None and (type(byte_count) is not int or not 0<=byte_count<2**63):raise ValueError('INVALID_IO_BYTE_COUNT')
+        oid=uuid4().hex;start=time.monotonic_ns();status='COMPLETED'
+        self.emit('io.operation.begin',operation_id=oid,parent_id=parent_id,io_kind=kind)
+        try:yield oid
+        except BaseException:status='ERROR';raise
+        finally:self.emit('io.operation.end',operation_id=oid,parent_id=parent_id,io_kind=kind,
+            byte_count=byte_count,latency_ns=time.monotonic_ns()-start,status=status,
+            semantics='APP_SUPPLIED_WALL_LATENCY_NOT_DEVICE_SERVICE_TIME')
+
 
 class EventTail:
     """Bounded incremental reader; incomplete lines survive until next poll."""

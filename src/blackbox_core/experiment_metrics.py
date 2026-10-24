@@ -15,19 +15,19 @@ from .session_view import SessionView
 
 METRICS={'cpu_seconds':'seconds','rss_peak_bytes':'bytes','rss_delta_bytes':'bytes',
     'private_peak_bytes':'bytes','private_delta_bytes':'bytes','handles_peak':'handles',
-    'handles_delta':'handles','read_bytes':'bytes','write_bytes':'bytes','ui_timeouts':'events'}
+    'handles_delta':'handles','read_bytes':'bytes','write_bytes':'bytes','ui_timeouts':'events','read_ops':'ops','write_ops':'ops','uss_peak_bytes':'bytes','uss_delta_bytes':'bytes','threads_peak':'threads','sampling_gaps':'gaps','observation_errors':'events'}
 
 
 def _valid(v):return type(v) in (int,float) and math.isfinite(v) and v>=0
 
 
 def measure_interval(view,start,end,*,series):
-    peaks={};first={};last={};field_counts={};totals={'cpu_seconds':0.,'read_bytes':0,'write_bytes':0}
+    peaks={};first={};last={};field_counts={};totals={'cpu_seconds':0.,'read_bytes':0,'write_bytes':0,'read_ops':0,'write_ops':0}
     coverage={k:0 for k in totals};pairs={k:0 for k in totals}
     previous=None;samples=0;gaps=0;resets=0
     for row in view.reader.iter_samples(start,end,series=series,instance_id=1):
         samples+=1
-        for field in ('rss_bytes','private_bytes','handle_count'):
+        for field in ('rss_bytes','private_bytes','uss_bytes','handle_count','thread_count'):
             value=row.get(field)
             if _valid(value):
                 field_counts[field]=field_counts.get(field,0)+1
@@ -39,7 +39,7 @@ def measure_interval(view,start,end,*,series):
             if not continuous:gaps+=1
             else:
                 for metric,fields in (('cpu_seconds',('cpu_user_s','cpu_system_s')),
-                    ('read_bytes',('read_bytes',)),('write_bytes',('write_bytes',))):
+                    ('read_bytes',('read_bytes',)),('write_bytes',('write_bytes',)),('read_ops',('read_ops',)),('write_ops',('write_ops',))):
                     values=[(previous.get(k),row.get(k)) for k in fields]
                     if all(_valid(a) and _valid(b) for a,b in values):
                         if all(b>=a for a,b in values):
@@ -48,7 +48,7 @@ def measure_interval(view,start,end,*,series):
         previous=row
     metrics={m:totals[m] if pairs[m] else None for m in totals}
     for field,peak,delta in (('rss_bytes','rss_peak_bytes','rss_delta_bytes'),
-        ('private_bytes','private_peak_bytes','private_delta_bytes'),('handle_count','handles_peak','handles_delta')):
+        ('private_bytes','private_peak_bytes','private_delta_bytes'),('uss_bytes','uss_peak_bytes','uss_delta_bytes'),('handle_count','handles_peak','handles_delta')):
         metrics[peak]=peaks.get(field)
         metrics[delta]=last[field]-first[field] if field_counts.get(field,0)>=2 else None
     timeout=view.db.execute("SELECT count(*) FROM events WHERE event_type='UI_UNRESPONSIVE_OBSERVED' "
@@ -57,6 +57,9 @@ def measure_interval(view,start,end,*,series):
     native=view.db.execute("SELECT count(*) FROM events WHERE source_kind='WIN32' AND event_type IN ('WINDOW_PROBE_RESULT','UI_UNRESPONSIVE_OBSERVED','UI_RESPONSIVE_AGAIN') AND measurement_status IN ('OK','SENSOR_TIMEOUT') "
         "AND coalesce(observed_ns,recorded_ns) BETWEEN ? AND ?",(start,end)).fetchone()[0]
     metrics['ui_timeouts']=timeout if native else None
+    metrics['threads_peak']=peaks.get('thread_count');metrics['sampling_gaps']=gaps if samples>=2 else None
+    has_errors=view.db.execute("SELECT 1 FROM sqlite_schema WHERE type='table' AND name='sensor_errors'").fetchone()
+    metrics['observation_errors']=view.db.execute('SELECT count(*) FROM sensor_errors WHERE monotonic_ns BETWEEN ? AND ?',(start,end)).fetchone()[0] if has_errors and samples else None
     return {'metrics':metrics,'samples':samples,'gaps':gaps,'counter_resets':resets,
         'pair_count':pairs,'covered_ns':coverage,
         'covered_fraction':{k:coverage[k]/max(1,end-start) for k in totals},
@@ -82,8 +85,9 @@ def resource_statistics(folder,*,warmup_count=0):
                 standard=measure_interval(view,start,end,series='STANDARD')
                 detail=measure_interval(view,start,end,series='DETAILED')
                 metrics=standard['metrics']
-                for key in ('private_peak_bytes','private_delta_bytes','handles_peak','handles_delta'):
+                for key in ('private_peak_bytes','private_delta_bytes','handles_peak','handles_delta','uss_peak_bytes','uss_delta_bytes'):
                     metrics[key]=detail['metrics'][key]
+                if detail['metrics']['threads_peak'] is not None:metrics['threads_peak']=detail['metrics']['threads_peak']
                 if not standard['pair_count']['cpu_seconds']:incomplete+=1
                 for metric,value in metrics.items():
                     covered=standard['covered_fraction'].get(metric)

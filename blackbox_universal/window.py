@@ -812,6 +812,9 @@ class UniversalWindow(QMainWindow):
         from .recovery_panel import RecoveryPanel
         recovery=WindowPanel('Interrupted exports / Прерванные экспорты','LOCAL RECOVERY')
         self.recovery_panel=RecoveryPanel(self);recovery.content.addWidget(self.recovery_panel);content.addWidget(recovery)
+        from .measurement_help import MeasurementHelp
+        sources=WindowPanel('Measurement definitions / Определения измерений','SENSOR HEALTH')
+        self.measurement_help=MeasurementHelp(self);sources.content.addWidget(self.measurement_help);content.addWidget(sources)
         content.addWidget(_label("CONTROL PANEL / PREFERENCES", "eyebrow", False))
         setting = WindowPanel("Observation settings", "LOCAL CONFIGURATION")
         setting.content.addWidget(_label("SAMPLE INTERVAL", "cardTitle"))
@@ -981,6 +984,7 @@ class UniversalWindow(QMainWindow):
                                         else "SAVED RESEARCH / EXPERIMENT LIBRARY")
         if hasattr(self,'capture_settings'):self.capture_settings.retranslate()
         if hasattr(self,'recovery_panel'):self.recovery_panel.retranslate()
+        if hasattr(self,'measurement_help'):self.measurement_help.retranslate()
         if hasattr(self,'marker_panel'):self.marker_panel.retranslate()
         if hasattr(self,'analysis_panel'):self.analysis_panel.retranslate()
         if hasattr(self,'events_panel'):self.events_panel.retranslate()

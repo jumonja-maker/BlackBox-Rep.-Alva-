@@ -198,7 +198,8 @@ class LibraryCatalog:
 
     def register(self,folder):
         folder=checked(folder)
-        if folder.is_relative_to(self.root/TRASH):raise ValueError('LIBRARY_RESTORE_BEFORE_OPEN');meta=recording_metadata(folder);size=tree_summary(folder)
+        if folder.is_relative_to(self.root/TRASH):raise ValueError('LIBRARY_RESTORE_BEFORE_OPEN')
+        meta=recording_metadata(folder);size=tree_summary(folder)
         with closing(self._connect(write=True)) as db:
             local=db.execute('SELECT * FROM entries WHERE locator=?',('LOCAL:'+folder.name,)).fetchone() if folder.parent==self.root else None
             if local:
@@ -336,9 +337,9 @@ class LibraryCatalog:
         if meta['state'] not in TERMINAL:raise ValueError('LIBRARY_FINALIZATION_UNCONFIRMED')
         artifacts=folder/'artifacts'
         if artifacts.exists():
-            for n,journal in enumerate(artifacts.glob('BLACKBOX_*.trace.json')):
+            for n,journal in enumerate(artifacts.glob('*.trace.json')):
                 if n>=64:raise ValueError('LIBRARY_TRACE_JOURNAL_BUDGET')
-                if read_json(journal).get('state') not in ('COMPLETED','FAILED'):raise ValueError('LIBRARY_TRACE_STILL_ACTIVE')
+                if read_json(journal).get('state') not in ('COMPLETED','FAILED','RECOVERED_NAMED_CANCEL','RECOVERED_OWNED_TOOL_STOP'):raise ValueError('LIBRARY_TRACE_STILL_ACTIVE')
         size=tree_summary(folder,max_seconds=2)
         if size['fingerprint'] is None:raise ValueError('LIBRARY_TREE_CHECK_INCOMPLETE')
         return folder,marker,size

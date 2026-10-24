@@ -17,6 +17,10 @@ if __name__ == "__main__" and "--trace-owner" in sys.argv:
     from blackbox_core.trace_owner import run as trace_main
     raise SystemExit(trace_main(sys.argv[sys.argv.index("--trace-owner")+1]))
 
+if __name__=='__main__' and '--runtime-owner' in sys.argv:
+    from blackbox_core.runtime_trace import run as runtime_main
+    raise SystemExit(runtime_main(sys.argv[sys.argv.index('--runtime-owner')+1]))
+
 # Optional diagnostics use a disposable child of the same frozen executable.
 if __name__ == "__main__" and "--research-operation" in sys.argv:
     from blackbox_core.operation_worker import main as operation_main

@@ -59,6 +59,8 @@ def run(journal):
             'distribution':'INSTALLED_MICROSOFT_WINDOWS_COMPONENT_NOT_BUNDLED'}
     if not capture.instance.startswith('BLACKBOX_') or len(capture.instance)!=41 or any(c not in '0123456789abcdef' for c in capture.instance[9:]):
         raise ValueError('INVALID_OWNED_TRACE_INSTANCE')
+    import psutil
+    data['guardian_created']=psutil.Process().create_time()
     data.update(guardian_pid=os.getpid(),state='STARTING',started_monotonic_ns=time.monotonic_ns(),
                 source='ETW_WPR',lost_events=None,decoded=False)
     _write(path,data)
@@ -98,6 +100,8 @@ class TraceSupervisor:
             'policy':{'duration_s':seconds,'max_output_bytes':max_output_bytes,
                 'mode':'WPR_CIRCULAR_MEMORY','disk_quota':'NOT_HARD_LIMIT'},
             'recovery':'ONLY_THIS_NAMED_INSTANCE_MAY_BE_CANCELLED'}
+        import psutil
+        self.data.update(owner_pid=os.getpid(),owner_created=psutil.Process().create_time())
     @property
     def active(self):return self.process is not None and self.process.poll() is None
     def start(self):

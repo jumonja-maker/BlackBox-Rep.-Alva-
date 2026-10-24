@@ -10,7 +10,7 @@ from pathlib import Path
 from PySide6.QtCore import Qt,QTimer,Signal
 from PySide6.QtWidgets import (QWidget,QVBoxLayout,QHBoxLayout,QGridLayout,QLabel,QLineEdit,
     QComboBox,QPushButton,QTableWidget,QTableWidgetItem,QHeaderView,QAbstractItemView,
-    QPlainTextEdit,QFileDialog,QMessageBox,QSpinBox,QDialog,QDialogButtonBox)
+    QPlainTextEdit,QFileDialog,QMessageBox,QSpinBox,QDialog,QDialogButtonBox,QInputDialog)
 
 
 class LibraryPanel(QWidget):
@@ -54,7 +54,8 @@ class LibraryPanel(QWidget):
         self.scan_button=self.button('Find older recordings','Найти прежние записи',self.scan_next)
         self.trash_button=self.button('Move selected to Trash…','Выбранные в корзину…',self.plan_selected)
         self.restore_button=self.button('Restore selected','Восстановить выбранную',self.restore_selected)
-        for i,b in enumerate((self.open_button,self.compare_button,self.register_button,self.scan_button,self.trash_button,self.restore_button)):
+        self.trace_button=self.button('Inspect interrupted traces…','Проверить прерванные трассы…',self.trace_scan)
+        for i,b in enumerate((self.open_button,self.compare_button,self.register_button,self.scan_button,self.trash_button,self.restore_button,self.trace_button)):
             actions.addWidget(b,i//2,i%2)
         layout.addLayout(actions)
         self.storage_toggle=self.button('Storage policy / reversible Trash','Хранение / обратимая корзина',lambda:None)
@@ -156,6 +157,7 @@ class LibraryPanel(QWidget):
             all(r['state'] not in ('RECORDING','FINALIZATION_UNCONFIRMED') for r in selected))
         self.trash_button.setEnabled(available and bool(selected) and all(r['trash_eligible'] for r in selected))
         self.restore_button.setEnabled(available and len(selected)==1 and selected[0]['state']=='TRASH')
+        self.trace_button.setEnabled(available and len(selected)==1 and normal and selected[0]['origin']=='LOCAL_APP_MARKED')
         readers=any(getattr(self.window,key,None) is not None for key in ('_interval_worker','_interval_export_worker','_thread_detail_worker','_investigation_worker'))
         self.purge_button.setEnabled(available and not readers and bool(selected) and all(r['origin']=='LOCAL_APP_MARKED' and r['state'] in ('TRASH','PURGING','PURGE_PARTIAL') for r in selected))
         self.candidate_trash.setEnabled(available and bool(self.selected(self.candidate_table,self.candidates)))
@@ -235,6 +237,23 @@ class LibraryPanel(QWidget):
     def restore_selected(self):
         rows=self.selected()
         if len(rows)==1:self.send('library_restore',entry_id=rows[0]['entry_id'])
+    def trace_scan(self):
+        rows=self.selected()
+        if len(rows)==1:self.send('library_trace_scan',entry_id=rows[0]['entry_id'])
+    def trace_review(self,result):
+        self.details.setPlainText(json.dumps(result,ensure_ascii=False,indent=2))
+        rows=[r for r in result['rows'] if r.get('eligible')]
+        if not rows:return
+        name,ok=QInputDialog.getItem(self,self.tr('Review owned trace recovery','Восстановление собственной трассы'),
+            self.tr('Select an abandoned trace. No files are deleted.','Выберите оставшуюся трассу. Файлы не удаляются.'),[r['journal'] for r in rows],0,False)
+        if not ok:return
+        row=next(r for r in rows if r['journal']==name)
+        box=QMessageBox(self);box.setWindowTitle('BLACK.BOX');box.setTextFormat(Qt.TextFormat.PlainText)
+        box.setText(self.tr('Stop only this named BLACK.BOX trace / verified owned collector? The observed application is not terminated.',
+            'Остановить только эту именованную трассу BLACK.BOX / проверенный собственный сборщик? Наблюдаемая программа не завершается.')+'\n'+name)
+        box.setStandardButtons(QMessageBox.StandardButton.Yes|QMessageBox.StandardButton.No);box.setDefaultButton(QMessageBox.StandardButton.No)
+        if box.exec()==QMessageBox.StandardButton.Yes:self.send('library_trace_recover',entry_id=row['recording_id'],journal=name,confirmed=True)
+
     def plan_purge(self):
         rows=self.selected()
         if self.purge_button.isEnabled() and rows:self.send('library_plan_purge',entry_ids=[r['entry_id'] for r in rows])
@@ -285,6 +304,8 @@ class LibraryPanel(QWidget):
                     (self.tr(' · First 50 eligible entries only.',' · Проверены первые 50 подходящих записей.') if result.get('preview_limited') else ''))
             elif op=='library_plan_trash':self.confirm_plan(result)
             elif op=='library_plan_purge':self.confirm_purge(result)
+            elif op=='library_trace_scan':self.trace_review(result)
+            elif op=='library_trace_recover':self.details.setPlainText(json.dumps(result,ensure_ascii=False,indent=2))
             elif op in ('library_apply_trash','library_restore','library_register','library_reconcile','library_apply_purge'):
                 self.candidates=[];self.candidate_table.setRowCount(0)
                 self.details.setPlainText(json.dumps(result,ensure_ascii=False,indent=2));self.refresh()

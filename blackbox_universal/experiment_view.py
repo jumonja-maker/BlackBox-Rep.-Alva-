@@ -7,7 +7,11 @@ LABELS={
  'private_delta_bytes':('Private memory change','Изменение private memory'),
  'handles_peak':('Peak handles','Пик handles'),'handles_delta':('Handle change','Изменение handles'),
  'read_bytes':('Bytes read','Прочитано'),'write_bytes':('Bytes written','Записано'),
- 'ui_timeouts':('Observed UI timeout episodes','Наблюдавшиеся эпизоды неответа UI')}
+ 'ui_timeouts':('Observed UI timeout episodes','Наблюдавшиеся эпизоды неответа UI'),
+ 'uss_peak_bytes':('Peak USS','Пик USS'),'uss_delta_bytes':('USS change','Изменение USS'),
+ 'read_ops':('Read operations','Операции чтения'),'write_ops':('Write operations','Операции записи'),
+ 'threads_peak':('Peak threads','Пик количества потоков'),'sampling_gaps':('Sampling gaps','Разрывы опроса'),
+ 'observation_errors':('Recorded sensor errors','Записанные ошибки датчиков')}
 
 
 def comparison_text(result,language):

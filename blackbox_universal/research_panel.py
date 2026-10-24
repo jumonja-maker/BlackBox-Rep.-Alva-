@@ -94,7 +94,7 @@ class ResearchPanel(QWidget):
             ("Inspect dump stacks…","Разобрать стеки дампа…",self.inspect_dump),
             ("Windows snapshot","Снимок Windows / WCT",self.native),
             ("ETW recording","Запись ETW",self.etw),
-            ("EventPipe 10 s","EventPipe 10 с",lambda:self.send("eventpipe",seconds=10)),
+            ("EventPipe 10 s","EventPipe 10 с",self.eventpipe),
             ("Capture minidump","Снять минидамп",self.dump),
             ("Administrator mode…","Режим администратора…",self.elevate),
             ("Export investigation…","Сохранить исследование…",self.export),
@@ -187,6 +187,10 @@ class ResearchPanel(QWidget):
                 "Record a system-wide ETW trace for up to 30 seconds? It may include other processes and changes measurement overhead. Recording stops automatically.",
                 "Записать системную ETW-трассу до 30 секунд? Она может содержать данные других процессов и влиять на измерения. Остановка выполняется автоматически."))!=QMessageBox.StandardButton.Yes:return
         self.send("wpr",enabled=on)
+    def eventpipe(self):
+        text=self.tr('Collect a GC EventPipe trace for 10 seconds using installed dotnet-trace? This adds overhead and may contain sensitive runtime data. No download is performed.',
+            'Собрать GC-трассу EventPipe за 10 секунд установленным dotnet-trace? Это создаёт нагрузку и может содержать чувствительные данные. Ничего не загружается.')
+        if QMessageBox.question(self,'EventPipe',text,QMessageBox.StandardButton.Yes|QMessageBox.StandardButton.No,QMessageBox.StandardButton.No)==QMessageBox.StandardButton.Yes:self.send('eventpipe',seconds=10,profile='gc-collect')
     def dump(self):
         if QMessageBox.question(self,"BLACK.BOX",self.tr(
                 "Capture a minidump? It contains process memory and may briefly pause the selected application.",

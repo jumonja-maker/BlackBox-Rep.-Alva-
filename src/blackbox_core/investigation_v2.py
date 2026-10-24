@@ -96,11 +96,13 @@ def investigate(folder,*,start_ns=None,end_ns=None,instance_id=1,after=None,limi
      if total%128==0 and time.monotonic()>stats['deadline']:raise SessionReadError('INVESTIGATION_INTERVAL_BUDGET')
      if after is None or key(item)>tuple(after):yield item
   found=heapq.nsmallest(limit+1,rows(),key=key);page=found[:limit];threads=view.thread_summary(lo,hi,instance_id=instance_id)
+  from .instrumentation_analysis import io_latency_statistics
+  io=io_latency_statistics(folder,start_ns=lo,end_ns=hi)
   return {'schema_version':2,'engine':'BLACKBOX_INVESTIGATION_2','metadata':view.metadata,'selected_interval_ns':[lo,hi],
    'summary':{'observed':{'samples':coverage['selected_samples'],'findings_matching':total,'series':series},
     'support':{'metrics':report['metrics'],'coverage':coverage,'thread_status':threads['status']},
     'cannot_establish':['INTERNAL_ROOT_CAUSE','LEAK_WITHOUT_OBJECT_ANALYSIS','AUTHENTICITY_OF_IMPORTED_SOURCE']},
-   'interval':report,'thread_analysis':threads,'coverage':coverage,'findings':page,'findings_total':total,'has_more':len(found)>limit,
+   'application_io_latency':io,'interval':report,'thread_analysis':threads,'coverage':coverage,'findings':page,'findings_total':total,'has_more':len(found)>limit,
    'next_cursor':list(key(page[-1])) if page else None,'sort_order':sort_order,
    'analysis_limits':{k:v for k,v in stats.items() if k!='deadline'},'file_trust':'UNVERIFIED_IMPORT','root_cause':'UNKNOWN','root_cause_proven':False,'limitations':LIMITATIONS}
 def _snapshot(view,stamp,series):
