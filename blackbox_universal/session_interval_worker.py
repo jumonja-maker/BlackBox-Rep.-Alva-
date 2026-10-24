@@ -25,6 +25,8 @@ class SessionIntervalWorker(QThread):
                     "STANDARD" if self.instance_id==1 else "CHILD")
                 start,end=self.interval or (None,None)
                 report=view.interval(start,end,series=series,instance_id=self.instance_id)
+                from blackbox_core.event_stream import event_tracks
+                report['timeline']['events']=event_tracks(view,*report['selected_interval_ns'],folder=self.folder)
                 threads=view.thread_summary(start,end,instance_id=self.instance_id)
                 processes=view.process_page(after=self.process_after)
                 lo,hi=report["selected_interval_ns"]

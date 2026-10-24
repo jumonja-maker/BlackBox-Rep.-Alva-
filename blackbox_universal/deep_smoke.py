@@ -182,6 +182,30 @@ class DeepSmoke(QObject):
                     return
                 self._require(w._investigation_result is not None and "error" not in w._investigation_result,
                               "INVESTIGATION_HANDLER_FAILED")
+                w.analysis_panel.load.click();self.phase='INVESTIGATION_V2'
+            elif self.phase=='INVESTIGATION_V2':
+                panel=w.analysis_panel
+                if panel._busy:return
+                packet=panel.packet
+                self._require(packet is not None and packet['engine']=='BLACKBOX_INVESTIGATION_2','INVESTIGATION_V2_HANDLER_FAILED')
+                self._require(packet['root_cause']=='UNKNOWN' and packet['findings_total']>0,'INVESTIGATION_V2_FACTS_MISSING')
+                index=next((i for i,r in enumerate(packet['findings']) if r['detail'].get('incident_id')),None)
+                self._require(index is not None,'INCIDENT_CARD_ROW_MISSING')
+                panel.table.selectRow(index);panel.card.click();self.phase='INCIDENT_CARD'
+            elif self.phase=='INCIDENT_CARD':
+                panel=w.analysis_panel
+                if panel._busy:return
+                packet=panel.card_packet
+                self._require(packet is not None and packet['status']=='OBSERVATION_ONLY','INCIDENT_CARD_HANDLER_FAILED')
+                self._require(bool(packet['snapshots']),'INCIDENT_CARD_SNAPSHOTS_MISSING')
+                self.result['investigation_v2_and_incident_card_ui']=True
+                w.events_panel.load.click();self.phase='UNIFIED_EVENTS'
+            elif self.phase=='UNIFIED_EVENTS':
+                panel=w.events_panel
+                if panel._busy:return
+                self._require(panel.packet is not None and panel.packet['total_matching']>0,'UNIFIED_EVENT_UI_FAILED')
+                self._require(all(r['verification_class']=='UNVERIFIED_IMPORT' for r in panel.packet['rows']),'UNIFIED_EVENT_TRUST_ESCALATED')
+                self.result['unified_events_ui']=True
                 for language in ("RU","EN"):
                     w._set_language(language)
                     for page,_ in w.PAGES:

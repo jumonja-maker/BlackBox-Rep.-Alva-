@@ -75,6 +75,25 @@ class IsolatedGuiTests(unittest.TestCase):
         self.window._set_language("EN")
         self.assertEqual(self.window.research_panel.load.text(),"Load interval")
         self.assertEqual(self.window.library_panel.open_button.text(),"Open selected")
+    def test_new_user_markers_analysis_and_event_filters_use_real_isolated_owner(self):
+        self.start_recording();w=self.window;b=w.probe
+        w.marker_panel.name.setText('real GUI stage');w.marker_panel.send('STAGE_BEGIN')
+        self.assertTrue(self.drain(lambda:bool(b.snapshot().get('active_stages')) and not b.pending))
+        w.marker_panel.send('STAGE_END')
+        self.assertTrue(self.drain(lambda:not b.snapshot().get('active_stages') and not b.pending))
+        first=b.total_samples
+        self.assertTrue(self.drain(lambda:b.total_samples>first,seconds=4))
+        w._stop();self.assertTrue(self.drain(lambda:not b.active and not b.pending))
+        w._load_session_interval(b.session_folder)
+        self.assertTrue(self.drain(lambda:w._interval_worker is None and w.analysis_panel.folder==b.session_folder))
+        w.analysis_panel.load.click()
+        self.assertTrue(self.drain(lambda:w.analysis_panel.packet is not None and not w.analysis_panel._busy))
+        self.assertTrue(any(r['confidence_class']=='USER_REPORTED' for r in w.analysis_panel.packet['findings']))
+        w.events_panel.source.setCurrentIndex(w.events_panel.source.findData('USER'));w.events_panel.refresh()
+        self.assertTrue(self.drain(lambda:w.events_panel.packet is not None and not w.events_panel._busy))
+        self.assertTrue(all(r['source']=='USER' for r in w.events_panel.packet['rows']))
+        self.assertGreater(w.events_panel.packet['total_matching'],0)
+
     def test_preparation_wizard_requires_actual_control_event(self):
         self.start_recording();panel=self.window.research_panel;panel.prepare()
         dialog=panel.preparation_dialog

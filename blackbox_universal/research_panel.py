@@ -234,7 +234,7 @@ class ResearchPanel(QWidget):
             for j,key in enumerate(("elapsed_ms","source","quality","kind")):
                 item=QTableWidgetItem(str(r[key]));item.setData(Qt.ItemDataRole.UserRole,r);self.table.setItem(i,j,item)
     def receive(self,op,result,error):
-        if op.startswith("library_"):return
+        if op.startswith("library_") or op in ("investigation","incident_card","events_query"):return
         if error:
             from .research_messages import explain
             self.details.setPlainText(explain(error,self.window.language));return

@@ -204,7 +204,7 @@ class DetailedCapture:
         self.session_writer = None
 
     def start(self) -> None:
-        if self.thread is not None or not self.folder.is_dir() or self.folder.is_symlink() or self.path.is_symlink():
+        if self.thread is not None or not self.folder.is_dir() or self.folder.is_symlink() or self.path.is_symlink() or (self.path.exists() and self._resume is None):
             raise DetailSensorError('DETAILED_SESSION_UNAVAILABLE')
         old=self._resume
         if old is not None:
@@ -214,7 +214,9 @@ class DetailedCapture:
             if (stat.st_dev,stat.st_ino)!=old._identity:raise DetailSensorError('DETAILED_RESUME_IDENTITY_CHANGED')
         else:
             flags=os.O_WRONLY|os.O_CREAT|os.O_EXCL
-            fd=os.open(self.path,flags,0o600);os.close(fd)
+            try:fd=os.open(self.path,flags,0o600)
+            except FileExistsError:raise DetailSensorError('DETAILED_SESSION_UNAVAILABLE') from None
+            os.close(fd)
         stat=self.path.stat();self._identity=(stat.st_dev,stat.st_ino)
         self.thread = Thread(target=self._run, name="blackbox-detailed-sampler",
                              daemon=True)

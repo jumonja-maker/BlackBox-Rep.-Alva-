@@ -11,6 +11,7 @@ class SessionTimeline(QWidget):
     range_requested=Signal(object,object)
     TRACKS=("cpu_interval_percent","rss_bytes","private_bytes","uss_bytes",
             "handle_count","read_bps","write_bps","thread_count","children_total")
+    EVENT_TRACKS=("ACTIONS","USER","INCIDENTS","WINDOW","WCT","TRACE","OBSERVER")
     COLORS=("#bb5666","#31847f","#8b5b9f","#596aa4","#947343","#a6522f","#795d49","#5c6b55","#684b85")
     TRACK_LABELS=dict(zip(TRACKS,("CPU","RSS / Working set","Private","USS","Handles","Read","Write","Threads","Children")))
 
@@ -18,7 +19,7 @@ class SessionTimeline(QWidget):
         super().__init__(parent)
         self.payload=None
         self.language="EN"
-        self.visible_tracks=set(self.TRACKS[:3])
+        self.visible_tracks=set(self.TRACKS[:3]);self.visible_event_tracks=set(self.EVENT_TRACKS)
         self.selection=None
         self._drag=None
         self.setMinimumHeight(280)
@@ -31,18 +32,22 @@ class SessionTimeline(QWidget):
     def set_interval(self,payload):
         self.payload=payload
         self.selection=None
-        self.update()
+        self._height();self.update()
 
     def set_language(self,language):
         self.language=language
         self.update()
 
     def set_track(self,key,enabled):
-        if enabled:
-            self.visible_tracks.add(key)
-        else:
-            self.visible_tracks.discard(key)
-        self.update()
+        target=self.visible_event_tracks if key in self.EVENT_TRACKS else self.visible_tracks
+        if enabled:target.add(key)
+        else:target.discard(key)
+        self._height();self.update()
+
+    def _height(self):
+        events=self.payload.get('timeline',{}).get('events',{}).get('tracks',{}) if self.payload else {}
+        count=len(self.visible_tracks)+sum(bool(events.get(k)) for k in self.visible_event_tracks)
+        self.setMinimumHeight(max(280,45+46*count))
 
     def _plot(self):
         return QRectF(150,12,max(1,self.width()-170),max(1,self.height()-45))
@@ -134,7 +139,9 @@ class SessionTimeline(QWidget):
         plot=self._plot()
         keys=[k for k in self.TRACKS if k in self.visible_tracks]
         lo,hi=self.payload["selected_interval_ns"]
-        height=plot.height()/max(1,len(keys))
+        event_data=self.payload['timeline'].get('events',{}).get('tracks',{})
+        event_keys=[k for k in self.EVENT_TRACKS if k in self.visible_event_tracks and event_data.get(k)]
+        height=plot.height()/max(1,len(keys)+len(event_keys))
         for n,key in enumerate(keys):
             y=plot.top()+height*n
             points=self.payload["timeline"]["tracks"].get(key,[])
@@ -161,6 +168,14 @@ class SessionTimeline(QWidget):
                 previous_segment=point["segment"]
             painter.setPen(QPen(QColor(self.COLORS[self.TRACKS.index(key)]),2))
             painter.drawPath(path)
+        for n,key in enumerate(event_keys,len(keys)):
+            y=plot.top()+height*n;rows=event_data[key]
+            painter.setPen(QColor('#584c63'));painter.drawText(QRectF(3,y,144,height),Qt.AlignmentFlag.AlignVCenter,key+'\n'+str(sum(r['count'] for r in rows))+' events')
+            painter.setPen(QPen(QColor('#596aa4'),3))
+            for row in rows:
+                x=plot.left()+plot.width()*(row['first_ns']-lo)/max(1,hi-lo)
+                last=plot.left()+plot.width()*(row['last_ns']-lo)/max(1,hi-lo)
+                painter.drawLine(QPointF(x,y+height/2),QPointF(max(x+3,last),y+height/2))
         origin=self.payload["metadata"]["monotonic_origin_ns"]
         painter.setPen(QColor("#584c63"))
         painter.drawText(150,self.height()-10,f"A {(lo-origin)/1e9:.6f}s  —  B {(hi-origin)/1e9:.6f}s")

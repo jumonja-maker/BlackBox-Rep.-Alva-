@@ -597,6 +597,9 @@ class UniversalWindow(QMainWindow):
 
     def _build_events(self) -> QWidget:
         page, content = _page()
+        from .evidence_panels import EvidencePanel
+        self.events_panel=EvidencePanel(self,events=True);self.events_panel.range_requested.connect(self._view_evidence_range)
+        content.addWidget(self.events_panel)
         content.addWidget(_label("WINDOWS / EVENT VIEWER", "eyebrow", False))
         frame = WindowPanel("Session timeline", "LATEST FIRST")
         self.event_table = QTableWidget(0, 3)
@@ -689,9 +692,9 @@ class UniversalWindow(QMainWindow):
         self.session_event_details.setMaximumHeight(155)
         interval_panel.content.addWidget(self.session_event_details)
         track_controls = QGridLayout()
-        for index,key in enumerate(SessionTimeline.TRACKS):
-            toggle = QCheckBox(SessionTimeline.TRACK_LABELS[key])
-            toggle.setChecked(key in self.session_timeline.visible_tracks)
+        for index,key in enumerate((*SessionTimeline.TRACKS,*SessionTimeline.EVENT_TRACKS)):
+            toggle = QCheckBox(SessionTimeline.TRACK_LABELS.get(key,key))
+            toggle.setChecked(key in self.session_timeline.visible_tracks or key in self.session_timeline.visible_event_tracks)
             toggle.toggled.connect(lambda enabled,k=key:self.session_timeline.set_track(k,enabled))
             track_controls.addWidget(toggle,index//3,index%3)
         interval_panel.content.addLayout(track_controls)
@@ -788,6 +791,9 @@ class UniversalWindow(QMainWindow):
         from .library_panel import LibraryPanel
         from .marker_panel import MarkerPanel
         self.marker_panel=MarkerPanel(self);content.addWidget(self.marker_panel)
+        from .evidence_panels import EvidencePanel
+        self.analysis_panel=EvidencePanel(self);self.analysis_panel.range_requested.connect(self._view_evidence_range)
+        content.insertWidget(1,self.analysis_panel)
         self.library_panel=LibraryPanel(self)
         self.library_toggle=_button("SAVED RESEARCH / EXPERIMENT LIBRARY")
         self.library_toggle.setCheckable(True)
@@ -971,6 +977,8 @@ class UniversalWindow(QMainWindow):
                                         else "SAVED RESEARCH / EXPERIMENT LIBRARY")
         if hasattr(self,'capture_settings'):self.capture_settings.retranslate()
         if hasattr(self,'marker_panel'):self.marker_panel.retranslate()
+        if hasattr(self,'analysis_panel'):self.analysis_panel.retranslate()
+        if hasattr(self,'events_panel'):self.events_panel.retranslate()
         if self.stack.currentIndex() == self._page_ids["reports"]:
             self._update_report_preview()
 
@@ -1580,6 +1588,9 @@ class UniversalWindow(QMainWindow):
                 gaps=coverage["spacing_gap_pairs"],errors=coverage["sensor_error_records"])+
             " · UNVERIFIED_IMPORT · "+" / ".join(result["warnings"]))
 
+    def _view_evidence_range(self,folder,start,end):
+        self._load_session_interval(Path(folder),(start,end));self._navigate('reports')
+
     def _session_interval_ready(self,packet,error):
         if self._interval_pending is not None or self._pending_close:
             return
@@ -1596,6 +1607,8 @@ class UniversalWindow(QMainWindow):
             result["metadata"]["recorded_status"] not in (None,"RECORDING"))
         self._thread_detail_ready({"folder":packet["folder"],"analysis":packet["threads"]},"")
         rows=packet["processes"]["rows"]
+        self.analysis_panel.apply_interval(packet['folder'],tuple(result['selected_interval_ns']),origin=result['metadata']['monotonic_origin_ns'])
+        self.events_panel.apply_interval(packet['folder'],tuple(result['selected_interval_ns']),origin=result['metadata']['monotonic_origin_ns'],processes=rows)
         self.process_history_table.blockSignals(True)
         self.process_history_table.setRowCount(len(rows))
         for index,row in enumerate(rows):

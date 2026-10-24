@@ -16,7 +16,7 @@ Status rules: **PASS** needs actual user-facing integration, automated tests and
 | --- | --- | --- | --- |
 | M-001 | PARTIAL | blackbox_universal/monitor.py; src/blackbox_core/detailed_capture.py; tests/test_bbdi_detailed_slice.py | PID + birth checked; formal target provenance not complete |
 | M-002 | PARTIAL | blackbox_universal/monitor.py; tests/test_bbdi_action_slice.py | Target switch denied while active; full PID-reuse Windows E2E unverified |
-| M-003 | PARTIAL | src/blackbox_core/detailed_capture.py; blackbox_universal/window.py | Opt-in detailed channel; no complete profiles or Incident Burst |
+| M-003 | PARTIAL | src/blackbox_core/capture_policy.py; blackbox_universal/capture_settings.py; tests/test_profiles_markers.py | Standard/Detailed/TTL Incident Burst, limits and explicit opt-in; full overhead/endurance acceptance pending |
 | M-004 | PARTIAL | src/blackbox_core/session_v2.py; tests/test_bbdi_schema2_sessions.py | New live session UUID and paired nanosecond clock anchor cover Standard/Detailed; system UTC drift and all sensor clocks not accepted |
 | M-005 | PARTIAL | src/blackbox_core/probe.py; src/blackbox_core/session_view.py; tests/test_bbdi_schema2_sessions.py | Live cumulative user/system counters and actual read tags, real-dt CPU >100%, logical CPU context; full CPU/observer acceptance not complete |
 | M-006 | PARTIAL | src/blackbox_core/detailed_capture.py; tests/test_bbdi_detailed_slice.py | RSS/Private/USS/handles best effort with per-field status; full Windows source/fixture acceptance incomplete |
@@ -33,7 +33,7 @@ Status rules: **PASS** needs actual user-facing integration, automated tests and
 | M-017 | PARTIAL | docs/BB_DI_001_QA_20261024.md; CI 40041993181 (854cd6bef1d35b1e541cbca77e6ff5a7dcea68f4); blackbox_universal/window.py | Actual non-GUI EnumWindows empty; NOT_APPLICABLE policy and HWND selector without root rebind; exhaustive physical multi-window QA pending |
 | M-018 | PARTIAL | src/blackbox_core/actions.py; blackbox_universal/window.py; tests/test_bbdi_action_slice.py | Three real Qt/frozen action cycles persisted; full ABORTED/state/interval acceptance remains incomplete |
 | M-019 | PARTIAL | src/blackbox_core/actions.py; tests/test_bbdi_action_slice.py | Real USER-command monotonic timestamps; no OS execution attestation |
-| M-020 | PARTIAL | blackbox_universal/monitor.py; src/blackbox_core/actions.py | Problem marker exists; no app instrumented channel and all marker types |
+| M-020 | PARTIAL | src/blackbox_core/user_markers.py; blackbox_universal/marker_panel.py; tests/test_profiles_markers.py; tests/test_research_gui.py | Durable USER stage/comment/problem commands with issue/receipt times and aborted stages; voluntary APP channel remains separately untrusted |
 | M-021 | PARTIAL | src/blackbox_core/library_catalog.py; src/blackbox_core/experiment_metrics.py; blackbox_universal/library_panel.py; tests/test_library_workflow.py | Saved scenario/app versions, indexed experiment history and resource comparison integrated; complete profiles/environment UI/full acceptance remain |
 | M-022 | PARTIAL | src/blackbox_core/experiments.py; src/blackbox_core/report.py | Duration aggregation/compare partial; no resource delta comparability |
 | M-023 | PARTIAL | src/blackbox_core/incidents.py; src/blackbox_core/windows_observer.py; blackbox_universal/window.py | CPU/gap plus native UI timeout; CPU threshold/duration Settings; all memory/handles/IO/exit/burst policies still incomplete |
@@ -50,22 +50,22 @@ Status rules: **PASS** needs actual user-facing integration, automated tests and
 | M-034 | PARTIAL | src/blackbox_core/detailed_capture.py; tests/test_bbdi_detailed_slice.py; tests/test_bbdi_detail_contracts.py | Sample/quality rows atomic on malformed data and WAL+soft quota remain; power-loss recovery/checkpoint/8h NOT RUN |
 | M-035 | PARTIAL | src/blackbox_core/library_catalog.py; src/blackbox_core/library_files.py; blackbox_universal/library_panel.py; tests/test_library_catalog.py; tests/test_research_gui.py | Explicit retention preview, confirmed reversible Trash/Restore and interrupted-move reconciliation; no permanent deletion/automatic hard quota, bytes_freed=0; full storage acceptance pending |
 | M-036 | PARTIAL | blackbox_universal/window.py; blackbox_universal/monitor.py | Action and incident controls; no complete status architecture |
-| M-037 | PARTIAL | blackbox_universal/timeline.py; blackbox_universal/window.py; tests/test_bbdi_schema2_sessions.py | Nine resource tracks, wheel/key zoom, A/B drag, pan/reset and full range requery; native Windows/ETW tracks absent |
+| M-037 | PARTIAL | blackbox_universal/timeline.py; src/blackbox_core/event_stream.py | Numeric plus action/user/incident/Win32/WCT/trace/observer tracks, full-range event buckets and toggles; Windows/frozen candidate validation pending |
 | M-038 | PARTIAL | blackbox_universal/timeline.py; src/blackbox_core/session_view.py | Peak-preserving buckets, gap segment breaks, cancellable background range reload; full endurance/physical Windows pending |
 | M-039 | PARTIAL | blackbox_universal/window.py; tests/test_bbdi_detailed_slice.py | Overview controls; no complete investigation timeline |
 | M-040 | PARTIAL | blackbox_universal/window.py; src/blackbox_core/session_view.py | Persisted paged child history, per-child interval, cumulative TID table/presence; no root rebind; full hierarchical tree widget/native load QA pending |
-| M-041 | PARTIAL | blackbox_universal/window.py; src/blackbox_core/session_view.py | Paged observation-time timeline, native/user source distinction and selected event evidence/WCT nodes in UI; full filters/ETW stream absent |
-| M-042 | PARTIAL | blackbox_universal/window.py; src/blackbox_core/interval_report.py | Human selected-interval summary before hidden raw JSON; saved-session open and privacy-selected exports; full findings/cards/compare pending |
+| M-041 | PARTIAL | src/blackbox_core/event_stream.py; blackbox_universal/evidence_panels.py; tests/test_investigation_v2.py | Merged read-only sources, source/severity/target/time/literal filters, bounded cursor pages and interval navigation; no imported OS attestation |
+| M-042 | PARTIAL | blackbox_universal/evidence_panels.py; tests/test_research_gui.py | Human summary first, paged/sorted findings, explicit technical payload and incident cards invoked by actual UI; full export/acceptance pending |
 | M-043 | PARTIAL | blackbox_universal/window.py | Partial controls; complete profiles/privacy/quota UI missing |
 | M-044 | PARTIAL | blackbox_universal/library_panel.py; src/blackbox_core/library_catalog.py; tests/test_research_gui.py | Indexed search, keyset paging, explicit legacy import, open without target rebind, ID-based comparison, Trash/Restore; full experiment metadata/deletion/endurance acceptance remain |
 | M-045 | NOT-RUN | — | Not yet independently audited end-to-end against full original criterion |
 | M-046 | PARTIAL | .github/workflows/shell-qa.yml | Offscreen DPI screenshots; full keyboard/screen reader/physical Windows NOT RUN |
-| M-047 | PARTIAL | src/blackbox_investigation/engine.py; src/blackbox_investigation/sqlite_adapter.py | Legacy investigation, no full v2 timeline |
+| M-047 | PARTIAL | src/blackbox_core/investigation_v2.py; tests/test_investigation_v2.py | Versioned findings separate facts/candidates/alternatives/limitations/source/coverage; whole interval and conservative UNKNOWN cause; full fixture acceptance pending |
 | M-048 | PARTIAL | src/blackbox_investigation/model.py; src/blackbox_core/report.py | Provenance disclaimers, full source-class contracts missing |
 | M-049 | PARTIAL | src/blackbox_core/incidents.py; src/blackbox_investigation/engine.py | CPU episodes supported, incomplete signals |
-| M-050 | NOT-IMPLEMENTED | — | Required full capability not present; see original order |
+| M-050 | NOT-IMPLEMENTED | src/blackbox_core/investigation_v2.py; blackbox_universal/evidence_panels.py | Incident before/inside/after resources, snapshots, TIDs, child history, native evidence, partial post and next steps; physical/native load acceptance pending |
 | M-051 | NOT-IMPLEMENTED | — | Required full capability not present; see original order |
-| M-052 | PARTIAL | src/blackbox_core/session_view.py; tests/test_bbdi_schema2_sessions.py | Whole selected history statistics, paged events/processes, explicit Top-N truncation; legacy engine full findings pagination still missing |
+| M-052 | PARTIAL | src/blackbox_core/investigation_v2.py; tests/test_investigation_v2.py | All 513 synthetic incidents paged without hidden UI cutoff; query budget and inference quota explicit; export integration in progress |
 | M-053 | PARTIAL | src/blackbox_core/interval_report.py; tests/test_bbdi_schema2_sessions.py | Schema2 interval JSON, offline escaped HTML/SVG, streamed full CSV/events, selected ZIP, SHA manifest and ownership-safe no-clobber; full finding/native/compare report absent |
 | M-054 | PARTIAL | src/blackbox_core/experiments.py; src/blackbox_core/report.py | Duration-only experiment comparison |
 | M-055 | PARTIAL | src/blackbox_core/session_view.py; tests/test_bbdi_schema2_sessions.py | Separate v1/v2 readers and SessionView; v1 LEGACY_LIMITED_DATA with unchanged hash; full Windows legacy fixture acceptance pending |

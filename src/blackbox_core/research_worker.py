@@ -304,7 +304,7 @@ class ResearchSession:
             "folder":str(self.probe.session_folder) if self.probe.session_folder else None,
             "end_ms":self.probe.last_elapsed_ms or 1,"library_root":str(self.probe.output_root)}
         if op=="prepare_client":packet.update(event_path=str(self.tail.path),event_token=self.tail.token)
-        self.jobs.submit(command, packet, seconds=300 if op=="export" else 120 if op in ("library_plan_trash","library_apply_trash") else 75 if op in ("inspect_dump","verify","recover","library_scan","library_compare") else 15)
+        self.jobs.submit(command, packet, seconds=300 if op=="export" else 120 if op in ("library_plan_trash","library_apply_trash") else 75 if op in ("inspect_dump","verify","recover","library_scan","library_compare","investigation","incident_card","events_query") else 15)
         if self.book:
             self.book.put("observer.operation_queued", {"op":op,"command_id":command.get("id"),
                 "issued_ns":command.get("issued_ns")}, source="BLACKBOX_COMMAND_OWNER")
