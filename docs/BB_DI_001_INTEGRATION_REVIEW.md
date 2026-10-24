@@ -64,3 +64,13 @@ from the input b817 run. Results are recorded in the PR conversation.
 Full BB-DI-001 remains NOT ACCEPTED. In particular: real 8h Standard / 1h
 Detailed, physical Win10/11, full security/privacy/ACL/AV, installed upgrade /
 uninstall and accessibility are not supplied by this patch.
+
+## Expanded minimum-width visual gate
+
+The existing offscreen DPI tool additionally opens the research controls at
+1020x690, checks all 17 research and four USER buttons for containment, label
+width and nonoverlap, and scrolls to the first/last actions for genuine window
+screenshots. Eight additional RU/EN images and expanded-layout.json are saved
+per scale. No source/recording command is issued by this audit, and the current
+workflow is unchanged. A failure is retained as FAIL rather than suppressed.
+These checks concern expanded action groups, not full accessibility sign-off.

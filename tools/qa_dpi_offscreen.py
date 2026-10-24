@@ -50,7 +50,9 @@ def main() -> int:
                 path = output / f"dpi-{scale}-{lang}-{page}.png"
                 if not shot.save(str(path), "PNG"):
                     raise RuntimeError("DPI_SCREENSHOT_WRITE_FAILED")
-        print(f"DPI offscreen capture PASS: scale={scale}, 10 snapshots")
+        from tools.qa_integrated_layout import capture_integrated_layout
+        capture_integrated_layout(window, app, output, scale)
+        print(f"DPI offscreen capture PASS: scale={scale}, 10 page and 8 expanded snapshots")
         return 0
     finally:
         window.close()
