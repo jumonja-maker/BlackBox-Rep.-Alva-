@@ -144,6 +144,17 @@ class IsolatedGuiTests(unittest.TestCase):
         table=self.window.library_panel.table;table.clearSelection()
         flags=QItemSelectionModel.SelectionFlag.Select|QItemSelectionModel.SelectionFlag.Rows
         for index in indexes:table.selectionModel().select(table.model().index(index,0),flags)
+    def test_library_export_selected_uses_actual_owner_and_keeps_original_hashes(self):
+        from blackbox_core.casebook import _hash,verify_package
+        folder=self.saved_recording('1');before={p.name:_hash(p) for p in folder.glob('*.sqlite3')}
+        panel=self.window.library_panel;panel.refresh();self.assertTrue(self.drain(lambda:len(panel.rows)==1 and not panel._busy))
+        self.select_library_rows(0);output=Path(self.temp.name)/'share';output.mkdir()
+        self.assertTrue(panel.export_button.isEnabled())
+        with patch('blackbox_universal.library_panel.QFileDialog.getExistingDirectory',return_value=str(output)):
+            panel.export_button.click();self.assertTrue(self.drain(lambda:not panel._busy,seconds=15))
+        self.assertEqual(panel.last_result['op'],'library_export')
+        self.assertEqual(verify_package(next(output.glob('*.zip')))['integrity'],'VERIFIED')
+        self.assertEqual(before,{p.name:_hash(p) for p in folder.glob('*.sqlite3')})
     def test_index_search_discards_stale_pages_and_does_not_poll_sample_updates(self):
         self.saved_recording('1');panel=self.window.library_panel;bridge=self.window.probe
         with patch.object(bridge,'send',wraps=bridge.send) as send:

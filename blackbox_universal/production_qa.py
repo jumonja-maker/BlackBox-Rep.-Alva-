@@ -72,7 +72,7 @@ def run(mode,pid,output,*,phase_seconds=60,warmup_seconds=10,sample_seconds=.5,p
   'machine':{'os':platform.platform(),'machine':platform.machine(),'processor':platform.processor(),
    'logical_cpus':cpus,'physical_cpus':psutil.cpu_count(logical=False),'ram_bytes':psutil.virtual_memory().total,
    'python':platform.python_version(),'psutil':psutil.__version__,'qt_platform':os.environ.get('QT_QPA_PLATFORM','desktop')},
-  'target':{'pid':pid,'created':created},'phase_seconds':phase_seconds,'warmup_seconds':warmup_seconds,'sample_seconds':sample_seconds,
+  'target':{'pid':pid,'created':created},'phase_seconds':phase_seconds,'warmup_seconds':warmup_seconds,'sample_seconds':sample_seconds,'recording_interval_ms':2000,
   'limitations':['OBSERVER_INCLUDES_GUI_OWNED_HELPERS_AND_MEASUREMENT_LOOP','RSS_TREE_SUM_CAN_DOUBLE_COUNT_SHARED_PAGES',
    'EXITED_HELPER_CPU_BETWEEN_SAMPLES_UNKNOWN','OFF_INCLUDES_IDLE_GUI_AND_SESSION_HELPER','SHORT_RUN_IS_NOT_ENDURANCE_OR_PHYSICAL_WINDOWS_QA'],
   'phases':phases,'acceptance':'NOT_ACCEPTED'}
@@ -85,6 +85,7 @@ def run(mode,pid,output,*,phase_seconds=60,warmup_seconds=10,sample_seconds=.5,p
   if not predicate():raise TimeoutError('QA_REAL_GUI_COMMAND_TIMEOUT: '+str(bridge.last_error))
  try:
   bridge.attach(pid);wait(lambda:bridge.pid==pid and not bridge.pending)
+  bridge.send('interval',milliseconds=2000);wait(lambda:not bridge.pending)
   with (output/'samples.csv').open('x',newline='',encoding='utf-8') as stream:
    fields=['phase','at_ns','duration_s','observer_cpu_machine_pp','target_cpu_machine_pp','observer_rss_bytes','target_rss_bytes','observer_instances','observer_missing_or_new_instances']
    writer=csv.DictWriter(stream,fieldnames=fields);writer.writeheader()

@@ -26,6 +26,7 @@ from .sensors import Capability, CallbackSensor, SensorRegistry
 from .capture_policy import validate_policy,profile_description
 from .contracts import ObserverError
 from .user_markers import UserMarkers
+from .capability_catalog import inventory
 
 
 class ResearchSession:
@@ -33,7 +34,7 @@ class ResearchSession:
         from blackbox_universal.monitor import ReadOnlyProbe
         self.probe=ReadOnlyProbe(output_root=Path(os.path.abspath(output_root)) if output_root is not None else None)
         self.book=None;self.tail=None;self.wpr=None
-        self.runtime_trace=None;self._capabilities=capabilities()
+        self.runtime_trace=None;self._capabilities=capabilities();self._capability_inventory=inventory(self._capabilities);self._optional_source_results={}
         self._last_detail_capture=None
         self.jobs=OptionalJobs()
         self.sensors=None
@@ -79,7 +80,7 @@ class ResearchSession:
             window_capture_enabled=p.window_capture is not None,window_capture_status=state,
             observed_windows=windows,selected_hwnd=p.window_capture.selected_hwnd if p.window_capture else None,
             detail_status=detail.status if detail is not None else "DISABLED",
-            report_result=p.report_result,capabilities=self._capabilities,
+            report_result=p.report_result,capabilities=self._capabilities,capability_inventory=self._capability_inventory,
             experiment_context=self.context,native_enabled=self.native_enabled,
             wpr_active=bool(self.wpr and self.wpr.active),
             eventpipe_active=bool(self.runtime_trace and self.runtime_trace.process is not None),
@@ -219,7 +220,8 @@ class ResearchSession:
                 result=self.runtime_trace.poll()
                 if result:self.book.put("eventpipe.stopped",result,source="EVENTPIPE_DOTNET_TRACE",quality=result["status"])
             if self.sensors:
-                for name in ("application", "detail", "windows", "optional"):
+                for name in self.sensors.entries:
+                    if name=='base':continue
                     self.sensors.sample(name, budget_s=.1)
             else:self._application_events()
             try:self._maybe_burst()
@@ -270,7 +272,7 @@ class ResearchSession:
             "application_source_discontinuities":t.discontinuities}
 
     def _start_registry(self):
-        self.sensors=SensorRegistry(("base", "application", "detail", "windows", "optional"))
+        self.sensors=SensorRegistry(("base", "application", "detail", "windows", "optional",'threads','memory','process_tree','wct','etw','runtime','dump','crash_events'))
         def base(deadline):
             result=self.probe.tick(requested_interval_ms=self.interval_ms,track_cadence=True)
             return {"status":"OBSERVED" if result is not None else self.probe.session_state,
@@ -289,6 +291,26 @@ class ResearchSession:
                 "producer_heartbeat_ns":self.probe.window_capture.last_poll_completed_ns}, enabled=lambda:self.probe.window_capture is not None))
         self.sensors.register(CallbackSensor(Capability("optional", "DISPOSABLE_OPERATION_PROCESS", "AVAILABLE", "EXPLICIT_OPT_IN", "OWNED_PROCESS_HARD_DEADLINE",requires_optin=True),
             lambda deadline:self.jobs.health()))
+        def detail_health(deadline):
+            capture=self.probe.detailed_capture
+            return {'status':capture.status,'error':capture.error,'producer_heartbeat_ns':(capture.latest_metrics or {}).get('time_ns')}
+        def optional_health(key):
+            capture=self.wpr if key=='wpr' else self.runtime_trace if key=='eventpipe' else None
+            if capture is not None:
+                process=capture.process
+                if process is not None and process.poll() is None:return {'status':'GUARDIAN_ALIVE_CAPTURE_HANDSHAKE_NOT_ATTESTED','producer_heartbeat_ns':None}
+                return {'status':capture.data.get('state','UNCONFIRMED'),'error':capture.data.get('error')}
+            return self._optional_source_results.get(key,{'status':'NOT_REQUESTED'})
+        caps={r['capability_id']:r for r in self._capability_inventory}
+        for name in ('threads','memory','process_tree'):
+            r=caps[name]
+            self.sensors.register(CallbackSensor(Capability(name,r['source_id'],r['availability'],'EXISTING_WORKER_HEALTH',
+                requires_optin=True,accuracy=r['accuracy_notes']),detail_health,enabled=lambda:self.probe.detailed_capture is not None))
+        for name,key in (('wct','native'),('etw','wpr'),('runtime','eventpipe'),('dump','dump'),('crash_events','crash_events')):
+            r=caps[name]
+            self.sensors.register(CallbackSensor(Capability(name,r['source_id'],r['availability'],'EXPLICIT_PROVIDER_HEALTH',
+                permissions=r['privilege_level'],requires_optin=True,supported_os=tuple(r['supported_os']),accuracy=r['accuracy_notes']),
+                lambda deadline,k=key:optional_health(k)))
         self.sensors.start(self.context)
 
     def _receive_command(self,command):
@@ -313,7 +335,7 @@ class ResearchSession:
             "folder":str(self.probe.session_folder) if self.probe.session_folder else None,
             "end_ms":self.probe.last_elapsed_ms or 1,"library_root":str(self.probe.output_root)}
         if op=="prepare_client":packet.update(event_path=str(self.tail.path),event_token=self.tail.token)
-        self.jobs.submit(command, packet, seconds=300 if op in ("export","export_recover") else 120 if op in ("library_plan_trash","library_apply_trash","library_plan_purge","library_apply_purge","library_trace_recover") else 75 if op in ("inspect_dump","verify","recover","library_scan","library_compare","investigation","incident_card","events_query") else 15)
+        self.jobs.submit(command, packet, seconds=300 if op in ("export","export_recover","library_export") else 120 if op in ("library_plan_trash","library_apply_trash","library_plan_purge","library_apply_purge","library_trace_recover") else 75 if op in ("inspect_dump","verify","recover","library_scan","library_compare","investigation","incident_card","events_query","decode_trace") else 15)
         if self.book:
             self.book.put("observer.operation_queued", {"op":op,"command_id":command.get("id"),
                 "issued_ns":command.get("issued_ns")}, source="BLACKBOX_COMMAND_OWNER")
@@ -328,6 +350,9 @@ class ResearchSession:
                 except Exception:result["result"]=None;result["error"]="TARGET_INSTANCE_CHANGED_RESULT_NOT_COMMITTED"
             if not self.book:continue
             value=result.get("result")
+            if op in ('native','dump','crash_events','decode_trace'):
+                self._optional_source_results[op]={'status':'OPERATION_FAILED' if result.get('error') else value.get('status','SNAPSHOT_RETURNED'),
+                    'error':result.get('error'),'producer_heartbeat_ns':time.monotonic_ns()}
             if result.get("error"):
                 self.book.put("observer.operation_failed", {"op":op,"error":result["error"],
                     "operation_ms":result.get("operation_ms")}, source="DISPOSABLE_OPERATION_PROCESS", quality="NOT_CONFIRMED")
@@ -339,6 +364,13 @@ class ResearchSession:
                 kind,source={"dump":("snapshot.captured","DBGHELP_MINIDUMP"),"symbols":("symbols.identity","DBGHELP_SYMSRV_FILE_INDEX"),
                     "inspect_dump":("stack.offline","CDB_OFFLINE_DUMP")}[op]
                 self.book.put(kind,value,source=source,quality=value.get("status","OBSERVED"))
+            elif op in ('crash_events','decode_trace'):
+                key='events' if op=='crash_events' else 'rows'
+                rows=value.get(key,[])
+                summary={**value,key:rows[:16],'items_omitted_from_evidence_preview':max(0,len(rows)-16),'full_items_location':value.get('supplemental_artifact'),
+                    'timeline_timestamp_semantics':'OBSERVER_RECEIPT_NOT_SOURCE_EVENT_CLOCK'}
+                self.book.put('crash.system_events' if op=='crash_events' else 'trace.decoded',summary,
+                    source='WIN32_APPLICATION_EVENTLOG' if op=='crash_events' else 'ETW_TRACERPT',quality=value.get('status','NOT_CONFIRMED'))
         return results
 
     def capture_native(self):
@@ -447,7 +479,7 @@ class ResearchSession:
                 self._changed_configuration()
             return n
         if op=="start":
-            self._capabilities=capabilities()
+            self._capabilities=capabilities();self._capability_inventory=inventory(self._capabilities);self._optional_source_results={}
             self.markers=UserMarkers();self._ui_seen=set();self._burst_until=None;self._library_budget=None
             self.context.update(profile=self.capture_policy["profile"],capture_policy=self.capture_policy)
             self.probe.start()

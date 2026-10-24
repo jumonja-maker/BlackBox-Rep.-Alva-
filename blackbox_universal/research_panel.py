@@ -95,6 +95,8 @@ class ResearchPanel(QWidget):
             ("Windows snapshot","Снимок Windows / WCT",self.native),
             ("ETW recording","Запись ETW",self.etw),
             ("EventPipe 10 s","EventPipe 10 с",self.eventpipe),
+            ("System failure events","Системные события сбоев",self.crash_events),
+            ("Read saved ETL…","Прочитать сохранённый ETL…",self.decode_trace),
             ("Capture minidump","Снять минидамп",self.dump),
             ("Administrator mode…","Режим администратора…",self.elevate),
             ("Export investigation…","Сохранить исследование…",self.export),
@@ -191,6 +193,10 @@ class ResearchPanel(QWidget):
         text=self.tr('Collect a GC EventPipe trace for 10 seconds using installed dotnet-trace? This adds overhead and may contain sensitive runtime data. No download is performed.',
             'Собрать GC-трассу EventPipe за 10 секунд установленным dotnet-trace? Это создаёт нагрузку и может содержать чувствительные данные. Ничего не загружается.')
         if QMessageBox.question(self,'EventPipe',text,QMessageBox.StandardButton.Yes|QMessageBox.StandardButton.No,QMessageBox.StandardButton.No)==QMessageBox.StandardButton.Yes:self.send('eventpipe',seconds=10,profile='gc-collect')
+    def crash_events(self):self.send('crash_events')
+    def decode_trace(self):
+        path,_=QFileDialog.getOpenFileName(self,self.tr('Read local ETL headers (no symbols/downloads)','Прочитать заголовки локального ETL (без загрузок)'),'', 'ETL (*.etl)')
+        if path:self.send('decode_trace',path=path)
     def dump(self):
         if QMessageBox.question(self,"BLACK.BOX",self.tr(
                 "Capture a minidump? It contains process memory and may briefly pause the selected application.",

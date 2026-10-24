@@ -6,7 +6,7 @@ from .session_v2 import safe_path
 SOURCES=('ALL','USER','WIN32','WCT','ETW','EVENTPIPE','APP','OBSERVER')
 SEVERITIES=('ALL','INFO','WARNING','ERROR')
 def _source_sql(value):
- return "CASE WHEN "+value+" IN ('USER','USER_MARKER') THEN 'USER' WHEN "+value+" IN ('WIN32','WIN32_HWND') THEN 'WIN32' WHEN "+value+" IN ('WCT','WIN32_WCT') THEN 'WCT' WHEN "+value+" LIKE 'ETW%' THEN 'ETW' WHEN "+value+" LIKE 'EVENTPIPE%' THEN 'EVENTPIPE' WHEN "+value+" IN ('APPLICATION_EVENT','APP_INSTRUMENTATION') THEN 'APP' ELSE 'OBSERVER' END"
+ return "CASE WHEN "+value+" IN ('USER','USER_MARKER') THEN 'USER' WHEN "+value+" IN ('WIN32','WIN32_HWND','WIN32_APPLICATION_EVENTLOG') THEN 'WIN32' WHEN "+value+" IN ('WCT','WIN32_WCT') THEN 'WCT' WHEN "+value+" LIKE 'ETW%' THEN 'ETW' WHEN "+value+" LIKE 'EVENTPIPE%' THEN 'EVENTPIPE' WHEN "+value+" IN ('APPLICATION_EVENT','APP_INSTRUMENTATION') THEN 'APP' ELSE 'OBSERVER' END"
 def _union(view,folder):
  deadline=time.monotonic()+25;view.db.set_progress_handler(lambda:int(time.monotonic()>deadline),1000)
  research=safe_path(Path(folder)/'research.sqlite3');attached=False

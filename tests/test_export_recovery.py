@@ -47,5 +47,26 @@ os._exit(0)
   t=ExportTransaction(self.root,kind='TEST_ONLY_ACTIVE')
   with self.assertRaisesRegex(ValueError,'OWNER_ACTIVE'):recover_export(t.journal,action='DISCARD',confirmed=True)
   t.abort();self.assertEqual(list(self.root.iterdir()),[])
+ def test_actual_exit_after_stage_cleanup_reconciles_committed_outputs_without_republication(self):
+  code="""from blackbox_core.export_recovery import ExportTransaction
+from pathlib import Path
+import os,sys
+t=ExportTransaction(sys.argv[1],kind='TEST_ONLY_POST_CLEANUP_EXIT')
+a=t.reserve('a.txt');a.write_text('COMMITTED BY REAL CHILD')
+t.prepare({'a.txt':a})
+original=Path.unlink
+def crash(path,*args,**kwargs):
+ if path==t.journal:os._exit(0)
+ return original(path,*args,**kwargs)
+Path.unlink=crash
+t.publish()
+"""
+  subprocess.run([sys.executable,'-c',code,str(self.root)],check=True,timeout=10)
+  journal=Path(scan_exports(self.root)['rows'][0]['journal'])
+  self.assertFalse(any(p.is_dir() for p in self.root.iterdir()))
+  with self.assertRaisesRegex(ValueError,'COMMITTED_REQUIRES_FINISH'):recover_export(journal,action='DISCARD',confirmed=True)
+  r=recover_export(journal,action='FINISH',confirmed=True)
+  self.assertEqual(r['status'],'RECONCILED_COMMITTED');self.assertEqual((self.root/'a.txt').read_text(),'COMMITTED BY REAL CHILD')
+  self.assertFalse(journal.exists())
 if __name__=='__main__':unittest.main()
 

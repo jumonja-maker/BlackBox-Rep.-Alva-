@@ -25,6 +25,19 @@ class LibraryWorkflowTests(unittest.TestCase):
     def record(self,version='1'):
         s=self.session;s.command({'op':'configure','args':{'scenario':'Library QA','scenario_version':version,'workload':'same-input'}})
         s.command({'op':'start'});s.tick();folder=s.probe.session_folder;s.stop();return folder
+    def test_local_comment_lives_only_in_index_and_share_export_preserves_originals(self):
+        folder=self.record();catalog=LibraryCatalog(self.root);row=catalog.query()['rows'][0]
+        original={p.name:_hash(p) for p in folder.glob('*.sqlite3')};note='PRIVATE_LOCAL_COMMENT_<script>test</script>'
+        catalog.annotate(row['entry_id'],note)
+        with patch('blackbox_core.library_catalog.recording_metadata',side_effect=AssertionError('query must not scan source')):
+            self.assertEqual(catalog.query()['rows'][0]['local_note'],note)
+        with self.assertRaises(ValueError):catalog.annotate(row['entry_id'],'x'*2049)
+        self.assertEqual(catalog.entry(row['entry_id'])['local_note'],note)
+        out=self.root/'share';out.mkdir();result=execute({'op':'library_export','args':{'entry_id':row['entry_id'],'output':str(out)},'library_root':str(self.root)})
+        import zipfile
+        with zipfile.ZipFile(result['path']) as package:
+            self.assertFalse(any(note.encode() in package.read(name) for name in package.namelist()))
+        self.assertEqual(original,{p.name:_hash(p) for p in folder.glob('*.sqlite3')})
     def test_lifecycle_index_is_not_part_of_sampling_and_repeated_stop_is_idempotent(self):
         s=self.session;s.command({'op':'start'});catalog=LibraryCatalog(self.root)
         rows=catalog.query()['rows'];self.assertEqual(len(rows),1);self.assertEqual(rows[0]['state'],'RECORDING')

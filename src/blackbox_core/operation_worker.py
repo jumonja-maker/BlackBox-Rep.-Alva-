@@ -13,9 +13,9 @@ import time
 
 LIBRARY_OPERATIONS = frozenset({'library_query','library_register','library_scan','library_open',
     'library_compare','library_policy','library_retention','library_plan_trash',
-    'library_apply_trash','library_restore','library_reconcile','library_plan_purge','library_apply_purge','library_trace_scan','library_trace_recover'})
+    'library_apply_trash','library_restore','library_reconcile','library_plan_purge','library_apply_purge','library_trace_scan','library_trace_recover','library_export','library_note'})
 OPERATIONS = LIBRARY_OPERATIONS | frozenset({'native', 'symbols', 'inspect_dump', 'inspect', 'prepare_client',
-    'episode', 'evidence_page', 'export', 'compare', 'verify', 'recover', 'dump', 'processes','investigation','incident_card','events_query','export_recovery_scan','export_recover'})
+    'episode', 'evidence_page', 'export', 'compare', 'verify', 'recover', 'dump', 'processes','investigation','incident_card','events_query','export_recovery_scan','export_recover','crash_events','decode_trace'})
 TARGET_OPERATIONS = frozenset({'native', 'symbols', 'inspect', 'dump'})
 MAX_RESULT_BYTES = 4 * 1024 * 1024
 
@@ -44,6 +44,20 @@ def execute(packet):
         elif op=='library_register':result={'entry':catalog.register(a['folder'])}
         elif op=='library_scan':result=catalog.scan(after=a.get('after',''),limit=a.get('limit',50))
         elif op=='library_open':result=catalog.open_entry(a['entry_id'])
+        elif op=='library_note':result=catalog.annotate(a['entry_id'],a['note'])
+        elif op=='library_export':
+            entry=catalog.open_entry(a['entry_id'],completed=True)
+            from .session_v2 import safe_path
+            from uuid import uuid4
+            output=safe_path(a['output'])
+            if not output.is_dir():raise ValueError('EXPORT_DIRECTORY_REQUIRED')
+            if entry['has_research']:
+                from .casebook import export_case
+                result=export_case(entry['folder'],output/('BLACKBOX-'+uuid4().hex+'.zip'))
+            else:
+                from .interval_report import export_interval
+                result=export_interval(Path(entry['folder']),output,bundle=True)
+            result['entry_id']=a['entry_id'];result['source_observations_modified']=False
         elif op=='library_compare':
             if a['before_id']==a['after_id']:raise ValueError('LIBRARY_SELECT_TWO_RECORDINGS')
             before=catalog.open_entry(a['before_id'],completed=True)
@@ -87,6 +101,21 @@ def execute(packet):
         from .event_stream import event_page
         result=event_page(a.get('folder') or folder,after=a.get('after'),limit=a.get('limit',100),source=a.get('source','ALL'),severity=a.get('severity','ALL'),instance_id=a.get('instance_id',0),search=a.get('search',''),start_ms=a.get('start_ms'),end_ms=a.get('end_ms'))
         result['request_key']=a.get('request_key')
+    elif op in ('crash_events','decode_trace'):
+        if folder is None:raise ValueError('START_RECORDING_FIRST')
+        if op=='crash_events':
+            from .crash_events import query
+            result=query(pid,created)
+        else:
+            from .trace_decode import decode
+            result=decode(a['path'],target_pid=pid)
+        from .session_v2 import safe_path
+        from uuid import uuid4
+        artifacts=safe_path(folder/'artifacts');artifacts.mkdir(exist_ok=True)
+        artifact=artifacts/(op+'-'+uuid4().hex+'.json')
+        with artifact.open('x',encoding='utf-8') as stream:json.dump(result,stream,ensure_ascii=True,allow_nan=False)
+        result['supplemental_artifact']=artifact.name
+        result['primary_recording_modified']=False
     elif op == 'native':
         import psutil
         from .windows_research import window_observations, wait_chain, enable_debug_privilege

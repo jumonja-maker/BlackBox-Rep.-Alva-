@@ -95,6 +95,8 @@ class SensorRegistry:
             if not isinstance(producer,dict):producer={'status':'INVALID_SENSOR_HEALTH'}
             producer_ns=producer.get('producer_heartbeat_ns')
             result[name]={'permissions':cap.permissions,'requires_optin':cap.requires_optin,
+                'capability_id':cap.sensor_id,'source_id':cap.source,'privilege_level':cap.permissions,
+                'accuracy_notes':cap.accuracy,'failure_reason':row['error'] or cap.reason,
                 'supported_os':list(cap.supported_os),'accuracy':cap.accuracy,'limitations':cap.limitation,
                 'unavailable_reason':cap.reason,'latency_p95_ms':row['latency_p95_ms'],
                 'latency_window_count':len(row['latencies_ms']),'latency_window_limit':128,'source':cap.source,'availability':cap.availability,'mode':cap.mode,

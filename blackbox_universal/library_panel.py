@@ -55,15 +55,17 @@ class LibraryPanel(QWidget):
         self.trash_button=self.button('Move selected to Trash…','Выбранные в корзину…',self.plan_selected)
         self.restore_button=self.button('Restore selected','Восстановить выбранную',self.restore_selected)
         self.trace_button=self.button('Inspect interrupted traces…','Проверить прерванные трассы…',self.trace_scan)
-        for i,b in enumerate((self.open_button,self.compare_button,self.register_button,self.scan_button,self.trash_button,self.restore_button,self.trace_button)):
+        self.export_button=self.button('Export selected…','Экспортировать выбранную…',self.export_selected)
+        self.note_button=self.button('Local comment…','Локальный комментарий…',self.annotate_selected)
+        for i,b in enumerate((self.open_button,self.compare_button,self.register_button,self.scan_button,self.trash_button,self.restore_button,self.trace_button,self.export_button,self.note_button)):
             actions.addWidget(b,i//2,i%2)
         layout.addLayout(actions)
         self.storage_toggle=self.button('Storage policy / reversible Trash','Хранение / обратимая корзина',lambda:None)
         self.storage_toggle.setCheckable(True);layout.addWidget(self.storage_toggle)
         self.storage=QWidget();storage=QVBoxLayout(self.storage);storage.setContentsMargins(0,0,0,0)
         storage_note=QLabel();storage_note.setWordWrap(True)
-        self.label(storage_note,'No automatic deletion. These thresholds only prepare a review list. Trash preserves every file and does not free disk space. Permanent deletion is not provided.',
-            'Автоматического удаления нет. Пороги только составляют список для просмотра. Корзина сохраняет все файлы и не освобождает место. Окончательного удаления здесь нет.')
+        self.label(storage_note,'No automatic deletion. Thresholds only prepare a review list. Trash preserves files. Permanent deletion requires its own separate confirmation below.',
+            'Автоматического удаления нет. Пороги только составляют список для просмотра. Корзина сохраняет файлы. Окончательное удаление ниже требует отдельного подтверждения.')
         storage.addWidget(storage_note)
         policy=QGridLayout();self.days=QSpinBox();self.days.setRange(0,36500)
         self.size_mb=QSpinBox();self.size_mb.setRange(0,1024*1024*1024)
@@ -153,6 +155,8 @@ class LibraryPanel(QWidget):
         selected=self.selected();available=not self._busy
         normal=all(r['state'] not in ('TRASH','MOVING_TO_TRASH','RESTORING','PURGING','PURGE_PARTIAL','PURGED') for r in selected)
         self.open_button.setEnabled(available and len(selected)==1 and normal)
+        self.export_button.setEnabled(available and len(selected)==1 and normal and selected[0]['state'] not in ('RECORDING','FINALIZATION_UNCONFIRMED'))
+        self.note_button.setEnabled(available and len(selected)==1 and normal)
         self.compare_button.setEnabled(available and len(selected)==2 and normal and
             all(r['state'] not in ('RECORDING','FINALIZATION_UNCONFIRMED') for r in selected))
         self.trash_button.setEnabled(available and bool(selected) and all(r['trash_eligible'] for r in selected))
@@ -171,6 +175,7 @@ class LibraryPanel(QWidget):
                 (self.tr('yes','да') if r['configuration_changed'] else self.tr('no','нет'))+'\n'+
                 self.tr('Samples / completed runs: ','Отсчёты / завершённые повторы: ')+str(r['samples'])+' / '+str(r['completed_runs'])+'\n'+
                 self.tr('Cached size: ','Сохранённая оценка размера: ')+self.size(r['size_bytes'])+' · '+str(r['size_status'])+'\n'+
+                self.tr('Local comment (not in share export): ','Локальный комментарий (не входит в экспорт): ')+r.get('local_note','')+'\n'+
                 r['file_trust']+'\n'+r['folder'])
     def size(self,value):return self.tr('unknown','неизвестно') if value is None else f'{value/1048576:.2f} MiB'
     def state_text(self,value):
@@ -192,6 +197,16 @@ class LibraryPanel(QWidget):
     def open_selected(self):
         rows=self.selected()
         if len(rows)==1 and self.open_button.isEnabled():self.send('library_open',entry_id=rows[0]['entry_id'])
+    def export_selected(self):
+        rows=self.selected()
+        if len(rows)!=1 or not self.export_button.isEnabled():return
+        output=QFileDialog.getExistingDirectory(self,self.tr('Export directory (share copy, sensitive fields excluded)','Каталог экспорта (копия, чувствительные поля исключены)'))
+        if output:self.send('library_export',entry_id=rows[0]['entry_id'],output=output)
+    def annotate_selected(self):
+        rows=self.selected()
+        if len(rows)!=1 or not self.note_button.isEnabled():return
+        text,ok=QInputDialog.getMultiLineText(self,self.tr('Local comment','Локальный комментарий'),self.tr('Stored in this index only; up to 2048 characters.','Только в локальном индексе; до 2048 символов.'),rows[0].get('local_note',''))
+        if ok:self.send('library_note',entry_id=rows[0]['entry_id'],note=text)
     def compare_selected(self):
         rows=self.selected()
         if len(rows)!=2 or not self.compare_button.isEnabled():return
@@ -280,6 +295,7 @@ class LibraryPanel(QWidget):
                     self.rows=result['rows'];self._has_more=result['has_more'];self._next_cursor=result['next_cursor'];self.render_rows(self.rows)
                 if result.get('request_key')!=self._generation:self._query_dirty=True
             elif op=='library_open':self.open_requested.emit(result)
+            elif op=='library_export':self.details.setPlainText(self.tr('Export saved: ','Экспорт сохранён: ')+str(result.get('path') or result.get('files')))
             elif op=='library_compare':
                 self.comparison_ready.emit(result['comparison'])
                 if 'resource_comparison' in result['comparison']:
@@ -306,7 +322,7 @@ class LibraryPanel(QWidget):
             elif op=='library_plan_purge':self.confirm_purge(result)
             elif op=='library_trace_scan':self.trace_review(result)
             elif op=='library_trace_recover':self.details.setPlainText(json.dumps(result,ensure_ascii=False,indent=2))
-            elif op in ('library_apply_trash','library_restore','library_register','library_reconcile','library_apply_purge'):
+            elif op in ('library_apply_trash','library_restore','library_register','library_reconcile','library_apply_purge','library_note'):
                 self.candidates=[];self.candidate_table.setRowCount(0)
                 self.details.setPlainText(json.dumps(result,ensure_ascii=False,indent=2));self.refresh()
         self.selection_changed();self._update_paging()

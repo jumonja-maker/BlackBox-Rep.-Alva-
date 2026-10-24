@@ -24,6 +24,7 @@ class SdkLatencyTests(unittest.TestCase):
    rows=EventTail(p,'a'*32,os.getpid()).poll();ends=[r for r in rows if r['kind']=='io.operation.end']
    self.assertEqual([r['attributes']['status'] for r in ends],['COMPLETED','ERROR'])
    self.assertGreater(ends[0]['attributes']['latency_ns'],0)
+   self.assertEqual(ends[0]['attributes']['latency_clock'],'PYTHON_PERF_COUNTER_NS')
    self.assertTrue(all(r['parent_id']==stage for r in ends))
    self.assertEqual(rows[-1]['kind'],'stage.end');self.assertEqual(rows[-1]['attributes']['status'],'COMPLETED')
  def test_quantiles_are_only_valid_app_reports_not_bytes_or_device_facts(self):

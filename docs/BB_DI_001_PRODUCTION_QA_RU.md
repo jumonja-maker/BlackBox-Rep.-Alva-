@@ -10,7 +10,7 @@
 
 Через атомарную замену `command.json` можно передать `{id,op,count}`: cpu/SET_CPU_COUNT от 0 до исходного N; memory/ALLOCATE_32_MIB, RELEASE_HALF, RELEASE_ALL (предел 256 МиБ); handles/CLOSE_HALF. `state.json` содержит ack/error. Это управление стендом, а не исследуемой чужой программой. PID reuse проверяется отдельно контрактными тестами и не имитируется подменой настоящих счётчиков.
 
-Frozen EXE: `BlackBoxUniversal.exe --qa-workload threads OUT --count 300 --seconds 60` (фактическое имя EXE берётся из portable-пакета).
+Frozen EXE: `BLACK.BOX-Universal.exe --qa-workload threads OUT --count 300 --seconds 60`.
 
 FIX-02/03 остаются настоящими Win32/Qt GUI и mutex-cycle в `blackbox_universal/qa_fixtures.py`. FIX-08 содержит штатное завершение/контролируемое исключение в research_fixtures. FIX-09: `tools/fixtures/ManagedRuntimeProbe/Program.cs`, автономный EventSource + GC pressure. Тест собирает исходник только установленным SDK, без NuGet/network; отсутствующий SDK/dotnet-trace даёт явный SKIP. JSON ready не является доказательством GC.
 

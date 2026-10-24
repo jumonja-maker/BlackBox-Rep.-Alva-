@@ -41,6 +41,7 @@ CREATE INDEX IF NOT EXISTS ix_library_state ON entries(state,started_ns DESC,ent
 CREATE INDEX IF NOT EXISTS ix_library_target ON entries(target_name,started_ns DESC);
 CREATE TABLE IF NOT EXISTS plans(token_hash TEXT PRIMARY KEY,created_ns INTEGER NOT NULL,
  expires_ns INTEGER NOT NULL,payload TEXT NOT NULL,used INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE IF NOT EXISTS annotations(entry_id TEXT PRIMARY KEY,note TEXT NOT NULL,edited_utc_ns INTEGER NOT NULL);
 '''
 
 
@@ -228,7 +229,10 @@ class LibraryCatalog:
                 raise ValueError('LIBRARY_INVALID_CURSOR')
             where.append('(started_ns,entry_id)<(?,?)');params.extend(after)
         with closing(self._connect()) as db:
-            rows=db.execute('SELECT * FROM entries WHERE '+' AND '.join(where)+' ORDER BY started_ns DESC,entry_id DESC LIMIT ?',(*params,limit+1)).fetchall()
+            has_notes=db.execute("SELECT 1 FROM sqlite_schema WHERE type='table' AND name='annotations'").fetchone()
+            source="entries LEFT JOIN annotations USING(entry_id)" if has_notes else 'entries'
+            cols="entries.*,coalesce(annotations.note,'') AS local_note" if has_notes else 'entries.*'
+            rows=db.execute('SELECT '+cols+' FROM '+source+' WHERE '+' AND '.join(where)+' ORDER BY started_ns DESC,entry_id DESC LIMIT ?',(*params,limit+1)).fetchall()
         selected=[self._present(dict(r)) for r in rows[:limit]]
         return {'rows':selected,'has_more':len(rows)>limit,
             'next_cursor':[selected[-1]['started_ns'],selected[-1]['entry_id']] if selected else None,
@@ -236,6 +240,7 @@ class LibraryCatalog:
 
     def _present(self,row):
         row=dict(row)
+        row['local_note']=row.get('local_note','')[:2048]
         # Rendering an indexed page does not stat every recording directory.
         if row['origin']=='LOCAL_APP_MARKED':
             if not SESSION_NAME.fullmatch(row['folder_name'] or ''):raise ValueError('LIBRARY_INVALID_LOCAL_PATH')
@@ -251,9 +256,22 @@ class LibraryCatalog:
 
     def entry(self,entry_id):
         if not _uuid(entry_id):raise ValueError('LIBRARY_INVALID_ENTRY')
-        with closing(self._connect()) as db:r=db.execute('SELECT * FROM entries WHERE entry_id=?',(entry_id,)).fetchone()
+        with closing(self._connect()) as db:
+            r=db.execute('SELECT * FROM entries WHERE entry_id=?',(entry_id,)).fetchone()
+            if r is not None:
+                r=dict(r)
+                if db.execute("SELECT 1 FROM sqlite_schema WHERE type='table' AND name='annotations'").fetchone():
+                    note=db.execute('SELECT note FROM annotations WHERE entry_id=?',(entry_id,)).fetchone()
+                    r['local_note']=note[0] if note else ''
         if r is None:raise ValueError('LIBRARY_ENTRY_NOT_FOUND')
         return self._present(r)
+
+    def annotate(self,entry_id,note):
+        self.entry(entry_id)
+        if type(note) is not str or len(note)>2048:raise ValueError('LIBRARY_NOTE_LIMIT_2048')
+        with closing(self._connect(write=True)) as db:
+            db.execute('INSERT OR REPLACE INTO annotations VALUES(?,?,?)',(entry_id,note,time.time_ns()));db.commit()
+        return {'entry_id':entry_id,'local_note':note,'source':'USER_ANNOTATION','source_observations_modified':False,'included_in_share_export':False}
 
     def open_entry(self,entry_id,*,completed=False):
         """Resolve an indexed identifier, without changing the observed target."""

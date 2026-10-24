@@ -81,3 +81,19 @@ production_qa запускает настоящий Qt/isolated owner и изм�
 Анализ действий теперь выдаёт ACTION_RESOURCE_COINCIDENCE с ресурсами внутри настоящих USER boundaries, отсутствием экстраполяции и causal_claim=false. Параметр top_threads считывается из контекста сохранённого сеанса и применяется к range/analysis/card. Все 6 тестов анализа PASS.
 
 Полный локальный набор checkpoint b41f819: 416 тестов, 12 SKIP, 0 FAIL/ERROR (144.552s). Это относится к b41f819 до добавления текущих стендов. Hosted Linux b41f819 PASS; Windows/frozen ещё выполняются. Политика обязательств остаётся прежней: полное исходное ТЗ не принято, настоящие 8ч/1ч/physical Windows NOT-RUN. Команды и точные ограничения: BB_DI_001_PRODUCTION_QA_RU.md.
+
+## Сохранение этапа: системные сведения, источники и экспорт библиотеки
+
+Windows d7e2db7 / run 40115280533: 426 тестов, 1 FAIL, 4 SKIP; Linux PASS. Провал SDK выявил coarse monotonic Python 3.11: короткое действие могло иметь 0 ns. Для новых Python APP events теперь используются perf_counter_ns с собственным source ID и разрешением; stage/I/O duration также QPC/perf_counter. Source clock никогда не выравнивается к observer clock без основания. Проверка на ненулевой длительности оставлена; hosted Windows ещё должен подтвердить исправление. Предыдущий b41f819 Windows CI отменён новым checkpoint, полного frozen PASS не было.
+
+Добавлены отдельные read-only запросы Application EventLog (1000/1001/1026 в ограниченном UTC-окне), с сопоставлением только именованного payload PID. Execution PID — регистратор события; отсутствие совпадения не доказывает отсутствие crash. Тексты, пути и имена модулей не сохраняются. Права/timeout/truncation различаются. Никаких WER registry changes. После Stop сведения сохраняются отдельным supplement, исходная запись не переписывается.
+
+Добавлено явное offline чтение ETL через Windows System32 tracerpt: безопасный массив аргументов, owned process/deadline, бюджеты входа/выхода, SHA-256 исходника/декодера, streaming XML. Декодируются только event headers с emitter PID; это не causal target, не stacks/GC/device latency. Ограниченный preview имеет точное число исключённых строк. Lost-events остаётся unknown. Кнопка в прежних Reports. Отдельный Windows QA fixture создаёт только собственную случайную ETW session/provider, пишет 12 настоящих EventWrite headers и останавливает только её; реальная приёмка нового fixture ещё NOT-RUN.
+
+Фиксированный inventory включает Standard/Threads/Memory/Tree/HWND/WCT/ETW/Runtime/Crash/Dump, поля capability/source/privilege/opt-in/ОС/точности/причины. Health adapters используют существующих владельцев, не дублируют запросы ресурсов. FUTURE network/GPU/frames явно NOT_IMPLEMENTED, value=NULL, системный total запрещён как fallback PID.
+
+В библиотеке — экспорт выбранной записи через disposable operation и отдельный локальный комментарий в индексе (до 2048 символов, вне исходного evidence и share bundle). Legacy использует штатный interval bundle. Исправлен устаревший текст «окончательного удаления нет»; отдельное подтверждаемое удаление действительно существует. Тест комментария/поиска/экспорта и source hashes PASS. Все 29 library regression PASS; Qt export user path PASS в наборе 12 сценариев.
+
+Закрыт дополнительный crash window экспорта: если stage уже очищен и процесс погиб перед удалением COMMITTED-журнала, FINISH заново проверяет native ID+SHA всех опубликованных файлов и сохраняет их. DISCARD не удаляет уже committed выдачу. Это проверено настоящим дочерним os._exit ровно в этой точке. Все 7 recovery/export тестов PASS.
+
+Вновь затронутые исходники требуют общего exact-head CI/EXE. Отдельно прошли 10 SDK/recovery, 2 capability, 8 crash/decoder checks (1 Windows SKIP) и Qt 12; это не независимая Windows/full-order приёмка.

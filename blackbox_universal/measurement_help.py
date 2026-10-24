@@ -9,7 +9,7 @@ class MeasurementHelp(QWidget):
   self.retranslate()
  def retranslate(self):
   self.button.setText('Определения, формулы и ограничения метрик' if self.window.language=='RU' else 'Metric definitions, formulas and limitations')
-  self.table.setHorizontalHeaderLabels(('SENSOR','SOURCE','STATUS','PERMISSIONS','LAST / P95 ms','ERRORS / OVERRUNS'))
+  self.table.setHorizontalHeaderLabels(('ДАТЧИК','SOURCE','СОСТОЯНИЕ','ПРАВА','ПОСЛ. / P95 ms','ОШИБКИ / БЮДЖЕТ') if self.window.language=='RU' else ('SENSOR','SOURCE','STATUS','PERMISSIONS','LAST / P95 ms','ERRORS / OVERRUNS'))
  def showEvent(self,event):super().showEvent(event);self._key=None;self.refresh()
  def refresh(self):
   if not self.isVisible():return
@@ -24,6 +24,9 @@ class MeasurementHelp(QWidget):
   from blackbox_core.metric_help import definitions
   dialog=QDialog(self);dialog.resize(800,650);dialog.setWindowTitle(self.button.text());box=QVBoxLayout(dialog);browser=QTextBrowser();browser.setOpenExternalLinks(False);box.addWidget(browser)
   rows=[]
+  rows.append('<h2>'+('Доступность источников' if self.window.language=='RU' else 'Source capabilities')+'</h2>')
+  for item in getattr(self.window.probe,'data',{}).get('capability_inventory',[]):
+   rows.append('<p>'+escape(str(item.get('capability_id'))+' · '+str(item.get('source_id'))+' · '+str(item.get('availability'))+' · '+str(item.get('accuracy_notes')))+'</p>')
   for r in definitions()['metrics']:rows.append('<h3>'+escape(r['metric'])+'</h3><p>'+escape(r['source']+' · '+r['unit'])+'</p><p>'+escape(r['explanation_ru' if self.window.language=='RU' else 'explanation_en'])+'</p>')
   browser.setHtml(''.join(rows));dialog.exec()
 

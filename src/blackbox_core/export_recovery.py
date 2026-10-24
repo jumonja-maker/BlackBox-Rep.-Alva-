@@ -127,6 +127,22 @@ def recover_export(journal,*,action,confirmed=False):
  path=checked(journal);data=read_json(path,8*1024**2);output=path.parent;stage=output/('.bb-export-'+str(data.get('uid')))
  if path.name!=stage.name+'.json':raise ValueError('EXPORT_INVALID_JOURNAL')
  if owner_alive(data):raise ValueError('EXPORT_RECOVERY_OWNER_ACTIVE')
+ if not stage.exists() and data.get('state')=='COMMITTED':
+  # The only remaining operation can be removal of this journal after durable
+  # COMMITTED + successful stage cleanup. Re-prove every output, never rebuild
+  # an empty package or delete committed user-visible files during DISCARD.
+  if action!='FINISH':raise ValueError('EXPORT_COMMITTED_REQUIRES_FINISH')
+  if (data.get('kind')!='BLACKBOX_EXPORT_TRANSACTION' or data.get('schema_version')!=1 or
+      not re.fullmatch('[0-9a-f]{32}',str(data.get('uid'))) or data.get('prepared') is not True or
+      file_identity(output)!=data.get('output_identity') or type(data.get('files')) is not list or not 1<=len(data['files'])<=100):raise ValueError('EXPORT_INVALID_JOURNAL')
+  seen=set()
+  for row in data['files']:
+   name=row.get('destination')
+   if type(name) is not str or not name or len(name)>256 or Path(name).name!=name or name in seen:raise ValueError('EXPORT_INVALID_JOURNAL')
+   seen.add(name);dest=checked(output/name)
+   if not dest.is_file() or not same(file_identity(dest),row.get('identity')) or digest(dest)!=row.get('sha256'):raise ValueError('EXPORT_RECOVERY_FILE_CHANGED')
+  remove_entry(output,path.name,file_identity(path),data['output_identity'])
+  return {'status':'RECONCILED_COMMITTED','files':[str(output/name) for name in sorted(seen)],'source_modified':False,'published_files_deleted':False}
  validate(output,stage,data,ready=action=='FINISH')
  tx=object.__new__(ExportTransaction);tx.output=output;tx.stage=stage;tx.journal=path;tx.data=data
  data['published']=[r['destination'] for r in data['files'] if (output/r['destination']).exists()]
