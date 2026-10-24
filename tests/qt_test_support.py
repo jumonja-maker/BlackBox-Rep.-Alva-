@@ -9,7 +9,11 @@ def close_and_drain(window,app,timeout=10):
            "_investigation_worker","_thread_detail_worker")
     while time.monotonic()<deadline:
         app.processEvents()
-        if not window.probe.active and all(getattr(window,n,None) is None for n in names):
+        probe=window.probe
+        owners=(getattr(probe,n,None) for n in ("_pending_windows","_pending_detailed","_pending_v2"))
+        native_pending=any(getattr(o,"thread",None) is not None and o.thread.is_alive() for o in owners)
+        helper_alive=bool(getattr(probe,"alive",False))
+        if not probe.active and not native_pending and not helper_alive and all(getattr(window,n,None) is None for n in names):
             window.close()
             app.processEvents()
             return

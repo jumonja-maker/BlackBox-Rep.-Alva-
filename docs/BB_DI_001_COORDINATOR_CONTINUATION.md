@@ -169,3 +169,23 @@ the persisted extended-spacing event with missing_sample_count=NULL.
 
 Original order remains WIP: no claim of 8h/1h endurance, 300/100 native scale,
 complete source coverage, physical Windows acceptance or full 128-item closure.
+
+
+## Final clock corrections found in continuation review
+
+GUI problem markers now retain issued monotonic time separately from helper
+receipt time; delayed transport is not silently substituted for the click.
+Missing/invalid issued clocks cannot reuse a previous command's latency.
+Process-exit incidents use the actual observation time, not the last sample's
+old timestamp. Their nonexistent post-exit samples remain zero observed span,
+not invented continuous coverage. Real delayed-marker and owned-child-exit
+regressions verify both paths.
+
+
+The e4ef320 Windows suite failed on two fixture-cleanup WinError 32 cases:
+`test_shell` waited for base/report workers but not the interval reader or
+pending native/v2 owners before deleting its temporary evidence. It now uses
+the common close-and-drain helper, which asserts every real owner is finished;
+there is no ignore_errors/retry-delete or suppressed assertion. Product close
+already defers while those owners exist. Final detail counters are retained
+after capture stops instead of displaying zero for an actual completed capture.

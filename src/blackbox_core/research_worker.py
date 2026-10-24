@@ -31,6 +31,7 @@ class ResearchSession:
         self.probe=ReadOnlyProbe(output_root=Path(os.path.abspath(output_root)) if output_root is not None else None)
         self.book=None;self.tail=None;self.wpr=None
         self.runtime_trace=None
+        self._last_detail_capture=None
         self.jobs=OptionalJobs()
         self.sensors=None
         self._cancelled_operations=deque(maxlen=8)
@@ -60,16 +61,17 @@ class ResearchSession:
     def snapshot(self):
         p=self.probe
         data=p.snapshot()
+        detail=p.detailed_capture or self._last_detail_capture
         state,windows=p.window_capture.snapshot() if p.window_capture is not None else ("DISABLED",[])
         data["recent_samples"]=data["recent_samples"][-360:]
         data.update(name=p.name,pid=p.pid,last_error=p.last_error or self.research_error,
             action_ready=p.actions.ready_to_start(),
             detail_enabled=p.detailed_capture is not None,incident_enabled=p.incident_capture is not None,
             incident_policy={"threshold":p.incident_capture.threshold,"min_duration_ms":p.incident_capture.min_duration_ms} if p.incident_capture is not None else None,
-            detail_sample_count=p.detailed_capture.samples if p.detailed_capture is not None else 0,
+            detail_sample_count=detail.samples if detail is not None else 0,
             window_capture_enabled=p.window_capture is not None,window_capture_status=state,
             observed_windows=windows,selected_hwnd=p.window_capture.selected_hwnd if p.window_capture else None,
-            detail_status=p.detailed_capture.status if p.detailed_capture is not None else "DISABLED",
+            detail_status=detail.status if detail is not None else "DISABLED",
             report_result=p.report_result,capabilities=capabilities(),
             experiment_context=self.context,native_enabled=self.native_enabled,
             wpr_active=bool(self.wpr and self.wpr.active),
@@ -209,7 +211,17 @@ class ResearchSession:
             lambda deadline:self.jobs.health()))
         self.sensors.start(self.context)
 
+    def _receive_command(self,command):
+        self.last_command=command.get("op");self.command_latency_ms=None
+        issued=command.get("issued_ns")
+        if issued is None:return None
+        latency=time.monotonic_ns()-issued if type(issued) is int else -1
+        if not 0<=latency<=300_000_000_000:raise ValueError("INVALID_COMMAND_ISSUE_TIME")
+        self.command_latency_ms=latency/1_000_000
+        return issued
+
     def submit_optional(self, command):
+        self._receive_command(command)
         op=command.get("op");a=command.get("args", {})
         if type(a) is not dict:raise ValueError("INVALID_COMMAND_ARGUMENTS")
         if op in ("native", "dump", "prepare_client", "inspect_dump") and not self.book:raise ValueError("START_RECORDING_FIRST")
@@ -312,10 +324,7 @@ class ResearchSession:
     def command(self, command):
         op=command.get("op");a=command.get("args",{})
         if type(a) is not dict:raise ValueError("INVALID_COMMAND_ARGUMENTS")
-        self.last_command=op
-        issued=command.get("issued_ns")
-        if type(issued) is int and 0<=time.monotonic_ns()-issued<=300_000_000_000:
-            self.command_latency_ms=(time.monotonic_ns()-issued)/1_000_000
+        issued=self._receive_command(command)
         if op=="attach":
             if self.book:self.stop()
             return self.probe.attach(int(a["pid"]))
@@ -343,7 +352,7 @@ class ResearchSession:
         if op=="start":
             self.probe.start()
             self.probe._store.v2.max_bytes=self.budget_bytes
-            self.native_enabled=False;self.runtime_trace=None;self.wpr=None
+            self.native_enabled=False;self.runtime_trace=None;self.wpr=None;self._last_detail_capture=None
             self.app_source_error=None
             self.research_state="RECORDING";self.research_error=None
             try:
@@ -375,10 +384,13 @@ class ResearchSession:
                         "end":self.probe.finish_action}[op](**({"baseline_ms":a["baseline_ms"]} if op=="prepare" and "baseline_ms" in a else {}))
             finally:self.probe.actions.clock=previous
             return result
-        if op=="mark":return self.probe.mark_problem(a.get("note",""))
+        if op=="mark":return self.probe.mark_problem(a.get("note",""),
+            issued_ns=issued if type(issued) is int and self.command_latency_ms is not None else None)
         if op=="detailed":
+            if self.probe.detailed_capture is not None:self._last_detail_capture=self.probe.detailed_capture
             result=self.probe.set_detailed_capture(bool(a["enabled"]))
             if self.probe.detailed_capture is not None:
+                self._last_detail_capture=self.probe.detailed_capture
                 self.probe.detailed_capture.max_bytes=self.budget_bytes
             self.book.set_context("configuration_changed",True)
             return result

@@ -98,9 +98,8 @@ class QtShellTests(unittest.TestCase):
         self.fail("report worker did not terminate")
 
     def tearDown(self):
-        self._wait_report()
-        self.window.close()
-        self.app.processEvents()
+        from qt_test_support import close_and_drain
+        close_and_drain(self.window,self.app)
         self.default_root.stop()
         self.tmp.cleanup()
 

@@ -242,7 +242,7 @@ class ReadOnlyProbe:
         # Close a partially captured CPU episode as incomplete, not successful.
         if self.incident_capture is not None:
             capture = self.incident_capture
-            boundaries = (capture.process_exited(elapsed_ms=self.last_elapsed_ms or 0,
+            boundaries = (capture.process_exited(elapsed_ms=max(0,(time.monotonic_ns()-self._recording_origin_ns)//1_000_000),
                 sample_seq=self.total_samples or 1) if reason=="PROCESS_EXITED" else [])
             boundaries += capture.stop(elapsed_ms=self.last_elapsed_ms or 0, sample_seq=self.total_samples or 1)
             for finding in boundaries:
@@ -584,7 +584,7 @@ class ReadOnlyProbe:
             raise ActionError("RECORDING_NOT_ACTIVE")
         return self.actions.finish(self._persist_action)
 
-    def mark_problem(self, note: str = "") -> int:
+    def mark_problem(self, note: str = "", *, issued_ns: int | None = None) -> int:
         """Record actual command time; preserve provenance as USER_REPORTED.
 
         The previous sample ordinal is metadata, never substituted for the
@@ -597,8 +597,9 @@ class ReadOnlyProbe:
         if type(note) is not str:
             raise ValueError("INVALID_MARKER_NOTE")
         clipped = note.strip()[:128]
-        command_ns = time.monotonic_ns()
-        if command_ns < self._recording_origin_ns:
+        received_ns = time.monotonic_ns()
+        command_ns = received_ns if issued_ns is None else issued_ns
+        if (type(command_ns) is not int or command_ns < self._recording_origin_ns or command_ns>received_ns):
             raise ValueError("INVALID_COMMAND_CLOCK")
         elapsed_ms = (command_ns - self._recording_origin_ns) // 1_000_000
         self._store.write_event({
@@ -606,6 +607,8 @@ class ReadOnlyProbe:
             "elapsed_ms": elapsed_ms, "note": clipped,
             "timestamp_utc": utc_stamp(),
             "timestamp_monotonic_ns": command_ns,
+            "observer_received_monotonic_ns": received_ns,
+            "command_clock_origin": "GUI_ISSUED" if issued_ns is not None else "LOCAL_OWNER_RECEIVED",
             "timestamp_precision": "COMMAND_MONOTONIC_NS",
             "previous_sample_elapsed_ms": self.last_elapsed_ms,
             "previous_sample_seq": self.total_samples,
