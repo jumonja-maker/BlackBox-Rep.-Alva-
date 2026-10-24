@@ -466,7 +466,11 @@ class SessionV2Writer:
                     db.execute("UPDATE sessions SET status='CLOSED',ended_monotonic_ns=?,exit_code=?,"
                                "writer_dropped_commands=?",(data["ended_ns"],code,self.dropped_commands))
                     db.commit()
-                    db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                    # FULL-synchronous WAL COMMIT is the durability boundary.
+                    # A forced TRUNCATE checkpoint can be blocked by an
+                    # unrelated read-only interval viewer. Checkpointing is
+                    # not required to read or verify the committed CLOSED row
+                    # and must never turn a valid finalization into an error.
                     return
                 try:
                     data = json.loads(command.payload)
