@@ -50,7 +50,7 @@ class EvidenceTimeline(QWidget):
 class ResearchPanel(QWidget):
     def __init__(self,window):
         super().__init__(window);self.window=window;self.bridge=window.probe
-        self._labels=[];self.result=None
+        self._labels=[];self.result=None;self._comparison_result=None
         layout=QVBoxLayout(self);layout.setContentsMargins(0,0,0,0)
         self.status=QLabel();self.status.setWordWrap(True);layout.addWidget(self.status)
         context=QGridLayout()
@@ -83,7 +83,7 @@ class ResearchPanel(QWidget):
             self._labels.append((b,en,ru));self.buttons.append(b)
             self.by_action[en]=b
         layout.addLayout(buttons)
-        self.sensitive=QCheckBox();self._labels.append((self.sensitive,"Include raw traces / dumps in export","Включать исходные трассы / дампы в экспорт"));layout.addWidget(self.sensitive)
+        self.sensitive=QCheckBox();self._labels.append((self.sensitive,"Include raw traces, dumps and source fields in export","Включать исходные трассы, дампы и поля источников"));layout.addWidget(self.sensitive)
         interval=QHBoxLayout();self.begin=QDoubleSpinBox();self.end=QDoubleSpinBox()
         for box in (self.begin,self.end):box.setRange(0,31*24*3600);box.setDecimals(3);box.setSuffix(" s");interval.addWidget(box)
         self.end.setValue(60)
@@ -100,6 +100,8 @@ class ResearchPanel(QWidget):
         self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.table.setMinimumHeight(180);self.table.itemSelectionChanged.connect(self.show_evidence);layout.addWidget(self.table)
+        self.machine_fields=QCheckBox();self._labels.append((self.machine_fields,"Show technical JSON for comparison","Показать технический JSON сравнения"))
+        self.machine_fields.toggled.connect(self._render_comparison);layout.addWidget(self.machine_fields)
         self.details=QPlainTextEdit();self.details.setReadOnly(True);self.details.setMinimumHeight(150);layout.addWidget(self.details)
         self.folder=None
         self.preparation_dialog=None
@@ -114,6 +116,7 @@ class ResearchPanel(QWidget):
     def retranslate(self):
         for widget,en,ru in self._labels:widget.setText(self.tr(en,ru))
         self.table.setHorizontalHeaderLabels(("ms",self.tr("SOURCE","ИСТОЧНИК"),self.tr("QUALITY","КАЧЕСТВО"),self.tr("EVENT","СОБЫТИЕ")))
+        self._render_comparison()
     def refresh(self):
         data=getattr(self.bridge,"data",{})
         mode=data.get("capabilities",{}).get("privilege",{}).get("mode","UNKNOWN")
@@ -214,11 +217,21 @@ class ResearchPanel(QWidget):
             self.result=result;self.timeline.set_data(result);self.render_page(result["evidence"])
             self.details.setPlainText(json.dumps({"facts":result["facts"],"limitations":result["limitations"],
                 "more_evidence_available":result["evidence"]["has_more"]},ensure_ascii=False,indent=2))
+        elif op=="compare" and type(result) is dict:
+            self._comparison_result=result;self._render_comparison()
         elif op=="evidence_page" and type(result) is dict:self.render_page(result)
         elif op=="prepare_client" and type(result) is dict:
             self.details.setPlainText(result["instructions"]+"\n\n"+result["folder"])
         elif op not in ("attach","start","prepare","begin","end","mark","interval","detailed","incidents","stop","quit","processes"):
             self.details.setPlainText(json.dumps(result,ensure_ascii=False,indent=2))
+    def _render_comparison(self):
+        if self._comparison_result is None:return
+        if self.machine_fields.isChecked():text=json.dumps(self._comparison_result,ensure_ascii=False,indent=2)
+        else:
+            from .experiment_view import comparison_text
+            text=comparison_text(self._comparison_result,self.window.language)
+        self.details.setPlainText(text)
+
     def elevate(self):
         if os.name!="nt":self.details.setPlainText("UNSUPPORTED_PLATFORM");return
         if self.bridge.active or self.bridge.pending:

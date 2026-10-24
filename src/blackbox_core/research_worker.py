@@ -190,7 +190,7 @@ class ResearchSession:
     def _start_registry(self):
         self.sensors=SensorRegistry(("base", "application", "detail", "windows", "optional"))
         def base(deadline):
-            result=self.probe.tick(requested_interval_ms=self.interval_ms)
+            result=self.probe.tick(requested_interval_ms=self.interval_ms,track_cadence=True)
             return {"status":"OBSERVED" if result is not None else self.probe.session_state,
                 "committed_sample_seq":self.probe.total_samples}
         self.sensors.register(CallbackSensor(Capability("base","PSUTIL_PROCESS_COUNTERS","AVAILABLE","PRIMARY_RECORDING"),base))
@@ -553,7 +553,11 @@ def main(output_root=None):
                 except Exception as exc:
                     emit({"type":"error","error":str(exc)[:512]})
                     session.stop("STORAGE_ERROR")
-                next_tick=time.monotonic()+session.interval_ms/1000
+                # Preserve an absolute recorder cadence; never run a burst of
+                # catch-up samples or call skipped local slots lost OS events.
+                interval=session.interval_ms/1000
+                now=time.monotonic();next_tick+=interval
+                if next_tick<=now:next_tick+=((now-next_tick)//interval+1)*interval
                 emit({"type":"snapshot","snapshot":session.snapshot()})
     finally:
         session.jobs.cancel()

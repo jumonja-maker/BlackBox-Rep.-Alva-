@@ -457,7 +457,7 @@ class ReadOnlyProbe:
         except ObserverError:
             self.last_error = "STORAGE_ERROR"
 
-    def tick(self, *, requested_interval_ms: int = 1000) -> dict | None:
+    def tick(self, *, requested_interval_ms: int = 1000, track_cadence: bool = False) -> dict | None:
         """Legacy synchronous path for CLI/explicit callers, not Qt timer."""
         if not self.active or self._core is None or self._store is None:
             return None
@@ -469,6 +469,9 @@ class ReadOnlyProbe:
                     **self._core.last_observation,
                     "correlation_key": f"schema1:{self._store.seq}",
                     "requested_interval_ns": requested_interval_ms*1_000_000})
+            if track_cadence:
+                return self.accept_background_sample(sample,self._store.seq,
+                    requested_interval_ms=requested_interval_ms)
             return self._accept_persisted_sample(sample, self._store.seq)
         except ObserverError as exc:
             self.last_error = exc.code

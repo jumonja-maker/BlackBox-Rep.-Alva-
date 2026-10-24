@@ -19,7 +19,7 @@ class IncidentCapture:
         if (type(threshold) not in (float,int) or not math.isfinite(threshold) or not 0<threshold<=6400 or
             any(type(x) is not int or x<0 for x in (min_duration_ms,gap_ms,pre_ms,post_ms,cooldown_ms,
                 memory_growth_bytes,handle_growth,growth_window_ms,io_rate_bytes_s)) or
-            not 1<=max_incidents<=100 or post_ms>60000 or
+            type(max_incidents) is not int or not 1<=max_incidents<=100 or post_ms>60000 or
             growth_window_ms>60000 or type(gap_incidents) is not bool):
             raise ValueError('INVALID_INCIDENT_POLICY')
         self.threshold=float(threshold);self.min_duration_ms=min_duration_ms;self.gap_ms=gap_ms
@@ -38,7 +38,7 @@ class IncidentCapture:
                 handle_count=None, read_bytes=None, write_bytes=None, detail_ref=None):
         values=(cpu_percent,rss_bytes,private_bytes,handle_count,read_bytes,write_bytes)
         if (type(elapsed_ms) is not int or elapsed_ms<0 or type(sample_seq) is not int or sample_seq<=0 or
-            any(not self._valid(v) for v in values) or cpu_percent is not None and cpu_percent>6400 or
+            any(not self._valid(v) for v in values) or
             self._last_time is not None and elapsed_ms<self._last_time):raise ValueError('INVALID_INCIDENT_SAMPLE')
         previous=self._last_time;discontinuous=previous is not None and elapsed_ms-previous>self.gap_ms
         self._last_time=elapsed_ms;events=[];candidates=[]

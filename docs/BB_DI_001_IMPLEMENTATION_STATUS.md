@@ -192,3 +192,15 @@ Do not merge main or publish a release without the owner's explicit decision.
 ## Continuation: isolated owner and cooperative evidence
 
 See `BB_DI_001_COORDINATOR_CONTINUATION.md`. Public `app.py` now uses an isolated session owner for attach/start/actions/SQLite finish/report; synchronous APIs remain for embedders. Current 2.1 source/clock/privacy fixes are preserved, optional application events are explicitly unauthenticated. Quit acknowledgement no longer cancels the native-owner exit deadline. The base 4e048be Windows job timed out at DPI 200% and did not build a portable EXE; successful base unit/Python deep steps are not a successful frozen result. This section is an implementation delta, not promotion of every related row to full PASS. Exact new CI is pending.
+
+### Continuation evidence — 24 October 2026
+
+The normative rows above retain their original scope. The integrated recording
+owner, disposable optional operations, fixed sensor contract/health/backoff,
+multisignal windows, bounded WPR guardian, interval resource experiments and
+privacy-transformed share copies are documented in
+`BB_DI_001_COORDINATOR_CONTINUATION.md`. Exact-head CI and resource coverage
+must be reviewed before promoting a row; no original mandatory requirement has
+been removed. Real WPR raw capture/TTL is now evidenced on 2b6a7a3, separately
+from independent provider-content, size-hard-quota and orphan-recovery acceptance.
+The order is still NOT ACCEPTED; this appendix is not a blanket PASS update.

@@ -120,3 +120,52 @@ sitecustomize translates self PID to /proc/self/status; it is not product code
 or a hosted-CI modification. Counter values/times remain actual OS observations.
 The unmodified Windows/Linux CI remains authoritative for normal PID semantics.
 The original 128-item acceptance ledger is not reduced by this continuation.
+
+## Resource experiments and privacy of share copies
+
+Completed action intervals now have separate CPU-time, RSS/private peaks and
+changes, handle peaks/changes, observed I/O deltas and native timeout-episode
+counts. Standard and Detailed are never added together. Only valid adjacent
+counter pairs inside the actual action bounds are integrated; resets, gaps,
+missing fields and missing boundary coverage are explicit. A short action may
+have no resource pair. Quantiles use a small temporary indexed SQLite store;
+preview is capped to 20 runs, all runs contribute to statistics. Warmups and
+small-N warnings remain explicit. Comparison includes absolute/percentage
+median changes; a zero reference cannot produce an invented percentage.
+Reports exposes a bilingual human summary with opt-in technical JSON. Full
+experiment history/catalog and all acceptance metadata UI remain unfinished.
+
+Default ZIP creation now redacts **copies** of known JSON columns and derives
+HTML/JSON/CSV from those same copies. Raw application attributes, debugger
+previews, known internal full paths and recognizable paths/URLs are omitted.
+Secure-delete plus VACUUM prevents the copied SQLite pages from retaining the
+removed payload. The original databases/hashes remain unchanged. Explicit
+sensitive export retains original fields; the UI label describes this scope.
+The manifest declares the privacy transformation and that arbitrary secrets
+hidden in other free text cannot be universally detected. A redacted package
+is never marked a complete original package.
+
+A continuation audit found that the isolated owner's synchronous sampling path
+had bypassed the earlier monotonic-cadence tracker. Production now calls its
+existing durable cadence acceptance path and preserves an absolute sampling
+schedule without catch-up bursts. This does not invent Qt signal-delivery
+measurements or lost OS sample counts. A real delayed owner regression verifies
+the persisted extended-spacing event with missing_sample_count=NULL.
+
+## Evidence obtained during continuation
+
+- 2b6a7a3: unmodified Windows suite 332 total, 329 PASS / 3 platform SKIP;
+  Linux and source E2E passed. Actual WPR guardian TTL created a 9,437,184-byte
+  ETL, stopped with TTL_EXPIRED and recorded SHA-256
+  `6d2732c15a2697cd79d7a582836c3df6fa890ea5c8240464fe4b0b84a6e05d16`.
+  Event loss remains unknown; provider payloads were not independently decoded.
+- WPR artifact 12549521847 archive digest:
+  `c541ef16e4690af1b0059e149bc2ebf71ae923bac3027f8b828ca3a159603796`.
+- Actual vector-icon DPI images reviewed from artifact 12549447429, digest
+  `110dae96e03f1e645ce747cbeb9a63eb24d0627bf0e6bcc7d24e870c6d8136a1`.
+  The earlier missing action-icon boxes are resolved in that capture.
+- Resource/export/privacy/cadence additions require the next exact-head CI;
+  preceding green checks are not their acceptance evidence.
+
+Original order remains WIP: no claim of 8h/1h endurance, 300/100 native scale,
+complete source coverage, physical Windows acceptance or full 128-item closure.
