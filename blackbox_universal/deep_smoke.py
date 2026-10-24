@@ -22,6 +22,7 @@ from PySide6.QtWidgets import QCheckBox,QDialog,QApplication
 import psutil
 from blackbox_core.interval_report import digest
 from blackbox_core.session_v2 import FILENAME,safe_path
+from blackbox_universal.theme import font_coverage
 
 
 class DeepSmoke(QObject):
@@ -45,6 +46,7 @@ class DeepSmoke(QObject):
             "os":platform.platform(),"python":platform.python_version(),"psutil":psutil.__version__,
             "pyside6":qt_version,"limitations":["NOT_8H_OR_1H_ENDURANCE","NOT_PHYSICAL_WIN10_WIN11_QA",
                 "NO_ETW_ACCEPTANCE","NO_FULL_INCIDENT_CARD_RESOURCE_COMPARE_ACCEPTANCE"]}
+        self.result["font_coverage"] = font_coverage(app)
         self.timer=QTimer(self);self.timer.setInterval(100);self.timer.timeout.connect(self.poll)
 
     def start(self):
@@ -70,6 +72,7 @@ class DeepSmoke(QObject):
                 raise RuntimeError("DEEP_SMOKE_DEADLINE")
             w=self.window
             if self.phase=="BOOT":
+                self._require(self.result["font_coverage"]["ok"], "RU_EN_FONT_GLYPHS_MISSING")
                 ready=self.fixture/"ready.json"
                 if not ready.is_file():
                     self._require(self.child.poll() is None,"FIXTURE_EXITED_BEFORE_READY")

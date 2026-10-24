@@ -6,6 +6,21 @@ are NEVER translated: only interface chrome and explanatory text.
 from __future__ import annotations
 
 RU = {
+"INVESTIGATION SUMMARY":"ИТОГИ РАССЛЕДОВАНИЯ",
+"FULL SELECTED INTERVAL / READ ONLY":"ВЕСЬ ВЫБРАННЫЙ ИНТЕРВАЛ / ЧТЕНИЕ",
+"RECORDED PROCESS TREE":"ИСТОРИЯ ДЕРЕВА ПРОЦЕССОВ",
+"SESSION EVENT TIMELINE":"ШКАЛА СОБЫТИЙ СЕАНСА",
+"No interval":"Нет интервала",
+"RSS / Working set":"RSS / Рабочий набор",
+"Private":"Частная память",
+"Handles":"Дескрипторы",
+"Read":"Чтение",
+"Write":"Запись",
+"Threads":"Потоки",
+"Children":"Потомки",
+"FIRST/MIN/MAX/LAST; gaps are not zero":"Первая/минимум/максимум/последняя; пропуски не равны нулю",
+"{selected}/{total} samples · CPU peak {cpu} % / 1 CPU · RSS peak {rss} MiB":"{selected}/{total} отсчётов · пик CPU {cpu} % одного ядра · пик RSS {rss} МиБ",
+"gaps={gaps} · errors={errors} · Root cause: UNKNOWN":"пропуски={gaps} · ошибки={errors} · Первопричина: UNKNOWN",
 "Select a saved event to inspect method, status, HWND/TID or WCT nodes. Root cause: UNKNOWN.":"Выберите сохранённое событие: метод, статус, HWND/TID или узлы WCT. Первопричина: UNKNOWN.",
 "Maximum 20 repeats per recording. Start a new recording for another experiment.":"До 20 повторов в одном сеансе. Для другого эксперимента начните новый сеанс.",
 "CPU trigger threshold (% of one logical CPU)":"Порог CPU (% одного логического ядра)",

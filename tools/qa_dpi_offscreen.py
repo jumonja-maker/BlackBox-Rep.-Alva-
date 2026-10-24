@@ -6,6 +6,7 @@ Only synthetic empty-interface data is captured. No user process metadata.
 """
 from __future__ import annotations
 import os
+import json
 from pathlib import Path
 import sys
 
@@ -14,7 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from PySide6.QtWidgets import QApplication
 from blackbox_universal.window import UniversalWindow
-from blackbox_universal.theme import set_retro_theme
+from blackbox_universal.theme import set_retro_theme, font_coverage
 
 
 def main() -> int:
@@ -24,6 +25,10 @@ def main() -> int:
     output.mkdir(parents=True, exist_ok=True)
     app = QApplication.instance() or QApplication([])
     set_retro_theme(app)
+    fonts = font_coverage(app)
+    (output / "font-coverage.json").write_text(json.dumps(fonts, ensure_ascii=False, indent=2), encoding="utf-8")
+    if not fonts["ok"]:
+        raise RuntimeError("DPI_RU_EN_FONT_GLYPHS_MISSING: " + json.dumps(fonts, ensure_ascii=False))
     window = UniversalWindow()
     window._timer.stop()
     window.resize(1330, 850)

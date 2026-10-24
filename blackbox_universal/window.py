@@ -681,7 +681,7 @@ class UniversalWindow(QMainWindow):
         interval_panel.content.addWidget(self.session_event_details)
         track_controls = QGridLayout()
         for index,key in enumerate(SessionTimeline.TRACKS):
-            toggle = QCheckBox(key)
+            toggle = QCheckBox(SessionTimeline.TRACK_LABELS[key])
             toggle.setChecked(key in self.session_timeline.visible_tracks)
             toggle.toggled.connect(lambda enabled,k=key:self.session_timeline.set_track(k,enabled))
             track_controls.addWidget(toggle,index//3,index%3)
@@ -887,7 +887,8 @@ class UniversalWindow(QMainWindow):
                 action.setProperty("bb_english", original)
             action.setText(self._t(str(original)))
         for table in (self.process_table, self.event_table,
-                      self.thread_detail_table):
+                      self.thread_detail_table, self.process_history_table,
+                      self.session_event_table):
             for i in range(table.columnCount()):
                 header = table.horizontalHeaderItem(i)
                 if header is None:
@@ -912,6 +913,8 @@ class UniversalWindow(QMainWindow):
             "Проверять GitHub Releases при запуске" if language == "RU"
             else "Check GitHub Releases when the app starts")
         self.chart.set_language(language)
+        self.session_timeline.set_language(language)
+        self._render_interval_summary()
         self._refresh_report_status()
         self._refresh_investigation_info()
         self._render_investigation_findings()
@@ -1485,6 +1488,25 @@ class UniversalWindow(QMainWindow):
         worker.finished.connect(self._session_interval_finished)
         worker.start()
 
+    def _render_interval_summary(self):
+        if self._interval_packet is None:
+            if self._interval_worker is None:
+                self.interval_summary.setText(self._t("Open a recorded session to inspect its full interval."))
+            return
+        result=self._interval_packet["interval"]
+        coverage=result["coverage"]
+        metrics=result["metrics"]
+        cpu_peak=metrics["cpu_interval_percent"]["max"]
+        rss_peak=metrics["rss_bytes"]["max"]
+        cpu_text=f"{cpu_peak:.1f}" if cpu_peak is not None else "UNAVAILABLE"
+        rss_text=f"{rss_peak/1048576:.2f}" if rss_peak is not None else "UNAVAILABLE"
+        self.interval_summary.setText(self._t("Observed / support / limits")+f"\n{result['series']} · "+
+            self._t("{selected}/{total} samples · CPU peak {cpu} % / 1 CPU · RSS peak {rss} MiB").format(
+                selected=coverage["selected_samples"],total=coverage["total_samples"],cpu=cpu_text,rss=rss_text)+"\n"+
+            self._t("gaps={gaps} · errors={errors} · Root cause: UNKNOWN").format(
+                gaps=coverage["spacing_gap_pairs"],errors=coverage["sensor_error_records"])+
+            " · UNVERIFIED_IMPORT · "+" / ".join(result["warnings"]))
+
     def _session_interval_ready(self,packet,error):
         if self._interval_pending is not None or self._pending_close:
             return
@@ -1495,18 +1517,7 @@ class UniversalWindow(QMainWindow):
             return
         self._interval_packet=packet
         result=packet["interval"]
-        coverage=result["coverage"]
-        metrics=result["metrics"]
-        cpu_peak=metrics["cpu_interval_percent"]["max"]
-        rss_peak=metrics["rss_bytes"]["max"]
-        cpu_text=f"{cpu_peak:.1f}" if cpu_peak is not None else "UNAVAILABLE"
-        rss_text=f"{rss_peak/1048576:.2f}" if rss_peak is not None else "UNAVAILABLE"
-        self.interval_summary.setText(
-            self._t("Observed / support / limits")+f"\n{result['series']} · "
-            f"{coverage['selected_samples']}/{coverage['total_samples']} samples · "
-            f"CPU peak {cpu_text} % / 1 CPU · RSS peak {rss_text} MiB\n"
-            f"gaps={coverage['spacing_gap_pairs']} · errors={coverage['sensor_error_records']} · "
-            "Root cause: UNKNOWN · UNVERIFIED_IMPORT · "+" / ".join(result["warnings"]))
+        self._render_interval_summary()
         self.session_timeline.set_interval(result)
         self.export_interval_btn.setEnabled(self._interval_export_worker is None and
             result["metadata"]["recorded_status"] not in (None,"RECORDING"))

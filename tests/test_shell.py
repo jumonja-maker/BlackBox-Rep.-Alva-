@@ -19,7 +19,7 @@ from blackbox_universal.monitor import (
 )
 from blackbox_core.contracts import ObserverError
 from blackbox_core.report import summarize
-from blackbox_universal.theme import set_retro_theme
+from blackbox_universal.theme import set_retro_theme, font_coverage
 from blackbox_universal.window import UniversalWindow
 
 
@@ -115,6 +115,11 @@ class QtShellTests(unittest.TestCase):
             self.assertEqual(self.window.stack.currentIndex(),
                              self.window._page_ids[key])
         self.assertTrue(self.window.windowTitle().startswith("BLACK.BOX"))
+
+    def test_ru_en_text_has_real_regular_and_bold_glyphs(self):
+        evidence = font_coverage(self.app)
+        self.assertTrue(evidence["ok"], json.dumps(evidence, ensure_ascii=False))
+        self.assertEqual(len(evidence["fonts"]), 4)
 
     def test_section_breadcrumbs_without_marketing_headings(self):
         from PySide6.QtWidgets import QFrame, QLabel

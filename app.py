@@ -11,7 +11,7 @@ from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication
 
 from blackbox_universal.monitor import ReadOnlyProbe
-from blackbox_universal.theme import set_retro_theme
+from blackbox_universal.theme import set_retro_theme, font_coverage
 from blackbox_universal.window import UniversalWindow
 
 
@@ -45,6 +45,8 @@ def main(argv: list[str] | None = None) -> int:
         controller.start()
         return app.exec()
     if options.smoke:
+        if not font_coverage(app)["ok"]:
+            raise RuntimeError("SMOKE_RU_EN_FONT_GLYPHS_MISSING")
         # Exercise the ACTUAL Python/frozen binary, not only a Qt import.
         # Entirely temporary and offline.
         expected = ("dashboard", "processes", "events", "reports", "settings")

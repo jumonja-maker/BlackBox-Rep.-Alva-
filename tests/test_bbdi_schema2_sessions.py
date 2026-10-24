@@ -353,7 +353,7 @@ class FullIntervalTests(unittest.TestCase):
 
 class IntervalQtTests(unittest.TestCase):
     def test_real_ui_opens_v2_zoom_changes_full_query_and_keeps_target(self):
-        from PySide6.QtWidgets import QApplication
+        from PySide6.QtWidgets import QApplication, QCheckBox
         from blackbox_universal.window import UniversalWindow
         app=QApplication.instance() or QApplication([])
         with tempfile.TemporaryDirectory() as temp:
@@ -376,6 +376,10 @@ class IntervalQtTests(unittest.TestCase):
                     app.processEvents();time.sleep(.005)
                 self.assertIsNone(window._interval_worker)
             try:
+                window._set_language("RU")
+                self.assertIn("Откройте записанный сеанс",window.interval_summary.text())
+                self.assertEqual(window.session_timeline.language,"RU")
+                self.assertIn("Дескрипторы",[c.text() for c in window.findChildren(QCheckBox)])
                 window.load_interval_current.click();drain()
                 self.assertEqual(window.stack.count(),5)
                 self.assertEqual(window._interval_packet["interval"]["coverage"]["selected_samples"],6000)
@@ -385,6 +389,11 @@ class IntervalQtTests(unittest.TestCase):
                 self.assertEqual(window.probe.pid,98765)
                 self.assertGreater(window.process_history_table.rowCount(),0)
                 self.assertIn("UNKNOWN",window.interval_summary.text())
+                self.assertIn("61/6000 отсчётов",window.interval_summary.text())
+                packet=window._interval_packet
+                window._set_language("EN")
+                self.assertIn("61/6000 samples",window.interval_summary.text())
+                self.assertIs(window._interval_packet,packet)
                 window.session_event_table.selectRow(0);drain()
                 self.assertIn("WCT_SNAPSHOT",window.session_event_details.toPlainText())
                 self.assertIn("UNVERIFIED_IMPORT",window.session_event_details.toPlainText())

@@ -4,6 +4,7 @@ from bisect import bisect_left
 from PySide6.QtCore import QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import QWidget, QToolTip
+from .i18n import translate
 
 
 class SessionTimeline(QWidget):
@@ -11,10 +12,12 @@ class SessionTimeline(QWidget):
     TRACKS=("cpu_interval_percent","rss_bytes","private_bytes","uss_bytes",
             "handle_count","read_bps","write_bps","thread_count","children_total")
     COLORS=("#bb5666","#31847f","#8b5b9f","#596aa4","#947343","#a6522f","#795d49","#5c6b55","#684b85")
+    TRACK_LABELS=dict(zip(TRACKS,("CPU","RSS / Working set","Private","USS","Handles","Read","Write","Threads","Children")))
 
     def __init__(self,parent=None):
         super().__init__(parent)
         self.payload=None
+        self.language="EN"
         self.visible_tracks=set(self.TRACKS[:3])
         self.selection=None
         self._drag=None
@@ -28,6 +31,10 @@ class SessionTimeline(QWidget):
     def set_interval(self,payload):
         self.payload=payload
         self.selection=None
+        self.update()
+
+    def set_language(self,language):
+        self.language=language
         self.update()
 
     def set_track(self,key,enabled):
@@ -79,11 +86,11 @@ class SessionTimeline(QWidget):
             i=bisect_left([p["time_ns"] for p in points],stamp)
             if points:
                 p=points[min(i,len(points)-1)]
-                labels.append(f"{key}: {p['value']:.4g} {self.payload['metrics'][key]['unit']} "
+                labels.append(f"{translate(self.TRACK_LABELS[key],self.language)}: {p['value']:.4g} {self.payload['metrics'][key]['unit']} "
                               f"@ {(p['time_ns']-self.payload['metadata']['monotonic_origin_ns'])/1e9:.6f}s")
         if labels:
             QToolTip.showText(event.globalPosition().toPoint(),"\n".join(labels)+
-                             "\nFIRST/MIN/MAX/LAST; gaps are not zero",self)
+                             "\n"+translate("FIRST/MIN/MAX/LAST; gaps are not zero",self.language),self)
 
     def mouseReleaseEvent(self,event):
         if not self._drag or not self.payload:
@@ -122,7 +129,7 @@ class SessionTimeline(QWidget):
         painter.fillRect(self.rect(),QColor("#fffaf0"))
         painter.setPen(QColor("#584c63"))
         if not self.payload:
-            painter.drawText(self.rect(),Qt.AlignmentFlag.AlignCenter,"No interval / Нет интервала")
+            painter.drawText(self.rect(),Qt.AlignmentFlag.AlignCenter,translate("No interval",self.language))
             return
         plot=self._plot()
         keys=[k for k in self.TRACKS if k in self.visible_tracks]
@@ -139,10 +146,7 @@ class SessionTimeline(QWidget):
             painter.setPen(QColor("#584c63"))
             unit=self.payload["metrics"][key]["unit"]
             display_unit="% / 1 CPU" if unit=="percentage_of_one_logical_cpu" else unit
-            name={"cpu_interval_percent":"CPU","rss_bytes":"RSS / Working set",
-                "private_bytes":"Private","uss_bytes":"USS","handle_count":"Handles",
-                "read_bps":"Read","write_bps":"Write","thread_count":"Threads",
-                "children_total":"Children"}.get(key,key)
+            name=translate(self.TRACK_LABELS[key],self.language)
             painter.drawText(QRectF(3,y,144,height),Qt.AlignmentFlag.AlignVCenter,
                 name+f"\n{maximum:.3g} {display_unit}" if points else name+"\nUNAVAILABLE")
             path=QPainterPath()
