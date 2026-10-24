@@ -2,7 +2,9 @@
 from contextlib import closing
 import hashlib
 from pathlib import Path
+import os
 import sqlite3
+import time
 import tempfile
 import unittest
 
@@ -99,6 +101,40 @@ class CompletionReadTests(unittest.TestCase):
                 return  # Windows tokens can lack symlink creation permission.
             with self.assertRaisesRegex(CompletionNotConfirmed, "UNSAFE_PATH"):
                 self.check(alias)
+
+    def test_actual_writer_finish_does_not_require_checkpointing_active_reader(self):
+        # A real SessionV2Writer must commit CLOSED while a read-only
+        # Investigation view retains an earlier WAL snapshot. SQLite WAL
+        # durability does not depend on a blocking TRUNCATE checkpoint.
+        from blackbox_core.storage import SessionStore
+        from blackbox_core.probe import PsutilProbe
+        with tempfile.TemporaryDirectory() as root:
+            pid = os.getpid()
+            probe = PsutilProbe(pid)
+            store = SessionStore(Path(root), pid)
+            try:
+                store.enable_v2(pid=pid, created=probe.created,
+                                name="self-test", origin_ns=probe.origin_ns)
+                self.assertTrue(store.v2._ready.wait(5))
+                self.assertIsNone(store.v2.failure)
+                with closing(sqlite3.connect(store.v2.path)) as older:
+                    older.execute("BEGIN")
+                    self.assertEqual(
+                        older.execute("SELECT status FROM sessions").fetchone(),
+                        ("RECORDING",))
+                    started = time.monotonic()
+                    store.finish("COMPLETED")
+                    self.assertLess(time.monotonic() - started, 4.5)
+                    self.assertTrue(store.finished)
+                    confirm_v2_completion(
+                        store.v2.path, session_uuid=store.v2.session_uuid,
+                        origin_ns=store.v2.origin_ns, exit_code="COMPLETED")
+                    self.assertEqual(
+                        older.execute("SELECT status FROM sessions").fetchone(),
+                        ("RECORDING",))
+                    older.rollback()
+            finally:
+                store.close()
 
     def test_closed_commit_in_wal_is_seen_despite_older_reader(self):
         with tempfile.TemporaryDirectory() as root:
