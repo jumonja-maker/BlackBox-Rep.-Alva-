@@ -61,12 +61,20 @@ class ChromeButton(QPushButton):
             self.setIcon(icon(stripped[0]));text=stripped[1:].lstrip()
         else:self.setIcon(QIcon())
         super().setText(text)
+        if self.menu() is not None:
+            # QHBoxLayout may shrink QPushButton below its sizeHint even when
+            # minimumSizeHint is overridden. A true minimum width reserves
+            # room for translated Cyrillic and the *native* menu indicator.
+            self.setMinimumWidth(self.sizeHint().width())
     def setMenu(self,menu):
         super().setMenu(menu)
         if menu is not None:
             # Do not re-run icon extraction on already displayed text: Start
             # and other icon-bearing menus must retain their original icon.
             super().setText(self.text().rstrip().removesuffix('▾').rstrip())
+            self.setMinimumWidth(self.sizeHint().width())
+        else:
+            self.setMinimumWidth(0)
         self.updateGeometry()
     def sizeHint(self):
         size=super().sizeHint()
