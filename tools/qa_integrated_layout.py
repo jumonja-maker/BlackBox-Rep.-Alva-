@@ -96,7 +96,7 @@ def capture_integrated_layout(window, app, output: Path, scale: str) -> None:
         result["failures"] = failures
         result["status"] = "PASS" if not failures else "FAIL"
     finally:
-        (output / "expanded-layout.json").write_text(
+        (output / f"expanded-layout-{scale}.json").write_text(
             json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
     if failures:
         raise RuntimeError("INTEGRATED_LAYOUT_CHECK_FAILED: " + json.dumps(failures))

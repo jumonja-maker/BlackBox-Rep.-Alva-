@@ -145,6 +145,7 @@ class ResearchPanel(QWidget):
         self.table.setHorizontalHeaderLabels(("ms",self.tr("SOURCE","ИСТОЧНИК"),self.tr("QUALITY","КАЧЕСТВО"),self.tr("EVENT","СОБЫТИЕ")))
         self.action_grid.invalidate()
         self._render_comparison()
+        self.refresh()  # Translate cached status immediately, without a new command.
     def refresh(self):
         data=getattr(self.bridge,"data",{})
         mode=data.get("capabilities",{}).get("privilege",{}).get("mode","UNKNOWN")
