@@ -9,7 +9,7 @@ import json
 from pathlib import Path
 
 from PySide6.QtCore import QPoint, QRect
-from PySide6.QtWidgets import QScrollArea
+from PySide6.QtWidgets import QScrollArea, QPushButton
 
 
 def _settle(app):
@@ -46,6 +46,26 @@ def capture_integrated_layout(window, app, output: Path, scale: str) -> None:
             window._set_language(language)
             window._navigate("reports")
             _settle(app)
+            menu_buttons = [button for button in window.findChildren(QPushButton)
+                            if button.menu() is not None and button.isVisible()]
+            menu_rows = []
+            for button in menu_buttons:
+                rect = button.geometry()
+                text_width = button.fontMetrics().horizontalAdvance(button.text())
+                original = button.property("bb_english")
+                row = {"source": str(original), "text": button.text(),
+                       "width": button.width(), "text_width": text_width,
+                       "hint_width": button.sizeHint().width(),
+                       "native_indicator_only": "▾" not in button.text(),
+                       "contained": button.parentWidget().rect().contains(rect),
+                       "actions": len(button.menu().actions())}
+                menu_rows.append(row)
+                if (not row["native_indicator_only"] or not row["contained"] or
+                        button.width() < text_width + 40):
+                    failures.append([language, "menu", str(original), "CLIPPED_MENU_LABEL"])
+            result.setdefault("menus", {})[language] = menu_rows
+            if len(menu_rows) < 3:
+                failures.append([language, "menu", "MISSING_MENU"])
             scroll = window.stack.currentWidget()
             if not isinstance(scroll, QScrollArea):
                 raise RuntimeError("INTEGRATED_REPORT_SCROLL_MISSING")

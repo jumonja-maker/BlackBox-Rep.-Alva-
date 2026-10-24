@@ -52,8 +52,30 @@ class ChromeButton(QPushButton):
         super().__init__(parent);self.setProperty('bb_english',text);self.setText(text)
         self.setIconSize(QSize(14,14))
     def setText(self,text):
+        if self.menu() is not None:
+            # QMenu already supplies its native indicator. Retain bb_english
+            # as the original translation key, not a second visible arrow.
+            text=str(text).rstrip().removesuffix('▾').rstrip()
         stripped=str(text).lstrip()
         if stripped and stripped[0] in SYMBOLS:
             self.setIcon(icon(stripped[0]));text=stripped[1:].lstrip()
         else:self.setIcon(QIcon())
         super().setText(text)
+    def setMenu(self,menu):
+        super().setMenu(menu)
+        if menu is not None:
+            # Do not re-run icon extraction on already displayed text: Start
+            # and other icon-bearing menus must retain their original icon.
+            super().setText(self.text().rstrip().removesuffix('▾').rstrip())
+        self.updateGeometry()
+    def sizeHint(self):
+        size=super().sizeHint()
+        if self.menu() is not None:
+            # Reserve CSS padding/borders plus a separate native arrow area.
+            # A non-shrinkable menu hint avoids clipped leading RU glyphs.
+            label_width=self.fontMetrics().horizontalAdvance(self.text())
+            icon_width=0 if self.icon().isNull() else self.iconSize().width()+6
+            size.setWidth(max(size.width()+20,label_width+icon_width+60))
+        return size
+    def minimumSizeHint(self):
+        return self.sizeHint() if self.menu() is not None else super().minimumSizeHint()
