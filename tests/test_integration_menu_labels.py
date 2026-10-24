@@ -36,6 +36,37 @@ class MenuLabelTests(unittest.TestCase):
         finally:
             host.close()
 
+    def test_actual_width_never_shrinks_translated_help_or_loses_actions(self):
+        # sizeHint alone did not prevent real Windows/Linux QHBoxLayout from
+        # clipping the leading Cyrillic glyph in the top "СПРАВКА" menu.
+        host = QWidget()
+        layout = QHBoxLayout(host)
+        menus = []
+        try:
+            for english in ("FILE  ▾", "VIEW  ▾", "HELP  ▾"):
+                button = ChromeButton(english, host)
+                menu = QMenu(host)
+                action = menu.addAction("Keep original callback")
+                button.setMenu(menu)
+                layout.addWidget(button)
+                menus.append((button, menu, action, english))
+            host.resize(600, 80)
+            host.show()
+            for labels in (("ФАЙЛ  ▾", "ВИД  ▾", "СПРАВКА  ▾"),
+                           ("FILE  ▾", "VIEW  ▾", "HELP  ▾")):
+                for (button, menu, action, english), label in zip(menus, labels):
+                    button.setText(label)
+                self.app.processEvents()
+                for button, menu, action, english in menus:
+                    text_width = button.fontMetrics().horizontalAdvance(button.text())
+                    self.assertGreaterEqual(button.minimumWidth(), text_width + 60)
+                    self.assertGreaterEqual(button.width(), text_width + 60)
+                    self.assertNotIn("▾", button.text())
+                    self.assertEqual(button.property("bb_english"), english)
+                    self.assertEqual(menu.actions(), [action])
+        finally:
+            host.close()
+
     def test_plain_controls_are_not_reinterpreted_as_menu_commands(self):
         button=ChromeButton('Regular text ▾')
         try:
