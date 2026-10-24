@@ -8,6 +8,8 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
+from blackbox_core.contracts import ObserverError
 from blackbox_core.research_worker import ResearchSession
 
 class ActualEventClockTests(unittest.TestCase):
@@ -45,6 +47,35 @@ class ActualEventClockTests(unittest.TestCase):
             finally:s.stop()
             after=s.snapshot();self.assertGreaterEqual(after['detail_sample_count'],before)
             self.assertFalse(after['detail_enabled'])
+
+    def test_exit_during_first_tick_finalizes_before_optional_health(self):
+        # The target may disappear between attach/start and its first sample
+        # on a busy Windows machine. ReadOnlyProbe.tick then closes its
+        # SessionStore immediately; the research CaseBook must not mirror a
+        # later health record into that closed SQLite connection.
+        with tempfile.TemporaryDirectory() as tmp:
+            session = ResearchSession(tmp)
+            session.command({'op': 'attach', 'args': {'pid': os.getpid()}})
+            session.command({'op': 'start'})
+            session.command({'op': 'incidents', 'args': {'enabled': True}})
+            folder = session.probe.session_folder
+            try:
+                with patch.object(session.probe._core, 'sample',
+                                  side_effect=ObserverError('PROCESS_EXITED', 'sample')):
+                    session.tick()
+                self.assertFalse(session.probe.active)
+                self.assertIsNone(session.book)
+                self.assertIsNone(session.probe._store)
+                self.assertEqual(session.probe.session_state, 'PROCESS_EXITED')
+                self.assertEqual(session.research_state, 'INCOMPLETE')
+                # Finalizing twice must not reopen or write into the session.
+                session.stop()
+                with closing(sqlite3.connect(folder / 'session.sqlite3')) as db:
+                    self.assertEqual(
+                        db.execute('SELECT exit_code FROM metadata').fetchone()[0],
+                        'PROCESS_EXITED')
+            finally:
+                session.stop()
 
     def test_actual_exit_is_timestamped_when_observed_not_at_last_sample(self):
         target=subprocess.Popen([sys.executable,'-u','-c','import os,time;print(os.getpid(),flush=True);time.sleep(1)'],stdout=subprocess.PIPE,text=True)
