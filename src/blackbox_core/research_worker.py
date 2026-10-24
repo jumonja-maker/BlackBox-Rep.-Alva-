@@ -201,10 +201,19 @@ class ResearchSession:
             "optional_jobs":self.jobs.health(),
             "overhead_scope":"DIRECT_HELPER_USAGE_NOT_TOTAL_OBSERVER_EFFECT"})
         library=self._library_budget or {};maximum=library.get('policy',{}).get('max_bytes',0)
-        local_exceeded=size is not None and size>=self.budget_bytes
+        # A soft scan timeout can leave total bytes unknown, but the
+        # independently stat'ed *partial* set can already exceed the hard
+        # policy threshold. Never confuse that partial value with the total,
+        # or let an interrupted metadata scan hide an observed over-budget
+        # recording (notably on heavily loaded Windows runners).
+        partial = measured.get('observed_partial_bytes') if measured.get('status') == 'METADATA_BUDGET_EXHAUSTED' else None
+        partial_exceeded = type(partial) is int and partial >= self.budget_bytes
+        local_exceeded=(size is not None and size>=self.budget_bytes) or partial_exceeded
         global_exceeded=maximum and size is not None and library.get('known_bytes',0)+size>=maximum
         if local_exceeded or global_exceeded:
-            self.book.put('observer.disk_budget',{'status':'BUDGET_EXHAUSTED','scope':'SESSION' if local_exceeded else 'LIBRARY_CACHED_KNOWN_BYTES',
+            scope = ('SESSION_OBSERVED_PARTIAL_BYTES' if partial_exceeded and size is None
+                     else 'SESSION' if local_exceeded else 'LIBRARY_CACHED_KNOWN_BYTES')
+            self.book.put('observer.disk_budget',{'status':'BUDGET_EXHAUSTED','scope':scope,
                 'measurement':measured,'library':library,'hard_filesystem_quota':False,'deletion_performed':False})
             self.stop('STORAGE_LIMIT_REACHED')
 
