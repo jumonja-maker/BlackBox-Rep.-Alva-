@@ -46,6 +46,7 @@ from .i18n import translate
 from .releases import (Release, NoOfficialRelease, check_latest_release, stage_release,
                        runtime_directory, MAINTENANCE_NAME)
 from .shortcuts import create_shortcut
+from .maintenance import prepare_external_helper
 from .theme import COLORS
 from .chrome_icons import ChromeButton
 from .widgets import DesktopMark, MetricCard, SparkleBorder, TrendChart, WindowPanel
@@ -1152,10 +1153,10 @@ class UniversalWindow(QMainWindow):
         install = runtime_directory()
         if install is None:
             return
-        scratch = Path(tempfile.mkdtemp(prefix="bb-maintenance-"))
+        scratch = None
         try:
-            helper = scratch / MAINTENANCE_NAME
-            shutil.copy2(install / MAINTENANCE_NAME, helper)
+            helper = prepare_external_helper(install)
+            scratch = helper.parent
             command = [str(helper), action, "--install", str(install),
                        "--wait-pid", str(os.getpid())]
             if staged is not None:
@@ -1164,8 +1165,9 @@ class UniversalWindow(QMainWindow):
             if os.name == "nt":
                 kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
             subprocess.Popen(command, **kwargs)
-        except (OSError, subprocess.SubprocessError):
-            shutil.rmtree(scratch, ignore_errors=True)
+        except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):
+            if scratch is not None:
+                shutil.rmtree(scratch, ignore_errors=True)
             if staged is not None:
                 shutil.rmtree(staged.parent, ignore_errors=True)
             QMessageBox.warning(self, "BLACK.BOX Universal",
