@@ -33,7 +33,7 @@ HELPER_CLEANER = ".blackbox-maintenance-cleanup.vbs"
 # Its external host can finish after the PyInstaller maintenance EXE exits.
 _CLEAN_HELPER_VBS = r'''
 Option Explicit
-Dim fso, folder, helper, marker, script, attempt
+Dim fso, folder, helper, marker, script, attempt, ownedFolder
 If WScript.Arguments.Count <> 1 Then WScript.Quit 3
 Set fso = CreateObject("Scripting.FileSystemObject")
 folder = WScript.Arguments(0)
@@ -46,7 +46,12 @@ For attempt = 1 To 180
     If Not fso.FileExists(helper) Then
         If fso.FileExists(marker) Then fso.DeleteFile marker, True
         If fso.FileExists(script) Then fso.DeleteFile script, True
-        If fso.FolderExists(folder) Then fso.DeleteFolder folder, False
+        If fso.FolderExists(folder) Then
+            Set ownedFolder = fso.GetFolder(folder)
+            If ownedFolder.Files.Count = 0 And ownedFolder.SubFolders.Count = 0 Then
+                fso.DeleteFolder folder, False
+            End If
+        End If
         If Not fso.FolderExists(folder) Then WScript.Quit 0
     End If
     Err.Clear
