@@ -7,7 +7,7 @@
 [![Проверка Windows/Linux](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/actions/workflows/shell-qa.yml/badge.svg?branch=main)](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/actions/workflows/shell-qa.yml)
 ![Разработка](https://img.shields.io/badge/source-0.4.0%20candidate-40766c) ![Windows](https://img.shields.io/badge/platform-Windows%20x64-40766c) ![MIT](https://img.shields.io/badge/license-MIT-40766c)
 
-**Статус:** текущая ветка содержит **кандидат v0.4.0**, но обновление ещё не опубликовано. До подтверждения CI и официальной публикации GitHub Release доступна стабильная **v0.3.6**. PR и архивы Actions сами по себе не являются пользовательским обновлением.
+**Версия исходного кода: v0.4.0.** Фактическую доступность обновления определяет только [последний официальный релиз](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/releases/latest). Черновик PR или архив CI ещё не является пользовательским обновлением. Уже установленная v0.3.6 увидит v0.4.0 только после публикации нового проверенного GitHub Release.
 
 BLACK.BOX Universal позволяет **выбрать запущенный процесс либо указать файл приложения**. У работающего процесса программа измеряет системные показатели и сохраняет сеансы в SQLite, JSON и HTML; выбор файла сам по себе ничего не запускает. Программа не изменяет наблюдаемый процесс, не внедряется в его код и не требует регистрации, подписки, собственного сервера, фоновой службы или отдельной установки Python.
 
