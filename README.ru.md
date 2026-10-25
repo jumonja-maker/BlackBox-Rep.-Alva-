@@ -2,10 +2,12 @@
 
 **Портативная программа мониторинга процессов и просмотра файлов приложений Windows.**
 
-[**Скачать для Windows x64 — v0.3.6**](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/releases/download/v0.3.6/BLACK.BOX-Universal-Windows.zip) · [Все версии](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/releases) · [English README](README.md)
+[**Скачать последний опубликованный релиз Windows x64**](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/releases/latest) · [Все версии](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/releases) · [English README](README.md)
 
 [![Проверка Windows/Linux](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/actions/workflows/shell-qa.yml/badge.svg?branch=main)](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/actions/workflows/shell-qa.yml)
-![Версия](https://img.shields.io/badge/version-0.3.6-40766c) ![Windows](https://img.shields.io/badge/platform-Windows%20x64-40766c) ![MIT](https://img.shields.io/badge/license-MIT-40766c)
+![Разработка](https://img.shields.io/badge/source-0.4.0%20candidate-40766c) ![Windows](https://img.shields.io/badge/platform-Windows%20x64-40766c) ![MIT](https://img.shields.io/badge/license-MIT-40766c)
+
+**Статус:** текущая ветка содержит **кандидат v0.4.0**, но обновление ещё не опубликовано. До подтверждения CI и официальной публикации GitHub Release доступна стабильная **v0.3.6**. PR и архивы Actions сами по себе не являются пользовательским обновлением.
 
 BLACK.BOX Universal позволяет **выбрать запущенный процесс либо указать файл приложения**. У работающего процесса программа измеряет системные показатели и сохраняет сеансы в SQLite, JSON и HTML; выбор файла сам по себе ничего не запускает. Программа не изменяет наблюдаемый процесс, не внедряется в его код и не требует регистрации, подписки, собственного сервера, фоновой службы или отдельной установки Python.
 
