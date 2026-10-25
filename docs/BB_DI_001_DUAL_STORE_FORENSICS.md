@@ -94,3 +94,18 @@ Completing this engineering safeguard does **not** substitute for the
 8-hour Standard / 1-hour Detailed runs, physical Win10/Win11/ACL/AV/
 accessibility/upgrade testing or acceptance of all 128 requirements.
 PR #17 remains Draft; no main merge or release.
+
+## 25 October 2026 — confirmed 1h DETAILED verification defect
+
+The one-time GitHub endurance run [#40174622393](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/actions/runs/40174622393), **pinned source `48b99ec587789ae4d08bc3a4a2004822483708e9`**, recorded a full 3600.0-second DETAILED session before returning **FAIL**. Its retained artifact `BB-DI-001-ENDURANCE-DETAILED-40174622393` independently contains:
+
+- v1 `session.sqlite3`: 1806 base snapshots (seq 1..1806), 606 events; final metadata `STORAGE_ERROR`, with append-only diagnostic event `V2_COMPLETION_READ_FAILED`.
+- v2 `session-v2.sqlite3`: 1806 STANDARD (seq 1..1806, 0 invalid `schema1:N` links), 1791 DETAILED; `CLOSED` / `COMPLETED`, `writer_dropped_commands=0`, no SCHEMA2_WRITER sensor errors.
+- `research.sqlite3`: INCOMPLETE, consistent with the primary v1 failure.
+- Endurance harness: 3600.0 real seconds elapsed, 1806 accepted base samples. The QA wrapper correctly refused to call this a PASS.
+
+**Cause reproduced using the exact archived v2 SQLite:** `confirm_v2_completion()` installed `db.set_progress_handler(lambda: 1, 10000)`. SQLite defines *nonzero* progress callback returns as request to interrupt the active SQL statement. Once the source grew to 1806 rows, the `COUNT/MIN/MAX/SUM` verification query crossed the 10,000-VM-operation threshold and returned `sqlite3.OperationalError: interrupted`; the generic exception guard converted that into `V2_COMPLETION_READ_FAILED`. The **identical immutable archive** returns (1806, 1, 1806, 0) if that callback is absent or correctly returns zero before a deadline. Therefore this particular 1h CI failure is a **deterministic checker defect**, **not demonstrated data loss or a v1/v2 counter mismatch**.
+
+Patch on PR #17 after the pinned endurance SHA replaces the unconditional interruption with a real five-second monotonic deadline, retains read-only verification and failure-on-timeout, and adds `test_1806_standard_rows_do_not_trigger_sqlite_progress_interrupt` using real SQLite rows. It does not change the running pinned Standard job, lower sample-integrity checks, weaken the export guard, or turn the original aecc archival cause into a proven finding.
+
+**Acceptance:** the 3600s of actual DETAILED sampling is evidence of duration, but the test's final verdict remains **FAIL** pending a new passing full-duration run on the corrected HEAD. The separate STANDARD job is independently running on the old SHA and may hit this same verifier defect at Stop. Do not mark the original 8h Standard requirement complete.
