@@ -269,8 +269,8 @@ def acceptance(built_zip: Path, source_sha: str, evidence: Path):
             require(desktop_link.is_file(), "SHORTCUT_CREATION_FAILED")
             # App-scoped QSettings marker: uninstall must remove this registry
             # subtree and must never modify unrelated HKCU keys.
-            app_settings_key = r"Software\\BlackBox\\BLACK.BOX Universal"
-            neighbor_key = r"Software\\BlackBox\\BLACKBOX_QA_FOREIGN_KEEP"
+            app_settings_key = r"Software\BlackBox\BLACK.BOX Universal"
+            neighbor_key = r"Software\BlackBox\BLACKBOX_QA_FOREIGN_KEEP"
             with winreg.CreateKey(winreg.HKEY_CURRENT_USER,
                                   app_settings_key) as settings:
                 winreg.SetValueEx(settings, "bb_native_qa_marker", 0,
@@ -363,7 +363,7 @@ def acceptance(built_zip: Path, source_sha: str, evidence: Path):
         if os.name == "nt":
             try:
                 winreg.DeleteKey(winreg.HKEY_CURRENT_USER,
-                                 r"Software\\BlackBox\\BLACKBOX_QA_FOREIGN_KEEP")
+                                 r"Software\BlackBox\BLACKBOX_QA_FOREIGN_KEEP")
             except FileNotFoundError:
                 pass
         (evidence / "maintenance-native-result.json").write_text(
