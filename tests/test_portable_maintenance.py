@@ -26,7 +26,8 @@ from blackbox_universal.releases import (
     _extract_release,
 )
 from blackbox_universal.maintenance import (
-    MaintenanceError, apply_update, uninstall,
+    HELPER_TICKET, HELPER_TICKET_VALUE, MaintenanceError,
+    apply_update, prepare_external_helper, uninstall,
 )
 from blackbox_universal.theme import set_retro_theme
 from blackbox_universal.window import UniversalWindow
@@ -209,6 +210,29 @@ class PortableMaintenanceTests(unittest.TestCase):
             with self.assertRaises(MaintenanceError):
                 uninstall(other)
 
+
+    def test_external_helper_is_marked_and_copies_only_own_executable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            install = base / "BLACK.BOX-Universal"
+            fake_install(install)
+            scratch = base / "bb-maintenance-test"
+            scratch.mkdir()
+            with patch("blackbox_universal.maintenance.tempfile.mkdtemp",
+                       return_value=str(scratch)):
+                helper = prepare_external_helper(install)
+            self.assertEqual(helper, scratch / MAINTENANCE_NAME)
+            self.assertEqual(helper.read_text(), "old")
+            ticket = json.loads((scratch / HELPER_TICKET).read_text("utf-8"))
+            self.assertEqual(ticket, HELPER_TICKET_VALUE)
+            self.assertFalse((scratch / EXECUTABLE_NAME).exists())
+
+    def test_preparing_external_helper_refuses_unmarked_install(self):
+        with tempfile.TemporaryDirectory() as directory:
+            install = Path(directory) / "unmarked"
+            install.mkdir()
+            with self.assertRaises(MaintenanceError):
+                prepare_external_helper(install)
 
     def test_uninstall_resolves_shortcut_before_deleting_exe(self):
         with tempfile.TemporaryDirectory() as directory:
