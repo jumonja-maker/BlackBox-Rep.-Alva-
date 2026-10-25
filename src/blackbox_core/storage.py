@@ -159,6 +159,13 @@ class SessionStore:
                 completion_failure = str(exc)
             except ObserverError:
                 code, v2_error = "STORAGE_ERROR", True
+            except sqlite3.Error:
+                # The primary counter ledger is itself unreadable. No
+                # successful cross-database reconciliation is possible.
+                # Keep both originals; never promote v2 CLOSED alone to
+                # primary COMPLETED.
+                code, v2_error = "STORAGE_ERROR", True
+                completion_failure = "V1_COMPLETION_READ_FAILED"
         try:
             if completion_failure is not None:
                 # Keep the reason and primary failure state in one transaction.
