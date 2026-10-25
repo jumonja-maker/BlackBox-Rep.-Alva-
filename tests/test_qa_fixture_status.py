@@ -60,12 +60,34 @@ class FixtureStatusTests(unittest.TestCase):
     def test_unrelated_permission_error_is_not_retried(self):
         for error in (PermissionError(13, "POSIX denial"), denied(87)):
             with self.subTest(error=repr(error)), \
+                    patch.object(status, "_IS_WINDOWS", False), \
                     patch.object(Path, "read_text", side_effect=error) as read, \
                     patch.object(status, "sleep") as sleep:
                 with self.assertRaises(PermissionError):
                     status.wait_fixture_ack(Path("state.json"), "wanted")
                 read.assert_called_once()
                 sleep.assert_not_called()
+
+    def test_windows_crt_errno_only_denial_retries_but_cannot_bypass_deadline(self):
+        for transient in (True, False):
+            with self.subTest(transient=transient):
+                clock = Clock()
+                error = PermissionError(13, "Windows CRT sharing denial")
+                effects = ([error, '{"ack":"wanted","error":null}']
+                           if transient else error)
+                with patch.object(status, "_IS_WINDOWS", True), \
+                        patch.object(status, "monotonic", clock.monotonic), \
+                        patch.object(status, "sleep", clock.sleep), \
+                        patch.object(Path, "read_text", side_effect=effects):
+                    if transient:
+                        result = status.wait_fixture_ack(Path("state.json"), "wanted", timeout=.1)
+                        self.assertIsNone(result["error"])
+                        self.assertAlmostEqual(clock.now, .02)
+                    else:
+                        with self.assertRaises(TimeoutError) as caught:
+                            status.wait_fixture_ack(Path("state.json"), "wanted", timeout=.1)
+                        self.assertIs(caught.exception.__cause__, error)
+                        self.assertAlmostEqual(clock.now, .1)
 
     def test_invalid_json_or_non_object_is_not_retried(self):
         for text, exception in (("{", json.JSONDecodeError), ("[]", ValueError)):

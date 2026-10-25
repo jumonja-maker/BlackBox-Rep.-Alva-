@@ -8,10 +8,12 @@ Full CI 40194071431 on f55025c1 passed Linux and failed Windows at tests/test_re
 
 ## Bounded QA protocol correction
 
-- A QA-only wait_fixture_ack helper retries only native Windows error codes 5/32/33, within the original five-second ACK deadline. It requires the exact command ID and returns the original fixture error field unchanged. No chmod, ACL changes, elevation, synthetic ACK, lowered CPU expectation or skipped functional test.
+- A QA-only wait_fixture_ack helper retries native Windows error codes 5/32/33 or Windows CRT errno-only EACCES without a native error code, within the original five-second ACK deadline. CPython FileIO uses _wopen and reports errno for this path: a sharing denial can appear as PermissionError [Errno 13] without winerror. That fallback is never enabled on POSIX or for unrelated native codes.
+- The exact command ID is required and the original fixture error field is returned unchanged. No chmod, ACL changes, elevation, synthetic ACK, lowered CPU expectation or skipped functional test.
 - Missing files, malformed JSON and unrelated errors propagate. Permanent denial and stale ACKs expire as failures. The command writer reuses the existing atomic_json owned-file primitive.
-- Nine tests cover recovery, permanent denial, mismatched ACK, malformed/missing data, retained command errors, bounds, and an actual Windows exclusive CreateFile handle released by a fixture thread. The last test is explicitly Windows-only.
+- Ten tests cover recovery, permanent denial, Windows CRT errno-only behavior, mismatched ACK, malformed/missing data, retained command errors, bounds, and an actual Windows exclusive CreateFile handle released by a fixture thread. The last test is explicitly Windows-only.
 - Three additional real-SQLite tests cover 9906 and 100001 rows, cancellation after the real time limit, and a wrong source mapping hidden within an otherwise matching large count. Large synthetic rows are query tests, never elapsed endurance evidence.
+- The first retry candidate 7dffc2a26c0902c686d69d65e1b9ec1f2936b89f handled native errors only. Review caught the missing CRT errno fallback before long runs; this follow-up preserves that history and uses a new exact-source candidate. Do not treat a superseded run as evidence for the new one.
 
 ## Retry gate and evidence
 

@@ -2,15 +2,20 @@
 
 A fixture replaces its own state.json atomically. Windows may briefly deny an
 open while that file is being replaced. Retry only native access/share/lock
-errors within the original deadline; stale or absent acknowledgements never
-count as command success. This is not a general-purpose imported-file reader.
+errors (including Windows CRT errno-only EACCES) within the original deadline.
+Stale or absent acknowledgements never count as command success. This is not
+a general-purpose imported-file reader.
 """
 from __future__ import annotations
 
+import errno
 import json
 import math
+import os
 from pathlib import Path
 from time import monotonic, sleep
+
+_IS_WINDOWS = os.name == "nt"
 
 
 def wait_fixture_ack(path: Path, command_id: str, *, timeout: float = 5.0) -> dict:
@@ -31,7 +36,13 @@ def wait_fixture_ack(path: Path, command_id: str, *, timeout: float = 5.0) -> di
         try:
             state = json.loads(path.read_text(encoding="utf-8"))
         except OSError as exc:
-            if getattr(exc, "winerror", None) not in (5, 32, 33):
+            native = getattr(exc, "winerror", None)
+            # CPython FileIO uses _wopen/errno on Windows, so the same
+            # sharing denial may arrive as EACCES with no winerror at all.
+            # Do not extend that fallback to POSIX or unrelated Win32 codes.
+            crt_denial = (_IS_WINDOWS and native is None and
+                          exc.errno == errno.EACCES)
+            if native not in (5, 32, 33) and not crt_denial:
                 raise
             last_read_error = exc
         else:
