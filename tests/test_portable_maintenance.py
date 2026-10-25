@@ -237,7 +237,7 @@ class PortableMaintenanceTests(unittest.TestCase):
                 shortcut.unlink()
                 return shortcut, original
             with patch("blackbox_universal.maintenance._detach_matching_desktop_shortcut",
-                       side_effect=detach), \\
+                       side_effect=detach), \
                  patch("blackbox_universal.maintenance.shutil.rmtree",
                        side_effect=PermissionError("locked")):
                 with self.assertRaises(PermissionError):
