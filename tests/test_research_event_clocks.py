@@ -78,19 +78,56 @@ class ActualEventClockTests(unittest.TestCase):
                 session.stop()
 
     def test_actual_exit_is_timestamped_when_observed_not_at_last_sample(self):
-        target=subprocess.Popen([sys.executable,'-u','-c','import os,time;print(os.getpid(),flush=True);time.sleep(1)'],stdout=subprocess.PIPE,text=True)
+        # The real child stays alive until the observer has recorded a base
+        # sample. A fixed 1-second lifetime can expire before a first tick on
+        # a loaded Windows runner, leaving last_elapsed_ms=None and testing a
+        # different scenario than delayed PROCESS_EXIT_OBSERVED.
+        target = subprocess.Popen(
+            [sys.executable, '-u', '-c',
+             'import os,sys;print(os.getpid(),flush=True);sys.stdin.read(1)'],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
         try:
-            pid=int(target.stdout.readline())
+            pid = int(target.stdout.readline())
             with tempfile.TemporaryDirectory() as tmp:
-                s=ResearchSession(tmp);s.command({'op':'attach','args':{'pid':pid}});s.command({'op':'start'})
-                s.command({'op':'incidents','args':{'enabled':True}});s.tick();previous=s.probe.last_elapsed_ms
-                target.wait(timeout=5);time.sleep(.05);s.tick();s.stop()
-                with closing(sqlite3.connect(s.probe.session_folder/'session.sqlite3')) as db:
-                    rows=[json.loads(r[0]) for r in db.execute('SELECT data FROM events')]
-                marker=next(r for r in rows if r.get('code')=='AUTO_INCIDENT_STARTED' and r.get('trigger_code')=='PROCESS_EXIT_OBSERVED')
-                self.assertGreater(marker['elapsed_ms']-previous,100)
-                end=next(r for r in rows if r.get('code')=='AUTO_INCIDENT_COMPLETED' and r.get('trigger_code')=='PROCESS_EXIT_OBSERVED')
-                self.assertEqual(end['observed_post_ms'],0);self.assertIsNone(marker['trigger_detail']['exit_code'])
+                s = ResearchSession(tmp)
+                try:
+                    s.command({'op': 'attach', 'args': {'pid': pid}})
+                    s.command({'op': 'start'})
+                    s.command({'op': 'incidents', 'args': {'enabled': True}})
+                    deadline = time.monotonic() + 5
+                    while (s.probe.last_elapsed_ms is None
+                           and time.monotonic() < deadline):
+                        s.tick()
+                        time.sleep(.01)
+                    previous = s.probe.last_elapsed_ms
+                    self.assertIsNotNone(previous, "FIRST_OBSERVED_SAMPLE_REQUIRED")
+                    # The target exits only after the known sample. Preserve
+                    # the original >100 ms clock separation assertion.
+                    time.sleep(.15)
+                    target.stdin.write('\n')
+                    target.stdin.flush()
+                    self.assertEqual(target.wait(timeout=5), 0)
+                    time.sleep(.05)
+                    s.tick()
+                    s.stop()
+                    with closing(sqlite3.connect(s.probe.session_folder /
+                                                 'session.sqlite3')) as db:
+                        rows = [json.loads(r[0]) for r in
+                                db.execute('SELECT data FROM events')]
+                    marker = next(r for r in rows
+                                  if r.get('code') == 'AUTO_INCIDENT_STARTED'
+                                  and r.get('trigger_code') == 'PROCESS_EXIT_OBSERVED')
+                    self.assertGreater(marker['elapsed_ms'] - previous, 100)
+                    end = next(r for r in rows
+                               if r.get('code') == 'AUTO_INCIDENT_COMPLETED'
+                               and r.get('trigger_code') == 'PROCESS_EXIT_OBSERVED')
+                    self.assertEqual(end['observed_post_ms'], 0)
+                    self.assertIsNone(marker['trigger_detail']['exit_code'])
+                finally:
+                    s.stop()
         finally:
+            if target.poll() is None:
+                target.terminate()
+                target.wait(timeout=5)
             target.stdout.close()
-            if target.poll() is None:target.terminate();target.wait(timeout=5)
+            target.stdin.close()
