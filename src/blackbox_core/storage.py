@@ -142,9 +142,17 @@ class SessionStore:
                 self.v2.finish(code)
                 # A stopped thread alone does not prove a durable CLOSED row.
                 # Verify the same session before primary metadata claims success.
+                base_count, first_seq, last_seq = self.db.execute(
+                    "SELECT COUNT(*), COALESCE(MIN(seq),0),"
+                    " COALESCE(MAX(seq),0) FROM samples").fetchone()
+                if (first_seq != (1 if base_count else 0) or
+                        last_seq != base_count):
+                    raise CompletionNotConfirmed(
+                        "V1_COMPLETION_BASE_SEQUENCE_INVALID")
                 confirm_v2_completion(
                     self.v2.path, session_uuid=self.v2.session_uuid,
-                    origin_ns=self.v2.origin_ns, exit_code=code)
+                    origin_ns=self.v2.origin_ns, exit_code=code,
+                    expected_standard_samples=base_count)
             except CompletionNotConfirmed as exc:
                 self.v2.failure = self.v2.failure or str(exc)
                 code, v2_error = "STORAGE_ERROR", True
