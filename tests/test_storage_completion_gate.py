@@ -10,7 +10,7 @@ import tempfile
 import time
 import unittest
 
-from blackbox_core.contracts import ObserverError
+from blackbox_core.contracts import ObserverError, Sample
 from blackbox_core.storage import SessionStore
 from blackbox_core.session_completion import confirm_v2_completion
 
@@ -32,6 +32,110 @@ class StoreCompletionTests(unittest.TestCase):
                 self.assertEqual(store.db.execute(
                     "SELECT exit_code FROM metadata").fetchone(), ("COMPLETED",))
                 store.finish("COMPLETED")  # idempotent
+            finally:
+                store.close()
+
+    @staticmethod
+    def _base_sample():
+        return Sample(1000, 4096, 0.0, 1, None, None, 0)
+
+    @staticmethod
+    def _base_payload(store, *, correlation_key="schema1:1"):
+        v2 = store.v2
+        now = time.monotonic_ns()
+        return {
+            "time_ns": now, "capture_started_ns": now,
+            "capture_ended_ns": now, "pid": v2.pid,
+            "created": v2.created, "correlation_key": correlation_key,
+            "requested_interval_ns": 1_000_000_000,
+            "rss_bytes": 4096, "cpu_percent": 0.0, "thread_count": 1,
+        }
+
+    @staticmethod
+    def _start_pair(root):
+        store = SessionStore(Path(root), os.getpid())
+        store.enable_v2(
+            pid=os.getpid(), created=time.time(), name="QA",
+            origin_ns=time.monotonic_ns())
+        assert store.v2._ready.wait(5) and not store.v2.failure
+        return store
+
+    @staticmethod
+    def _reason(store):
+        return [json.loads(data)["reason"] for (data,) in store.db.execute(
+            "SELECT data FROM events") if '"reason"' in data]
+
+    def test_closed_v2_with_missing_base_snapshot_cannot_certify_v1_completed(self):
+        # The retained aecc fixture has v1=43, v2 STANDARD=27 plus DETAILED=13.
+        # Recreate the *cardinality failure*, not a claim about its root cause.
+        with tempfile.TemporaryDirectory() as root:
+            store = self._start_pair(root)
+            try:
+                store.write_sample(self._base_sample())
+                # An unrelated DETAILED row cannot make up for missing
+                # accepted STANDARD samples.
+                store.v2.submit("detail", self._base_payload(
+                    store, correlation_key="detail:1"))
+                with self.assertRaisesRegex(ObserverError, "STORAGE_ERROR"):
+                    store.finish("COMPLETED")
+                self.assertTrue(store.finished)
+                self.assertEqual(store.db.execute(
+                    "SELECT exit_code FROM metadata").fetchone()[0],
+                    "STORAGE_ERROR")
+                self.assertIn("V2_COMPLETION_BASE_COUNT_MISMATCH",
+                              self._reason(store))
+                self.assertFalse(store.v2.thread.is_alive())
+            finally:
+                store.close()
+
+    def test_closed_v2_with_extra_base_snapshot_cannot_certify_v1_completed(self):
+        with tempfile.TemporaryDirectory() as root:
+            store = self._start_pair(root)
+            try:
+                store.v2.submit("base", self._base_payload(store))
+                with self.assertRaisesRegex(ObserverError, "STORAGE_ERROR"):
+                    store.finish("COMPLETED")
+                self.assertEqual(store.db.execute(
+                    "SELECT exit_code FROM metadata").fetchone()[0],
+                    "STORAGE_ERROR")
+                self.assertIn("V2_COMPLETION_BASE_COUNT_MISMATCH",
+                              self._reason(store))
+            finally:
+                store.close()
+
+    def test_same_count_but_wrong_correlation_is_not_a_complete_mirror(self):
+        with tempfile.TemporaryDirectory() as root:
+            store = self._start_pair(root)
+            try:
+                store.write_sample(self._base_sample())
+                store.v2.submit("base", self._base_payload(
+                    store, correlation_key="NOT_THE_SOURCE_SAMPLE"))
+                with self.assertRaisesRegex(ObserverError, "STORAGE_ERROR"):
+                    store.finish("COMPLETED")
+                self.assertIn("V2_COMPLETION_BASE_MAPPING_MISMATCH",
+                              self._reason(store))
+                self.assertEqual(store.db.execute(
+                    "SELECT exit_code FROM metadata").fetchone()[0],
+                    "STORAGE_ERROR")
+            finally:
+                store.close()
+
+    def test_exact_base_parity_allows_valid_run_with_optional_detail(self):
+        with tempfile.TemporaryDirectory() as root:
+            store = self._start_pair(root)
+            try:
+                store.write_sample(self._base_sample())
+                store.v2.submit("base", self._base_payload(store))
+                store.v2.submit("detail", self._base_payload(
+                    store, correlation_key="detail:1"))
+                store.finish("COMPLETED")
+                self.assertEqual(store.db.execute(
+                    "SELECT exit_code FROM metadata").fetchone()[0],
+                    "COMPLETED")
+                confirm_v2_completion(
+                    store.v2.path, session_uuid=store.v2.session_uuid,
+                    origin_ns=store.v2.origin_ns, exit_code="COMPLETED",
+                    expected_standard_samples=1)
             finally:
                 store.close()
 
