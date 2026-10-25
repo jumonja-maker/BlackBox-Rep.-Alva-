@@ -139,6 +139,39 @@ class StoreCompletionTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_early_readonly_v2_snapshot_is_not_evidence_of_final_writer_state(self):
+        # Establish a real, independent alternative explanation for a
+        # RECORDING archived SQLite alongside a later COMPLETED primary DB.
+        # This does NOT establish how the old aecc QA copy was captured.
+        with tempfile.TemporaryDirectory() as root:
+            store = self._start_pair(root)
+            archived = Path(root) / "controlled-before-stop.sqlite3"
+            try:
+                store.write_sample(self._base_sample())
+                store.v2.submit("base", self._base_payload(store))
+                store.v2._commands.join()  # only this already-accepted row
+                with closing(sqlite3.connect(store.v2.path)) as live, closing(
+                        sqlite3.connect(archived)) as snapshot:
+                    live.backup(snapshot)
+                store.finish("COMPLETED")
+                with closing(sqlite3.connect(archived)) as copy:
+                    self.assertEqual(copy.execute(
+                        "SELECT status,exit_code FROM sessions").fetchone(),
+                        ("RECORDING", None))
+                confirm_v2_completion(
+                    store.v2.path, session_uuid=store.v2.session_uuid,
+                    origin_ns=store.v2.origin_ns, exit_code="COMPLETED",
+                    expected_standard_samples=1)
+                self.assertEqual(store.db.execute(
+                    "SELECT exit_code FROM metadata").fetchone()[0],
+                    "COMPLETED")
+                with closing(sqlite3.connect(store.v2.path)) as live:
+                    self.assertEqual(live.execute(
+                        "SELECT status,exit_code FROM sessions").fetchone(),
+                        ("CLOSED", "COMPLETED"))
+            finally:
+                store.close()
+
     def test_missing_closed_commit_is_failure_not_primary_completed(self):
         with tempfile.TemporaryDirectory() as root:
             store = SessionStore(Path(root), os.getpid())
