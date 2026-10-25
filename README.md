@@ -7,7 +7,7 @@
 [![Windows/Linux QA](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/actions/workflows/shell-qa.yml/badge.svg?branch=main)](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/actions/workflows/shell-qa.yml)
 ![Development version](https://img.shields.io/badge/source-0.4.0%20candidate-40766c) ![Windows](https://img.shields.io/badge/platform-Windows%20x64-40766c) ![MIT](https://img.shields.io/badge/license-MIT-40766c)
 
-**Release status:** This branch contains the **v0.4.0 candidate**, not a published update. Until its acceptance gates pass and a new GitHub Release is created, the published download is **v0.3.6**. Do not confuse PR or CI artifacts with signed-off releases.
+**Build version: v0.4.0.** The [official latest release](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/releases/latest) is the authority for public availability; source builds, draft PRs and CI artifacts are not automatically delivered as updates. A running v0.3.6 installation can find v0.4.0 only after its verified higher-version release has actually been published.
 
 BLACK.BOX Universal lets you **select a running process or choose an application file**. It records operating-system measurements from a running process and saves sessions as local SQLite, JSON, and HTML files. File selection itself only reads file metadata. It does not inject code, modify the target program, or require a service, account, cloud server, subscription, or separately installed Python.
 
