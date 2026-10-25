@@ -24,7 +24,7 @@ from unittest.mock import patch
 import psutil
 import winreg
 
-from blackbox_universal.maintenance import _safe_install, _user_data_root
+from blackbox_universal.maintenance import _safe_install, _user_data_root, prepare_external_helper
 from blackbox_universal.releases import (
     EXECUTABLE_NAME, MAINTENANCE_NAME, Release, stage_release,
     check_latest_release, version_tuple,
@@ -133,6 +133,7 @@ def acceptance(built_zip: Path, source_sha: str, evidence: Path):
     }
     exe_root = None
     desktop_link = None
+    new_helper_scratch = None
     try:
         from blackbox_universal import __version__
         require(__version__ == "0.4.0", "CANDIDATE_VERSION_NOT_BUMPED")
@@ -280,10 +281,10 @@ def acceptance(built_zip: Path, source_sha: str, evidence: Path):
                 winreg.SetValueEx(neighbor, "bb_native_qa_foreign", 0,
                                   winreg.REG_SZ, "must-stay")
 
-            new_maintenance = root / "outside-new-maintenance"
-            new_maintenance.mkdir()
-            shutil.copy2(install / MAINTENANCE_NAME,
-                         new_maintenance / MAINTENANCE_NAME)
+            new_helper = prepare_external_helper(install)
+            new_helper_scratch = new_helper.parent
+            require(new_helper_scratch.name.startswith("bb-maintenance-"),
+                    "TEMP_HELPER_NOT_MARKED")
             before_uninstall = sha256(exe_root)
             require(before_uninstall == new_exe_hash,
                     "NEW_INSTALL_CHANGED_BEFORE_UNINSTALL")
@@ -294,7 +295,7 @@ def acceptance(built_zip: Path, source_sha: str, evidence: Path):
                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL)
             remover = _maintenance(
-                new_maintenance / MAINTENANCE_NAME, "uninstall", install,
+                new_helper, "uninstall", install,
                 env, wait_pid=running.pid)
             try:
                 require(running.wait(timeout=120) == 0, "NEW_GUI_EXIT_FAILED")
@@ -308,6 +309,14 @@ def acceptance(built_zip: Path, source_sha: str, evidence: Path):
             require(not install.exists() and not install.is_symlink(),
                     "APP_FOLDER_REMAINED_AFTER_UNINSTALL")
             require(not desktop_link.exists(), "APP_SHORTCUT_REMAINED")
+            # Self-deletion is asynchronous: the external script waits for
+            # the frozen maintenance EXE to finish and releases its own files.
+            deadline = time.monotonic() + 45
+            while new_helper_scratch.exists() and time.monotonic() < deadline:
+                time.sleep(.25)
+            require(not new_helper_scratch.exists(),
+                    "TEMP_MAINTENANCE_HELPER_REMAINED")
+            report["temporary_maintenance_helper_removed"] = True
             try:
                 with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
                                     app_settings_key):
@@ -366,6 +375,12 @@ def acceptance(built_zip: Path, source_sha: str, evidence: Path):
                                  r"Software\BlackBox\BLACKBOX_QA_FOREIGN_KEEP")
             except FileNotFoundError:
                 pass
+        if new_helper_scratch is not None and new_helper_scratch.exists():
+            # Leave diagnostic evidence but do not leak this QA-owned helper
+            # outside the isolated disposable runner's temporary space.
+            report["helper_residue"] = sorted(p.name for p in
+                                              new_helper_scratch.iterdir())
+            shutil.rmtree(new_helper_scratch, ignore_errors=True)
         (evidence / "maintenance-native-result.json").write_text(
             json.dumps(report, ensure_ascii=True, indent=2) + "\n",
             encoding="utf-8")
