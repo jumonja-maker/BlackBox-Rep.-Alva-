@@ -1,0 +1,134 @@
+name: BB-DI-001 — one-time Windows 5h30 Standard / 1h Detailed endurance
+
+on:
+  pull_request:
+    types: [synchronize]
+    branches: [main]
+
+# This workflow runs on the PR head only, never on main or a release tag.
+# The exact triggering commit subject gates both the preflight and long tests.
+permissions:
+  contents: read
+
+concurrency:
+  group: bb-di-001-endurance-${{ github.event.pull_request.number }}-${{ github.event.pull_request.head.sha }}
+  cancel-in-progress: false
+
+jobs:
+  preflight:
+    if: ${{ github.event.pull_request.number == 17 && github.head_ref == 'review/bb-di-001-action-integration-20261023' }}
+    runs-on: windows-latest
+    timeout-minutes: 30
+    env:
+      QT_QPA_PLATFORM: offscreen
+      PYTHONUTF8: "1"
+      BB_QA_SOURCE_SHA: ${{ github.event.pull_request.head.sha }}
+    outputs:
+      requested: ${{ steps.gate.outputs.requested }}
+    steps:
+      - name: Checkout exact PR source, never mutable main
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - id: gate
+        name: One-time explicit commit-subject guard
+        shell: pwsh
+        run: |
+          $subject = (git log -1 --format=%s).Trim()
+          $expected = 'Start BB-DI-001 GitHub endurance: 5h30 Standard and 1h Detailed'
+          if ($subject -ceq $expected) {
+            'requested=true' >> $env:GITHUB_OUTPUT
+            Write-Host "Endurance expressly requested on HEAD $env:BB_QA_SOURCE_SHA"
+          } else {
+            'requested=false' >> $env:GITHUB_OUTPUT
+            Write-Host 'No new endurance requested; ordinary PR commits will not rerun long QA.'
+          }
+      - name: Prepare explicit, isolated Windows QA dependencies
+        if: steps.gate.outputs.requested == 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          architecture: x64
+          cache: pip
+      - name: Install production GUI and observer
+        if: steps.gate.outputs.requested == 'true'
+        shell: pwsh
+        run: |
+          python -m pip install -r requirements.txt
+          if ($LASTEXITCODE -ne 0) { throw 'Requirements install failed' }
+          python -m pip install -e .
+          if ($LASTEXITCODE -ne 0) { throw 'Editable package install failed' }
+      - name: Real source/isolated-GUI preflight Standard and Detailed
+        if: steps.gate.outputs.requested == 'true'
+        shell: pwsh
+        timeout-minutes: 16
+        run: |
+          python tools/qa_github_endurance.py --output "$env:RUNNER_TEMP/blackbox-preflight-standard" --profile STANDARD --duration-seconds 90 --expected-sha "$env:BB_QA_SOURCE_SHA"
+          if ($LASTEXITCODE -ne 0) { throw 'Standard preflight failed; block all long tests' }
+          python tools/qa_github_endurance.py --output "$env:RUNNER_TEMP/blackbox-preflight-detailed" --profile DETAILED --duration-seconds 90 --expected-sha "$env:BB_QA_SOURCE_SHA"
+          if ($LASTEXITCODE -ne 0) { throw 'Detailed preflight failed; block all long tests' }
+      - name: Retain preflight evidence (including failure diagnostics)
+        if: ${{ always() && steps.gate.outputs.requested == 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: BB-DI-001-ENDURANCE-PREFLIGHT-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/blackbox-preflight-standard/
+            ${{ runner.temp }}/blackbox-preflight-detailed/
+          if-no-files-found: warn
+          retention-days: 7
+
+  endurance:
+    needs: preflight
+    if: ${{ needs.preflight.outputs.requested == 'true' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - profile: STANDARD
+            duration: 19800
+            job_timeout: 355
+            step_timeout: 342
+          - profile: DETAILED
+            duration: 3600
+            job_timeout: 90
+            step_timeout: 80
+    runs-on: windows-latest
+    timeout-minutes: ${{ matrix.job_timeout }}
+    env:
+      QT_QPA_PLATFORM: offscreen
+      PYTHONUTF8: "1"
+      BB_QA_SOURCE_SHA: ${{ github.event.pull_request.head.sha }}
+    steps:
+      - name: Checkout frozen exact PR candidate
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          architecture: x64
+          cache: pip
+      - name: Install same production source as preflight
+        shell: pwsh
+        run: |
+          python -m pip install -r requirements.txt
+          if ($LASTEXITCODE -ne 0) { throw 'Requirements install failed' }
+          python -m pip install -e .
+          if ($LASTEXITCODE -ne 0) { throw 'Editable package install failed' }
+      - name: Real full wall-clock session, owner exit and read-only verification
+        shell: pwsh
+        timeout-minutes: ${{ matrix.step_timeout }}
+        run: |
+          python tools/qa_github_endurance.py --output "$env:RUNNER_TEMP/blackbox-endurance-${{ matrix.profile }}" --profile ${{ matrix.profile }} --duration-seconds ${{ matrix.duration }} --expected-sha "$env:BB_QA_SOURCE_SHA"
+          if ($LASTEXITCODE -ne 0) { throw 'BB-DI-001 endurance or dual-store verification failed' }
+      - name: Preserve real SQLite, CSV, progress, interval exports and verdict
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: BB-DI-001-ENDURANCE-${{ matrix.profile }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/blackbox-endurance-${{ matrix.profile }}/
+          if-no-files-found: warn
+          retention-days: 7
