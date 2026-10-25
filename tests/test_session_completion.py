@@ -136,6 +136,26 @@ class CompletionReadTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_1806_standard_rows_do_not_trigger_sqlite_progress_interrupt(self):
+        # Exact archived 1h DETAILED failure: a fully CLOSED v2 database
+        # carried 1806 matching base samples, but the old progress callback
+        # unconditionally returned 1 every 10000 VM operations, causing
+        # sqlite3.OperationalError("interrupted") and a false STORAGE_ERROR.
+        # This must use an actual SQLite aggregate, not a mock.
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / "session-v2.sqlite3"
+            make_db(path)
+            with closing(sqlite3.connect(path)) as db:
+                db.execute("CREATE TABLE samples (instance_id INTEGER,"
+                           "series TEXT,series_seq INTEGER,"
+                           "correlation_key TEXT)")
+                db.executemany(
+                    "INSERT INTO samples VALUES (1,'STANDARD',?,?)",
+                    ((seq, f"schema1:{seq}") for seq in range(1, 1807)))
+                db.commit()
+            # Reproduces a >10000-instruction COUNT/MIN/MAX/SUM over real rows.
+            self.check(path, expected_standard_samples=1806)
+
     def test_closed_commit_in_wal_is_seen_despite_older_reader(self):
         with tempfile.TemporaryDirectory() as root:
             path = Path(root) / "session-v2.sqlite3"
