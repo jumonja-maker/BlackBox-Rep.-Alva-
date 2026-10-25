@@ -8,6 +8,16 @@ on:
     branches:
       - main
   workflow_dispatch:
+    inputs:
+      publish_v040:
+        description: "Publish tested v0.4.0 from the exact accepted main SHA"
+        required: true
+        type: boolean
+        default: false
+      accepted_source_sha:
+        description: "Exact 40-character approved main commit SHA"
+        required: false
+        type: string
 
 concurrency:
   group: blackbox-public-qa-${{ github.ref }}
@@ -285,11 +295,15 @@ jobs:
           retention-days: 14
 
 
-# Release v0.3.6 is published after Windows/Linux tests and Windows EXE smoke.
+# Explicit release gate: NEVER publish just because a PR is merged or main is pushed.
+# A manual dispatch from main with exact reviewed SHA reruns all three QA jobs.
   publish-updater-test:
-    name: Publish independent BLACK.BOX release
+    name: Publish verified BLACK.BOX v0.4.0 (manual owner gate)
     needs: [linux-tests, windows-portable]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      github.ref == 'refs/heads/main' &&
+      inputs.publish_v040 == true
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -298,58 +312,76 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
       - uses: actions/download-artifact@v4
         with:
           name: BLACKBOX-INDEPENDENT-WINDOWS-QA
           path: verified-portable
-      - name: Publish verified hardened v0.3.6
+      - name: Check exact SHA, source metadata, frozen provenance and no old tag
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ACCEPTED_SHA: ${{ inputs.accepted_source_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_REF" == "refs/heads/main" ]]
+          if [[ ! "$ACCEPTED_SHA" =~ ^[0-9a-f]{40}$ || "$ACCEPTED_SHA" != "$GITHUB_SHA" ]]; then
+            echo "::error::Published source must equal the manually approved exact main SHA"
+            exit 1
+          fi
+          VERSION="$(python -c 'from blackbox_universal import __version__; print(__version__)')"
+          PACKAGE_VERSION="$(python -c 'import tomllib; print(tomllib.load(open("pyproject.toml","rb"))["project"]["version"])')"
+          [[ "$VERSION" == "0.4.0" && "$PACKAGE_VERSION" == "$VERSION" ]] || {
+            echo "::error::Release version mismatch"
+            exit 1
+          }
+          ZIP="verified-portable/BLACK.BOX-Universal-Windows.zip"
+          test -s "$ZIP"
+          unzip -p "$ZIP" BLACK.BOX-Universal/_internal/blackbox-build.json > frozen-source.json
+          python -c 'import json,os; s=json.load(open("frozen-source.json")); assert s["source_sha"]==os.environ["GITHUB_SHA"] and s["tracked_worktree_clean"] is True, "Frozen archive source mismatch"'
+          TAG="v$VERSION"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "::error::Existing release $TAG will not be overwritten"
+            exit 1
+          fi
+          # Disallow publishing over an existing tag even if it has no release.
+          TAG_HTTP="$(gh api -i "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" 2>/dev/null | head -n 1 || true)"
+          if [[ "$TAG_HTTP" != *"404"* ]]; then
+            echo "::error::Tag existence could not be disproved; refusing unsafe publication: $TAG_HTTP"
+            exit 1
+          fi
+          sha256sum "$ZIP" > "$ZIP.sha256"
+          sha256sum -c "$ZIP.sha256"
+      - name: Publish owner-approved release without clobber
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          VERSION="$(python -c 'from blackbox_universal import __version__; print(__version__)')"
-          if [[ "$VERSION" != "0.3.6" ]]; then
-            echo "No owner-authorized test release for v$VERSION"
-            exit 0
-          fi
-          TAG="v$VERSION"
           ZIP="verified-portable/BLACK.BOX-Universal-Windows.zip"
-          test -s "$ZIP"
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            echo "Release $TAG already exists, never silently overwrite"
-            exit 0
-          fi
-          sha256sum "$ZIP" > "$ZIP.sha256"
           cat > release-notes.md <<'EOF'
-          BLACK.BOX Universal v0.3.6 — deep reliability hardening
+          BLACK.BOX Universal v0.4.0 — local investigations and portable maintenance
 
-          Reviewed PR #16 plus independent fixes:
-          - Original SQLite, JSON and HTML reports are never replaced by a
-            racing second writer; HTML + JSON use exclusive hard links and
-            conservative rollback.
-          - SQLite report errors count only genuine observation warnings/errors,
-            not user problem markers; streaming handles large event histories.
-          - Update ZIP validation rejects additional malformed Windows filenames,
-            device names, special nodes, aliases, collisions and existing roots.
-          - Portable update/uninstall reject junctions and Windows reparse points,
-            including ancestor directories. Fail closed if path inspection fails.
-          - On failure, the updater protects the prior portable installation and
-            saved session folders; Windows tests include a deliberate collision.
-          - CPU graph dynamically displays multicore utilization above 100%.
-          - Windows CI captures RU/EN Qt offscreen screenshots at 100/125/150/200%
-            scale, available as a separate QA artifact (not shipped to users).
+          - Deep local process investigations, dual SQLite evidence stores and
+            fail-closed cross-store consistency verification.
+          - 17 investigation actions + 4 user markers, offline interval exports,
+            event/thread history, bilingual five-page Qt interface.
+          - Verified old v0.3.6 frozen-app update to new Windows portable EXE,
+            relaunch, and new frozen helper removal on disposable Windows CI.
+          - Portable uninstall removes application files, its matching desktop
+            shortcut, owned Qt registry preferences, and its temporary helper.
+          - Diagnostic sessions and reports under Documents are PRESERVED.
 
-          The standalone Investigation Engine 0.1.2 remains included, and the
-          product still has exactly five tabs, no external worker or cloud
-          upload. All changes are tested against Windows/Linux Python 3.11
-          and frozen Windows EXE before publication.
-          Physical Windows screens, OneDrive/junction rights configurations,
-          AV blocks and a real end-user updater replacement remain NOT RUN.
+          The owner accepted the 5h30 Standard endurance test as an alternative
+          to the planned 8 hours (not an 8-hour test); 1h Detailed passed.
+          CI is NOT physical Win10/11, AV, UAC, OneDrive, screen-reader,
+          signed-binary, or independent 128-point acceptance. These limits
+          are not represented as PASS.
           EOF
-          gh release create "$TAG" "$ZIP" "$ZIP.sha256" \
+          gh release create "v0.4.0" "$ZIP" "$ZIP.sha256" \
             --target "$GITHUB_SHA" \
-            --title "BLACK.BOX Universal v0.3.6 — reliability hardening" \
+            --title "BLACK.BOX Universal v0.4.0 — local investigations" \
             --notes-file release-notes.md --latest
-          echo "Published $TAG from $GITHUB_SHA after Windows + Linux QA"
-
+          echo "Published v0.4.0 at exact reviewed SHA $GITHUB_SHA"
