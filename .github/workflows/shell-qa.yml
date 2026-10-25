@@ -141,7 +141,8 @@ jobs:
 
   windows-portable:
     name: Windows portable exe
-    needs: shell-tests
+    # Independent native verification runs alongside source tests for fast
+    # failure diagnosis. Publication still requires *all* three jobs green.
     runs-on: windows-latest
     timeout-minutes: 40
     env:
@@ -299,7 +300,7 @@ jobs:
 # A manual dispatch from main with exact reviewed SHA reruns all three QA jobs.
   publish-updater-test:
     name: Publish verified BLACK.BOX v0.4.0 (manual owner gate)
-    needs: [linux-tests, windows-portable]
+    needs: [shell-tests, linux-tests, windows-portable]
     if: >-
       github.event_name == 'workflow_dispatch' &&
       github.ref == 'refs/heads/main' &&
