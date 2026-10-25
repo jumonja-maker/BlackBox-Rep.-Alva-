@@ -3,6 +3,8 @@ import json,os,subprocess,sys,tempfile,time,unittest
 from pathlib import Path
 import psutil
 from blackbox_core.detailed_capture import sample_process
+from blackbox_core.library_files import atomic_json
+from blackbox_core.qa_fixture_status import wait_fixture_ack
 
 class RealScaleTests(unittest.TestCase):
  def launch(self,mode,count,root):
@@ -21,14 +23,13 @@ class RealScaleTests(unittest.TestCase):
    except subprocess.TimeoutExpired:child.terminate();child.wait(timeout=5)
   if child.stderr:child.stderr.close()
  def command(self,root,op,**extra):
-  cid=str(time.monotonic_ns());p=root/'command.writing';p.write_text(json.dumps({'id':cid,'op':op,**extra}));os.replace(p,root/'command.json')
-  deadline=time.monotonic()+5
-  while time.monotonic()<deadline:
-   state=json.loads((root/'state.json').read_text())
-   if state.get('ack')==cid:
-    self.assertIsNone(state['error']);return state
-   time.sleep(.02)
-  self.fail('REAL_FIXTURE_COMMAND_TIMEOUT')
+  cid=str(time.monotonic_ns())
+  # Both protocol files belong to this disposable fixture. Retain the same
+  # command ID, five-second deadline and resource assertions; tolerate only
+  # transient Windows share/access/lock denial, never a fabricated ACK.
+  atomic_json(root/'command.json',{'id':cid,'op':op,**extra},durable=False)
+  state=wait_fixture_ack(root/'state.json',cid,timeout=5.0)
+  self.assertIsNone(state['error']);return state
  def test_300_real_threads_default_truncation_and_explicit_larger_capture(self):
   with tempfile.TemporaryDirectory() as temp:
    root=Path(temp)/'threads';child,info=self.launch('threads',300,root)
