@@ -153,4 +153,34 @@ Capability unavailable is a supported outcome where the original is capability-a
 
 NIKITA and the owner's computer have not been used. No routine testing is assigned to the owner; physical/long-duration evidence is explicitly outstanding rather than falsely certified.
 
+## Dual-store completion forensic gate (engineering stabilization, NOT full acceptance)
+
+- `src/blackbox_core/session_completion.py` and `storage.py`: after the
+  normalized writer's durable `CLOSED` acknowledgement, cross-check the
+  committed v1 base-row cardinality/contiguous sequence against **only**
+  v2 `STANDARD` rows, their root instance and exact `schema1:N`
+  correlation keys. DETAILED/CHILD rows are not base snapshots. Rejection
+  ends v1 with `STORAGE_ERROR`, preserving the original evidence and
+  user-facing export safeguards; a failed read is never called success.
+- `blackbox_universal/deep_smoke.py`: real source/frozen deep QA independently
+  reopens both SQLite files after STOP and verifies source/mirror counts,
+  statuses and sequence mapping before the existing interval/export stage.
+  Legacy-only schema1 reading remains available.
+- `tests/test_storage_completion_gate.py` demonstrates missing, excess,
+  mislinked and correctly mirrored samples; an early read-only v2 backup
+  can legitimately remain `RECORDING` even after the live writer closes.
+  This establishes a *possible* snapshot-ordering explanation, **not**
+  the historical cause.
+- `docs/BB_DI_001_DUAL_STORE_FORENSICS.md`: primary QA summary reports 43
+  base snapshots, while the retained aecc v2 image has **27 STANDARD
+  and 13 DETAILED**, not 40 STANDARD, and a third action still RUNNING.
+  The exact original v1 database and a common atomic instant are not
+  preserved. The historical root cause is still **NOT ESTABLISHED**;
+  falsifying a completion/export status is forbidden.
+
+Acceptance matrix M-027/M-028/M-035/M-062 and AC/FIX remain PARTIAL pending
+full independent QA and 8h/1h/physical-Windows checks. This is a durable
+false-success prevention and reproducible forensic boundary, not a claim
+that an observed historical producer defect was fixed.
+
 **Gate:** keep PR #17 Draft / NOT ACCEPTED. No release/merge. Read the full original and completion requirements before any independent sign-off.
