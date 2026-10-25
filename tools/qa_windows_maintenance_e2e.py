@@ -262,12 +262,26 @@ def acceptance(built_zip: Path, source_sha: str, evidence: Path):
             _run_exe([str(exe_root), "--smoke"], cwd=str(install), env=env)
             report["steps"].append("REAL_NEW_FROZEN_EXE_RESTART_AND_SMOKE_PASS")
 
-            # Test real Windows shortcut removal, but never replace a
-            # pre-existing shortcut even in the isolated hosted runner.
-            desktop_link = _desktop() / SHORTCUT_TITLE
-            require(not desktop_link.exists(), "QA_DESKTOP_SHORTCUT_COLLISION")
-            create_shortcut(exe_root)
-            require(desktop_link.is_file(), "SHORTCUT_CREATION_FAILED")
+            # Keep Shell's known Desktop folder in the SAME isolated
+            # USERPROFILE used by the frozen maintenance child. Previously the
+            # QA parent created a real-runner Desktop shortcut, but maintenance
+            # ran with a fake profile lacking Desktop and failed SHGetFolderPathW.
+            # Never create or remove a shortcut on the real runner's Desktop.
+            qa_desktop = profile / "Desktop"
+            qa_desktop.mkdir()
+            with patch.dict(os.environ, {
+                    "USERPROFILE": str(profile),
+                    "APPDATA": str(profile / "AppData" / "Roaming"),
+                    "LOCALAPPDATA": str(profile / "AppData" / "Local")}):
+                actual_desktop = _desktop()
+                require(actual_desktop.resolve(strict=True) ==
+                        qa_desktop.resolve(strict=True),
+                        "QA_DESKTOP_PROFILE_NOT_ISOLATED")
+                desktop_link = actual_desktop / SHORTCUT_TITLE
+                require(not desktop_link.exists(), "QA_DESKTOP_SHORTCUT_COLLISION")
+                create_shortcut(exe_root)
+                require(desktop_link.is_file(), "SHORTCUT_CREATION_FAILED")
+            report["qa_desktop_profile_isolated"] = True
             # App-scoped QSettings marker: uninstall must remove this registry
             # subtree and must never modify unrelated HKCU keys.
             app_settings_key = r"Software\BlackBox\BLACK.BOX Universal"
