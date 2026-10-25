@@ -185,7 +185,7 @@ def _remove_owned_qsettings() -> None:
         return
     import winreg
     root = winreg.HKEY_CURRENT_USER
-    app_key = r"Software\\BlackBox\\BLACK.BOX Universal"
+    app_key = r"Software\BlackBox\BLACK.BOX Universal"
 
     def remove_subtree(path: str) -> None:
         try:
@@ -195,13 +195,15 @@ def _remove_owned_qsettings() -> None:
                 while True:
                     try:
                         children.append(winreg.EnumKey(key, index))
-                    except OSError:
+                    except OSError as error:
+                        if getattr(error, "winerror", None) != 259:  # ERROR_NO_MORE_ITEMS
+                            raise
                         break
                     index += 1
         except FileNotFoundError:
             return
         for child in children:
-            remove_subtree(path + "\\\\" + child)
+            remove_subtree(path + "\\" + child)
         winreg.DeleteKey(root, path)
 
     try:
