@@ -28,16 +28,22 @@ def _identity(path: Path) -> tuple[int, int]:
 
 
 def confirm_v2_completion(path: Path, *, session_uuid: str,
-                          origin_ns: int, exit_code: str) -> None:
+                          origin_ns: int, exit_code: str,
+                          expected_standard_samples: int | None = None) -> None:
     """Require the same session's CLOSED commit, including committed WAL data.
 
     No immutable=1, journal-mode change, UPDATE or checkpoint is used: a WAL
-    commit is valid even while another reader holds an older snapshot. Source
-    counters are not reconstructed and no missing sample count is inferred.
+    commit is valid even while another reader holds an older snapshot. A
+    caller that owns the closed schema1 recording supplies its *persisted*
+    number of base samples; this verifies one-to-one sequence/correlation
+    coverage. We never infer missing OS samples between accepted observations.
     """
     if (type(session_uuid) is not str or not session_uuid or
             type(origin_ns) is not int or origin_ns < 0 or
-            type(exit_code) is not str or not exit_code):
+            type(exit_code) is not str or not exit_code or
+            (expected_standard_samples is not None and
+             (type(expected_standard_samples) is not int or
+              not 0 <= expected_standard_samples <= 100_000_000))):
         raise CompletionNotConfirmed("V2_COMPLETION_INVALID_CONTEXT")
     path = Path(path).absolute()
     try:
@@ -61,6 +67,24 @@ def confirm_v2_completion(path: Path, *, session_uuid: str,
             if (status != "CLOSED" or type(ended) is not int or
                     ended < origin_ns or saved_code != exit_code):
                 raise CompletionNotConfirmed("V2_COMPLETION_NOT_CLOSED")
+            if expected_standard_samples is not None:
+                # Every real base counter snapshot is mirrored under its
+                # durable schema1 sequence. DETAILED and CHILD samples are
+                # independent and MUST NOT be counted as base snapshots.
+                # A CLOSED marker without full base coverage cannot pass.
+                count, first, last, bad_mapping = db.execute(
+                    "SELECT COUNT(*), COALESCE(MIN(series_seq),0),"
+                    " COALESCE(MAX(series_seq),0),"
+                    " COALESCE(SUM(CASE WHEN instance_id != 1 OR "
+                    "correlation_key != 'schema1:' || series_seq "
+                    "THEN 1 ELSE 0 END),0) "
+                    "FROM samples WHERE series='STANDARD'"
+                ).fetchone()
+                if count != expected_standard_samples:
+                    raise CompletionNotConfirmed("V2_COMPLETION_BASE_COUNT_MISMATCH")
+                if (first != (1 if count else 0) or last != count or
+                        bad_mapping):
+                    raise CompletionNotConfirmed("V2_COMPLETION_BASE_MAPPING_MISMATCH")
         if _identity(path) != before:
             raise CompletionNotConfirmed("V2_COMPLETION_FILE_CHANGED")
     except CompletionNotConfirmed:
