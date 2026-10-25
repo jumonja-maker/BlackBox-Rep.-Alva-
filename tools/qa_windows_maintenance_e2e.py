@@ -22,6 +22,7 @@ import time
 from unittest.mock import patch
 
 import psutil
+import winreg
 
 from blackbox_universal.maintenance import _safe_install, _user_data_root
 from blackbox_universal.releases import (
@@ -266,6 +267,18 @@ def acceptance(built_zip: Path, source_sha: str, evidence: Path):
             require(not desktop_link.exists(), "QA_DESKTOP_SHORTCUT_COLLISION")
             create_shortcut(exe_root)
             require(desktop_link.is_file(), "SHORTCUT_CREATION_FAILED")
+            # App-scoped QSettings marker: uninstall must remove this registry
+            # subtree and must never modify unrelated HKCU keys.
+            app_settings_key = r"Software\\BlackBox\\BLACK.BOX Universal"
+            neighbor_key = r"Software\\BlackBox\\BLACKBOX_QA_FOREIGN_KEEP"
+            with winreg.CreateKey(winreg.HKEY_CURRENT_USER,
+                                  app_settings_key) as settings:
+                winreg.SetValueEx(settings, "bb_native_qa_marker", 0,
+                                  winreg.REG_SZ, "must-be-removed")
+            with winreg.CreateKey(winreg.HKEY_CURRENT_USER,
+                                  neighbor_key) as neighbor:
+                winreg.SetValueEx(neighbor, "bb_native_qa_foreign", 0,
+                                  winreg.REG_SZ, "must-stay")
 
             new_maintenance = root / "outside-new-maintenance"
             new_maintenance.mkdir()
@@ -295,6 +308,18 @@ def acceptance(built_zip: Path, source_sha: str, evidence: Path):
             require(not install.exists() and not install.is_symlink(),
                     "APP_FOLDER_REMAINED_AFTER_UNINSTALL")
             require(not desktop_link.exists(), "APP_SHORTCUT_REMAINED")
+            try:
+                with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                                    app_settings_key):
+                    raise QaFailure("OWN_QSETTINGS_REMAINED")
+            except FileNotFoundError:
+                pass
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                                neighbor_key) as foreign_settings:
+                value, _ = winreg.QueryValueEx(foreign_settings,
+                                               "bb_native_qa_foreign")
+                require(value == "must-stay", "FOREIGN_QSETTINGS_CHANGED")
+            report["owned_qsettings_removed"] = True
             require(sha256(user_sentinel) == user_digest,
                     "USER_SESSIONS_OUTSIDE_INSTALL_REMOVED")
             require(sha256(adjacent) == foreign_digest,
@@ -333,6 +358,13 @@ def acceptance(built_zip: Path, source_sha: str, evidence: Path):
             try:
                 remove_shortcut_if_matches(exe_root)
             except (OSError, subprocess.SubprocessError):
+                pass
+        # The marker is owned by this disposable QA run, not BLACK.BOX.
+        if os.name == "nt":
+            try:
+                winreg.DeleteKey(winreg.HKEY_CURRENT_USER,
+                                 r"Software\\BlackBox\\BLACKBOX_QA_FOREIGN_KEEP")
+            except FileNotFoundError:
                 pass
         (evidence / "maintenance-native-result.json").write_text(
             json.dumps(report, ensure_ascii=True, indent=2) + "\n",
