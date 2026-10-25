@@ -210,6 +210,41 @@ class PortableMaintenanceTests(unittest.TestCase):
                 uninstall(other)
 
 
+    def test_uninstall_resolves_shortcut_before_deleting_exe(self):
+        with tempfile.TemporaryDirectory() as directory:
+            install = Path(directory) / "BLACK.BOX-Universal"
+            fake_install(install)
+            observed = []
+            def detach(exe):
+                self.assertTrue(exe.is_file(), "must resolve .lnk before EXE removal")
+                observed.append("detached")
+                return None
+            with patch("blackbox_universal.maintenance._detach_matching_desktop_shortcut",
+                       side_effect=detach):
+                uninstall(install)
+            self.assertEqual(observed, ["detached"])
+            self.assertFalse(install.exists())
+
+    def test_failed_uninstall_restores_original_shortcut_without_overwrite(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            install = base / "BLACK.BOX-Universal"
+            fake_install(install)
+            shortcut = base / "BLACK.BOX Universal.lnk"
+            original = b"original-link-file-bytes"
+            shortcut.write_bytes(original)
+            def detach(_exe):
+                shortcut.unlink()
+                return shortcut, original
+            with patch("blackbox_universal.maintenance._detach_matching_desktop_shortcut",
+                       side_effect=detach), \\
+                 patch("blackbox_universal.maintenance.shutil.rmtree",
+                       side_effect=PermissionError("locked")):
+                with self.assertRaises(PermissionError):
+                    uninstall(install)
+            self.assertEqual(shortcut.read_bytes(), original)
+            self.assertTrue(install.exists())
+
 class LanguageAndFeedbackQtTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
