@@ -22,6 +22,30 @@ def observer_identity():
     return os.getpid(),"OS_GETPID"
 
 
+
+def _publish_ready(directory: Path, data: dict) -> None:
+    """Expose ready.json only when complete; never replace an earlier marker.
+
+    The consumer polls ready.json while the fixture runs in another process.
+    Opening the final path with "x" exposed a zero-byte/partial JSON file
+    before json.dump finished. The same-directory hard link is an atomic
+    no-clobber publication on the test stand's NTFS/ext4 filesystem.
+    """
+    pending = directory / ".ready.json.pending"
+    ready = directory / "ready.json"
+    owned = False
+    try:
+        with pending.open("x", encoding="utf-8") as handle:
+            owned = True
+            json.dump(data, handle)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.link(pending, ready)  # Atomic create; FileExistsError is intentional.
+    finally:
+        if owned:
+            pending.unlink(missing_ok=True)
+
+
 def run_fixture(mode,directory,*,ttl_s=75):
     directory=Path(directory)
     directory.mkdir(parents=True,exist_ok=True)
@@ -64,8 +88,7 @@ def run_fixture(mode,directory,*,ttl_s=75):
         data={"fixture":"BB-DI-001/REAL_OS_WORKLOAD","mode":mode,"pid":os.getpid(),
               "sensor_pid":sensor_pid,"sensor_pid_source":pid_source,
               "thread_ids":tids,"hwnd":hwnd,"ttl_seconds":ttl_s}
-        with (directory/"ready.json").open("x",encoding="utf-8") as f:
-            json.dump(data,f)
+        _publish_ready(directory, data)
     def should_stop():
         return time.monotonic()>=deadline or (directory/"stop.request").exists()
     if mode=="ui":
