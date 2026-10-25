@@ -16,6 +16,12 @@ post-stop instant.
   rows). Its metadata is `status=RECORDING, ended_monotonic_ns=NULL,
   exit_code=NULL`; 25 normalized events; of three action intervals,
   two are `COMPLETED` and the third is `RUNNING`.
+  The last stored STANDARD sample has an **estimated** UTC of
+  `2026-10-24T19:11:42.819527Z` (per v2 clock anchor), and last DETAILED
+  sample `19:11:41.847046Z`; the reported v1 `ended_utc` is
+  `19:11:44.975Z`. The approximate 2.16-second source-clock separation
+  is consistent with a pre-close copy but cannot date the actual copy
+  operation or prove a cause.
   The retained WAL contains 0 bytes. The copy's main-file SHA-256 is
   `1eba4e12bd0edbeeac5cb1fb64f4e92e0e20df7aed877e867cc65eb42a4eb495`.
 - Export refused `EXPORT_REQUIRES_CLOSED_SESSION` correctly. No export
