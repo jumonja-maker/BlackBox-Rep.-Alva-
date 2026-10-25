@@ -299,7 +299,29 @@ def acceptance(built_zip: Path, source_sha: str, evidence: Path):
                 env, wait_pid=running.pid)
             try:
                 require(running.wait(timeout=120) == 0, "NEW_GUI_EXIT_FAILED")
-                require(remover.wait(timeout=180) == 0,
+                remover_code = remover.wait(timeout=180)
+                report["new_maintenance_exit_code"] = remover_code
+                if remover_code != 0:
+                    # Capture the real frozen maintenance error *before* the
+                    # isolated TemporaryDirectory is destroyed. The log and
+                    # every inspected path belong to this disposable QA run.
+                    error_log = data / "maintenance-errors.log"
+                    try:
+                        recent_errors = error_log.read_text(
+                            encoding="utf-8", errors="replace")[-4096:]
+                    except OSError as error:
+                        recent_errors = "UNAVAILABLE: " + type(error).__name__
+                    report["uninstall_failure_context"] = {
+                        "install_exists": install.exists(),
+                        "desktop_shortcut_exists": desktop_link.exists(),
+                        "user_data_root_exists": data.exists(),
+                        "preserved_folder_count": len(list(data.glob("Preserved-*"))),
+                        "maintenance_errors": recent_errors,
+                        "helper_files": sorted(
+                            p.name for p in new_helper_scratch.iterdir())
+                        if new_helper_scratch.is_dir() else [],
+                    }
+                require(remover_code == 0,
                         "NEW_MAINTENANCE_UNINSTALL_FAILED")
             finally:
                 for proc in (running, remover):
