@@ -133,7 +133,7 @@ jobs:
     name: Windows portable exe
     needs: shell-tests
     runs-on: windows-latest
-    timeout-minutes: 30
+    timeout-minutes: 40
     env:
       QT_QPA_PLATFORM: offscreen
       PYTHONUTF8: "1"
@@ -264,6 +264,19 @@ jobs:
         run: |
           Compress-Archive -LiteralPath "dist\BLACK.BOX-Universal" -DestinationPath "BLACK.BOX-Universal-Windows.zip" -Force
           if (-not (Test-Path "BLACK.BOX-Universal-Windows.zip")) { throw "ZIP missing" }
+      - name: Native old-v0.3.6 to new-v0.4.0 update and full portable uninstall
+        shell: pwsh
+        timeout-minutes: 16
+        run: |
+          python tools/qa_windows_maintenance_e2e.py --built-zip "BLACK.BOX-Universal-Windows.zip" --expected-sha "${{ github.event.pull_request.head.sha || github.sha }}" --evidence "portable-maintenance-e2e"
+          if ($LASTEXITCODE -ne 0) { throw 'Real portable update/uninstall acceptance failed' }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: BLACKBOX-NATIVE-UPDATE-UNINSTALL-QA
+          path: portable-maintenance-e2e/
+          if-no-files-found: warn
+          retention-days: 14
       - uses: actions/upload-artifact@v4
         with:
           name: BLACKBOX-INDEPENDENT-WINDOWS-QA
