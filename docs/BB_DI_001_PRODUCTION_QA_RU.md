@@ -33,3 +33,16 @@ Frozen EXE использует тот же harness: `... --qa-production benchm
 ## Действия и доказательства
 
 Анализ связывает ресурсы только внутри настоящих USER action timestamps. Выдаётся ACTION_RESOURCE_COINCIDENCE с частичным диапазоном, доступными парами, количеством/покрытием, типизированным следующим измерением и явным causal_claim=false. Настройка top_threads читается из самого сохранённого сеанса, а не из текущей цели. Непрочитанные nettrace/ETL остаются UNDECODED; сообщения SDK остаются APP statements.
+
+## Однократное длительное испытание в GitHub Actions (отдельный QA; не релиз)
+
+На Draft PR #17 при **одном явно помеченном** commit `Start BB-DI-001 GitHub endurance: 5h30 Standard and 1h Detailed` запускается выделенный workflow `.github/workflows/bb-di-001-endurance-qa.yml`. Следующие обычные изменения в PR **не запускают** длинное испытание повторно: в workflow есть проверка точной строки commit subject. Отдельная concurrency group не отменяет этот тест при обычных изменениях основного CI. `main` и релизы не трогаются.
+
+- Общая **предпроверка**: Windows offscreen PySide6 с настоящим изолированным исследовательским процессом и локальным стендом `longrun`; по 90 секунд Standard/Detailed. Предпроверка — функциональная, никогда не считается 8ч/1ч.
+- Два параллельных независимых hosted Windows job: `STANDARD` **19800 реальных секунд = 5ч30м**, `DETAILED` **3600 реальных секунд = 1ч**. Тайм-ауты оставляют запас перед лимитом GitHub-hosted job 6 часов. Каждый использует собственную временную папку и собственный процесс-мишень. Не запускаются ETW/dump/загрузка чужих программ.
+- Скрипт `tools/qa_github_endurance.py` вызывает неизменённый production GUI-harness `blackbox_universal.production_qa endurance` с `--expected-sha` из точного PR HEAD. Каждые 5 секунд production harness обновляет `progress.json`; оболочка печатает суммарный heartbeat каждые 10 минут. Все исходные CSV и SQLite остаются в QA artifacts.
+- После STOP скрипт **отдельно** читает реально сохранённые v1/v2/research SQLite, проверяет `COMPLETED/CLOSED`, идентичность, отсутствие writer drop, точное соответствие последовательных STANDARD (`schema1:N`), без замещения Detailed/Child. Проверяется доступность одной минуты в начале, середине и конце, а также **реальный экспорт** среднего интервала с хеш-проверкой неизменности исходных БД. Любой сбой/преждевременная смерть цели/GUI helper или пустая история даёт `FAIL`.
+- Конечные `qa-verdict.json`, `result.json`, `samples.csv`, `progress.json`, интервальные экспорты и исходные SQLite сохраняются в отдельные GitHub Actions Artifacts на 7 дней; реальные файлы публикуются только после остановки job. Во время выполнения состояние доступно в Actions status/log heartbeat, не как уже доказанный PASS.
+- **ВАЖНО:** 5ч30м Standard **не выполняет нормативные 8ч Standard (M-064)**. Его честная метка — `short_run: true`/`endurance_duration_met: false`. Часовой Detailed покрывает только требование длительности Detailed. GitHub-hosted Windows Server/offscreen — не физические Win10/11 и не полноценные off/on overhead-бенчмарки. Полная матрица 128 пунктов остаётся незакрытой.
+
+Ручное `workflow_dispatch` не используется: для нового workflow ещё нет файла на `main`; однократный PR `synchronize` запускает его непосредственно на ветке через зафиксированный source SHA. Это **не** изменение release/default branch.
