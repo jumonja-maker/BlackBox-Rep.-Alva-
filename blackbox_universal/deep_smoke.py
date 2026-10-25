@@ -155,6 +155,35 @@ class DeepSmoke(QObject):
                 self._require(w.probe.last_error is None and w.probe.report_result is not None,"REPORT_FAILED")
                 folder=w.probe.session_folder
                 self.hashes={name:digest(folder/name) for name in ("session.sqlite3",FILENAME,"report.json","report.html")}
+                # Real source/frozen QA must verify both durable stores, not
+                # simply the total count of STANDARD+DETAILED v2 rows.
+                # This gate runs AFTER Stop's owner ACK and before export.
+                with sqlite3.connect((folder/"session.sqlite3").as_uri()+"?mode=ro",uri=True) as primary:
+                    base_count, first, last = primary.execute(
+                        "SELECT COUNT(*),COALESCE(MIN(seq),0),"
+                        " COALESCE(MAX(seq),0) FROM samples").fetchone()
+                    base_status = primary.execute(
+                        "SELECT exit_code FROM metadata").fetchone()[0]
+                with sqlite3.connect((folder/FILENAME).as_uri()+"?mode=ro",uri=True) as normalized:
+                    mirrored, bad_mapping = normalized.execute(
+                        "SELECT COUNT(*),"
+                        " COALESCE(SUM(CASE WHEN instance_id!=1 OR "
+                        "correlation_key!='schema1:' || series_seq "
+                        "THEN 1 ELSE 0 END),0) "
+                        "FROM samples WHERE series='STANDARD'").fetchone()
+                    closed_status = normalized.execute(
+                        "SELECT status,exit_code FROM sessions").fetchone()
+                self.result.update(primary_standard_samples=base_count,
+                                   normalized_standard_samples=mirrored,
+                                   normalized_base_mismatches=bad_mapping,
+                                   primary_exit_code=base_status,
+                                   normalized_completion=list(closed_status))
+                self._require(
+                    (base_count == mirrored and first == (1 if base_count else 0)
+                     and last == base_count and not bad_mapping and
+                     base_status=="COMPLETED" and
+                     closed_status==("CLOSED","COMPLETED")),
+                    "DUAL_STORE_COMPLETION_NOT_CONFIRMED")
                 with sqlite3.connect(folder/FILENAME) as db:
                     self.result.update(samples=db.execute("SELECT count(*) FROM samples").fetchone()[0],
                         thread_records=db.execute("SELECT count(*) FROM thread_samples").fetchone()[0],
