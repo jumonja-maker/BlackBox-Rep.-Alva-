@@ -10,6 +10,7 @@ from contextlib import closing
 from pathlib import Path
 import sqlite3
 import stat
+import time
 
 
 class CompletionNotConfirmed(ValueError):
@@ -51,7 +52,15 @@ def confirm_v2_completion(path: Path, *, session_uuid: str,
         with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True,
                                      timeout=1.0)) as db:
             db.execute("PRAGMA query_only=ON")
-            db.set_progress_handler(lambda: 1, 10000)
+            # SQLite: nonzero return from a progress handler INTERRUPTS
+            # the query. An unconditional 1 caused long-running sessions
+            # with >~1000 STANDARD rows to fail verification even though
+            # the v2 CLOSED row and source samples were fully committed.
+            # Preserve a bounded read-only verification, but cancel only
+            # after a real deadline, never at a fixed VM instruction count.
+            deadline = time.monotonic() + 5.0
+            db.set_progress_handler(
+                lambda: int(time.monotonic() >= deadline), 10000)
             if db.execute("PRAGMA user_version").fetchone() != (2,):
                 raise CompletionNotConfirmed("V2_COMPLETION_SCHEMA_MISMATCH")
             rows = db.execute(
