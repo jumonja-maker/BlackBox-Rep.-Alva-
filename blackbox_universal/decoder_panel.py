@@ -8,7 +8,7 @@ from uuid import uuid4
 
 from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QFileDialog, QComboBox, QSpinBox, QTableWidget, QTableWidgetItem, QHeaderView,
+    QFileDialog, QComboBox, QSpinBox, QLineEdit, QTableWidget, QTableWidgetItem, QHeaderView,
     QPlainTextEdit, QSplitter)
 
 from blackbox_core.decoder_service import capability, decode_file
@@ -71,10 +71,14 @@ class DecoderPanel(QWidget):
         self.pid = QSpinBox()
         self.pid.setRange(0, 2147483647)
         self.pid.setPrefix("PID: ")
+        self.search = QLineEdit()
+        self.search.setMaxLength(120)
+        self.search.returnPressed.connect(self.reset_page)
         self.apply_button = QPushButton()
         self.apply_button.clicked.connect(self.reset_page)
         filters.addWidget(self.mode)
         filters.addWidget(self.pid)
+        filters.addWidget(self.search, 1)
         filters.addWidget(self.apply_button)
         layout.addLayout(filters)
         split = QSplitter(Qt.Orientation.Vertical)
@@ -125,6 +129,7 @@ class DecoderPanel(QWidget):
         for i, pair in enumerate((("Events", "События"), ("Recorded stacks", "Записанные стеки"),
                                   ("GC / suspension intervals", "GC / интервалы остановки"))):
             self.mode.setItemText(i, self.tr2(*pair))
+        self.search.setPlaceholderText(self.tr2("Find provider or event…", "Поиск источника или события…"))
         self.table.setHorizontalHeaderLabels(("#", "ms", "PID", self.tr2("SOURCE", "ИСТОЧНИК"),
                                                self.tr2("EVENT / INTERVAL", "СОБЫТИЕ / ИНТЕРВАЛ")))
         self.render_status()
@@ -161,6 +166,18 @@ class DecoderPanel(QWidget):
             self.render_status()
             return
         output = Path(self.cache.name) / (uuid4().hex + ".sqlite3")
+        # Never show an old trace as though it belonged to the new input,
+        # including while decoding or after a malformed file fails.
+        previous = self.index
+        self.index, self.summary, self.rows = None, None, []
+        self.cursors, self.next_cursor = [0], 0
+        self.table.clearContents()
+        self.table.setRowCount(0)
+        self.details.clear()
+        for button in (self.prev_button, self.next_button, self.export_button):
+            button.setEnabled(False)
+        if previous is not None:
+            previous.unlink(missing_ok=True)
         self.state = "decoding"
         self.open_button.setEnabled(False)
         self.session_button.setEnabled(False)
@@ -206,7 +223,8 @@ class DecoderPanel(QWidget):
         if not self.index:
             return
         try:
-            page = read_index(self.index, after=self.cursors[-1], mode=self.mode.currentData(), pid=self.pid.value())
+            page = read_index(self.index, after=self.cursors[-1], mode=self.mode.currentData(),
+                              pid=self.pid.value(), search=self.search.text())
             self.rows = page["rows"]
             self.table.setRowCount(len(self.rows))
             for i, item in enumerate(self.rows):

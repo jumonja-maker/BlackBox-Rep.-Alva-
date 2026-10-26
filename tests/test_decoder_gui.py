@@ -97,6 +97,42 @@ class DecoderGuiTests(unittest.TestCase):
                 self.window._navigate("decoder")
                 self.assertEqual(current.verticalScrollBar().value(), 0)
 
+    def test_new_decode_clears_old_trace_and_failed_input_does_not_show_stale_rows(self):
+        panel = self.window.decoder_panel
+        valid = Path(self.temp.name) / "first.jsonl"
+        valid.write_text(json.dumps({"schema_version": 1, "pid": 5, "tid": 6,
+            "seq": 1, "source_ns": 100, "source_clock": "TEST",
+            "kind": "first.event"}) + "\n", encoding="utf-8")
+        panel.start_decode(valid)
+        self.wait_idle()
+        self.assertEqual(panel.state, "decoded", panel.error)
+        self.assertEqual(panel.table.rowCount(), 1)
+        self.assertTrue(panel.export_button.isEnabled())
+        broken = Path(self.temp.name) / "broken.jsonl"
+        broken.write_text('{"incomplete":true}', encoding="utf-8")
+        panel.start_decode(broken)
+        self.assertEqual(panel.table.rowCount(), 0)
+        self.assertFalse(panel.export_button.isEnabled())
+        self.assertIsNone(panel.index)
+        self.wait_idle()
+        self.assertEqual(panel.state, "error")
+        self.assertEqual(panel.table.rowCount(), 0)
+        self.assertFalse(panel.export_button.isEnabled())
+
+    def test_search_filter_is_applied_to_index(self):
+        panel = self.window.decoder_panel
+        source = Path(self.temp.name) / "search.jsonl"
+        rows = [{"schema_version": 1, "pid": 5, "tid": 6, "seq": i+1,
+                 "source_ns": (i+1)*1000000, "source_clock": "TEST",
+                 "kind": name} for i, name in enumerate(("alpha.event", "beta.event"))]
+        source.write_text("".join(json.dumps(x) + "\n" for x in rows), encoding="utf-8")
+        panel.start_decode(source)
+        self.wait_idle()
+        panel.search.setText("beta")
+        panel.apply_button.click()
+        self.assertEqual(panel.table.rowCount(), 1)
+        self.assertIn("beta", panel.table.item(0, 4).text())
+
     def test_close_cancels_and_drains_worker_without_qthread_destruction(self):
         def blocked(*args, cancel, **kwargs):
             if not cancel.wait(5):

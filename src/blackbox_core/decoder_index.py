@@ -187,7 +187,7 @@ class GCAdapter:
 
 def own_events(path, cancel=None):
     """Our schema-1 JSONL is not an ETW format. Never trust its token or source label."""
-    origins, sequences = {}, {}
+    origins, sequences, producers = {}, {}, {}
     for ordinal, raw in enumerate(lines(path, cancel), 1):
         if (raw.get("schema_version") != 1 or not _integer(raw.get("pid"), minimum=1) or
                 not _integer(raw.get("tid")) or not _integer(raw.get("source_ns")) or
@@ -198,7 +198,19 @@ def own_events(path, cancel=None):
         tid_kind = raw.get("tid_kind", "OS_NATIVE")
         if tid_kind not in ("OS_NATIVE", "RUNTIME_THREAD_ID"):
             raise ValueError("INVALID_APP_THREAD_KIND")
-        identity = (raw["pid"], raw["source_clock"])
+        # An application token identifies a writer, NOT an authenticated
+        # source. Its opaque value must never enter a saved index. Without
+        # one, distinct writers using the same PID/clock remain ambiguous.
+        token = raw.get("token")
+        if token is not None and (type(token) is not str or not 1 <= len(token) <= 128):
+            raise ValueError("INVALID_APP_WRITER_TOKEN")
+        producer_key = (raw["pid"], raw["source_clock"], token)
+        if producer_key not in producers:
+            if len(producers) >= 4096:
+                raise ValueError("APPLICATION_PRODUCER_BUDGET")
+            producers[producer_key] = len(producers) + 1
+        producer = producers[producer_key]
+        identity = (raw["pid"], raw["source_clock"], producer)
         sequence_key = (*identity, tid_kind, raw["tid"])
         if raw["seq"] <= sequences.get(sequence_key, -1):
             raise ValueError("REPLAYED_APPLICATION_EVENT")
@@ -212,6 +224,8 @@ def own_events(path, cancel=None):
                "pid": raw["pid"], "tid": raw["tid"], "process_instance": None,
                "provider": "BLACKBOX_APPLICATION_JSONL", "name": raw["kind"],
                "clock_scope": list(identity), "clock_alignment": "SEPARATE_PER_PRODUCER_NOT_ALIGNED",
+               "producer_identity_quality": "TOKEN_PARTITIONED_NOT_VERIFIED" if token is not None
+                                            else "NO_TOKEN_WRITER_AMBIGUOUS",
                "payload": raw, "payload_status": "UNVERIFIED_APPLICATION_STATEMENT",
                "frames": [], "stack_status": "NOT_RECORDED", "semantic": None}
 
@@ -315,8 +329,9 @@ def build_index(source, output, *, input_sha256, format_name, cancel=None):
         part.unlink(missing_ok=True)
 
 
-def read_index(path, *, after=0, mode="events", pid=0, limit=200):
-    if not _integer(after) or not _integer(pid) or type(limit) is not int or not 1 <= limit <= 200:
+def read_index(path, *, after=0, mode="events", pid=0, limit=200, search=""):
+    if (not _integer(after) or not _integer(pid) or type(limit) is not int or
+            not 1 <= limit <= 200 or type(search) is not str or len(search) > 120):
         raise ValueError("INVALID_INDEX_PAGE")
     if mode not in ("events", "stacks", "gc"):
         raise ValueError("INVALID_INDEX_MODE")
@@ -339,6 +354,17 @@ def read_index(path, *, after=0, mode="events", pid=0, limit=200):
             values.append(pid)
         if mode == "stacks":
             sql += " AND has_stack=1"
+        # Literal search for event names/providers and derived interval kinds.
+        # Wildcards typed by a user must not silently match every event.
+        if search.strip():
+            needle = search.strip().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            pattern = "%" + needle + "%"
+            if mode == "gc":
+                sql += " AND kind LIKE ? ESCAPE '\\'"
+                values.append(pattern)
+            else:
+                sql += " AND (name LIKE ? ESCAPE '\\' OR provider LIKE ? ESCAPE '\\')"
+                values.extend((pattern, pattern))
         values.append(limit + 1)
         rows = db.execute(sql + " ORDER BY id LIMIT ?", values).fetchall()
         summary = json.loads(db.execute("SELECT value FROM metadata WHERE key='summary'").fetchone()[0])

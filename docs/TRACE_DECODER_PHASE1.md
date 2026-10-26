@@ -12,8 +12,11 @@ The existing manual release gate remains unchanged and is not dispatched.
 пользователь portable-сборки не должен устанавливать .NET отдельно.
 Python-адаптер создаёт отдельный SQLite-индекс, не изменяя базы наблюдения.
 Список событий постраничный (200 строк), а не обрезанный 500-строчный результат.
-Есть фильтр PID, просмотр записанных кадров стека, полей события и GC-интервалов,
-отмена операции, открытие файла из папки текущего сеанса и сохранение индекса.
+Есть фильтр PID, буквальный поиск по провайдеру/событию и видам интервалов,
+просмотр записанных кадров стека, полей события и GC-интервалов, отмена
+операции, открытие файла из папки текущего сеанса и сохранение индекса.
+Открытие нового файла очищает старую таблицу: ошибка декодирования не выдаёт
+результаты прошлой трассы за новые.
 
 The primary backend is the unmodified Microsoft.Diagnostics.Tracing.TraceEvent
 NuGet package, pinned to **4.0.0**. The helper converts a private input snapshot
@@ -37,7 +40,13 @@ The original trace remains unchanged, with SHA-256 checked before and after.
   `RUNTIME_FULLY_SUSPENDED` requires all four ordered suspension/restart phases.
   Runtime suspensions are not automatically attributed to GC or a user incident.
 - An independent adapter for BLACK.BOX schema-1 application JSONL. Tokens are
-  removed. Per-producer relative clocks are not falsely merged into one timeline.
+  removed. Distinct observed writer tokens are mapped to anonymous in-memory
+  producer IDs, so two writers reusing the same PID/clock do not share a false
+  time origin. The token is never written into the index and is NOT proof of
+  writer authenticity. When absent, producer identity remains explicitly
+  ambiguous. No per-producer clock is assumed aligned with another clock.
+- Literal, bounded provider/name/interval-kind search over SQLite keyset pages.
+  Search never interprets user-written % or _ as SQL wildcards.
 
 ## Budgets and limits — do not overstate this patch
 

@@ -140,6 +140,53 @@ class DecoderIndexTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 list(lines(path))
 
+    def test_jsonl_writer_tokens_partition_reused_pid_and_are_never_exported(self):
+        # Identical PID, clock and TID with independent writers must not be
+        # merged into one timeline or rejected as a replayed sequence.
+        base = {"schema_version": 1, "pid": 321, "tid": 77, "seq": 1,
+                "source_clock": "PYTHON_PERF_COUNTER_NS", "kind": "test.event"}
+        records = [dict(base, source_ns=1_000, token="secret-token-writer-A"),
+                   dict(base, source_ns=999_000, token="secret-token-writer-B"),
+                   dict(base, source_ns=2_000, token="secret-token-writer-A", seq=2)]
+        path = self.root / "writers.jsonl"
+        path.write_text("".join(json.dumps(x) + "\n" for x in records), encoding="utf-8")
+        parsed = list(own_events(path))
+        self.assertEqual([x["time_ms"] for x in parsed], [0, 0, .001])
+        self.assertEqual([x["clock_scope"][-1] for x in parsed], [1, 2, 1])
+        self.assertTrue(all(x["producer_identity_quality"] == "TOKEN_PARTITIONED_NOT_VERIFIED" for x in parsed))
+        out = self.root / "index.sqlite3"
+        build_index(path, out, input_sha256=HASH, format_name=".jsonl")
+        saved = json.dumps(read_index(out), ensure_ascii=False)
+        self.assertNotIn("secret-token", saved)
+
+    def test_no_token_requires_ambiguous_producer_quality(self):
+        path = self.root / "no-token.jsonl"
+        path.write_text(json.dumps({"schema_version": 1, "pid": 22, "tid": 33,
+                                    "seq": 1, "source_clock": "UNKNOWN_CLOCK",
+                                    "source_ns": 200, "kind": "test.event"}) + "\n", encoding="utf-8")
+        parsed = list(own_events(path))
+        self.assertEqual(parsed[0]["producer_identity_quality"], "NO_TOKEN_WRITER_AMBIGUOUS")
+
+    def test_index_filter_uses_literal_search_and_keyset_pagination(self):
+        events = [event(1), event(2), event(3), event(4)]
+        events[0]["name"] = "GC%Start"
+        events[1]["name"] = "GC_Start"
+        events[2]["name"] = "Other"
+        events[3]["name"] = "GC%Start"
+        path, _ = self.build(events)
+        names = [r["event"]["name"] for r in read_index(path, search="GC%Start")["rows"]]
+        self.assertEqual(names, ["GC%Start", "GC%Start"])
+        self.assertEqual([r["event"]["name"] for r in read_index(path, search="GC_Start")["rows"]], ["GC_Start"])
+        first = read_index(path, search="GC%Start", limit=1)
+        self.assertTrue(first["has_more"])
+        second = read_index(path, search="GC%Start", limit=1, after=first["next_cursor"])
+        self.assertEqual(second["rows"][0]["index_id"], 4)
+        self.assertEqual(len(read_index(path, search="SYNTHETIC_ONLY")["rows"]), 4)
+        with self.assertRaises(ValueError):
+            read_index(path, search="x" * 121)
+        with self.assertRaises(ValueError):
+            read_index(path, search=123)
+
     def test_stack_fields_are_preserved_without_fabricated_symbols(self):
         row = event(1)
         row["frames"] = [{"address": "0x123", "name": ""}]
