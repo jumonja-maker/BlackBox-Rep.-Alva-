@@ -23,7 +23,7 @@ from blackbox_core.experiment_metrics import measure_interval
 from blackbox_core.instrumentation import EventTail, EventWriter
 from blackbox_core.research_worker import ResearchSession
 from blackbox_core.session_v2 import SessionV2Writer
-from blackbox_core.session_view import SessionView
+from blackbox_core.session_view import SessionView, SessionReadError
 from blackbox_core.storage import SessionStore
 from blackbox_universal.base_sample_worker import BaseSampleWorker
 from blackbox_universal.monitor import ReadOnlyProbe
@@ -159,6 +159,54 @@ class MeasurementIntegrityTests(unittest.TestCase):
             finally:
                 if writer.thread.is_alive():
                     writer.finish("STORAGE_ERROR")
+
+
+    def test_malformed_imported_v2_clock_and_cadence_never_reach_math(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            origin = time.monotonic_ns()
+            created = time.time()
+            writer = SessionV2Writer(
+                folder, pid=os.getpid(), created=created,
+                name="malformed-import-test", origin_ns=origin)
+            for offset in (1, 2):
+                writer.submit("base", {
+                    "time_ns": origin + offset * 1_000_000_000,
+                    "pid": os.getpid(), "created": created,
+                    "rss_bytes": 123,
+                    "requested_interval_ns": 1_000_000_000,
+                })
+            writer.finish("COMPLETED")
+            path = folder / "session-v2.sqlite3"
+            with closing(sqlite3.connect(path)) as db:
+                for field, corruption in (
+                    ("series_seq", "bad-seq"),
+                    ("requested_interval_ns", "bad-period"),
+                    ("capture_started_ns", "bad-clock"),
+                    ("monotonic_ns", "bad-monotonic"),
+                ):
+                    original = db.execute(
+                        f"SELECT {field} FROM samples WHERE sample_id=1"
+                    ).fetchone()[0]
+                    db.execute(
+                        f"UPDATE samples SET {field}=? WHERE sample_id=1",
+                        (corruption,))
+                    db.commit()
+                    with SessionView.open(folder) as view:
+                        with self.assertRaises(SessionReadError, msg=field):
+                            view.interval()
+                    db.execute(
+                        f"UPDATE samples SET {field}=? WHERE sample_id=1",
+                        (original,))
+                    db.commit()
+                # Out-of-order but numeric clocks are also invalid.
+                db.execute(
+                    "UPDATE samples SET capture_started_ns=monotonic_ns+1 "
+                    "WHERE sample_id=1")
+                db.commit()
+                with SessionView.open(folder) as view:
+                    with self.assertRaises(SessionReadError):
+                        view.interval()
 
 
 class StopDurabilityTests(unittest.TestCase):
