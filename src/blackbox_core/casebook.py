@@ -131,7 +131,7 @@ class CaseBook:
                         continue
                     kind = payload.get("event", payload.get("kind", "legacy_event"))
                     at = payload.get("timestamp_monotonic_ns")
-                    self.put(str(kind)[:80], {"legacy_event_seq": row["seq"], "event": payload},
+                    evidence_id = self.put(str(kind)[:80], {"legacy_event_seq": row["seq"], "event": payload},
                              source=payload.get("source", "BLACKBOX_LEGACY"),
                              quality="USER_REPORTED" if payload.get("source", "").startswith("USER") else "OBSERVED",
                              at_ns=at, operation_id=payload.get("action_id"),mirror=False)
