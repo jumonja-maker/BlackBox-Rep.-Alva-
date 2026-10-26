@@ -41,7 +41,12 @@ jobs:
           python -m pip install -e .
           if ($LASTEXITCODE -ne 0) { throw 'Application installation failed' }
       - name: Test palette, rendered popup, keyboard and disabled actions
-        run: python -m unittest discover -s tests -p test_selection_contrast.py -v
+        shell: pwsh
+        run: |
+          python -m unittest discover -s tests -p test_popup_pointer_geometry.py -v
+          if ($LASTEXITCODE -ne 0) { throw 'Pointer geometry regression failed' }
+          python -m unittest discover -s tests -p test_selection_contrast.py -v
+          if ($LASTEXITCODE -ne 0) { throw 'Selection contrast regression failed' }
       - uses: actions/checkout@v4
         with:
           ref: 03df9cc874a310f46a4724b3b813e03898dc532a
@@ -68,6 +73,12 @@ jobs:
           New-Item -ItemType Directory -Force popup-qa | Out-Null
           git rev-parse HEAD | Out-File -Encoding utf8 popup-qa/source-sha.txt
           'Hosted Windows UI tests; not physical Win10/11, accessibility or full BB-DI-001 acceptance.' | Out-File -Encoding utf8 popup-qa/limits.txt
+          git archive --format=zip --output=popup-qa/patch-source.zip HEAD blackbox_universal/theme.py blackbox_universal/widgets.py blackbox_universal/window.py tools/qa_popup_contrast.py tools/qa_popup_geometry.py tests/test_selection_contrast.py tests/test_popup_pointer_geometry.py .github/workflows/ui-selection-qa.yml docs/BB_UI_SELECTION_FIX_20261026_RU.md
+          if ($LASTEXITCODE -ne 0) { throw 'Patch source archive failed' }
+          if (Test-Path baseline-source/.git) {
+            git -C baseline-source archive --format=zip --output=../popup-qa/baseline-ui-source.zip HEAD blackbox_universal/theme.py blackbox_universal/widgets.py blackbox_universal/window.py
+            if ($LASTEXITCODE -ne 0) { throw 'Baseline UI source archive failed' }
+          }
       - uses: actions/upload-artifact@v4
         if: always()
         with:

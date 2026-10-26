@@ -25,13 +25,18 @@ def _source_root() -> Path:
 sys.path.insert(0, str(_source_root()))
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 
-from PySide6.QtCore import QPoint, QSettings, Qt
+from PySide6.QtCore import QPoint, QRect, QSettings, Qt
 from PySide6.QtGui import QColor, QCursor
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
 from blackbox_universal.theme import set_retro_theme
 from blackbox_universal.window import UniversalWindow
+
+try:
+    from tools.qa_popup_geometry import visible_row_point
+except ModuleNotFoundError:
+    from qa_popup_geometry import visible_row_point
 
 SELECTION = '#ffddaa'
 FOREGROUND = '#302c43'
@@ -87,6 +92,38 @@ def assert_readable(stats: dict) -> None:
             'POPUP_SELECTED_TEXT_UNREADABLE')
 
 
+def hover_row(app, view, index, output: Path, prefix: str, row: int) -> None:
+    """Move the real cursor to an on-screen part of the actual popup row."""
+    viewport = view.viewport()
+    rect = view.visualRect(index).intersected(viewport.rect())
+    global_rect = QRect(viewport.mapToGlobal(rect.topLeft()), rect.size())
+    screens = [screen.availableGeometry().getRect() for screen in app.screens()]
+    state = {'row': row, 'global_row': global_rect.getRect(), 'screens': screens,
+             'platform': app.platformName(), 'dpr': viewport.devicePixelRatioF()}
+    try:
+        point = QPoint(*visible_row_point(global_rect.getRect(), screens))
+        state['requested_global'] = [point.x(), point.y()]
+        local = viewport.mapFromGlobal(point)
+        # Two distinct, reachable positions deliver a true move even when a
+        # reopened popup appears beneath the previous cursor position.
+        QTest.mouseMove(viewport, local + QPoint(0, 1))
+        QTest.qWait(25)
+        QTest.mouseMove(viewport, local)
+        wait_until(app, lambda: view.indexAt(viewport.mapFromGlobal(
+            QCursor.pos())).row() == row, timeout=2.0)
+        state['result'] = 'PASS'
+    except Exception as error:
+        state.update(result='FAIL', error=type(error).__name__ + ': ' + str(error))
+        view.window().grab().save(str(output / f'{prefix}-pointer-failure-{row}.png'))
+        raise
+    finally:
+        cursor = QCursor.pos()
+        state['observed_global'] = [cursor.x(), cursor.y()]
+        state['observed_row'] = view.indexAt(viewport.mapFromGlobal(cursor)).row()
+        (output / f'{prefix}-pointer-{row}.json').write_text(
+            json.dumps(state, indent=2), encoding='utf-8')
+
+
 def capture_combo(app, combo, output: Path, prefix: str, *, after_choice=None) -> list:
     require(combo.isEnabled(), 'POPUP_CONTROL_UNEXPECTEDLY_DISABLED')
     values = [combo.itemData(i) for i in range(combo.count())]
@@ -114,11 +151,8 @@ def capture_combo(app, combo, output: Path, prefix: str, *, after_choice=None) -
         index = combo.model().index(row, combo.modelColumn(), combo.rootModelIndex())
         view.scrollTo(index)
         app.processEvents()
-        QTest.mouseMove(view.viewport(), QPoint(1, 1))
-        QTest.qWait(25)
-        QTest.mouseMove(view.viewport(), view.visualRect(index).center())
-        wait_until(app, lambda: view.indexAt(view.viewport().mapFromGlobal(
-            QCursor.pos())).row() == row, timeout=2.0)
+        QTest.qWait(50)
+        hover_row(app, view, index, output, prefix, row)
         QTest.qWait(80)
         app.processEvents()
         # Qt supports both current-item and active-only hover tracking. Assert
