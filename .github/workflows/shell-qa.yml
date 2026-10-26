@@ -9,8 +9,8 @@ on:
       - main
   workflow_dispatch:
     inputs:
-      publish_v040:
-        description: "Publish tested v0.4.0 from the exact accepted main SHA"
+      publish_v041:
+        description: "Publish tested v0.4.1 from the exact accepted main SHA"
         required: true
         type: boolean
         default: false
@@ -277,7 +277,7 @@ jobs:
         run: |
           Compress-Archive -LiteralPath "dist\BLACK.BOX-Universal" -DestinationPath "BLACK.BOX-Universal-Windows.zip" -Force
           if (-not (Test-Path "BLACK.BOX-Universal-Windows.zip")) { throw "ZIP missing" }
-      - name: Native old-v0.3.6 to new-v0.4.0 update and full portable uninstall
+      - name: Native official v0.4.0 to v0.4.1 update and full portable uninstall
         shell: pwsh
         timeout-minutes: 16
         run: |
@@ -301,12 +301,12 @@ jobs:
 # Explicit release gate: NEVER publish just because a PR is merged or main is pushed.
 # A manual dispatch from main with exact reviewed SHA reruns all three QA jobs.
   publish-updater-test:
-    name: Publish verified BLACK.BOX v0.4.0 (manual owner gate)
+    name: Publish verified BLACK.BOX v0.4.1 (manual owner gate)
     needs: [shell-tests, linux-tests, windows-portable]
     if: >-
       github.event_name == 'workflow_dispatch' &&
       github.ref == 'refs/heads/main' &&
-      inputs.publish_v040 == true
+      inputs.publish_v041 == true
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -336,7 +336,7 @@ jobs:
           fi
           VERSION="$(python -c 'from blackbox_universal import __version__; print(__version__)')"
           PACKAGE_VERSION="$(python -c 'import tomllib; print(tomllib.load(open("pyproject.toml","rb"))["project"]["version"])')"
-          [[ "$VERSION" == "0.4.0" && "$PACKAGE_VERSION" == "$VERSION" ]] || {
+          [[ "$VERSION" == "0.4.1" && "$PACKAGE_VERSION" == "$VERSION" ]] || {
             echo "::error::Release version mismatch"
             exit 1
           }
@@ -365,26 +365,29 @@ jobs:
           set -euo pipefail
           ZIP="verified-portable/BLACK.BOX-Universal-Windows.zip"
           cat > release-notes.md <<'EOF'
-          BLACK.BOX Universal v0.4.0 — local investigations and portable maintenance
+          BLACK.BOX Universal v0.4.1 — expanded monitoring workspace
 
-          - Deep local process investigations, dual SQLite evidence stores and
-            fail-closed cross-store consistency verification.
-          - 17 investigation actions + 4 user markers, offline interval exports,
-            event/thread history, bilingual five-page Qt interface.
-          - Verified old v0.3.6 frozen-app update to new Windows portable EXE,
-            relaunch, and new frozen helper removal on disposable Windows CI.
-          - Portable uninstall removes application files, its matching desktop
-            shortcut, owned Qt registry preferences, and its temporary helper.
-          - Diagnostic sessions and reports under Documents are PRESERVED.
+          - Main window starts maximized, with native window minimize/restore
+            and resize controls retained; no exclusive fullscreen mode.
+          - Removed the decorative START taskbar and redundant VIEW menu;
+            kept FILE/HELP and five-sidebar navigation.
+          - Removed the duplicated PRIVACY & SECURITY paragraph in Settings.
+          - Overview lets Resource Telemetry and Current Session use the
+            available vertical viewport instead of reserving taskbar space.
+          - Updated the in-app About caption to match available optional
+            diagnostic sources. Monitoring and evidence semantics remain the same.
+          - Real v0.4.0 portable Windows EXE to v0.4.1 update/relaunch and
+            uninstall tested on disposable Windows CI with verified SHA-256.
+          - Saved user diagnostics under Documents remain PRESERVED.
 
-          The owner accepted the 5h30 Standard endurance test as an alternative
-          to the planned 8 hours (not an 8-hour test); 1h Detailed passed.
-          CI is NOT physical Win10/11, AV, UAC, OneDrive, screen-reader,
-          signed-binary, or independent 128-point acceptance. These limits
-          are not represented as PASS.
+          Release QA includes Windows/Linux source tests, genuine frozen
+          application tests, native maintenance, Windows DPI/offscreen and
+          WPR/real process checks. This does NOT assert physical Win10/11,
+          antivirus/ACL/OneDrive, screen-reader or independent full 128-item
+          diagnostic acceptance. No automated detective is introduced here.
           EOF
-          gh release create "v0.4.0" "$ZIP" "$ZIP.sha256" \
+          gh release create "v0.4.1" "$ZIP" "$ZIP.sha256" \
             --target "$GITHUB_SHA" \
-            --title "BLACK.BOX Universal v0.4.0 — local investigations" \
+            --title "BLACK.BOX Universal v0.4.1 — expanded monitoring workspace" \
             --notes-file release-notes.md --latest
-          echo "Published v0.4.0 at exact reviewed SHA $GITHUB_SHA"
+          echo "Published v0.4.1 at exact reviewed SHA $GITHUB_SHA"
