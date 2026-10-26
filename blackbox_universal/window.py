@@ -595,8 +595,8 @@ class UniversalWindow(QMainWindow):
         content.addWidget(threads_panel)
         history_panel = WindowPanel("Recorded process tree", "PID + BIRTH / READ ONLY")
         self.process_history_table = RecordedProcessTree(self)
-        self.process_history_table.itemSelectionChanged.connect(self._history_process_selected)
         history_panel.content.addWidget(self.process_history_table)
+        self.process_history_table.itemSelectionChanged.connect(self._history_process_selected)
         self.process_history_summary=QLabel();self.process_history_summary.setWordWrap(True);history_panel.content.addWidget(self.process_history_summary)
         self.process_history_more = _button("NEXT PROCESS PAGE")
         self.process_history_more.clicked.connect(self._next_process_page)
@@ -769,7 +769,7 @@ class UniversalWindow(QMainWindow):
         self.investigation_table.horizontalHeader().setSectionResizeMode(
             1, QHeaderView.ResizeMode.ResizeToContents)
         self.investigation_table.horizontalHeader().setSectionResizeMode(
-            2, QHeaderView.ResizeMode.ResizeToContents)
+            2, QHeaderView.ResizeMode.Stretch)
         self.investigation_table.setSelectionBehavior(
             QAbstractItemView.SelectionBehavior.SelectRows)
         self.investigation_table.setSelectionMode(
@@ -2402,7 +2402,6 @@ class UniversalWindow(QMainWindow):
             return
         if self._interval_worker is not None:
             self._pending_close = True
-            self._interval_pending = None
             self._interval_worker.requestInterruption()
             event.ignore()
             return
@@ -2432,8 +2431,8 @@ class UniversalWindow(QMainWindow):
         if self._update_worker is not None and self._update_worker.isRunning():
             event.ignore()
             QMessageBox.information(
-                self, "BLACK.BOX Universal", self._t(
-                    "Finish the current update before closing."))
+                self, "BLACK.BOX Universal",
+                self._t("Finish the current update before closing."))
             return
         if self.probe.active:
             self._pending_close = True
