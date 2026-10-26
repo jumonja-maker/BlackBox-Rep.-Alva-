@@ -70,8 +70,6 @@ def _button(text: str, kind: str = "") -> QPushButton:
 
 def _page() -> tuple[QWidget, QVBoxLayout]:
     widget = QWidget()
-    # A declaration without a selector also styles every descendant, including
-    # popup rows. Keep the page transparent without erasing their highlights.
     widget.setObjectName("pageBody")
     widget.setStyleSheet("QWidget#pageBody { background: transparent; }")
     content = QVBoxLayout(widget)
@@ -595,8 +593,8 @@ class UniversalWindow(QMainWindow):
         content.addWidget(threads_panel)
         history_panel = WindowPanel("Recorded process tree", "PID + BIRTH / READ ONLY")
         self.process_history_table = RecordedProcessTree(self)
-        history_panel.content.addWidget(self.process_history_table)
         self.process_history_table.itemSelectionChanged.connect(self._history_process_selected)
+        history_panel.content.addWidget(self.process_history_table)
         self.process_history_summary=QLabel();self.process_history_summary.setWordWrap(True);history_panel.content.addWidget(self.process_history_summary)
         self.process_history_more = _button("NEXT PROCESS PAGE")
         self.process_history_more.clicked.connect(self._next_process_page)
@@ -2402,6 +2400,7 @@ class UniversalWindow(QMainWindow):
             return
         if self._interval_worker is not None:
             self._pending_close = True
+            self._interval_pending = None
             self._interval_worker.requestInterruption()
             event.ignore()
             return
