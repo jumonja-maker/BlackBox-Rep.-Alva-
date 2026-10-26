@@ -22,6 +22,8 @@ from blackbox_core.contracts import ObserverError, Sample
 from blackbox_core.experiment_metrics import measure_interval
 from blackbox_core.instrumentation import EventTail, EventWriter
 from blackbox_core.research_worker import ResearchSession
+from blackbox_core.session_v2 import SessionV2Writer
+from blackbox_core.session_view import SessionView
 from blackbox_core.storage import SessionStore
 from blackbox_universal.base_sample_worker import BaseSampleWorker
 from blackbox_universal.monitor import ReadOnlyProbe
@@ -119,6 +121,44 @@ class MeasurementIntegrityTests(unittest.TestCase):
         self.assertEqual(result["metrics"]["cpu_seconds"], 1)
         self.assertEqual(result["metrics"]["read_bytes"], 10)
         self.assertEqual(result["covered_ns"]["cpu_seconds"], 1_000_000_000)
+
+
+    def test_v2_interval_report_does_not_integrate_cross_policy_pair(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            origin = time.monotonic_ns()
+            created = time.time()
+            writer = SessionV2Writer(
+                folder, pid=os.getpid(), created=created,
+                name="test-only", origin_ns=origin)
+            try:
+                for index, offset, period, cpu, read in [
+                    (1, 1, 1, 0., 0),
+                    (2, 4, 3, 30., 300),
+                    (3, 5, 3, 31., 310),
+                ]:
+                    writer.submit("base", {
+                        "pid": os.getpid(), "created": created,
+                        "time_ns": origin + offset * 1_000_000_000,
+                        "cpu_user_s": cpu, "cpu_system_s": 0.,
+                        "read_bytes": read, "write_bytes": read,
+                        "requested_interval_ns": period * 1_000_000_000,
+                        "correlation_key": f"test-only:{index}",
+                    })
+                writer.finish("COMPLETED")
+                with SessionView.open(folder) as view:
+                    result = view.interval()
+                self.assertEqual(result["coverage"]["selected_samples"], 3)
+                self.assertEqual(result["coverage"]["spacing_gap_pairs"], 1)
+                self.assertEqual(result["metrics"]["read_bps"]["observed_count"], 1)
+                self.assertEqual(result["metrics"]["read_bps"]["max"], 10)
+                self.assertEqual(result["metrics"]["cpu_interval_percent"]["max"], 100)
+                self.assertEqual(
+                    result["coverage"]["observed_comparable_duration_ns"],
+                    1_000_000_000)
+            finally:
+                if writer.thread.is_alive():
+                    writer.finish("STORAGE_ERROR")
 
 
 class StopDurabilityTests(unittest.TestCase):
