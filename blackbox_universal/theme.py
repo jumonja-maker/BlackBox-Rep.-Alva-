@@ -26,6 +26,7 @@ COLORS = {
     "white": "#ffffff",
     "mint": "#83d5b3",
     "alert": "#b84e50",
+    "selection": "#ffddaa",
 }
 
 STYLE = """
@@ -112,6 +113,10 @@ QPushButton#primary {
 }
 QPushButton#primary:hover { background: #ff9476; }
 QPushButton#accent { background: #83d5b3; }
+QPushButton#primary:disabled, QPushButton#accent:disabled {
+    color: #62576b;
+    background: #ded8ce;
+}
 QPushButton#nav {
     min-height: 42px;
     padding: 6px 12px;
@@ -172,6 +177,38 @@ QPushButton#windowControl {
     background: #f7e3c9;
     font-size: 12px;
 }
+QComboBox {
+    min-height: 29px;
+    padding: 4px 8px;
+    background: #fffaf0;
+    color: #302c43;
+    border: 2px solid #8a7f90;
+}
+QComboBox:hover, QComboBox:focus { border-color: #056c6d; }
+QComboBox:disabled { background: #ded8ce; color: #62576b; }
+QComboBox QAbstractItemView {
+    background: #fffaf0;
+    color: #302c43;
+    border: 2px solid #796e87;
+    selection-background-color: #ffddaa;
+    selection-color: #302c43;
+}
+QComboBox QAbstractItemView::item {
+    min-height: 24px;
+    padding: 4px 8px;
+}
+QComboBox QAbstractItemView::item:selected,
+QComboBox QAbstractItemView::item:hover {
+    background: #ffddaa;
+    color: #302c43;
+}
+QMenu {
+    background: #fffaf0;
+    color: #302c43;
+    border: 1px solid #796e87;
+}
+QMenu::item:selected { background: #ffddaa; color: #302c43; }
+QMenu::item:disabled { color: #77718a; }
 QLineEdit {
     min-height: 29px;
     background: #fffdf4;
@@ -281,6 +318,13 @@ def set_retro_theme(app: QApplication) -> None:
     palette.setColor(QPalette.ColorRole.WindowText, QColor(COLORS["navy"]))
     palette.setColor(QPalette.ColorRole.Base, QColor(COLORS["white"]))
     palette.setColor(QPalette.ColorRole.Text, QColor(COLORS["navy"]))
-    palette.setColor(QPalette.ColorRole.Highlight, QColor(COLORS["teal"]))
+    palette.setColor(QPalette.ColorRole.Button, QColor(COLORS["beige"]))
+    palette.setColor(QPalette.ColorRole.ButtonText, QColor(COLORS["navy"]))
+    # Set both roles for every group. A popup can use the inactive group;
+    # inherited system HighlightedText must not become white on cream.
+    palette.setColor(QPalette.ColorRole.Highlight, QColor(COLORS["selection"]))
+    palette.setColor(QPalette.ColorRole.HighlightedText, QColor(COLORS["navy"]))
+    palette.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.Text, QColor(COLORS["muted"]))
+    palette.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.ButtonText, QColor(COLORS["muted"]))
     app.setPalette(palette)
     app.setStyleSheet(STYLE)
