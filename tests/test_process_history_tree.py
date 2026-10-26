@@ -11,6 +11,7 @@ import unittest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from blackbox_core.process_tree import resource_tree_page
+from blackbox_core.contracts import ObserverError
 from blackbox_core.session_v2 import FILENAME, SessionV2Writer
 from blackbox_core.session_view import SessionReadError, SessionView
 from test_investigation_v2 import ORIGIN, observation
@@ -28,7 +29,22 @@ def recorded_tree(folder):
                                 cpu_user_s=n * .5, cpu_system_s=0., rss_bytes=4 * 1048576,
                                 private_bytes=2 * 1048576, handle_count=5, thread_count=1)]
         writer.submit("detail", row)
-    writer.finish("COMPLETED")
+    # This is a disposable QA fixture, not a production Stop policy.
+    # Hosted Windows can take >5s to flush FULL-synchronous SQLite and
+    # release its WAL/filesystem handles under antivirus/IO contention.
+    # Wait for the REAL owner to close; never fabricate a committed result.
+    try:
+        writer.finish("COMPLETED", timeout=25)
+    except ObserverError as exc:
+        # Preserve a genuine storage error with its writer-origin reason.
+        # Reap the owner before TemporaryDirectory attempts Windows deletion.
+        if writer.thread.is_alive():
+            writer.thread.join(timeout=5)
+        raise AssertionError(
+            "QA_RECORDED_TREE_REAL_SQLITE_FAILURE: " +
+            str(writer.failure) +
+            "; dropped=" + str(writer.dropped_commands) +
+            "; owner_alive=" + str(writer.thread.is_alive())) from exc
 
 
 class ProcessHistoryTreeTests(unittest.TestCase):
