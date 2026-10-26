@@ -5,6 +5,7 @@ instrumented application. Events are untrusted application statements.
 """
 from __future__ import annotations
 from contextlib import contextmanager
+import hashlib
 import json
 import math
 import os
@@ -114,24 +115,57 @@ class EventTail:
         self.client_dropped = None
         self.discontinuities = 0
         self.file_identity = None
+        # Hash only the trailing file boundary, not any application text.
+        # An in-place truncate/rewrite can keep the same inode and size.
+        self._boundary_hash = None
+
+    def _reset_stream(self):
+        self.offset, self.pending = 0, b""
+        self.last_seq.clear()
+        self.ready = False
+        self._boundary_hash = None
 
     def poll(self, *, max_bytes=65536):
+        if type(max_bytes) is not int or not 1 <= max_bytes <= 1024*1024:
+            raise ValueError("INVALID_APPLICATION_READ_BUDGET")
         if not self.path.exists():
+            if self.file_identity is not None:
+                # Deletion after a verified ready event is a loss of source
+                # continuity even if the file never reappears.
+                self._reset_stream()
+                self.file_identity = None
+                self.discontinuities += 1
             return []
         if self.path.is_symlink() or not self.path.is_file():
             raise ValueError("INVALID_APPLICATION_EVENT_FILE")
-        stat = self.path.stat();size=stat.st_size
-        identity=(stat.st_dev,stat.st_ino)
-        if size < self.offset or (self.file_identity is not None and self.file_identity!=identity):
-            self.offset, self.pending = 0, b""
-            self.last_seq.clear()
-            self.discontinuities += 1
-            self.ready = False
-        self.file_identity=identity
         with self.path.open("rb") as stream:
+            stat = os.fstat(stream.fileno())
+            identity = (stat.st_dev, stat.st_ino)
+            reset = (stat.st_size < self.offset or
+                     (self.file_identity is not None and self.file_identity != identity))
+            if not reset and self.offset and self._boundary_hash is not None:
+                # Stat-size and inode alone miss same-file rewrites. Verify
+                # previously read bytes BEFORE treating the next offset as
+                # continuous. A mismatch means previously accepted lines
+                # cannot attest the new file's prefix.
+                back = min(self.offset, 128)
+                stream.seek(self.offset - back)
+                if hashlib.sha256(stream.read(back)).digest() != self._boundary_hash:
+                    reset = True
+            if reset:
+                self._reset_stream()
+                self.discontinuities += 1
+            self.file_identity = identity
             stream.seek(self.offset)
             raw = stream.read(max_bytes)
             self.offset += len(raw)
+            if self.offset:
+                back = min(self.offset, 128)
+                stream.seek(self.offset - back)
+                self._boundary_hash = hashlib.sha256(stream.read(back)).digest()
+            # Truncation while reading cannot be misreported as a clean tail.
+            if os.fstat(stream.fileno()).st_size < stat.st_size:
+                raise ValueError("APPLICATION_EVENT_TRUNCATED_DURING_POLL")
         parts = (self.pending + raw).split(b"\n")
         self.pending = parts.pop()
         if len(self.pending) > 8192:
