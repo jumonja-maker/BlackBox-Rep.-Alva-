@@ -23,6 +23,35 @@ from blackbox_core.research_worker import ResearchSession
 from blackbox_core.windows_research import window_observations,wait_chain,minidump,enable_debug_privilege
 
 
+def _wait_generated_client(child, *, timeout=30):
+    """Fail on a hung SDK example, but never orphan its working-directory lock.
+
+    Hosted Windows may delay the first Node startup. The deadline stays
+    finite; timeout is a test failure, never a synthetic successful event.
+    """
+    try:
+        _, stderr = child.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired as original:
+        # Windows keeps the working directory in use while this child lives.
+        # Reap it before TemporaryDirectory cleanup. This preserves the
+        # original timeout failure and does not disable the test.
+        try:
+            child.kill()
+        except ProcessLookupError:
+            pass  # It exited at the timeout boundary; still reap it.
+        try:
+            _, stderr = child.communicate(timeout=5)
+        except subprocess.TimeoutExpired as failure:
+            raise AssertionError("QA_CLIENT_KILL_NOT_REAPED") from failure
+        raise AssertionError(
+            "QA_GENERATED_CLIENT_TIMEOUT_REAPED: " +
+            (stderr or b"").decode(errors="replace")[-1500:]) from original
+    if child.returncode != 0:
+        raise AssertionError(
+            "QA_GENERATED_CLIENT_NONZERO_EXIT: " + str(child.returncode) +
+            " " + (stderr or b"").decode(errors="replace")[-1500:])
+
+
 class ClientTests(unittest.TestCase):
     def setUp(self):
         self.temp=tempfile.TemporaryDirectory();self.path=Path(self.temp.name)/"events.jsonl"
@@ -65,10 +94,26 @@ class ClientTests(unittest.TestCase):
     def test_generated_node_client_preserves_runtime_tid_kind(self):
         folder=Path(self.temp.name)/"node-client";write_preparation(folder,self.path,"a"*32)
         (folder/"main.cjs").write_text("const {BlackBoxEvents}=require('./blackbox-events.cjs'); const bb=new BlackBoxEvents('blackbox-config.json'); bb.emit('blackbox.ready'); bb.operation('test',async()=>{}).then(()=>{});")
-        child=subprocess.Popen(["node","main.cjs"],cwd=folder);self.assertEqual(child.wait(timeout=10),0)
+        child=subprocess.Popen(["node","main.cjs"],cwd=folder,
+                               stdout=subprocess.DEVNULL,stderr=subprocess.PIPE)
+        try:
+            _wait_generated_client(child,timeout=30)
+        finally:
+            if child.poll() is None:
+                child.kill()
+                child.communicate(timeout=5)
         tail=EventTail(self.path,"a"*32,child.pid);rows=tail.poll()
         self.assertTrue(tail.ready);self.assertEqual(rows[0]["tid_kind"],"RUNTIME_THREAD_ID")
         self.assertEqual(rows[0]["tid"],0);self.assertIsInstance(rows[0]["source_ns"],int)
+    def test_hung_generated_client_is_reaped_without_accepting_a_false_pass(self):
+        folder=Path(self.temp.name)/"owned-hung-fixture";folder.mkdir()
+        child=subprocess.Popen([sys.executable,"-c","import time;time.sleep(60)"],
+                               cwd=folder,stdout=subprocess.DEVNULL,stderr=subprocess.PIPE)
+        with self.assertRaisesRegex(AssertionError,"QA_GENERATED_CLIENT_TIMEOUT_REAPED"):
+            _wait_generated_client(child,timeout=.2)
+        self.assertIsNotNone(child.poll())
+        # The same directory can now be removed by tearDown on Windows.
+        (folder/"cleanup-verified.txt").write_text("reaped",encoding="utf-8")
     def test_invalid_operation_type_cannot_break_recorder(self):
         self.writer.emit("operation.begin",operation_id={"bad":"id"})
         self.assertEqual(self.tail.poll(),[]);self.assertEqual(self.tail.invalid,1)

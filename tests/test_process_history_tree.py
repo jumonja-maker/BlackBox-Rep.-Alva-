@@ -11,6 +11,7 @@ import unittest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from blackbox_core.process_tree import resource_tree_page
+from blackbox_core.contracts import ObserverError
 from blackbox_core.session_v2 import FILENAME, SessionV2Writer
 from blackbox_core.session_view import SessionReadError, SessionView
 from test_investigation_v2 import ORIGIN, observation
@@ -28,7 +29,22 @@ def recorded_tree(folder):
                                 cpu_user_s=n * .5, cpu_system_s=0., rss_bytes=4 * 1048576,
                                 private_bytes=2 * 1048576, handle_count=5, thread_count=1)]
         writer.submit("detail", row)
-    writer.finish("COMPLETED")
+    # This is a disposable QA fixture, not a production Stop policy.
+    # Hosted Windows can take >5s to flush FULL-synchronous SQLite and
+    # release its WAL/filesystem handles under antivirus/IO contention.
+    # Wait for the REAL owner to close; never fabricate a committed result.
+    try:
+        writer.finish("COMPLETED", timeout=25)
+    except ObserverError as exc:
+        # Preserve a genuine storage error with its writer-origin reason.
+        # Reap the owner before TemporaryDirectory attempts Windows deletion.
+        if writer.thread.is_alive():
+            writer.thread.join(timeout=5)
+        raise AssertionError(
+            "QA_RECORDED_TREE_REAL_SQLITE_FAILURE: " +
+            str(writer.failure) +
+            "; dropped=" + str(writer.dropped_commands) +
+            "; owner_alive=" + str(writer.thread.is_alive())) from exc
 
 
 class ProcessHistoryTreeTests(unittest.TestCase):
@@ -37,6 +53,49 @@ class ProcessHistoryTreeTests(unittest.TestCase):
         from PySide6.QtWidgets import QApplication
         cls.app = QApplication.instance() or QApplication([])
         cls.app.setQuitOnLastWindowClosed(False)
+
+    def test_real_sqlite_writer_delayed_beyond_five_seconds_finishes_with_real_rows(self):
+        # Reproduce hosted Windows full-sync startup delay, without mocking
+        # committed evidence or changing the production five-second barrier.
+        from threading import Event, Thread
+        from unittest.mock import patch
+        entered, release = Event(), Event()
+        actual_initialize = SessionV2Writer._initialize
+        errors = []
+
+        def delayed_initialize(owner, db):
+            entered.set()
+            if not release.wait(20):
+                raise RuntimeError("QA_DELAYED_WRITER_GATE_EXPIRED")
+            return actual_initialize(owner, db)
+
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp)
+            def exercise():
+                try:
+                    recorded_tree(folder)
+                except BaseException as exc:
+                    errors.append(exc)
+            with patch.object(SessionV2Writer, "_initialize", delayed_initialize):
+                runner = Thread(target=exercise, name="real-delayed-sqlite-QA")
+                runner.start()
+                try:
+                    self.assertTrue(entered.wait(5))
+                    # The normal five-second production timeout would expire.
+                    time.sleep(5.2)
+                    self.assertTrue(runner.is_alive())
+                finally:
+                    release.set()
+                    runner.join(timeout=30)
+                self.assertFalse(runner.is_alive(), "QA_FIXTURE_OWNER_NOT_REAPED")
+                self.assertEqual(errors, [], repr(errors))
+            with closing(sqlite3.connect(folder / FILENAME)) as db:
+                self.assertEqual(db.execute(
+                    "SELECT exit_code FROM sessions").fetchone()[0], "COMPLETED")
+                self.assertEqual(db.execute(
+                    "SELECT COUNT(*) FROM samples WHERE series='DETAILED'").fetchone()[0], 3)
+                self.assertEqual(db.execute(
+                    "SELECT COUNT(*) FROM samples WHERE series='CHILD'").fetchone()[0], 6)
 
     def test_page_has_bounded_ancestors_and_cpu_over_100_without_source_mutation(self):
         with tempfile.TemporaryDirectory() as temp:
