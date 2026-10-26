@@ -260,8 +260,18 @@ class SessionView:
                 dt=stamp-previous["time_ns"]
                 interval=row.get("requested_interval_ns")
                 old_interval=previous.get("requested_interval_ns")
-                spacing_ok=(interval is None or dt<=max(2*interval,interval+500_000_000))
-                continuous=(dt>0 and row["series_seq"]==previous["series_seq"]+1 and spacing_ok)
+                # V2 knows the configured sampling interval for each row.
+                # Switching that interval is a coverage boundary even if the
+                # longer new schedule would tolerate the preceding gap.
+                # Legacy schema1 never stored intervals: keep its coarse
+                # elapsed-time deltas but do not attest v2 cadence for it.
+                same_cadence=(not self.is_v2 or
+                    (type(interval) is int and interval>0 and
+                     interval==old_interval))
+                spacing_ok=(not self.is_v2 or
+                    (same_cadence and dt<=max(2*interval,interval+500_000_000)))
+                continuous=(dt>0 and row["series_seq"]==previous["series_seq"]+1
+                            and same_cadence and spacing_ok)
                 if interval and interval==old_interval and dt>0:
                     expected_slots_estimate+=max(1,dt//interval)
                 if continuous:
