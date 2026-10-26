@@ -139,7 +139,7 @@ class CaseBook:
                             0<=payload["duration_ns"]<=30*86400*10**9 and
                             isinstance(payload.get("action_id"),str)):
                         self.db.execute("INSERT OR IGNORE INTO action_runs VALUES(?,?,?,?)",
-                            (payload["action_id"],payload.get("experiment_id"),payload["duration_ns"],row["seq"]))
+                            (payload["action_id"],payload.get("experiment_id"),payload["duration_ns"],evidence_id))
                         self.db.commit()
                     self.last_legacy=row["seq"]
                 if not drain or not count:break
