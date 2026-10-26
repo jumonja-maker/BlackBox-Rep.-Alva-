@@ -63,6 +63,24 @@ class DecoderGuiTests(unittest.TestCase):
         self.assertNotIn("PRIVATE", panel.details.toPlainText())
         self.assertFalse(self.window.probe.active)
 
+    def test_decoder_navigation_uses_standard_scroll_page_at_two_window_sizes(self):
+        from PySide6.QtWidgets import QScrollArea
+        for width, height in ((1330, 850), (1020, 690)):
+            self.window.resize(width, height)
+            for lang in ("EN", "RU"):
+                self.window._set_language(lang)
+                self.window._navigate("reports")
+                self.window._navigate("decoder")
+                self.app.processEvents()
+                current = self.window.stack.currentWidget()
+                self.assertIsInstance(current, QScrollArea)
+                self.assertIs(current.widget(), self.window.decoder_panel)
+                self.assertTrue(current.widgetResizable())
+                self.assertTrue(self.window.decoder_panel.open_button.isVisible())
+                self.window._navigate("dashboard")
+                self.window._navigate("decoder")
+                self.assertEqual(current.verticalScrollBar().value(), 0)
+
     def test_close_cancels_and_drains_worker_without_qthread_destruction(self):
         def blocked(*args, cancel, **kwargs):
             if not cancel.wait(5):

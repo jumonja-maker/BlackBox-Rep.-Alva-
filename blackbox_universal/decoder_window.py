@@ -11,7 +11,10 @@ class DecoderWindow(UniversalWindow):
         super()._build()
         self._decoder_close_pending = False
         self.decoder_panel = DecoderPanel(self)
-        self._page_ids["decoder"] = self.stack.addWidget(self.decoder_panel)
+        # The base shell's navigation intentionally resets each page's scroll bar.
+        # Wrap the sixth page exactly like the original five, rather than
+        # leaving a bare QWidget that crashes when navigation opens it.
+        self._page_ids["decoder"] = self.stack.addWidget(self._as_scroll(self.decoder_panel))
         self.decoder_panel.idle.connect(self._decoder_idle)
 
     def _set_language(self, language):
