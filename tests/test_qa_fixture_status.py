@@ -171,5 +171,107 @@ class FixtureStatusTests(unittest.TestCase):
             self.assertEqual(close_errors, [])
 
 
+
+class FixtureReadyTests(unittest.TestCase):
+    """Readiness is a verified real-process handoff, never file-exists alone."""
+
+    @staticmethod
+    def payload(**changes):
+        row = {"fixture": "REAL_OS_QA_ONLY", "mode": "children",
+               "pid": 4321, "created": 1234.5, "requested_count": 100}
+        row.update(changes)
+        return json.dumps(row)
+
+    @staticmethod
+    def read_ready(**kwargs):
+        return status.wait_fixture_ready(
+            Path("ready.json"), expected_pid=4321,
+            expected_mode="children", expected_count=100,
+            alive=lambda: True, timeout=.1, **kwargs)
+
+    def test_native_windows_share_denials_recover_only_after_verified_payload(self):
+        for code in (5, 32, 33):
+            with self.subTest(code=code):
+                clock = Clock()
+                with patch.object(status, "_IS_WINDOWS", True), \
+                        patch.object(status, "monotonic", clock.monotonic), \
+                        patch.object(status, "sleep", clock.sleep), \
+                        patch.object(Path, "read_text",
+                                     side_effect=[denied(code), self.payload()]) as read:
+                    result = self.read_ready()
+                self.assertEqual(read.call_count, 2)
+                self.assertEqual((result["pid"], result["requested_count"]), (4321, 100))
+                self.assertAlmostEqual(clock.now, .02)
+
+    def test_crt_errno_eacces_and_missing_file_are_only_transient(self):
+        for transient in (PermissionError(13, "CRT denied"), FileNotFoundError()):
+            with self.subTest(transient=type(transient).__name__):
+                clock = Clock()
+                with patch.object(status, "_IS_WINDOWS", True), \
+                        patch.object(status, "monotonic", clock.monotonic), \
+                        patch.object(status, "sleep", clock.sleep), \
+                        patch.object(Path, "read_text",
+                                     side_effect=[transient, self.payload()]):
+                    result = self.read_ready()
+                self.assertEqual(result["fixture"], "REAL_OS_QA_ONLY")
+                self.assertAlmostEqual(clock.now, .02)
+
+    def test_persistent_windows_denial_expires_preserving_original_error(self):
+        clock = Clock()
+        denied_open = denied(32)
+        with patch.object(status, "_IS_WINDOWS", True), \
+                patch.object(status, "monotonic", clock.monotonic), \
+                patch.object(status, "sleep", clock.sleep), \
+                patch.object(Path, "read_text", side_effect=denied_open) as read:
+            with self.assertRaisesRegex(TimeoutError, "REAL_FIXTURE_READY_TIMEOUT") as caught:
+                self.read_ready()
+        self.assertIs(caught.exception.__cause__, denied_open)
+        self.assertAlmostEqual(clock.now, .1)
+        self.assertLessEqual(read.call_count, 6)
+
+    def test_wrong_identity_or_malformed_ready_cannot_pass(self):
+        for payload in (
+            self.payload(pid=4322), self.payload(mode="threads"),
+            self.payload(requested_count=99), self.payload(created="bad"),
+            self.payload(fixture="SYNTHETIC"), "[]", "{",
+        ):
+            with self.subTest(payload=payload), \
+                    patch.object(Path, "read_text", return_value=payload) as read, \
+                    patch.object(status, "sleep") as sleep:
+                with self.assertRaises(ValueError):
+                    self.read_ready()
+                read.assert_called_once()
+                sleep.assert_not_called()
+
+    def test_unrelated_error_and_worker_exit_cannot_pass(self):
+        for is_windows, error in (
+            (False, PermissionError(13, "POSIX denied")),
+            (True, denied(87)),
+        ):
+            with self.subTest(windows=is_windows), \
+                    patch.object(status, "_IS_WINDOWS", is_windows), \
+                    patch.object(Path, "read_text", side_effect=error) as read, \
+                    patch.object(status, "sleep") as sleep:
+                with self.assertRaises(PermissionError):
+                    self.read_ready()
+                read.assert_called_once()
+                sleep.assert_not_called()
+        with patch.object(Path, "read_text") as read:
+            with self.assertRaises(TimeoutError):
+                status.wait_fixture_ready(
+                    Path("ready.json"), expected_pid=4321,
+                    expected_mode="children", expected_count=100,
+                    alive=lambda: False, timeout=.1)
+            read.assert_not_called()
+
+    def test_ready_wait_policy_is_bounded(self):
+        for timeout in (0, -1, 31, float("nan"), float("inf"), True):
+            with self.subTest(timeout=timeout), self.assertRaises(ValueError):
+                status.wait_fixture_ready(
+                    Path("ready.json"), expected_pid=4321,
+                    expected_mode="children", expected_count=100,
+                    alive=lambda: True, timeout=timeout)
+
+
 if __name__ == "__main__":
     unittest.main()
