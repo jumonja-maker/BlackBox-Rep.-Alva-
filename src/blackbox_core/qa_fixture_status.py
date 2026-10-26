@@ -58,3 +58,54 @@ def wait_fixture_ack(path: Path, command_id: str, *, timeout: float = 5.0) -> di
             break
         sleep(min(.02, remaining))
     raise TimeoutError("REAL_FIXTURE_COMMAND_TIMEOUT") from last_read_error
+
+
+def wait_fixture_ready(path: Path, *, expected_pid: int, expected_mode: str,
+                       expected_count: int, alive, timeout: float = 25.0) -> dict:
+    """Read the actual QA producer's ready.json within one bounded deadline.
+
+    Atomic publication prevents partial JSON, but Windows readers can still
+    see brief sharing/access denials after the file becomes visible. Retry
+    only those Windows denials and a not-yet-created file. Wrong identity,
+    malformed JSON, unrelated access errors or a dead producer never PASS.
+    """
+    if (type(expected_pid) is not int or expected_pid <= 0 or
+            type(expected_mode) is not str or not expected_mode or
+            type(expected_count) is not int or expected_count <= 0 or
+            type(timeout) not in (int, float) or
+            not math.isfinite(timeout) or not 0 < timeout <= 30 or
+            not callable(alive)):
+        raise ValueError("INVALID_FIXTURE_READY_WAIT")
+    path = Path(path)
+    deadline = monotonic() + timeout
+    last_denial = None
+    while monotonic() < deadline and alive():
+        try:
+            ready = json.loads(path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            # Real fixture may still be spawning 100 child processes.
+            last_denial = None
+        except OSError as exc:
+            native = getattr(exc, "winerror", None)
+            crt_denial = native is None and exc.errno == errno.EACCES
+            if not _IS_WINDOWS or (native not in (5, 32, 33) and not crt_denial):
+                raise
+            last_denial = exc
+        else:
+            if (type(ready) is not dict or
+                    ready.get("fixture") != "REAL_OS_QA_ONLY" or
+                    ready.get("mode") != expected_mode or
+                    type(ready.get("pid")) is not int or
+                    ready["pid"] != expected_pid or
+                    type(ready.get("requested_count")) is not int or
+                    ready["requested_count"] != expected_count or
+                    type(ready.get("created")) not in (int, float) or
+                    not math.isfinite(ready["created"]) or ready["created"] <= 0):
+                raise ValueError("INVALID_REAL_FIXTURE_READY")
+            if monotonic() > deadline:
+                break
+            return ready
+        remaining = deadline - monotonic()
+        if remaining > 0:
+            sleep(min(.02, remaining))
+    raise TimeoutError("REAL_FIXTURE_READY_TIMEOUT_OR_WORKER_EXITED") from last_denial
