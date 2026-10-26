@@ -6,7 +6,6 @@ without invoking an external diagnostic runtime.
 """
 from __future__ import annotations
 
-from datetime import datetime
 import json
 import os
 import shutil
@@ -188,7 +187,7 @@ class UniversalWindow(QMainWindow):
         desktop.setObjectName("desktop")
         self.setCentralWidget(desktop)
         root = QVBoxLayout(desktop)
-        root.setContentsMargins(17, 8, 17, 0)
+        root.setContentsMargins(17, 8, 17, 8)
         root.setSpacing(7)
 
         banner = QHBoxLayout()
@@ -241,12 +240,9 @@ class UniversalWindow(QMainWindow):
         file_menu.addAction("Save snapshot as JSON…", self._export)
         file_menu.addSeparator()
         file_menu.addAction("Quit BLACK.BOX", self.close)
-        view_menu = QMenu(self)
-        for key, label in self.PAGES:
-            view_menu.addAction(label.replace("  ", " · "), lambda checked=False, n=key: self._navigate(n))
         help_menu = QMenu(self)
         help_menu.addAction("About / safety notes", self._about)
-        for name, menu in (("FILE", file_menu), ("VIEW", view_menu), ("HELP", help_menu)):
+        for name, menu in (("FILE", file_menu), ("HELP", help_menu)):
             button = _button(name + "  ▾")
             button.setMenu(menu)
             tl.addWidget(button)
@@ -332,28 +328,6 @@ class UniversalWindow(QMainWindow):
         for key, build in builders:
             self._page_ids[key] = self.stack.addWidget(self._as_scroll(build()))
 
-        taskbar = QFrame()
-        taskbar.setObjectName("taskbar")
-        tbar = QHBoxLayout(taskbar)
-        tbar.setContentsMargins(7, 3, 7, 3)
-        tbar.setSpacing(10)
-        start = _button("▦  START")
-        start_menu = QMenu(self)
-        start_menu.addAction("Overview", lambda: self._navigate("dashboard"))
-        start_menu.addAction("Choose process", lambda: self._navigate("processes"))
-        start_menu.addAction("Save JSON…", self._export)
-        start_menu.addSeparator()
-        start_menu.addAction("Exit", self.close)
-        start.setMenu(start_menu)
-        tbar.addWidget(start)
-        self.task_active = _label("BLACK.BOX UNIVERSAL", "taskText", False)
-        tbar.addWidget(self.task_active)
-        tbar.addStretch()
-        self.task_privacy = _label("OFFLINE / LOCAL", "taskText", False)
-        tbar.addWidget(self.task_privacy)
-        self.clock = _label("", "taskText", False)
-        tbar.addWidget(self.clock)
-        root.addWidget(taskbar)
 
     def _as_scroll(self, page: QWidget) -> QScrollArea:
         scroll = QScrollArea()
@@ -365,6 +339,9 @@ class UniversalWindow(QMainWindow):
 
     def _build_dashboard(self) -> QWidget:
         page, content = _page()
+        # Unlike document-like pages, the live graph should use the entire
+        # remaining viewport, not remain packed against its top edge.
+        content.setAlignment(Qt.AlignmentFlag(0))
         top = QHBoxLayout()
         top.addStretch()
         self.live_badge = _label("●  NO TARGET SELECTED", "signal", False)
@@ -487,7 +464,7 @@ class UniversalWindow(QMainWindow):
         self.action_state_label = _label("Action state: IDLE", "caption")
         status.content.addWidget(self.action_state_label)
         middle.addWidget(status, 4)
-        content.addLayout(middle)
+        content.addLayout(middle, 1)
 
         notes = WindowPanel("System messages", "LATEST ACTIVITY")
         self.recent_messages = QPlainTextEdit()
@@ -854,23 +831,16 @@ class UniversalWindow(QMainWindow):
         self.auto_check.toggled.connect(
             lambda value: self._prefs.setValue("check_updates_at_start", value))
         setting.content.addWidget(self.auto_check)
-        setting.content.addWidget(_label("PRIVACY & SECURITY", "cardTitle"))
-        setting.content.addWidget(_label(
-            "• Read-only process counters\n"
-            "• No code injection or target manipulation\n"
-            "• No automatic upload or account sign-in\n"
-            "• Report export only when explicitly requested\n"
-            "• No administrator privileges requested by this shell", "caption"))
         content.addWidget(setting)
-        about = WindowPanel("About BLACK.BOX", "PREVIEW / v0.3")
+        about = WindowPanel("About BLACK.BOX", "v0.4.1")
         about.content.addWidget(_label(
             "A public-domain-independent desktop shell built from original "
             "PySide6 widgets. Inspired by classic desktop window geometry "
             "and warm retro illustrations, not copied system artwork.", "caption"))
         about.content.addWidget(_label(
-            "Diagnostics are produced by the local observer. Deep tracing, "
-            "Windows ETW and crash dump analysis are not present in this build.",
-            "caption"))
+            "Local diagnostics can include optional Windows/WCT, ETW, runtime "
+            "and minidump evidence when available and explicitly requested. "
+            "Observed counters do not prove an internal root cause.", "caption"))
         content.addWidget(about)
         maint = WindowPanel("Portable maintenance", "Managed locally")
         maint.content.addWidget(_label(
@@ -904,7 +874,7 @@ class UniversalWindow(QMainWindow):
         # Stable English source strings are kept separately so changing
         # languages never translates already translated text.
         changing = {self.target_name, self.target_pid, self.state_text,
-                    self.live_badge, self.toolbar_state, self.clock,
+                    self.live_badge, self.toolbar_state,
                     self.session_location, self.process_count,
                     self.report_status_label, self.file_description,
                     self.target_binding_title, self.target_binding_detail,
@@ -1869,7 +1839,6 @@ class UniversalWindow(QMainWindow):
                 "saved" if self.probe.report_result is not None else "unavailable")
     
     def _update_all(self) -> None:
-        self.clock.setText(datetime.now().strftime("%H:%M"))
         selected = self.probe.pid is not None
         running = self.probe.active
         stopping = (self._pending_base_stop is not None or
