@@ -1,4 +1,4 @@
-"""Real Windows portable v0.3.6 -> next build -> uninstall acceptance probe.
+"""Real Windows portable v0.4.0 -> next build -> uninstall acceptance probe.
 
 Only runs on disposable GitHub-hosted Windows runners. Never operates on the
 user's machine or any preexisting installation. Source and old official
@@ -31,14 +31,14 @@ from blackbox_universal.releases import (
 )
 from blackbox_universal.shortcuts import create_shortcut, remove_shortcut_if_matches, _desktop, SHORTCUT_TITLE
 
-# Immutable v0.3.6 official GitHub release. Refuse a changed/republished asset.
+# Immutable v0.4.0 official GitHub release. Refuse a changed/republished asset.
 OLD_RELEASE = Release(
-    "v0.3.6",
+    "v0.4.0",
     "https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/releases/"
-    "download/v0.3.6/BLACK.BOX-Universal-Windows.zip",
-    60623040,
-    "0e437a213477a7c2b89a3273f270cd8fb235f649689d9f7ccfdb7bbdcac91efb",
-    "https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/releases/tag/v0.3.6",
+    "download/v0.4.0/BLACK.BOX-Universal-Windows.zip",
+    62468600,
+    "01d5161abe76b74314cb7709925b36221da4916a16b2e9e3da8a37c28f72c813",
+    "https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/releases/tag/v0.4.0",
 )
 
 
@@ -122,7 +122,7 @@ def acceptance(built_zip: Path, source_sha: str, evidence: Path):
             "QA_SOURCE_SHA_INVALID")
     report = {
         "result": "RUNNING", "source_sha": source_sha,
-        "old_version": "v0.3.6", "new_version": "v0.4.0",
+        "old_version": "v0.4.0", "new_version": "v0.4.1",
         "candidate_sha256": sha256(built_zip),
         "profile": "GITHUB_HOSTED_WINDOWS_ISOLATED_PORTABLE",
         "real_official_old_release_digest_pinned": True,
@@ -136,8 +136,8 @@ def acceptance(built_zip: Path, source_sha: str, evidence: Path):
     new_helper_scratch = None
     try:
         from blackbox_universal import __version__
-        require(__version__ == "0.4.0", "CANDIDATE_VERSION_NOT_BUMPED")
-        require(version_tuple("v0.4.0") > version_tuple("v0.3.6"),
+        require(__version__ == "0.4.1", "CANDIDATE_VERSION_NOT_BUMPED")
+        require(version_tuple("v0.4.1") > version_tuple("v0.4.0"),
                 "CANDIDATE_NOT_NEWER_THAN_INSTALLED")
         with tempfile.TemporaryDirectory(prefix="bb-native-maint-", dir=str(runner)) as tmp:
             root = Path(tmp)
@@ -185,9 +185,9 @@ def acceptance(built_zip: Path, source_sha: str, evidence: Path):
             (install / "obsolete-application-file.bin").write_bytes(b"old_only")
 
             # Stage THE SAME candidate ZIP that Windows CI would publish.
-            # Offline _open substitution does not imply a published v0.4.0
+            # Offline _open substitution does not imply a published v0.4.1
             # release; the public GitHub metadata/asset does not exist yet.
-            new_release = Release("v0.4.0", "qa://verified-candidate",
+            new_release = Release("v0.4.1", "qa://verified-candidate",
                                   built_zip.stat().st_size,
                                   report["candidate_sha256"],
                                   "qa://unpublished-candidate")
