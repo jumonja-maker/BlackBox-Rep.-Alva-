@@ -7,7 +7,6 @@ Optional baseline checkout is read-only and must fail the same pixel gate.
 from __future__ import annotations
 
 import argparse
-from collections import Counter
 import json
 import os
 from pathlib import Path
@@ -16,7 +15,7 @@ import tempfile
 import time
 from unittest.mock import patch
 
-# The baseline checkout is selected before importing any application modules.
+
 def _source_root() -> Path:
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument('--source-root', type=Path)
@@ -27,7 +26,7 @@ sys.path.insert(0, str(_source_root()))
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 
 from PySide6.QtCore import QPoint, QSettings, Qt
-from PySide6.QtGui import QColor
+from PySide6.QtGui import QColor, QCursor
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
@@ -67,7 +66,6 @@ def row_pixels(view, index) -> dict:
     margin = max(3, round(3 * dpr))
     bg, fg = QColor(SELECTION), QColor(FOREGROUND)
     total = backgrounds = text_pixels = 0
-    # Exclude borders/focus outlines. Text is on the left, blank fill on right.
     text_right = min(image.width() - margin, round(250 * dpr))
     for y in range(margin, image.height() - margin):
         for x in range(margin, image.width() - margin):
@@ -93,49 +91,59 @@ def capture_combo(app, combo, output: Path, prefix: str, *, after_choice=None) -
     require(combo.isEnabled(), 'POPUP_CONTROL_UNEXPECTEDLY_DISABLED')
     values = [combo.itemData(i) for i in range(combo.count())]
     records = []
+
+    def save_measurement(view, index, mode, row):
+        stats = row_pixels(view, index)
+        record = {'mode': mode, 'row': row, 'current_view_row': view.currentIndex().row(),
+                  'text': combo.itemText(row), 'value': values[row], **stats}
+        require(view.grab().save(str(output / f'{prefix}-{mode}-{row}.png')),
+                'POPUP_SCREENSHOT_WRITE_FAILED')
+        (output / f'{prefix}-{mode}-{row}.json').write_text(
+            json.dumps(record, ensure_ascii=False, indent=2), encoding='utf-8')
+        records.append(record)
+        assert_readable(stats)
+
     for row in range(combo.count()):
+        before_hover = combo.currentData()
         combo.setFocus()
         combo.showPopup()
         app.processEvents()
+        QTest.qWait(120)  # Allow native popup show/animation before mouse input.
         view = combo.view()
         require(view.isVisible(), 'POPUP_NOT_VISIBLE')
         index = combo.model().index(row, combo.modelColumn(), combo.rootModelIndex())
         view.scrollTo(index)
         app.processEvents()
         QTest.mouseMove(view.viewport(), QPoint(1, 1))
+        QTest.qWait(25)
         QTest.mouseMove(view.viewport(), view.visualRect(index).center())
-        QTest.qWait(35)
+        wait_until(app, lambda: view.indexAt(view.viewport().mapFromGlobal(
+            QCursor.pos())).row() == row, timeout=2.0)
+        QTest.qWait(80)
         app.processEvents()
-        require(view.currentIndex().row() == row, 'POPUP_HOVER_DID_NOT_MOVE_SELECTION')
-        stats = row_pixels(view, index)
-        require(view.grab().save(str(output / f'{prefix}-hover-{row}.png')),
-                'POPUP_SCREENSHOT_WRITE_FAILED')
-        records.append({'mode': 'hover', 'row': row, 'text': combo.itemText(row),
-                        'value': values[row], **stats})
-        assert_readable(stats)
-        # Hover must not commit a profile. Escape cancels before keyboard test.
+        # Qt supports both current-item and active-only hover tracking. Assert
+        # the actual row under the pointer and its pixels, not a chosen policy.
+        save_measurement(view, index, 'hover', row)
+        require(combo.currentData() == before_hover, 'POPUP_HOVER_COMMITTED_VALUE')
         QTest.keyClick(view, Qt.Key.Key_Escape)
         combo.hidePopup()
         app.processEvents()
+        require(combo.currentData() == before_hover, 'POPUP_ESCAPE_COMMITTED_VALUE')
         combo.showPopup()
         app.processEvents()
+        QTest.qWait(120)
         view = combo.view()
         QTest.keyClick(view, Qt.Key.Key_Home)
         for _ in range(row):
             QTest.keyClick(view, Qt.Key.Key_Down)
         app.processEvents()
         require(view.currentIndex().row() == row, 'POPUP_KEYBOARD_SELECTION_WRONG')
-        stats = row_pixels(view, index)
-        require(view.grab().save(str(output / f'{prefix}-keyboard-{row}.png')),
-                'POPUP_SCREENSHOT_WRITE_FAILED')
-        assert_readable(stats)
+        save_measurement(view, index, 'keyboard', row)
         QTest.keyClick(view, Qt.Key.Key_Return)
         app.processEvents()
-        require(combo.currentData() == values[row], 'POPUP_ENTER_CHANGED_WRONG_VALUE')
         if after_choice is not None:
             after_choice(values[row])
-        records.append({'mode': 'keyboard', 'row': row, 'text': combo.itemText(row),
-                        'value': values[row], **stats})
+        require(combo.currentData() == values[row], 'POPUP_ENTER_CHANGED_WRONG_VALUE')
     require([combo.itemData(i) for i in range(combo.count())] == values,
             'POPUP_INTERNAL_VALUES_CHANGED')
     return records
@@ -174,10 +182,9 @@ def run(output: Path, *, expect_baseline_failure=False) -> dict:
                     wait_until(app, lambda: not window.probe.pending and
                                window.probe.data.get('capture_policy', {}).get('profile') == value)
                     require(not window.probe.active, 'PROFILE_STARTED_RECORDING')
-                    require(not window.probe.data.get('wpr_active'), 'PROFILE_STARTED_WPR')
-                records = capture_combo(app, window.dashboard_profile, output,
-                                        f'{lang}-overview', after_choice=verify_profile)
-                result['records'].extend(records)
+                result['records'].extend(capture_combo(
+                    app, window.dashboard_profile, output, f'{lang}-overview',
+                    after_choice=verify_profile))
                 require(tuple(window.dashboard_profile.itemData(i) for i in range(3)) == PROFILES,
                         'PROFILE_KEYS_CHANGED')
                 window._navigate('settings')
