@@ -1,8 +1,11 @@
 """Painted selection regression: a correct palette alone is not sufficient."""
 from __future__ import annotations
 
+from collections import Counter
+import json
 import os
 from pathlib import Path
+import shutil
 import tempfile
 import unittest
 
@@ -63,16 +66,31 @@ class SelectionContrastTests(unittest.TestCase):
 
     def test_actual_nested_popup_mouse_and_keyboard_keep_text_and_values(self):
         with tempfile.TemporaryDirectory() as folder:
-            for lang, labels in (
-                    ('EN', ('STANDARD', 'DETAILED', 'INCIDENT_BURST')),
-                    ('RU', ('СТАНДАРТНЫЙ', 'ПОДРОБНЫЙ', 'ЗАПИСЬ ИНЦИДЕНТА'))):
-                for index, label in enumerate(labels):
-                    self.combo.setItemText(index, label)
-                records = capture_combo(self.app, self.combo, Path(folder), lang)
-                self.assertEqual(len(records), 6)
-                self.assertEqual(self.combo.currentData(), 'INCIDENT_BURST')
-                self.assertEqual(tuple(self.combo.itemData(i) for i in range(3)),
-                                 ('STANDARD', 'DETAILED', 'INCIDENT_BURST'))
+            try:
+                for lang, labels in (
+                        ('EN', ('STANDARD', 'DETAILED', 'INCIDENT_BURST')),
+                        ('RU', ('СТАНДАРТНЫЙ', 'ПОДРОБНЫЙ', 'ЗАПИСЬ ИНЦИДЕНТА'))):
+                    for index, label in enumerate(labels):
+                        self.combo.setItemText(index, label)
+                    records = capture_combo(self.app, self.combo, Path(folder), lang)
+                    self.assertEqual(len(records), 6)
+                    self.assertEqual(self.combo.currentData(), 'INCIDENT_BURST')
+                    self.assertEqual(tuple(self.combo.itemData(i) for i in range(3)),
+                                     ('STANDARD', 'DETAILED', 'INCIDENT_BURST'))
+            except AssertionError:
+                view = self.combo.view()
+                image = view.viewport().grab().toImage()
+                counts = Counter(image.pixelColor(x, y).name()
+                                 for y in range(3, image.height() - 3, 3)
+                                 for x in range(3, image.width() - 3, 3))
+                print('POPUP_RENDER_FAILURE ' + json.dumps({
+                    'row': view.currentIndex().row(),
+                    'pixels': row_pixels(view, view.currentIndex()),
+                    'dominant': counts.most_common(8)}), flush=True)
+                raise
+            finally:
+                if os.environ.get('GITHUB_ACTIONS') == 'true':
+                    shutil.copytree(folder, Path('popup-qa') / 'unit', dirs_exist_ok=True)
 
     def test_pixel_gate_detects_regression_even_with_correct_palette(self):
         # Reintroduce only the old parent background leak in this QA fixture.
