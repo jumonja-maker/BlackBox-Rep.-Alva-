@@ -168,8 +168,12 @@ class SchemaV2Reader(_Reader):
             raise
 
     def bounds(self,series="STANDARD",instance_id=1):
-        return tuple(self.db.execute("SELECT min(monotonic_ns),max(monotonic_ns),count(*) "
+        result=tuple(self.db.execute("SELECT min(monotonic_ns),max(monotonic_ns),count(*) "
             "FROM samples WHERE instance_id=? AND series=?",(instance_id,series)).fetchone())
+        if ((result[0] is not None and (type(result[0]) is not int or result[0]<0))
+                or (result[1] is not None and (type(result[1]) is not int or result[1]<0))):
+            raise SessionReadError("INVALID_IMPORTED_SAMPLE_CLOCK")
+        return result
 
     def iter_samples(self,start,end,*,series="STANDARD",instance_id=1):
         cursor=self.db.execute("SELECT * FROM samples WHERE instance_id=? AND series=? AND "
@@ -177,6 +181,20 @@ class SchemaV2Reader(_Reader):
         for raw in cursor:
             row=dict(raw)
             row["time_ns"]=row["monotonic_ns"]
+            # SQLite's INTEGER affinity is not type enforcement. A modified
+            # or corrupt import can contain TEXT in series_seq, cadence or
+            # capture brackets, which would otherwise crash arithmetic or
+            # silently alter the coverage and CPU/IO estimates.
+            stamp=row["time_ns"]
+            began=row["capture_started_ns"]
+            ended=row["capture_ended_ns"]
+            interval=row["requested_interval_ns"]
+            if (type(stamp) is not int or stamp<0 or
+                    type(began) is not int or not 0<=began<=stamp or
+                    type(ended) is not int or ended<stamp or
+                    type(row["series_seq"]) is not int or row["series_seq"]<=0 or
+                    type(interval) is not int or interval<=0):
+                raise SessionReadError("INVALID_IMPORTED_SAMPLE_CLOCK_OR_CADENCE")
             if any(row[k] is not None and not _number(row[k]) for k in UNITS):
                 raise SessionReadError("INVALID_IMPORTED_COUNTER")
             yield row
