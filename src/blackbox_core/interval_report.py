@@ -174,9 +174,14 @@ def export_interval(folder: Path,output: Path,*,interval=None,series=None,instan
                     report["source_checksums"][name]=digest(path)
             _redact_metadata(report,include_identifiers)
             if not include_identifiers:
+                # The privacy flag applies to the WHOLE JSON report, not
+                # merely metadata and per-thread table rows. thread_summary
+                # also exposes the root PID and creation time at its top level.
+                for field in ("pid", "creation_time", "instance_id"):
+                    threads.pop(field, None)
                 for row in threads.get("top_threads",()):
-                    row.pop("pid",None)
-                    row.pop("tid",None)
+                    for field in ("pid", "tid", "creation_time", "instance_id"):
+                        row.pop(field, None)
             def stage_file(suffix):
                 path=tx.reserve(prefix+suffix)
                 stage[prefix+suffix]=path

@@ -1,5 +1,5 @@
 """Resource history by process instance; root and observed tree stay separate."""
-from .session_view import _validated_process_instance
+from .session_view import _validated_process_instance, SessionReadError
 
 
 def resource_tree_page(view,start,end,*,after=0,limit=100):
@@ -10,9 +10,26 @@ def resource_tree_page(view,start,end,*,after=0,limit=100):
  root=view.reader.root_instance
  root_series='STANDARD' if view.db.execute("SELECT 1 FROM samples WHERE instance_id=? AND series='STANDARD' AND monotonic_ns BETWEEN ? AND ? LIMIT 1",(root,start,end)).fetchone() else 'DETAILED'
  marks=','.join('?' for _ in ids)
+ # Schema-v2 files are imported and may contain nonnumeric TEXT in REAL
+ # columns, which SQLite silently converts to zero in arithmetic. Keep an
+ # indexed, bounded-to-page invalid-input check ahead of aggregation.
+ fields=("rss_bytes","private_bytes","uss_bytes","handle_count","thread_count",
+         "cpu_user_s","cpu_system_s")
+ invalid=" OR ".join(
+     f"({name} IS NOT NULL AND (typeof({name}) NOT IN ('integer','real') "
+     f"OR {name}<0 OR {name}>1e308))" for name in fields)
+ bad=view.db.execute("SELECT 1 FROM samples WHERE instance_id IN ("+marks+
+     ") AND monotonic_ns BETWEEN ? AND ? "+
+     "AND ((instance_id=? AND series IN (?,'DETAILED')) "+
+     "OR (instance_id<>? AND series='CHILD')) "+
+     "AND (typeof(requested_interval_ns)!='integer' "+
+     "OR requested_interval_ns<=0 OR typeof(series_seq)!='integer' OR series_seq<=0 OR "+
+     invalid+") LIMIT 1",(*ids,start,end,root,root_series,root)).fetchone()
+ if bad:raise SessionReadError("INVALID_IMPORTED_PROCESS_RESOURCE_COUNTER")
  rows=view.db.execute('''WITH source AS (
   SELECT *,lag(monotonic_ns) OVER w AS prior_ns,lag(series_seq) OVER w AS prior_seq,
-  lag(cpu_user_s) OVER w AS prior_user,lag(cpu_system_s) OVER w AS prior_system
+  lag(cpu_user_s) OVER w AS prior_user,lag(cpu_system_s) OVER w AS prior_system,
+  lag(requested_interval_ns) OVER w AS prior_interval
   FROM samples WHERE instance_id IN ('''+marks+''') AND monotonic_ns BETWEEN ? AND ?
   AND series=CASE WHEN instance_id=? THEN ? ELSE 'CHILD' END
   WINDOW w AS (PARTITION BY instance_id,series ORDER BY monotonic_ns,sample_id))
@@ -20,11 +37,15 @@ def resource_tree_page(view,start,end,*,after=0,limit=100):
   max(private_bytes) AS private_peak_bytes,max(uss_bytes) AS uss_peak_bytes,
   max(handle_count) AS handles_peak,max(thread_count) AS threads_peak,
   max(CASE WHEN series_seq=prior_seq+1 AND monotonic_ns>prior_ns
+   AND typeof(requested_interval_ns)='integer' AND requested_interval_ns>0
+   AND requested_interval_ns=prior_interval
    AND monotonic_ns-prior_ns<=max(2*requested_interval_ns,requested_interval_ns+500000000)
    AND cpu_user_s>=prior_user AND cpu_system_s>=prior_system
    THEN (cpu_user_s-prior_user+cpu_system_s-prior_system)*100000000000.0/(monotonic_ns-prior_ns) END)
    AS cpu_peak_percent_one_cpu,
   sum(CASE WHEN series_seq=prior_seq+1 AND monotonic_ns>prior_ns
+   AND typeof(requested_interval_ns)='integer' AND requested_interval_ns>0
+   AND requested_interval_ns=prior_interval
    AND monotonic_ns-prior_ns<=max(2*requested_interval_ns,requested_interval_ns+500000000)
    AND cpu_user_s>=prior_user AND cpu_system_s>=prior_system
    THEN cpu_user_s-prior_user+cpu_system_s-prior_system END) AS cpu_seconds,
@@ -84,6 +105,22 @@ def _parent_link(view,item):
  item['age_quality']='ANCHORED_UTC_ESTIMATE_SYSTEM_CLOCK_ADJUSTMENT_UNKNOWN'
 def tree_totals(view,start,end):
  if not view.is_v2:return {'status':'LEGACY_LIMITED_DATA'}
+ # SUM(TEXT) converts a corrupted SQLite numeric counter into 0. Avoid
+ # reporting a plausible but false process-tree RAM total.
+ roots=view.db.execute("""SELECT 1 FROM samples WHERE instance_id=? AND
+  series='DETAILED' AND monotonic_ns BETWEEN ? AND ? AND (
+  (rss_bytes IS NOT NULL AND (typeof(rss_bytes) NOT IN ('integer','real') OR rss_bytes<0 OR rss_bytes>1e308))
+  OR (children_total IS NOT NULL AND (typeof(children_total)!='integer' OR children_total<0))
+  OR (children_omitted IS NOT NULL AND (typeof(children_omitted)!='integer' OR children_omitted<0)))
+  LIMIT 1""",(view.reader.root_instance,start,end)).fetchone()
+ children=view.db.execute("""SELECT 1 FROM samples p
+  JOIN child_process_samples link ON link.parent_sample_id=p.sample_id
+  JOIN samples c ON c.sample_id=link.child_sample_id
+  WHERE p.instance_id=? AND p.series='DETAILED' AND p.monotonic_ns BETWEEN ? AND ?
+  AND c.rss_bytes IS NOT NULL AND (typeof(c.rss_bytes) NOT IN ('integer','real')
+  OR c.rss_bytes<0 OR c.rss_bytes>1e308) LIMIT 1""",
+  (view.reader.root_instance,start,end)).fetchone()
+ if roots or children:raise SessionReadError("INVALID_IMPORTED_TREE_RSS")
  row=view.db.execute('''WITH cohort AS (
   SELECT p.sample_id,p.rss_bytes AS root_rss,p.children_total,p.children_omitted,
   count(c.sample_id) AS observed_children,sum(c.rss_bytes) AS children_rss,sum(c.rss_bytes IS NULL) AS missing_child_rss

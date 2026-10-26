@@ -43,9 +43,13 @@ def event_page(folder,*,start_ns=0,end_ns=2**63-1,after=None,limit=100,source='A
   if severity!='ALL':clauses.append('severity=?');args.append(severity)
   if instance_id:clauses.append('instance_id=?');args.append(instance_id)
   if search:
-   view.db.create_function('bb_fold',1,lambda text:str(text or '').casefold())
-   clauses.append("bb_fold(code||' '||detail_json) LIKE ? ESCAPE '\\'")
-   args.append('%'+search.casefold().replace('\\','\\\\').replace('%','\\%').replace('_','\\_')+'%')
+   # SQLite LIKE only folds ASCII. Use literal Unicode casefold matching so
+   # Cyrillic provider names and events are searchable; user %/_ are text,
+   # never implicit wildcard patterns or SQL statements.
+   view.db.create_function('bb_contains_literal',2,
+    lambda hay,term:int(str(term) in str(hay or '').casefold()),deterministic=True)
+   clauses.append("bb_contains_literal(code||' '||detail_json,?)=1")
+   args.append(search.casefold())
   query='SELECT * FROM ('+sql+') WHERE '+' AND '.join(clauses)
   count=view.db.execute('SELECT count(*) FROM ('+query+')',args).fetchone()[0]
   cursor_clause=' AND (time_ns,rank,id)>(?,?,?)' if after is not None else ''

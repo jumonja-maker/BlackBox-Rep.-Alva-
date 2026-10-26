@@ -356,14 +356,39 @@ class SessionView:
             native=[dict(r) for r in self.db.execute("""SELECT source_kind,event_type,measurement_status,
                 count(*) AS count FROM events WHERE coalesce(observed_ns,recorded_ns) BETWEEN ? AND ? AND source_kind IN ('WIN32','WCT')
                 GROUP BY source_kind,event_type,measurement_status""",(start,end))]
+        # A row saying NOT_OBSERVED is valuable metadata, but it is NOT
+        # an observed measurement. Counting all per-field status rows as
+        # "COMPLETE" previously labelled even 0 samples / all-null values as
+        # fully covered. Compare status flags to actually decoded counters.
+        quality_slots=count*len(UNITS)
+        quality_rows=sum(r["count"] for r in statuses if r["metric"] in UNITS)
+        quality_ok=sum(r["count"] for r in statuses if
+                       r["metric"] in UNITS and r["measurement_status"]=="OK")
+        observed_values=sum(stats[name].count for name in UNITS)
+        if not self.is_v2:
+            quality_contract="LEGACY_LIMITED_DATA"
+        elif count==0:
+            quality_contract="NO_SAMPLES"
+        elif quality_rows!=quality_slots or quality_ok!=observed_values:
+            quality_contract="QUALITY_STATUS_INCONSISTENT_OR_MISSING"
+        elif observed_values==quality_slots:
+            quality_contract="ALL_SAMPLED_FIELDS_OBSERVED"
+        elif observed_values==0:
+            quality_contract="NO_METRIC_FIELDS_OBSERVED"
+        else:
+            quality_contract="PARTIAL_METRIC_FIELDS_OBSERVED"
         return {"schema_version":2,"source_schema_version":self.metadata["schema_version"],
             "file_trust":"UNVERIFIED_IMPORT","verification_class":"DERIVED",
             "root_cause":"UNKNOWN","metadata":self.metadata,"series":series,"instance_id":instance_id,
             "selected_interval_ns":[start,end],"metrics":{k:v.result(units[k]) for k,v in stats.items()},
             "cpu_time_seconds_over_comparable_pairs":covered_cpu_seconds if cpu_pairs else None,
             "quality_counts":statuses,"coverage":{"selected_samples":count,"total_samples":total,
-                "quality_contract":("COMPLETE" if sum(r["count"] for r in statuses if r["metric"] in UNITS)==count*len(UNITS)
-                                    and self.is_v2 else "LEGACY_LIMITED_DATA" if not self.is_v2 else "PARTIAL_OR_INVALID"),
+                "quality_contract":quality_contract,
+                "quality_status_rows_expected":quality_slots if self.is_v2 else None,
+                "quality_status_rows_present":quality_rows if self.is_v2 else None,
+                "quality_status_ok_rows":quality_ok if self.is_v2 else None,
+                "actually_observed_metric_values":observed_values,
+                "unavailable_metric_values":max(0,quality_slots-observed_values),
                 "outside_selected_interval":total-count,"first_sample_ns":first_time,"last_sample_ns":last_time,
                 "observed_comparable_duration_ns":observed_duration,"spacing_gap_pairs":gaps,
                 "counter_resets":resets,"sensor_error_records":errors,"exact_missed_samples":None,
@@ -383,6 +408,21 @@ class SessionView:
         self.reader.renew_deadline()
         start,end,total=self._range(start_ns,end_ns,"DETAILED",instance_id)
         args=(instance_id,start,end)
+        # Imported SQLite is not STRICT. REAL columns can hold TEXT values
+        # that pass SQLite's numeric CHECK and silently coerce to 0.0 during
+        # subtraction. Never interpret a malformed counter as 0% CPU.
+        invalid=self.db.execute("""SELECT 1 FROM samples s
+            JOIN thread_samples t USING(sample_id)
+            WHERE s.instance_id=? AND s.series='DETAILED'
+              AND s.monotonic_ns BETWEEN ? AND ?
+              AND (typeof(t.tid)!='integer' OR t.tid<=0
+                   OR typeof(t.cpu_user_s) NOT IN ('integer','real')
+                   OR typeof(t.cpu_system_s) NOT IN ('integer','real')
+                   OR t.cpu_user_s<0 OR t.cpu_system_s<0
+                   OR t.cpu_user_s>1e308 OR t.cpu_system_s>1e308)
+            LIMIT 1""",args).fetchone()
+        if invalid:
+            raise SessionReadError("INVALID_IMPORTED_THREAD_COUNTER")
         cte="""WITH selected AS (
             SELECT sample_id,series_seq,monotonic_ns,requested_interval_ns,threads_omitted
             FROM samples WHERE instance_id=? AND series='DETAILED' AND monotonic_ns BETWEEN ? AND ?
@@ -437,8 +477,10 @@ class SessionView:
             "recorded_omitted_thread_observations":omitted,
             "capture_quality":capture_quality,
             "capture_quality_contract":"NOT_RECORDED" if selected_count==0 else
-                                       "COMPLETE" if sum(r["count"] for r in capture_quality)==selected_count
-                                       else "LEGACY_NO_CAPTURE_STATUS",
+                "LEGACY_NO_CAPTURE_STATUS" if sum(r["count"] for r in capture_quality)!=selected_count else
+                "ALL_REPORTED_THREAD_SNAPSHOTS_OK" if (
+                    sum(r["count"] for r in capture_quality if r["measurement_status"]=="OK")==selected_count
+                    and not omitted) else "PARTIAL_OR_UNAVAILABLE_THREAD_COUNTERS",
             "omitted_cpu_seconds":max(0,totals[1]-sum(r["cpu_seconds"] or 0 for r in ranked))
                                   if totals[1] is not None else None,
             "segments_without_comparable_pairs":totals[2] or 0,

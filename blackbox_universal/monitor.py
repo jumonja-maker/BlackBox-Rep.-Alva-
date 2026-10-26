@@ -29,26 +29,38 @@ def utc_stamp() -> str:
 
 
 def available_processes(limit: int = 500) -> list[dict]:
-    """Core discovery plus best-effort RSS for the GUI process picker."""
+    """Enumerate all discovered names/PIDs; sample RSS for a bounded subset.
+
+    Limiting the returned list to 500 alphabetic names made every later
+    process unselectable, even with an exact PID query. Never silently drop
+    discovered targets; limit the expensive RSS/status inspection instead.
+    """
+    if type(limit) is not int or not 1 <= limit <= 5000:
+        raise ValueError("INVALID_PROCESS_DETAIL_LIMIT")
     try:
         import psutil
     except ImportError:
         return []
     rows: list[dict] = []
-    for item in list_processes():
-        try:
-            proc = psutil.Process(item["pid"])
-            memory = proc.memory_info()
-            status = proc.status()
-            rss = round(memory.rss / 1048576, 1)
-        except (psutil.Error, OSError):
-            rss, status = None, "unknown"
+    discovered = sorted(list_processes(), key=lambda row: (row["name"].casefold(), row["pid"]))
+    for index, item in enumerate(discovered):
+        if index < limit:
+            try:
+                proc = psutil.Process(item["pid"])
+                memory = proc.memory_info()
+                status = proc.status()
+                rss = round(memory.rss / 1048576, 1)
+            except (psutil.Error, OSError):
+                rss, status = None, "unknown"
+        else:
+            # Unknown is NOT 0 MiB. Exact-PID/name search can still attach
+            # these processes, even though we did not fetch their RSS.
+            rss, status = None, "not sampled"
         rows.append({
             "pid": item["pid"], "name": item["name"],
             "rss_mb": rss, "status": str(status)[:32],
         })
-    rows.sort(key=lambda r: (r["name"].casefold(), r["pid"]))
-    return rows[:limit]
+    return rows
 
 
 def _default_sessions_root() -> Path:

@@ -21,9 +21,25 @@ def summarize(folder: Path) -> dict:
             row = db.execute("SELECT * FROM metadata LIMIT 1").fetchone()
             if row is None or row["schema_version"] != 1:
                 raise ObserverError("UNSUPPORTED_SCHEMA", "report")
-            agg = db.execute("""SELECT count(*) AS samples, MAX(rss_bytes) AS peak_rss_bytes,
-                       MAX(cpu_percent) AS peak_cpu_percent, MAX(children_count) AS max_children,
-                       MAX(elapsed_ms) AS elapsed_ms FROM samples""").fetchone()
+            # SQLite schema1 is not STRICT: an imported file may carry
+            # "bogus" TEXT in INTEGER/REAL counter columns. MAX() can then
+            # select text as a fake peak instead of rejecting it. Validate
+            # all selected aggregates in the SAME full-table scan.
+            integer_fields=("rss_bytes","num_threads","read_bytes","write_bytes","children_count")
+            invalid=["typeof(elapsed_ms)!='integer' OR elapsed_ms<0"]
+            invalid.extend(f"({name} IS NOT NULL AND (typeof({name})!='integer' OR {name}<0))"
+                           for name in integer_fields)
+            invalid.append("(cpu_percent IS NOT NULL AND ("
+                           "typeof(cpu_percent) NOT IN ('integer','real') OR "
+                           "cpu_percent<0 OR cpu_percent>1e308))")
+            sql=("SELECT count(*) AS samples, MAX(rss_bytes) AS peak_rss_bytes, "
+                 "MAX(cpu_percent) AS peak_cpu_percent, MAX(children_count) AS max_children, "
+                 "MAX(elapsed_ms) AS elapsed_ms, "
+                 "coalesce(sum(CASE WHEN " + " OR ".join(invalid) +
+                 " THEN 1 ELSE 0 END),0) AS invalid_counter_rows FROM samples")
+            agg=db.execute(sql).fetchone()
+            if agg["invalid_counter_rows"]:
+                raise ObserverError("INVALID_DATA","report")
             # Stream the SQLite cursor: long recordings must not materialize
             # every event as a Python list. User problem markers are not faults.
             counts = {}

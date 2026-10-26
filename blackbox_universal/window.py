@@ -1179,8 +1179,11 @@ class UniversalWindow(QMainWindow):
 
     def _filter_processes(self, query: str = "") -> None:
         query = query.strip().casefold()
-        visible = [r for r in self._process_rows if
+        matches = [r for r in self._process_rows if
                    query in r["name"].casefold() or query in str(r["pid"])]
+        # Rendering tens of thousands of QTableWidgetItems can freeze Qt.
+        # Search operates on the COMPLETE discovery list before this cap.
+        visible = matches[:500]
         self.process_table.setRowCount(len(visible))
         for row_idx, item in enumerate(visible):
             cells = (item["name"], str(item["pid"]),
@@ -1191,9 +1194,16 @@ class UniversalWindow(QMainWindow):
                 if column == 1:
                     cell.setData(Qt.ItemDataRole.UserRole, item["pid"])
                 self.process_table.setItem(row_idx, column, cell)
-        self.process_count.setText(
-            f"{len(visible)} из {len(self._process_rows)} процессов" if self.language == "RU"
-            else f"{len(visible)} shown / {len(self._process_rows)} available")
+        count, total = len(matches), len(self._process_rows)
+        if self.language == "RU":
+            message = f"{len(visible)} показано / {count} найдено / {total} обнаружено"
+            if count > len(visible):
+                message += " · уточните поиск"
+        else:
+            message = f"{len(visible)} shown / {count} matching / {total} discovered"
+            if count > len(visible):
+                message += " · refine search"
+        self.process_count.setText(message)
 
     def _choose_application_file(self) -> None:
         chosen, _ = QFileDialog.getOpenFileName(
