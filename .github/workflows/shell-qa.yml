@@ -8,6 +8,16 @@ on:
     branches:
       - main
   workflow_dispatch:
+    inputs:
+      publish_v040:
+        description: "Publish tested v0.4.0 from the exact accepted main SHA"
+        required: true
+        type: boolean
+        default: false
+      accepted_source_sha:
+        description: "Exact 40-character approved main commit SHA"
+        required: false
+        type: string
 
 concurrency:
   group: blackbox-public-qa-${{ github.ref }}
@@ -26,6 +36,8 @@ jobs:
       PYTHONUTF8: "1"
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -39,20 +51,44 @@ jobs:
         run: python -m unittest discover -s tests -v
       - name: Real Qt offscreen startup smoke
         run: python app.py --smoke
+      - name: Real Qt isolated research end-to-end
+        run: python app.py --research-e2e source-research-e2e
+      - name: Real process action thread incident and selected export (Python)
+        run: python app.py --deep-smoke --qa-output deep-smoke-python --qa-commit-sha "${{ github.event.pull_request.head.sha || github.sha }}"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: BLACKBOX-REAL-PROCESS-WINDOWS-PYTHON
+          path: deep-smoke-python/
+          if-no-files-found: warn
+          retention-days: 7
+      - name: Explicit real WPR guardian TTL on the disposable CI runner
+        env:
+          BB_QA_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: python tools/qa_trace_guardian.py trace-guardian-qa
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: BLACKBOX-WPR-GUARDIAN-QA
+          path: trace-guardian-qa/
+          if-no-files-found: warn
+          retention-days: 7
       - name: Offscreen RU/EN screenshots at simulated Windows DPI 100-200%
         shell: pwsh
         run: |
           foreach ($scale in @('1', '1.25', '1.5', '2')) {
             $env:QT_SCALE_FACTOR = $scale
-            python tools/qa_dpi_offscreen.py dpi-offscreen
-            if ($LASTEXITCODE -ne 0) { throw "Offscreen DPI capture failed at scale $scale" }
+            $job = Start-Process -FilePath (Get-Command python).Source -ArgumentList @('tools/qa_dpi_offscreen.py', 'dpi-offscreen') -PassThru
+            if (-not $job.WaitForExit(120000)) { $job.Kill(); throw "DPI capture exceeded deadline at scale $scale" }
+            if ($job.ExitCode -ne 0) { throw "Offscreen DPI capture failed at scale $scale" }
           }
           Remove-Item Env:\QT_SCALE_FACTOR -ErrorAction SilentlyContinue
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: BLACKBOX-OFFSCREEN-DPI-QA
-          path: dpi-offscreen/*.png
-          if-no-files-found: error
+          path: dpi-offscreen/
+          if-no-files-found: warn
           retention-days: 7
       - name: Validate human-first CLI (no platform command)
         shell: pwsh
@@ -70,6 +106,8 @@ jobs:
       PYTHONUTF8: "1"
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -87,19 +125,33 @@ jobs:
         run: python -m unittest discover -s tests -v
       - name: Qt offscreen startup smoke
         run: python app.py --smoke
+      - name: Real Qt isolated research end-to-end
+        run: python app.py --research-e2e source-research-e2e
+      - name: Real process action thread incident and selected export (Linux)
+        run: python app.py --deep-smoke --qa-output deep-smoke-linux --qa-commit-sha "${{ github.event.pull_request.head.sha || github.sha }}"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: BLACKBOX-REAL-PROCESS-LINUX
+          path: deep-smoke-linux/
+          if-no-files-found: warn
+          retention-days: 7
       - name: Validate independent observer CLI
         run: python -m blackbox_core --help
 
   windows-portable:
     name: Windows portable exe
-    needs: shell-tests
+    # Independent native verification runs alongside source tests for fast
+    # failure diagnosis. Publication still requires *all* three jobs green.
     runs-on: windows-latest
-    timeout-minutes: 30
+    timeout-minutes: 40
     env:
       QT_QPA_PLATFORM: offscreen
       PYTHONUTF8: "1"
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -111,17 +163,21 @@ jobs:
           python -m pip install -e .
       - name: Generate original retro Windows icon
         run: python tools/generate_icon.py
+      - name: Record actual source identity for the frozen executable
+        run: python tools/write_build_provenance.py "${{ github.event.pull_request.head.sha || github.sha }}"
       - name: Build separate Windows maintenance EXE
-        run: python -m PyInstaller --noconfirm --clean --onefile --windowed --icon assets/blackbox.ico --name BLACK.BOX-Maintenance maintenance_entry.py
+        run: python -m PyInstaller --noconfirm --clean --paths src --paths . --onefile --windowed --icon assets/blackbox.ico --name BLACK.BOX-Maintenance maintenance_entry.py
       - name: Build BLACK.BOX Universal desktop with original icon
         shell: pwsh
         run: |
-          python -m PyInstaller --noconfirm --clean --onedir --windowed --collect-submodules blackbox_core --collect-submodules blackbox_investigation --collect-submodules blackbox_universal --icon assets/blackbox.ico --add-data "assets/blackbox.png;assets" --name BLACK.BOX-Universal app.py
+          python -m PyInstaller --noconfirm --clean --paths src --paths . --onedir --windowed --collect-submodules blackbox_core --collect-submodules blackbox_investigation --collect-submodules blackbox_universal --icon assets/blackbox.ico --add-data "assets/blackbox.png;assets" --add-data "src/blackbox_core/instrumentation.py;blackbox_core" --add-data ".qa-build/blackbox-build.json;." --name BLACK.BOX-Universal app.py
           if ($LASTEXITCODE -ne 0) { throw 'GUI build failed' }
           Copy-Item "dist/BLACK.BOX-Maintenance.exe" "dist/BLACK.BOX-Universal/BLACK.BOX-Maintenance.exe"
           Copy-Item ".blackbox-portable.json" "dist/BLACK.BOX-Universal/.blackbox-portable.json"
           if (-not (Test-Path "dist/BLACK.BOX-Universal/BLACK.BOX-Maintenance.exe")) { throw 'Maintenance helper missing' }
           if (-not (Test-Path "dist/BLACK.BOX-Universal/_internal/assets/blackbox.png")) { throw 'App icon missing' }
+      - name: Verify real embedded research modules before startup
+        run: python tools/verify_frozen_research.py "dist/BLACK.BOX-Universal/BLACK.BOX-Universal.exe"
       - name: Verify Explorer icon is the same as the taskbar icon for both EXEs
         shell: pwsh
         run: |
@@ -132,12 +188,76 @@ jobs:
         run: |
           $exe = Join-Path $PWD "dist\BLACK.BOX-Universal\BLACK.BOX-Universal.exe"
           if (-not (Test-Path $exe)) { throw "Missing portable EXE" }
-          $job = Start-Process -FilePath $exe -ArgumentList "--smoke" -PassThru -Wait
+          $job = Start-Process -FilePath $exe -ArgumentList "--smoke" -PassThru
+          if (-not $job.WaitForExit(120000)) { $job.Kill(); throw 'Frozen startup smoke exceeded deadline' }
           if ($job.ExitCode -ne 0) { throw "Frozen Windows GUI failed: $($job.ExitCode)" }
           Write-Host "Portable GUI smoke PASS"
           $maintenance = Join-Path $PWD "dist\BLACK.BOX-Universal\BLACK.BOX-Maintenance.exe"
-          $check = Start-Process -FilePath $maintenance -ArgumentList "--help" -PassThru -Wait
+          $check = Start-Process -FilePath $maintenance -ArgumentList "--help" -PassThru
+          if (-not $check.WaitForExit(60000)) { $check.Kill(); throw 'Maintenance startup exceeded deadline' }
           if ($check.ExitCode -ne 0) { throw "Maintenance EXE failed smoke: $($check.ExitCode)" }
+      - name: Full research roundtrip in the actual frozen EXE
+        shell: pwsh
+        run: |
+          $exe = Join-Path $PWD "dist\BLACK.BOX-Universal\BLACK.BOX-Universal.exe"
+          $evidence = Join-Path $PWD "frozen-research-e2e"
+          $job = Start-Process -FilePath $exe -ArgumentList @('--research-e2e', ('"' + $evidence + '"')) -PassThru
+          if (-not $job.WaitForExit(120000)) { $job.Kill(); throw 'Frozen research E2E exceeded deadline' }
+          if ($job.ExitCode -ne 0) { throw "Frozen research E2E failed: $($job.ExitCode)" }
+          $proof = Get-Content (Join-Path $evidence 'e2e.json') -Raw | ConvertFrom-Json
+          if ($proof.status -ne 'PASS' -or $proof.helper_pid -eq $proof.gui_pid) { throw 'Missing isolated research proof' }
+      - name: Frozen research with administrator SID and privileges removed
+        run: python tools/qa_standard_token.py "dist/BLACK.BOX-Universal/BLACK.BOX-Universal.exe" "frozen-standard-token-e2e"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: BLACKBOX-FROZEN-QA-DIAGNOSTICS
+          path: |
+            blackbox-qa-error.txt
+            blackbox-smoke-progress.json
+            frozen-research-e2e/*.json
+            frozen-standard-token-e2e/*.json
+          if-no-files-found: warn
+          retention-days: 7
+      - uses: actions/upload-artifact@v4
+        with:
+          name: BLACKBOX-FROZEN-RESEARCH-E2E
+          path: frozen-research-e2e/
+          if-no-files-found: error
+          retention-days: 7
+      - uses: actions/upload-artifact@v4
+        with:
+          name: BLACKBOX-STANDARD-TOKEN-E2E
+          path: frozen-standard-token-e2e/
+          if-no-files-found: error
+          retention-days: 7
+      - name: Deep test actual frozen EXE without Python on PATH or source working directory
+        shell: pwsh
+        run: |
+          $exe = Join-Path $PWD "dist\BLACK.BOX-Universal\BLACK.BOX-Universal.exe"
+          $evidence = Join-Path $PWD "deep-smoke-frozen"
+          New-Item -ItemType Directory -Path $evidence -Force | Out-Null
+          $savedPath = $env:PATH
+          try {
+            $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot"
+            $job = Start-Process -FilePath $exe -WorkingDirectory $evidence -ArgumentList @('--deep-smoke', '--qa-output', $evidence, '--qa-commit-sha', '${{ github.event.pull_request.head.sha || github.sha }}') -PassThru
+            if (-not $job.WaitForExit(120000)) { throw 'Frozen deep smoke exceeded 120s deadline' }
+            if ($job.ExitCode -ne 0) { throw "Frozen deep smoke failed: $($job.ExitCode)" }
+          } finally { $env:PATH = $savedPath }
+          $summaryFile = Get-ChildItem -Path $evidence -Filter qa-summary.json -Recurse | Select-Object -First 1
+          if (-not $summaryFile) { throw 'Frozen evidence summary missing' }
+          $summary = Get-Content -Raw $summaryFile.FullName | ConvertFrom-Json
+          if ($summary.result -ne 'PASS' -or -not $summary.frozen -or $summary.completed_actions -ne 3 -or $summary.thread_cpu_seconds -le 0 -or $summary.incidents -le 0) { throw 'Frozen vertical evidence incomplete' }
+          if ($summary.requested_head_sha -ne '${{ github.event.pull_request.head.sha || github.sha }}') { throw 'Frozen evidence head mismatch' }
+          if ($summary.actual_source_sha -ne '${{ github.event.pull_request.head.sha || github.sha }}' -or $summary.source_identity_status -ne 'VERIFIED_EXPECTED_HEAD') { throw 'Frozen build provenance mismatch' }
+          Get-FileHash -Algorithm SHA256 -LiteralPath $exe | Format-List
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: BLACKBOX-REAL-PROCESS-FROZEN
+          path: deep-smoke-frozen/
+          if-no-files-found: warn
+          retention-days: 14
       - name: Include public source license and distribution notices
         shell: pwsh
         run: |
@@ -155,6 +275,19 @@ jobs:
         run: |
           Compress-Archive -LiteralPath "dist\BLACK.BOX-Universal" -DestinationPath "BLACK.BOX-Universal-Windows.zip" -Force
           if (-not (Test-Path "BLACK.BOX-Universal-Windows.zip")) { throw "ZIP missing" }
+      - name: Native old-v0.3.6 to new-v0.4.0 update and full portable uninstall
+        shell: pwsh
+        timeout-minutes: 16
+        run: |
+          python tools/qa_windows_maintenance_e2e.py --built-zip "BLACK.BOX-Universal-Windows.zip" --expected-sha "${{ github.event.pull_request.head.sha || github.sha }}" --evidence "portable-maintenance-e2e"
+          if ($LASTEXITCODE -ne 0) { throw 'Real portable update/uninstall acceptance failed' }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: BLACKBOX-NATIVE-UPDATE-UNINSTALL-QA
+          path: portable-maintenance-e2e/
+          if-no-files-found: warn
+          retention-days: 14
       - uses: actions/upload-artifact@v4
         with:
           name: BLACKBOX-INDEPENDENT-WINDOWS-QA
@@ -163,11 +296,15 @@ jobs:
           retention-days: 14
 
 
-# Release v0.3.6 is published after Windows/Linux tests and Windows EXE smoke.
+# Explicit release gate: NEVER publish just because a PR is merged or main is pushed.
+# A manual dispatch from main with exact reviewed SHA reruns all three QA jobs.
   publish-updater-test:
-    name: Publish independent BLACK.BOX release
-    needs: [linux-tests, windows-portable]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    name: Publish verified BLACK.BOX v0.4.0 (manual owner gate)
+    needs: [shell-tests, linux-tests, windows-portable]
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      github.ref == 'refs/heads/main' &&
+      inputs.publish_v040 == true
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -176,58 +313,76 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
       - uses: actions/download-artifact@v4
         with:
           name: BLACKBOX-INDEPENDENT-WINDOWS-QA
           path: verified-portable
-      - name: Publish verified hardened v0.3.6
+      - name: Check exact SHA, source metadata, frozen provenance and no old tag
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ACCEPTED_SHA: ${{ inputs.accepted_source_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_REF" == "refs/heads/main" ]]
+          if [[ ! "$ACCEPTED_SHA" =~ ^[0-9a-f]{40}$ || "$ACCEPTED_SHA" != "$GITHUB_SHA" ]]; then
+            echo "::error::Published source must equal the manually approved exact main SHA"
+            exit 1
+          fi
+          VERSION="$(python -c 'from blackbox_universal import __version__; print(__version__)')"
+          PACKAGE_VERSION="$(python -c 'import tomllib; print(tomllib.load(open("pyproject.toml","rb"))["project"]["version"])')"
+          [[ "$VERSION" == "0.4.0" && "$PACKAGE_VERSION" == "$VERSION" ]] || {
+            echo "::error::Release version mismatch"
+            exit 1
+          }
+          ZIP="verified-portable/BLACK.BOX-Universal-Windows.zip"
+          test -s "$ZIP"
+          unzip -p "$ZIP" BLACK.BOX-Universal/_internal/blackbox-build.json > frozen-source.json
+          python -c 'import json,os; s=json.load(open("frozen-source.json")); assert s["source_sha"]==os.environ["GITHUB_SHA"] and s["tracked_worktree_clean"] is True, "Frozen archive source mismatch"'
+          TAG="v$VERSION"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "::error::Existing release $TAG will not be overwritten"
+            exit 1
+          fi
+          # Disallow publishing over an existing tag even if it has no release.
+          TAG_HTTP="$(gh api -i "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" 2>/dev/null | head -n 1 || true)"
+          if [[ "$TAG_HTTP" != *"404"* ]]; then
+            echo "::error::Tag existence could not be disproved; refusing unsafe publication: $TAG_HTTP"
+            exit 1
+          fi
+          sha256sum "$ZIP" > "$ZIP.sha256"
+          sha256sum -c "$ZIP.sha256"
+      - name: Publish owner-approved release without clobber
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          VERSION="$(python -c 'from blackbox_universal import __version__; print(__version__)')"
-          if [[ "$VERSION" != "0.3.6" ]]; then
-            echo "No owner-authorized test release for v$VERSION"
-            exit 0
-          fi
-          TAG="v$VERSION"
           ZIP="verified-portable/BLACK.BOX-Universal-Windows.zip"
-          test -s "$ZIP"
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            echo "Release $TAG already exists, never silently overwrite"
-            exit 0
-          fi
-          sha256sum "$ZIP" > "$ZIP.sha256"
           cat > release-notes.md <<'EOF'
-          BLACK.BOX Universal v0.3.6 — deep reliability hardening
+          BLACK.BOX Universal v0.4.0 — local investigations and portable maintenance
 
-          Reviewed PR #16 plus independent fixes:
-          - Original SQLite, JSON and HTML reports are never replaced by a
-            racing second writer; HTML + JSON use exclusive hard links and
-            conservative rollback.
-          - SQLite report errors count only genuine observation warnings/errors,
-            not user problem markers; streaming handles large event histories.
-          - Update ZIP validation rejects additional malformed Windows filenames,
-            device names, special nodes, aliases, collisions and existing roots.
-          - Portable update/uninstall reject junctions and Windows reparse points,
-            including ancestor directories. Fail closed if path inspection fails.
-          - On failure, the updater protects the prior portable installation and
-            saved session folders; Windows tests include a deliberate collision.
-          - CPU graph dynamically displays multicore utilization above 100%.
-          - Windows CI captures RU/EN Qt offscreen screenshots at 100/125/150/200%
-            scale, available as a separate QA artifact (not shipped to users).
+          - Deep local process investigations, dual SQLite evidence stores and
+            fail-closed cross-store consistency verification.
+          - 17 investigation actions + 4 user markers, offline interval exports,
+            event/thread history, bilingual five-page Qt interface.
+          - Verified old v0.3.6 frozen-app update to new Windows portable EXE,
+            relaunch, and new frozen helper removal on disposable Windows CI.
+          - Portable uninstall removes application files, its matching desktop
+            shortcut, owned Qt registry preferences, and its temporary helper.
+          - Diagnostic sessions and reports under Documents are PRESERVED.
 
-          The standalone Investigation Engine 0.1.2 remains included, and the
-          product still has exactly five tabs, no external worker or cloud
-          upload. All changes are tested against Windows/Linux Python 3.11
-          and frozen Windows EXE before publication.
-          Physical Windows screens, OneDrive/junction rights configurations,
-          AV blocks and a real end-user updater replacement remain NOT RUN.
+          The owner accepted the 5h30 Standard endurance test as an alternative
+          to the planned 8 hours (not an 8-hour test); 1h Detailed passed.
+          CI is NOT physical Win10/11, AV, UAC, OneDrive, screen-reader,
+          signed-binary, or independent 128-point acceptance. These limits
+          are not represented as PASS.
           EOF
-          gh release create "$TAG" "$ZIP" "$ZIP.sha256" \
+          gh release create "v0.4.0" "$ZIP" "$ZIP.sha256" \
             --target "$GITHUB_SHA" \
-            --title "BLACK.BOX Universal v0.3.6 — reliability hardening" \
+            --title "BLACK.BOX Universal v0.4.0 — local investigations" \
             --notes-file release-notes.md --latest
-          echo "Published $TAG from $GITHUB_SHA after Windows + Linux QA"
-
+          echo "Published v0.4.0 at exact reviewed SHA $GITHUB_SHA"

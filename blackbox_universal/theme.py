@@ -5,8 +5,11 @@ No third-party screenshots, icon packs, fonts or proprietary artwork bundled.
 """
 from __future__ import annotations
 
-from PySide6.QtGui import QColor, QFont, QPalette
-from PySide6.QtWidgets import QApplication
+import os
+from pathlib import Path
+
+from PySide6.QtGui import QColor, QFont, QFontInfo, QFontDatabase, QPalette, QRawFont, QTextLayout
+from PySide6.QtWidgets import QApplication, QProxyStyle, QStyle
 
 COLORS = {
     "teal": "#078b84",
@@ -23,6 +26,7 @@ COLORS = {
     "white": "#ffffff",
     "mint": "#83d5b3",
     "alert": "#b84e50",
+    "selection": "#ffddaa",
 }
 
 STYLE = """
@@ -109,6 +113,10 @@ QPushButton#primary {
 }
 QPushButton#primary:hover { background: #ff9476; }
 QPushButton#accent { background: #83d5b3; }
+QPushButton#primary:disabled, QPushButton#accent:disabled {
+    color: #62576b;
+    background: #ded8ce;
+}
 QPushButton#nav {
     min-height: 42px;
     padding: 6px 12px;
@@ -169,6 +177,38 @@ QPushButton#windowControl {
     background: #f7e3c9;
     font-size: 12px;
 }
+QComboBox {
+    min-height: 29px;
+    padding: 4px 8px;
+    background: #fffaf0;
+    color: #302c43;
+    border: 2px solid #8a7f90;
+}
+QComboBox:hover, QComboBox:focus { border-color: #056c6d; }
+QComboBox:disabled { background: #ded8ce; color: #62576b; }
+QComboBox QAbstractItemView {
+    background: #fffaf0;
+    color: #302c43;
+    border: 2px solid #796e87;
+    selection-background-color: #ffddaa;
+    selection-color: #302c43;
+}
+QComboBox QAbstractItemView::item {
+    min-height: 24px;
+    padding: 4px 8px;
+}
+QComboBox QAbstractItemView::item:selected,
+QComboBox QAbstractItemView::item:hover {
+    background: #ffddaa;
+    color: #302c43;
+}
+QMenu {
+    background: #fffaf0;
+    color: #302c43;
+    border: 1px solid #796e87;
+}
+QMenu::item:selected { background: #ffddaa; color: #302c43; }
+QMenu::item:disabled { color: #77718a; }
 QLineEdit {
     min-height: 29px;
     background: #fffdf4;
@@ -181,7 +221,7 @@ QLineEdit {
     selection-background-color: #078b84;
     selection-color: #ffffff;
 }
-QTableWidget {
+QTableWidget, QTreeWidget {
     background: #fffaf0;
     color: #302c43;
     gridline-color: #e2cdbf;
@@ -219,14 +259,82 @@ QToolTip {
 """
 
 
+def _load_windows_offscreen_fonts(app: QApplication) -> None:
+    """Qt's basic offscreen font database does not enumerate Windows fonts.
+
+    Register only installed OS fonts in this process, with no download, font
+    bundling or system installation. Native Windows uses its normal database.
+    """
+    if os.name != "nt" or app.platformName() != "offscreen":
+        return
+    if app.property("blackbox_offscreen_fonts_loaded"):
+        return
+    folder = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "Fonts"
+    for name in ("segoeui.ttf", "segoeuib.ttf", "consola.ttf", "consolab.ttf", "seguisym.ttf"):
+        path = folder / name
+        if path.is_file():
+            QFontDatabase.addApplicationFont(str(path))
+    app.setProperty("blackbox_offscreen_fonts_loaded", True)
+
+
+def font_coverage(app: QApplication) -> dict:
+    """QA evidence from the actual resolved font, not screenshot dimensions."""
+    cyrillic = "АБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯ"
+    alphabet = "BLACK.BOX 0123456789 " + cyrillic + cyrillic.lower()
+    rows = []
+    for family in ("Segoe UI", "Consolas"):
+        for weight in (QFont.Weight.Normal, QFont.Weight.Bold):
+            font = QFont(family, 10)
+            font.setWeight(weight)
+            raw = QRawFont.fromFont(font)
+            # Use the Unicode-codepoint overload. PySide's narrow-char overload
+            # rejects Cyrillic even when the font has its real glyphs.
+            missing = sorted({c for c in alphabet if not raw.supportsCharacter(ord(c))}) if raw.isValid() else sorted(set(alphabet))
+            rows.append({"requested_family": family, "weight": int(weight),
+                         "resolved_family": QFontInfo(font).family(),
+                         "valid": raw.isValid(), "missing_characters": missing})
+    # Check shaped fallback glyphs too: the alphabet alone cannot detect
+    # missing icons. These are the actual chrome symbols used by the shell.
+    symbols="▾●"  # all other chrome icons are original vectors, not glyphs
+    symbol_rows=[]
+    for symbol in symbols:
+        layout=QTextLayout(symbol,app.font());layout.beginLayout()
+        line=layout.createLine();line.setLineWidth(100);layout.endLayout()
+        runs=layout.glyphRuns()
+        valid=bool(runs) and all(run.rawFont().isValid() and all(run.glyphIndexes()) for run in runs)
+        symbol_rows.append({"text":symbol,"valid":valid,"families":[run.rawFont().familyName() for run in runs]})
+    alphabet_ok=all(r["valid"] and not r["missing_characters"] for r in rows)
+    symbols_ok=all(r["valid"] for r in symbol_rows)
+    return {"platform": app.platformName(), "ok":alphabet_ok and (symbols_ok or os.name!="nt"),
+            "alphabet_ok":alphabet_ok,"symbols_ok":symbols_ok,"fonts":rows,"symbols":symbol_rows}
+
+
+class RetroStyle(QProxyStyle):
+    """Use list rendering instead of menu rendering for styled combo popups."""
+    def styleHint(self, hint, option=None, widget=None, returnData=None):
+        if hint == QStyle.StyleHint.SH_ComboBox_Popup:
+            return 0
+        if hint == QStyle.StyleHint.SH_ComboBox_ListMouseTracking:
+            return 1
+        return super().styleHint(hint, option, widget, returnData)
+
+
 def set_retro_theme(app: QApplication) -> None:
-    app.setStyle("Fusion")
+    _load_windows_offscreen_fonts(app)
+    app.setStyle(RetroStyle("Fusion"))
     app.setFont(QFont("Segoe UI", 10))
     palette = app.palette()
     palette.setColor(QPalette.ColorRole.Window, QColor(COLORS["cream"]))
     palette.setColor(QPalette.ColorRole.WindowText, QColor(COLORS["navy"]))
     palette.setColor(QPalette.ColorRole.Base, QColor(COLORS["white"]))
     palette.setColor(QPalette.ColorRole.Text, QColor(COLORS["navy"]))
-    palette.setColor(QPalette.ColorRole.Highlight, QColor(COLORS["teal"]))
+    palette.setColor(QPalette.ColorRole.Button, QColor(COLORS["beige"]))
+    palette.setColor(QPalette.ColorRole.ButtonText, QColor(COLORS["navy"]))
+    # Set both roles for every group. A popup can use the inactive group;
+    # inherited system HighlightedText must not become white on cream.
+    palette.setColor(QPalette.ColorRole.Highlight, QColor(COLORS["selection"]))
+    palette.setColor(QPalette.ColorRole.HighlightedText, QColor(COLORS["navy"]))
+    palette.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.Text, QColor(COLORS["muted"]))
+    palette.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.ButtonText, QColor(COLORS["muted"]))
     app.setPalette(palette)
     app.setStyleSheet(STYLE)

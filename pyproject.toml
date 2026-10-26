@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "blackbox-core"
-version = "0.3.6"
+version = "0.4.0"
 description = "Local-first, read-only process observation and evidence reports"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -19,4 +19,6 @@ process = ["psutil>=6,<8"]
 blackbox = "blackbox_core.cli:main"
 
 [tool.setuptools.packages.find]
-where = ["src"]
+where = ["src", "."]
+include = ["blackbox_core*", "blackbox_investigation*", "blackbox_universal*"]
+namespaces = false

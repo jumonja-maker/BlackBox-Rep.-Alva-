@@ -1,0 +1,143 @@
+"""Opt-in WPR guardian. EOF and a short TTL stop only our named recording.
+
+The guardian survives an abrupt recorder exit long enough to stop the trace;
+its stdin is an ownership lease, not an interactive console. No global WPR
+stop/cancel is ever issued. The journal remains for explicit recovery.
+"""
+from __future__ import annotations
+import hashlib
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+from threading import Event, Thread
+import time
+from uuid import uuid4
+from .library_files import replace_owned_status
+
+MAX_JOURNAL_BYTES=65536
+
+
+def _read(path):
+    path=Path(path)
+    if path.is_symlink() or not path.is_file() or path.stat().st_size>MAX_JOURNAL_BYTES:
+        raise ValueError('INVALID_TRACE_JOURNAL')
+    return json.loads(path.read_text(encoding='utf-8'))
+
+
+def _write(path,data):
+    path=Path(path)
+    if path.is_symlink():raise ValueError('INVALID_TRACE_JOURNAL')
+    temp=path.with_name(path.name+'.'+uuid4().hex+'.tmp')
+    raw=json.dumps(data,ensure_ascii=True,allow_nan=False).encode('ascii')
+    if len(raw)>MAX_JOURNAL_BYTES:raise ValueError('TRACE_JOURNAL_BUDGET')
+    try:
+        with temp.open('xb') as f:f.write(raw);f.flush();os.fsync(f.fileno())
+        replace_owned_status(temp,path)
+    finally:
+        if temp.exists():temp.unlink()
+
+
+def run(journal):
+    from .research_worker import _streams
+    from .windows_research import WprCapture
+    inp,_=_streams();path=Path(journal);data=_read(path)
+    seconds=data['policy']['duration_s'];max_bytes=data['policy']['max_output_bytes']
+    if type(seconds) is not int or not 1<=seconds<=60 or type(max_bytes) is not int or not 1024**2<=max_bytes<=1024**3:
+        raise ValueError('INVALID_TRACE_POLICY')
+    lease_lost=Event()
+    def lease():
+        # Any command or EOF means finish; there is no arbitrary instruction.
+        inp.readline(64);lease_lost.set()
+    Thread(target=lease,name='blackbox-trace-lease',daemon=True).start()
+    capture=WprCapture(path.parent);capture.instance=data['instance']
+    if capture.tool:
+        tool=Path(capture.tool);digest=hashlib.sha256()
+        with tool.open('rb') as stream:
+            for block in iter(lambda:stream.read(1024*1024),b''):digest.update(block)
+        data['tool']={'name':tool.name,'sha256':digest.hexdigest(),'bytes':tool.stat().st_size,
+            'distribution':'INSTALLED_MICROSOFT_WINDOWS_COMPONENT_NOT_BUNDLED'}
+    if not capture.instance.startswith('BLACKBOX_') or len(capture.instance)!=41 or any(c not in '0123456789abcdef' for c in capture.instance[9:]):
+        raise ValueError('INVALID_OWNED_TRACE_INSTANCE')
+    import psutil
+    data['guardian_created']=psutil.Process().create_time()
+    data.update(guardian_pid=os.getpid(),state='STARTING',started_monotonic_ns=time.monotonic_ns(),
+                source='ETW_WPR',lost_events=None,decoded=False)
+    _write(path,data)
+    try:
+        data['start_result']=capture.start();data['state']='RECORDING'
+        deadline=time.monotonic()+seconds;_write(path,data)
+        while not lease_lost.wait(min(.1,max(0,deadline-time.monotonic()))) and time.monotonic()<deadline:pass
+        data['stop_reason']='LEASE_EOF_OR_EXPLICIT_STOP' if lease_lost.is_set() else 'TTL_EXPIRED'
+        data['state']='STOPPING';_write(path,data)
+        result=capture.stop();output=path.parent/result['path']
+        digest=hashlib.sha256()
+        with output.open('rb') as stream:
+            for block in iter(lambda:stream.read(1024*1024),b''):digest.update(block)
+        result.update(sha256=digest.hexdigest(),size_policy='CHECKED_AFTER_MEMORY_MODE_FLUSH_NOT_HARD_DISK_QUOTA')
+        if result['bytes']>max_bytes:result['status']='OUTPUT_BUDGET_EXCEEDED_RETAINED'
+        data.update(state='COMPLETED',result=result)
+    except BaseException as exc:
+        data.update(state='FAILED',error=(type(exc).__name__+': '+str(exc))[:1000])
+        if capture.active:
+            try:capture.cancel();data['cleanup']='NAMED_CANCEL_CONFIRMED'
+            except BaseException as error:
+                data['state']='CLEANUP_REQUIRED';data['cleanup_error']=(type(error).__name__+': '+str(error))[:1000]
+    finally:
+        data['ended_monotonic_ns']=time.monotonic_ns();_write(path,data)
+    return 0 if data['state']=='COMPLETED' else 1
+
+
+class TraceSupervisor:
+    def __init__(self,folder,*,seconds=30,max_output_bytes=256*1024**2,target=None):
+        if type(seconds) is not int or not 1<=seconds<=60:raise ValueError('INVALID_TRACE_DURATION')
+        if type(max_output_bytes) is not int or not 1024**2<=max_output_bytes<=1024**3:raise ValueError('INVALID_TRACE_SIZE_POLICY')
+        self.folder=Path(folder);self.instance='BLACKBOX_'+uuid4().hex
+        self.path=self.folder/(self.instance+'.trace.json');self.process=None;self.reported=False
+        self.data={'schema_version':1,'instance':self.instance,'state':'RESERVED',
+            'consent':'EXPLICIT_USER_COMMAND','target':target,
+            'scope':'SYSTEM_WIDE_MAY_INCLUDE_OTHER_PROCESSES',
+            'policy':{'duration_s':seconds,'max_output_bytes':max_output_bytes,
+                'mode':'WPR_CIRCULAR_MEMORY','disk_quota':'NOT_HARD_LIMIT'},
+            'recovery':'ONLY_THIS_NAMED_INSTANCE_MAY_BE_CANCELLED'}
+        import psutil
+        self.data.update(owner_pid=os.getpid(),owner_created=psutil.Process().create_time())
+    @property
+    def active(self):return self.process is not None and self.process.poll() is None
+    def start(self):
+        if self.path.exists() or self.path.is_symlink():raise ValueError('TRACE_JOURNAL_EXISTS')
+        with self.path.open('xb'):pass
+        _write(self.path,self.data)
+        args=[sys.executable,'--trace-owner',str(self.path)] if getattr(sys,'frozen',False) else [sys.executable,'-m','blackbox_core.trace_owner',str(self.path)]
+        self.process=subprocess.Popen(args,stdin=subprocess.PIPE,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,
+            creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
+        return {'source':'ETW_WPR','status':'START_REQUESTED','instance':self.instance,
+            'journal':self.path.name,**self.data['policy'],'lost_events':None}
+    def request_stop(self):
+        if self.process is not None and self.process.stdin is not None:
+            self.process.stdin.close();self.process.stdin=None
+    def poll(self):
+        if self.process is None:return None
+        try:self.data=_read(self.path)
+        except (OSError,ValueError):return {'source':'ETW_WPR','status':'JOURNAL_UNAVAILABLE','lost_events':None}
+        if self.process.poll() is None:return None
+        if self.reported:return None
+        self.reported=True
+        return {'source':'ETW_WPR','status':self.data.get('state','UNKNOWN'),
+            'journal':self.path.name,'instance':self.instance,'exit_code':self.process.returncode,
+            'details':self.data,'lost_events':None}
+    def stop(self):
+        self.request_stop()
+        if self.process is None:return None
+        try:self.process.wait(timeout=75)
+        except subprocess.TimeoutExpired:
+            # Never terminate the observed target or another profiler. The
+            # guardian retains its own command deadlines and recovery journal.
+            return {'source':'ETW_WPR','status':'CLEANUP_UNCONFIRMED_GUARDIAN_STILL_RUNNING',
+                'instance':self.instance,'journal':self.path.name,'lost_events':None}
+        result=self.poll()
+        return result or {'source':'ETW_WPR','status':self.data.get('state','UNKNOWN'),'journal':self.path.name,'lost_events':None}
+
+
+if __name__=='__main__':raise SystemExit(run(sys.argv[1]))

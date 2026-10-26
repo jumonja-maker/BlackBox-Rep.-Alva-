@@ -1,0 +1,186 @@
+"""Peak-preserving synchronized historical tracks with bounded point DTOs."""
+from __future__ import annotations
+from bisect import bisect_left
+from PySide6.QtCore import QPointF, QRectF, Qt, Signal
+from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen
+from PySide6.QtWidgets import QWidget, QToolTip
+from .i18n import translate
+
+
+class SessionTimeline(QWidget):
+    range_requested=Signal(object,object)
+    TRACKS=("cpu_interval_percent","rss_bytes","private_bytes","uss_bytes",
+            "handle_count","read_bps","write_bps","thread_count","children_total")
+    EVENT_TRACKS=("ACTIONS","USER","INCIDENTS","WINDOW","WCT","TRACE","OBSERVER")
+    COLORS=("#bb5666","#31847f","#8b5b9f","#596aa4","#947343","#a6522f","#795d49","#5c6b55","#684b85")
+    TRACK_LABELS=dict(zip(TRACKS,("CPU","RSS / Working set","Private","USS","Handles","Read","Write","Threads","Children")))
+
+    def __init__(self,parent=None):
+        super().__init__(parent)
+        self.payload=None
+        self.language="EN"
+        self.visible_tracks=set(self.TRACKS[:3]);self.visible_event_tracks=set(self.EVENT_TRACKS)
+        self.selection=None
+        self._drag=None
+        self.setMinimumHeight(280)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setMouseTracking(True)
+        self.setAccessibleName("Session timeline / Шкала сеанса")
+        self.setAccessibleDescription("Wheel or +/- zoom. Arrows pan. Drag selects A/B. Home resets. "
+                                      "Колесо или +/- масштаб, стрелки прокрутка, выделение мышью A/B.")
+
+    def set_interval(self,payload):
+        self.payload=payload
+        self.selection=None
+        self._height();self.update()
+
+    def set_language(self,language):
+        self.language=language
+        self.update()
+
+    def set_track(self,key,enabled):
+        target=self.visible_event_tracks if key in self.EVENT_TRACKS else self.visible_tracks
+        if enabled:target.add(key)
+        else:target.discard(key)
+        self._height();self.update()
+
+    def _height(self):
+        events=self.payload.get('timeline',{}).get('events',{}).get('tracks',{}) if self.payload else {}
+        count=len(self.visible_tracks)+sum(bool(events.get(k)) for k in self.visible_event_tracks)
+        self.setMinimumHeight(max(280,45+46*count))
+
+    def _plot(self):
+        return QRectF(150,12,max(1,self.width()-170),max(1,self.height()-45))
+
+    def _stamp(self,x):
+        lo,hi=self.payload["selected_interval_ns"]
+        f=max(0,min(1,(x-self._plot().left())/self._plot().width()))
+        return lo+int((hi-lo)*f)
+
+    def _request(self,lo,hi):
+        if hi>lo>=0:
+            self.range_requested.emit(int(lo),int(hi))
+
+    def wheelEvent(self,event):
+        if not self.payload:
+            return
+        lo,hi=self.payload["selected_interval_ns"]
+        anchor=self._stamp(event.position().x())
+        factor=.5 if event.angleDelta().y()>0 else 2
+        self._request(max(0,anchor-int((anchor-lo)*factor)),anchor+max(1,int((hi-anchor)*factor)))
+        event.accept()
+
+    def mousePressEvent(self,event):
+        if self.payload:
+            self.setFocus()
+            self._drag=(event.button(),event.position().x(),self._stamp(event.position().x()))
+
+    def mouseMoveEvent(self,event):
+        if not self.payload:
+            return
+        stamp=self._stamp(event.position().x())
+        if self._drag:
+            self.selection=sorted((self._drag[2],stamp))
+            self.update()
+            return
+        labels=[]
+        for key in self.TRACKS:
+            if key not in self.visible_tracks:
+                continue
+            points=self.payload["timeline"]["tracks"].get(key,[])
+            i=bisect_left([p["time_ns"] for p in points],stamp)
+            if points:
+                p=points[min(i,len(points)-1)]
+                labels.append(f"{translate(self.TRACK_LABELS[key],self.language)}: {p['value']:.4g} {self.payload['metrics'][key]['unit']} "
+                              f"@ {(p['time_ns']-self.payload['metadata']['monotonic_origin_ns'])/1e9:.6f}s")
+        if labels:
+            QToolTip.showText(event.globalPosition().toPoint(),"\n".join(labels)+
+                             "\n"+translate("FIRST/MIN/MAX/LAST; gaps are not zero",self.language),self)
+
+    def mouseReleaseEvent(self,event):
+        if not self._drag or not self.payload:
+            return
+        button,x,stamp=self._drag
+        self._drag=None
+        now=self._stamp(event.position().x())
+        lo,hi=self.payload["selected_interval_ns"]
+        if abs(event.position().x()-x)<5:
+            return
+        if button==Qt.MouseButton.LeftButton:
+            self._request(*sorted((stamp,now)))
+        else:
+            shift=stamp-now
+            self._request(max(0,lo+shift),max(1,hi+shift))
+
+    def keyPressEvent(self,event):
+        if not self.payload:
+            return
+        lo,hi=self.payload["selected_interval_ns"]
+        span=max(1,hi-lo)
+        if event.key() in (Qt.Key.Key_Plus,Qt.Key.Key_Equal):
+            self._request(lo+span//4,hi-span//4)
+        elif event.key()==Qt.Key.Key_Minus:
+            self._request(max(0,lo-span//2),hi+span//2)
+        elif event.key() in (Qt.Key.Key_Left,Qt.Key.Key_Right):
+            shift=span//4*(1 if event.key()==Qt.Key.Key_Right else -1)
+            self._request(max(0,lo+shift),max(1,hi+shift))
+        elif event.key()==Qt.Key.Key_Home:
+            self.range_requested.emit(None,None)
+        else:
+            super().keyPressEvent(event)
+
+    def paintEvent(self,event):
+        painter=QPainter(self)
+        painter.fillRect(self.rect(),QColor("#fffaf0"))
+        painter.setPen(QColor("#584c63"))
+        if not self.payload:
+            painter.drawText(self.rect(),Qt.AlignmentFlag.AlignCenter,translate("No interval",self.language))
+            return
+        plot=self._plot()
+        keys=[k for k in self.TRACKS if k in self.visible_tracks]
+        lo,hi=self.payload["selected_interval_ns"]
+        event_data=self.payload['timeline'].get('events',{}).get('tracks',{})
+        event_keys=[k for k in self.EVENT_TRACKS if k in self.visible_event_tracks and event_data.get(k)]
+        height=plot.height()/max(1,len(keys)+len(event_keys))
+        for n,key in enumerate(keys):
+            y=plot.top()+height*n
+            points=self.payload["timeline"]["tracks"].get(key,[])
+            maximum=max((p["value"] for p in points),default=1) or 1
+            if key=="cpu_interval_percent":
+                maximum=max(100,maximum)
+            painter.setPen(QColor("#e2d6d3"))
+            painter.drawLine(QPointF(plot.left(),y+height-4),QPointF(plot.right(),y+height-4))
+            painter.setPen(QColor("#584c63"))
+            unit=self.payload["metrics"][key]["unit"]
+            display_unit="% / 1 CPU" if unit=="percentage_of_one_logical_cpu" else unit
+            name=translate(self.TRACK_LABELS[key],self.language)
+            painter.drawText(QRectF(3,y,144,height),Qt.AlignmentFlag.AlignVCenter,
+                name+f"\n{maximum:.3g} {display_unit}" if points else name+"\nUNAVAILABLE")
+            path=QPainterPath()
+            previous_segment=None
+            for point in points:
+                x=plot.left()+plot.width()*(point["time_ns"]-lo)/max(1,hi-lo)
+                yy=y+height-8-(height-15)*point["value"]/maximum
+                if point["segment"]!=previous_segment:
+                    path.moveTo(x,yy)
+                else:
+                    path.lineTo(x,yy)
+                previous_segment=point["segment"]
+            painter.setPen(QPen(QColor(self.COLORS[self.TRACKS.index(key)]),2))
+            painter.drawPath(path)
+        for n,key in enumerate(event_keys,len(keys)):
+            y=plot.top()+height*n;rows=event_data[key]
+            painter.setPen(QColor('#584c63'));painter.drawText(QRectF(3,y,144,height),Qt.AlignmentFlag.AlignVCenter,key+'\n'+str(sum(r['count'] for r in rows))+' events')
+            painter.setPen(QPen(QColor('#596aa4'),3))
+            for row in rows:
+                x=plot.left()+plot.width()*(row['first_ns']-lo)/max(1,hi-lo)
+                last=plot.left()+plot.width()*(row['last_ns']-lo)/max(1,hi-lo)
+                painter.drawLine(QPointF(x,y+height/2),QPointF(max(x+3,last),y+height/2))
+        origin=self.payload["metadata"]["monotonic_origin_ns"]
+        painter.setPen(QColor("#584c63"))
+        painter.drawText(150,self.height()-10,f"A {(lo-origin)/1e9:.6f}s  —  B {(hi-origin)/1e9:.6f}s")
+        if self.selection:
+            for stamp in self.selection:
+                x=plot.left()+plot.width()*(stamp-lo)/max(1,hi-lo)
+                painter.setPen(QPen(QColor("#5e517c"),1,Qt.PenStyle.DashLine))
+                painter.drawLine(QPointF(x,plot.top()),QPointF(x,plot.bottom()))

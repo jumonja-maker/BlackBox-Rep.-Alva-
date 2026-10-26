@@ -9,6 +9,9 @@ import tempfile
 from pathlib import Path
 import sqlite3
 from .contracts import ObserverError, bounded
+from .experiments import ExperimentAccumulator
+from .detailed_capture import summarize_detail
+from .detail_analysis import analyze_detail_threads
 from .storage import _open_ro
 
 
@@ -24,10 +27,101 @@ def summarize(folder: Path) -> dict:
             # Stream the SQLite cursor: long recordings must not materialize
             # every event as a Python list. User problem markers are not faults.
             counts = {}
+            actions, completed_total, malformed_actions = [], 0, 0
+            experiments = ExperimentAccumulator()
+            incident_count, incident_preview, sampling_gaps = 0, [], 0
+            busy_ticks, busy_episodes, bad_busy_events = 0, 0, 0
+            truncated_busy_episodes = 0
+            extended_sample_spacing, largest_spacing, invalid_spacing = 0, None, 0
+            worker_health, invalid_worker_health = None, 0
             for entry in db.execute("SELECT data FROM events ORDER BY seq"):
                 record = json.loads(entry["data"])
                 if type(record) is not dict:
                     raise ObserverError("INVALID_DATA", "report")
+                experiments.observe(record)
+                if record.get("kind") == "sampling_gap" and record.get("code") == "SAMPLING_GAP_OBSERVED":
+                    sampling_gaps += 1
+                if (record.get("kind") == "sampling_gap" and
+                        record.get("code") == "BASE_TIMER_CALLBACK_SKIPPED_BUSY"):
+                    missed = record.get("missed_callback_count")
+                    if (type(missed) is int and 1 <= missed <= 1_000_000 and
+                            record.get("source") == "QT_TIMER_SCHEDULER" and
+                            record.get("verification_class") == "OBSERVED_GUI_CALLBACK_ONLY"):
+                        busy_ticks += missed
+                        busy_episodes += 1
+                        if record.get("count_truncated") is True:
+                            truncated_busy_episodes += 1
+                    else:
+                        bad_busy_events += 1
+                if (record.get("kind") == "sampling_gap" and
+                        record.get("code") == "EXTENDED_MONOTONIC_SAMPLE_SPACING"):
+                    previous = record.get("previous_elapsed_ms")
+                    current = record.get("current_elapsed_ms")
+                    spacing = record.get("observed_spacing_ms")
+                    configured = record.get("configured_interval_ms")
+                    threshold = record.get("threshold_ms")
+                    if (all(type(x) is int for x in (
+                            previous, current, spacing, configured, threshold)) and
+                            previous >= 0 and current > previous and
+                            spacing == current - previous and 1 <= configured <= 60000 and
+                            threshold == max(2 * configured, configured + 500) and
+                            spacing > threshold and
+                            record.get("source") == "BLACKBOX_MONOTONIC_SAMPLE_CLOCK" and
+                            record.get("verification_class") ==
+                            "DERIVED_ADJACENT_OS_COUNTER_SNAPSHOTS" and
+                            record.get("missing_sample_count") is None):
+                        extended_sample_spacing += 1
+                        largest_spacing = max(largest_spacing or 0, spacing)
+                    else:
+                        invalid_spacing += 1
+                if (record.get("kind") == "worker_health" and
+                        record.get("code") == "BASE_SAMPLE_WORKER_TIMING_SUMMARY"):
+                    numeric = ("completed_workers", "max_sensor_ms", "max_sqlite_ms",
+                               "max_signal_delivery_ms", "comparable_sample_pairs",
+                               "extended_sample_pairs", "interval_changes")
+                    numbers = [record.get(key) for key in numeric]
+                    if (worker_health is None and
+                            all(type(value) is int and 0 <= value <= 1_000_000_000
+                                for value in numbers) and numbers[0] > 0 and
+                            numbers[5] <= numbers[4] and
+                            (record.get("max_observed_spacing_ms") is None or
+                             (type(record.get("max_observed_spacing_ms")) is int and
+                              0 <= record["max_observed_spacing_ms"] <= 86400000)) and
+                            record.get("source") == "PYTHON_MONOTONIC_BRACKETS" and
+                            record.get("verification_class") ==
+                            "INTERNAL_WORKER_TIMING_DERIVED"):
+                        worker_health = {key: record[key] for key in numeric}
+                        worker_health["max_observed_spacing_ms"] = (
+                            record.get("max_observed_spacing_ms"))
+                        worker_health["source"] = "UNVERIFIED_SAVED_WORKER_TIMING"
+                    else:
+                        invalid_worker_health += 1
+                if (record.get("kind") == "incident_boundary" and
+                        record.get("code") == "AUTO_INCIDENT_COMPLETED"):
+                    # Imported event strings cannot attest OS responsiveness.
+                    incident_count += 1
+                    if len(incident_preview) < 20:
+                        incident_preview.append({
+                            "trigger_code": "CPU_SUSTAINED",
+                            "first_sample_seq": record.get("first_sample_seq"),
+                            "last_sample_seq": record.get("last_sample_seq"),
+                            "status": record.get("status"),
+                            "verification_class": "UNVERIFIED_SESSION_RECORD",
+                        })
+                if record.get("kind") == "action_marker" and record.get("event") == "ACTION_COMPLETED":
+                    # These are recorded USER commands, not independently attested OS events.
+                    value = record.get("duration_ns")
+                    action_id = record.get("action_id")
+                    if (type(value) is int and 0 <= value <= 30 * 86400 * 1_000_000_000 and
+                            type(action_id) is str and len(action_id) == 32 and
+                            all(c in "0123456789abcdef" for c in action_id)):
+                        completed_total += 1
+                        if len(actions) < 50:
+                            actions.append({"action_id": action_id,
+                                            "duration_ms": round(value / 1_000_000, 3),
+                                            "source": "RECORDED_USER_COMMAND_NOT_ATTESTED"})
+                    else:
+                        malformed_actions += 1
                 if record.get("kind") in ("observer_warning", "observer_error"):
                     code = record.get("code", "UNKNOWN")
                     if type(code) is not str or len(code) > 64:
@@ -45,6 +139,33 @@ def summarize(folder: Path) -> dict:
                 "peak_cpu_percent": agg["peak_cpu_percent"],
                 "max_children": agg["max_children"], "elapsed_ms": agg["elapsed_ms"],
                 "observation_errors": counts,
+                "completed_actions_total": completed_total,
+                "completed_actions": actions,
+                "completed_actions_omitted": max(0, completed_total - len(actions)),
+                "invalid_action_markers": malformed_actions,
+                "action_evidence": "RECORDED_USER_COMMAND_NOT_ATTESTED",
+                "experiment_summary": experiments.result(),
+                "detailed_capture": summarize_detail(folder),
+                "thread_cpu_analysis": (analyze_detail_threads(folder)
+                                        if (Path(folder) / "detail-v2.sqlite3").is_file()
+                                        else None),
+                "automatic_incident_count": incident_count,
+                "automatic_incident_preview": incident_preview,
+                "automatic_incidents_omitted": max(0, incident_count-len(incident_preview)),
+                "sampling_gap_count": sampling_gaps,
+                "extended_monotonic_spacing_count": extended_sample_spacing,
+                "max_extended_monotonic_spacing_ms": largest_spacing,
+                "invalid_monotonic_spacing_events": invalid_spacing,
+                "monotonic_spacing_provenance": "DERIVED_SAVED_SNAPSHOT_SPACING",
+                "worker_health_summary": worker_health,
+                "invalid_worker_health_events": invalid_worker_health,
+                "observed_busy_timer_callbacks": busy_ticks,
+                "observed_busy_timer_episodes": busy_episodes,
+                "invalid_busy_timer_events": bad_busy_events,
+                "truncated_busy_timer_episodes": truncated_busy_episodes,
+                "busy_timer_coverage": "OBSERVED_QT_CALLBACK_ONLY",
+                "busy_timer_limitations": "QT_COALESCED_CALLBACKS_NOT_COUNTED",
+                "automatic_event_provenance": "UNVERIFIED_STORED_EXTERNAL_COUNTERS",
                 "root_cause": "UNKNOWN", "root_cause_confidence": "UNKNOWN",
                 "execution_attested": False,
                 "limitations": ["external_sampling_only", "no_proof_of_memory_leak",
@@ -84,10 +205,102 @@ def _human_html(report: dict) -> str:
         "UNKNOWN": "Unknown status / Статус неизвестен",
     }
     errors = report.get("observation_errors", {})
+    deep = report.get("detailed_capture")
+    provenance = deep.get("provenance") if isinstance(deep, dict) else None
+    provenance_html = ""
+    if isinstance(provenance, dict):
+        clock = provenance.get("clock_mapping")
+        latest = provenance.get("latest_quality")
+        mapping = (" / " + safe(clock.get("utc_anchor_iso")) +
+                   " · ±" + safe(clock.get("uncertainty_ns_at_anchor")) +
+                   " ns (anchor only; system UTC clock may adjust)"
+                   if isinstance(clock, dict) else
+                   " / No UTC mapping in this legacy detailed sidecar")
+        statuses = (
+            " · ".join(safe(k.removesuffix("_status")) + ": " + safe(v)
+                       for k, v in sorted(latest.get("measurement_status", {}).items()))
+            if isinstance(latest, dict) else
+            "No per-field measurement status in this detailed sidecar")
+        provenance_html = (
+            "<h3>Timestamp and measurement quality / Время и качество</h3>"
+            "<p>Contract: " + safe(provenance.get("contract_status")) +
+            " · quality coverage: " + safe(provenance.get("quality_coverage")) +
+            mapping + "</p><p>Latest measurement: " + statuses + "</p>"
+            "<p>Stored file claims are not independently attested on import: " +
+            safe(provenance.get("file_trust")) + ".</p>"
+            "<p>PSUTIL external counters; OS-observed metrics do not prove "
+            "Windows hang, deadlock or application-internal cause.</p>")
+    detail_html = (
+        "<p>Detailed mode not enabled / Углублённый режим не включён.</p>"
+        if not isinstance(deep, dict) else
+        "<p>Independent v2 sidecar, read-only external counters. "
+        "No stacks, no wait chains, no OS-authenticated root cause.</p>"
+        "<div class='grid'>" +
+        metric("Detailed samples / Отсчётов", deep.get("samples")) +
+        metric("Thread records / Потоки", deep.get("thread_records")) +
+        metric("Child records / Потомки", deep.get("child_records")) +
+        metric("Peak Private Bytes", deep.get("peak_private_bytes"), "bytes") +
+        metric("Peak handles / Дескрипторы", deep.get("peak_handles")) +
+        metric("Sensor errors / Ошибки датчика", deep.get("sensor_errors")) +
+        "</div><p>Status: " + safe(deep.get("status")) + "</p>" +
+        provenance_html
+    )
+    thread_cpu = report.get("thread_cpu_analysis")
+    thread_rows = ""
+    if isinstance(thread_cpu, dict):
+        thread_rows = "".join(
+            "<tr><td>" + safe(item.get("tid")) + "</td><td>" +
+            safe(item.get("segment_start_seq")) + "</td><td>" +
+            safe(item.get("cpu_percent")) + "</td><td>" +
+            safe(item.get("peak_cpu_percent")) + "</td><td>" +
+            safe(item.get("observed_pairs")) + "</td></tr>"
+            for item in thread_cpu.get("top_threads", [])[:16]
+            if isinstance(item, dict)
+        )
+    thread_html = (
+        "<p>No detailed thread CPU data recorded / Нет замеров CPU потоков.</p>"
+        if not isinstance(thread_cpu, dict) else
+        "<p>Derived single-core-equivalent CPU% from adjacent TID snapshots; "
+        "TID reuse between samples cannot be ruled out. "
+        "No proof of hangs, deadlocks or root cause. / "
+        "CPU% вычислен из соседних замеров TID; повторное использование TID "
+        "не исключено.</p>"
+        "<p>Status: " + safe(thread_cpu.get("status")) +
+        " · Source: " + safe(thread_cpu.get("source_kind")) +
+        " · Verification: " + safe(thread_cpu.get("verification_class")) +
+        " · Warnings: " + safe(", ".join(thread_cpu.get("warnings", []))) + "</p>"
+        "<table><thead><tr><th>TID</th><th>Segment first seq</th>"
+        "<th>Mean CPU%</th><th>Peak CPU%</th><th>Valid pairs</th>"
+        "</tr></thead><tbody>" +
+        (thread_rows or "<tr><td colspan='5'>No comparable intervals</td></tr>") +
+        "</tbody></table>"
+    )
+    incidents = report.get("automatic_incident_preview", [])
+    incidents_html = "".join(
+        "<tr><td>" + safe(e.get("trigger_code")) + "</td><td>" +
+        safe(e.get("first_sample_seq")) + "</td><td>" +
+        safe(e.get("last_sample_seq")) + "</td><td>" +
+        safe(e.get("status")) + "</td></tr>" for e in incidents
+    ) or "<tr><td colspan='4'>No incidents / Нет инцидентов</td></tr>"
     errors_html = "".join(
         "<tr><td>" + safe(code) + "</td><td>" + safe(count) + "</td></tr>"
         for code, count in sorted(errors.items())
     ) or "<tr><td colspan='2'>None recorded / Нет зарегистрированных</td></tr>"
+    actions = report.get("completed_actions", [])
+    experiment_groups = report.get("experiment_summary", {}).get("experiments", [])
+    experiment_html = "".join(
+        "<tr><td>" + safe(e["experiment_id"][:12]) + "</td><td>" +
+        safe(e["repeats"]) + "</td><td>" +
+        safe(e["duration_ms"]["median"]) + "</td><td>" +
+        safe(e["duration_ms"]["p95"]) + "</td><td>" +
+        safe(e["duration_ms"]["mad"]) + "</td><td>" +
+        safe(", ".join(e["warnings"]) or "—") + "</td></tr>"
+        for e in experiment_groups
+    ) or "<tr><td colspan='6'>No experiment / Нет повторов</td></tr>"
+    actions_html = "".join(
+        "<tr><td>" + safe(item["action_id"][:12]) + "</td><td>" +
+        safe(item["duration_ms"]) + "</td></tr>" for item in actions
+    ) or "<tr><td colspan='2'>No completed action / Нет завершённых действий</td></tr>"
     return (
         "<!doctype html><html lang='en'><head><meta charset='utf-8'>"
         "<meta name='viewport' content='width=device-width,initial-scale=1'>"
@@ -117,11 +330,70 @@ def _human_html(report: dict) -> str:
         metric("RAM RSS (макс.) / Peak RSS", report["peak_rss_bytes"], "bytes") +
         metric("Дочерние процессы / Max children", report["max_children"]) +
         metric("Длительность / Elapsed", report["elapsed_ms"], "ms") +
+        metric("Занятый сборщик / Busy timer callbacks",
+               report.get("observed_busy_timer_callbacks")) +
+        metric("Удлинённые интервалы / Extended sample pairs",
+               report.get("extended_monotonic_spacing_count")) +
         "</div><h2>Сеанс / Session</h2><div class='grid'>" +
         metric("Начало UTC / Started", report["started_utc"]) +
         metric("Конец UTC / Ended", report["ended_utc"]) +
         metric("Идентификатор / Session ID", report["session_id"]) +
         "</div>"
+        "<h2>Замеры действий / Action intervals</h2>"
+        "<p>Recorded user commands, not OS-attested function timings / "
+        "Команды пользователя, не подтверждённое профилирование функции.</p>"
+        "<p>Total / Всего: " + safe(report.get("completed_actions_total", 0)) +
+        "; omitted from preview / скрыто: " + safe(report.get("completed_actions_omitted", 0)) + "</p>"
+        "<table><thead><tr><th>Action ID</th><th>Duration / Длительность (ms)</th>"
+        "</tr></thead><tbody>" + actions_html + "</tbody></table>"
+        "<h2>Эксперименты / Repeat experiments</h2>"
+        "<p>Only completed USER-command intervals. MAD is median absolute "
+        "deviation. Differences do not prove speedup or causal improvement.</p>"
+        "<table><thead><tr><th>Experiment</th><th>Repeats</th>"
+        "<th>Median ms</th><th>p95 ms</th><th>MAD ms</th>"
+        "<th>Coverage / Warnings</th></tr></thead><tbody>" +
+        experiment_html + "</tbody></table>"
+        "<h2>Углублённые данные / Detailed process capture (opt-in)</h2>" +
+        detail_html +
+        "<h2>Потоки / Per-thread CPU (derived)</h2>" + thread_html +
+        "<h2>Фактические интервалы / Actual snapshot spacing</h2>"
+        "<p>Extended adjacent monotonic sample intervals: " +
+        safe(report.get("extended_monotonic_spacing_count")) +
+        " · maximum extended spacing (ms): " +
+        safe(report.get("max_extended_monotonic_spacing_ms")) +
+        " · invalid imported spacing events: " +
+        safe(report.get("invalid_monotonic_spacing_events")) +
+        ". Consecutive OS-counter snapshots are separated in actual "
+        "monotonic time; the number of missing scheduled samples, Windows "
+        "hang status and delay cause are UNKNOWN. Interval-change pairs "
+        "are not classified. / Известна только реальная пауза между "
+        "снимками счётчиков, количество несделанных замеров неизвестно.</p>"
+        "<h2>Здоровье фонового сборщика / Base worker timing</h2>"
+        "<p>Worker timing: " + safe(report.get("worker_health_summary")) +
+        " · invalid summaries: " +
+        safe(report.get("invalid_worker_health_events")) +
+        ". Python monotonic brackets for sensor, SQLite and signal "
+        "delivery, not Windows deadline proof. Stored claims not attested.</p>"
+        "<h2>Пропущенные такты GUI / Skipped timer callbacks</h2>"
+        "<p>Count: " + safe(report.get("observed_busy_timer_callbacks")) +
+        " · episodes: " + safe(report.get("observed_busy_timer_episodes")) +
+        " · invalid events: " + safe(report.get("invalid_busy_timer_events")) +
+        " · truncated episodes: " + safe(report.get("truncated_busy_timer_episodes")) +
+        ". Only delivered Qt timer callbacks rejected by a busy sample worker "
+        "are counted. Coalesced callbacks and actual OS sample gaps are NOT "
+        "measured by this counter. / Учтены только доставленные вызовы таймера "
+        "при занятом сборщике. Пропущенные Qt вызовы и реальные пропуски "
+        "измерений ОС неизвестны.</p>"
+        "<h2>Автоинциденты / Automatic incidents (opt-in)</h2>"
+        "<p>Stored external-counter observations only. CPU threshold and "
+        "sampling gaps are not evidence of a Windows hang or internal defect."
+        " / Только внешние счётчики, причина не доказана.</p>"
+        "<p>Captured / Захвачено: " + safe(report.get("automatic_incident_count", 0)) +
+        "; hidden / скрыто: " + safe(report.get("automatic_incidents_omitted", 0)) +
+        "; gaps / пропуски: " + safe(report.get("sampling_gap_count", 0)) + "</p>"
+        "<table><thead><tr><th>Trigger</th><th>First seq</th>"
+        "<th>Last seq</th><th>Status</th></tr></thead><tbody>" +
+        incidents_html + "</tbody></table>"
         "<h2>Ошибки наблюдателя / Observer events</h2>"
         "<table><thead><tr><th>Код / Code</th><th>Количество / Count</th>"
         "</tr></thead><tbody>" + errors_html + "</tbody></table>"

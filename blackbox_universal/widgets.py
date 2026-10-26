@@ -90,9 +90,10 @@ class WindowPanel(QFrame):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
         title_row = QFrame()
+        title_row.setObjectName("panelTitle")
         title_row.setStyleSheet(
-            f"background: {COLORS['lilac']}; "
-            f"border: 0; border-bottom: 2px solid {COLORS['navy']};")
+            f"QFrame#panelTitle {{ background: {COLORS['lilac']}; "
+            f"border: 0; border-bottom: 2px solid {COLORS['navy']}; }}")
         title = QHBoxLayout(title_row)
         title.setContentsMargins(10, 6, 10, 6)
         name = QLabel(heading.upper())
@@ -106,7 +107,10 @@ class WindowPanel(QFrame):
             self.tag_label = label
         root.addWidget(title_row)
         self.body = QWidget()
-        self.body.setStyleSheet("background: #fffaf0;")
+        # Only the body owns this fill: the old unscoped declaration also
+        # painted popup items and erased button/selection backgrounds.
+        self.body.setObjectName("panelBody")
+        self.body.setStyleSheet("QWidget#panelBody { background: #fffaf0; }")
         self.content = QVBoxLayout(self.body)
         self.content.setContentsMargins(15, 15, 15, 15)
         self.content.setSpacing(11)

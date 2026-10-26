@@ -35,7 +35,7 @@ def _finding(code: str, start: int, end: int, facts: list[dict], limitation: str
 
 
 def analyze(samples: list[dict], *, markers: list[dict] | None = None, policy: Policy | None = None,
-            identity: dict | None = None) -> dict:
+            identity: dict | None = None, allow_trailing_user_ms: int = 0) -> dict:
     """Analyze supplied, ordered samples; no OS access, no sampling and no unbounded state.
 
     A CPU 'episode' measures consecutive observed intervals and does not invent the
@@ -45,7 +45,8 @@ def analyze(samples: list[dict], *, markers: list[dict] | None = None, policy: P
     rows = normalize_samples(samples, policy)
     first = rows[0]["elapsed_ms"] if rows else 0
     last = rows[-1]["elapsed_ms"] if rows else 0
-    marks = normalize_markers(markers, policy, first, last)
+    marks = normalize_markers(markers, policy, first, last,
+                              allow_trailing_user_ms=allow_trailing_user_ms)
     if identity is not None:
         if type(identity) is not dict or type(identity.get("pid")) is not int or identity["pid"] <= 0:
             raise InvestigationError("INVALID_IDENTITY")
@@ -172,7 +173,10 @@ def analyze(samples: list[dict], *, markers: list[dict] | None = None, policy: P
                              "digest_is_attestation": False, "input_contract_version": 2,
                              "pid_creation_verified": ident is not None and ident["creation_time"] is not None},
               "warnings": (["NO_OBSERVATIONS"] if not rows else []) +
-                          (["FINDING_LIMIT_REACHED"] if truncated else []),
+                          (["FINDING_LIMIT_REACHED"] if truncated else []) +
+                          (["UNSAMPLED_USER_MARKER"] if any(
+                              m.get("sampling_context") == "UNSAMPLED_AFTER_LAST_OBSERVATION"
+                              for m in marks) else []),
               "limitations": ["External counters do not establish application-internal cause.",
                               "Event coincidences do not demonstrate causality.",
                               "Unknown and unobserved measures are not imputed.",

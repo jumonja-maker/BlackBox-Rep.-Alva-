@@ -118,7 +118,15 @@ def normalize_samples(raw: list[dict], policy: Policy) -> list[dict]:
     return result
 
 
-def normalize_markers(raw: list[dict] | None, policy: Policy, earliest: int, latest: int) -> list[dict]:
+def normalize_markers(raw: list[dict] | None, policy: Policy, earliest: int, latest: int,
+                      *, allow_trailing_user_ms: int = 0) -> list[dict]:
+    """Additional tail is *unsampled user input*, never an observed OS event.
+
+    The default for untrusted public analyze() remains strict. Only the SQLite
+    adapter opts into a bounded tail for real commands between polls.
+    """
+    if type(allow_trailing_user_ms) is not int or not 0 <= allow_trailing_user_ms <= 5000:
+        raise InvestigationError("INVALID_MARKER_POLICY")
     if raw is None:
         return []
     if type(raw) is not list or len(raw) > policy.max_events:
@@ -128,19 +136,24 @@ def normalize_markers(raw: list[dict] | None, policy: Policy, earliest: int, lat
         if type(marker) is not dict:
             raise InvestigationError("INVALID_MARKER")
         elapsed = integer(marker.get("elapsed_ms"), "MARKER_TIME")
-        if elapsed < earliest or elapsed > latest:
-            raise InvestigationError("MARKER_OUTSIDE_OBSERVATION")
         kind = marker.get("kind")
         if kind in ("observed_window_unresponsive", "observed_process_exit"):
-            # Public caller strings cannot establish provenance, even if named OS/BLACKBOX.
             raise InvestigationError("UNATTESTED_SYSTEM_EVENT")
         if kind not in ("user_problem", "unverified_report"):
             raise InvestigationError("INVALID_MARKER_KIND")
         source = marker.get("source", "USER")
         if type(source) is not str or source not in ("USER", "EXTERNAL_UNVERIFIED"):
             raise InvestigationError("INVALID_MARKER_SOURCE")
+        unsampled_tail = (elapsed > latest and elapsed <= latest + allow_trailing_user_ms and
+                          kind == "user_problem" and source == "USER")
+        if elapsed < earliest or (elapsed > latest and not unsampled_tail):
+            raise InvestigationError("MARKER_OUTSIDE_OBSERVATION")
         note = marker.get("note", "")
         if type(note) is not str or len(note) > 160 or any(ord(c) < 32 for c in note):
             raise InvestigationError("INVALID_MARKER_NOTE")
-        result.append({"elapsed_ms": elapsed, "kind": kind, "note": note, "source": source, "verification": "UNVERIFIED"})
+        record = {"elapsed_ms": elapsed, "kind": kind, "note": note,
+                  "source": source, "verification": "UNVERIFIED"}
+        if unsampled_tail:
+            record["sampling_context"] = "UNSAMPLED_AFTER_LAST_OBSERVATION"
+        result.append(record)
     return sorted(result, key=lambda e: (e["elapsed_ms"], e["kind"]))

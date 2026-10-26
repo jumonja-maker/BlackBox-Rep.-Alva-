@@ -19,7 +19,7 @@ from blackbox_universal.monitor import (
 )
 from blackbox_core.contracts import ObserverError
 from blackbox_core.report import summarize
-from blackbox_universal.theme import set_retro_theme
+from blackbox_universal.theme import set_retro_theme, font_coverage
 from blackbox_universal.window import UniversalWindow
 
 
@@ -89,8 +89,17 @@ class QtShellTests(unittest.TestCase):
         self.window = UniversalWindow()
         self.window._timer.stop()
 
+    def _wait_report(self):
+        for _ in range(600):
+            self.app.processEvents()
+            if self.window._report_worker is None and self.window._base_sample_worker is None:
+                return
+            time.sleep(0.01)
+        self.fail("report worker did not terminate")
+
     def tearDown(self):
-        self.window.close()
+        from qt_test_support import close_and_drain
+        close_and_drain(self.window,self.app)
         self.default_root.stop()
         self.tmp.cleanup()
 
@@ -105,6 +114,11 @@ class QtShellTests(unittest.TestCase):
             self.assertEqual(self.window.stack.currentIndex(),
                              self.window._page_ids[key])
         self.assertTrue(self.window.windowTitle().startswith("BLACK.BOX"))
+
+    def test_ru_en_text_has_real_regular_and_bold_glyphs(self):
+        evidence = font_coverage(self.app)
+        self.assertTrue(evidence["ok"], json.dumps(evidence, ensure_ascii=False))
+        self.assertEqual(len(evidence["fonts"]), 4)
 
     def test_section_breadcrumbs_without_marketing_headings(self):
         from PySide6.QtWidgets import QFrame, QLabel
@@ -161,6 +175,7 @@ class QtShellTests(unittest.TestCase):
                       self.window.target_binding_detail.text())
         self.window._tick()
         self.window._stop()
+        self._wait_report()
         self.assertEqual(self.window.target_binding_title.text(),
                          "✓  СЕАНС ЗАВЕРШЁН")
         self.assertIn("Отчёт сохранён", self.window.target_binding_detail.text())
@@ -196,6 +211,7 @@ class QtShellTests(unittest.TestCase):
         self.assertGreater(self.window.probe.last["rss_mb"], 0)
         self.assertTrue(self.window.stop_btn.isEnabled())
         self.window._stop()
+        self._wait_report()
         self.assertFalse(self.window.probe.active)
         session = self.window.probe.session_folder
         self.assertIsNotNone(session)
@@ -212,6 +228,7 @@ class QtShellTests(unittest.TestCase):
             self.window.probe.start()
             self.window._tick()
             self.window._stop()
+            self._wait_report()
             with patch("blackbox_universal.window.QFileDialog.getSaveFileName",
                        return_value=(str(dst), "JSON files (*.json)")), \
                  patch.object(QMessageBox, "information", return_value=None):

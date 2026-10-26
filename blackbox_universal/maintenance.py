@@ -20,10 +20,47 @@ from uuid import uuid4
 
 from .releases import (EXECUTABLE_NAME, INSTALL_MARKER, MAINTENANCE_NAME,
                        _extract_release)
-from .shortcuts import remove_shortcut_if_matches
+from .shortcuts import SHORTCUT_TITLE, _desktop, remove_shortcut_if_matches
 
 SAVED_DIRS = ("logs", "sessions", "reports")
 MARKER = {"product": "blackbox-universal", "install_type": "portable"}
+HELPER_TICKET = ".blackbox-maintenance-helper.json"
+HELPER_TICKET_VALUE = {"product": "blackbox-universal", "role": "external-maintenance"}
+HELPER_CLEANER = ".blackbox-maintenance-cleanup.vbs"
+
+# This script does not accept a command or an arbitrary list of paths.
+# It deletes only our known temporary helper files and an empty folder.
+# Its external host can finish after the PyInstaller maintenance EXE exits.
+_CLEAN_HELPER_VBS = r'''
+Option Explicit
+Dim fso, folder, helper, marker, script, attempt, ownedFolder
+If WScript.Arguments.Count <> 1 Then WScript.Quit 3
+Set fso = CreateObject("Scripting.FileSystemObject")
+folder = WScript.Arguments(0)
+helper = fso.BuildPath(folder, "BLACK.BOX-Maintenance.exe")
+marker = fso.BuildPath(folder, ".blackbox-maintenance-helper.json")
+script = WScript.ScriptFullName
+For attempt = 1 To 180
+    On Error Resume Next
+    If fso.FileExists(helper) Then fso.DeleteFile helper, True
+    If Not fso.FileExists(helper) Then
+        If fso.FileExists(marker) Then fso.DeleteFile marker, True
+        If fso.FileExists(script) Then fso.DeleteFile script, True
+        If fso.FolderExists(folder) Then
+            Set ownedFolder = fso.GetFolder(folder)
+            If ownedFolder.Files.Count = 0 And ownedFolder.SubFolders.Count = 0 Then
+                fso.DeleteFolder folder, False
+            End If
+        End If
+        If Not fso.FolderExists(folder) Then WScript.Quit 0
+    End If
+    Err.Clear
+    On Error GoTo 0
+    WScript.Sleep 500
+Next
+WScript.Quit 2
+'''
+
 
 
 class MaintenanceError(RuntimeError):
@@ -138,6 +175,80 @@ def _keep_local_logs(folder: Path, destination: Path) -> list[tuple[Path, Path]]
         raise
 
 
+def _detach_matching_desktop_shortcut(executable: Path) -> tuple[Path, bytes] | None:
+    """Remove the *matching* link while its target still exists.
+
+    Windows Shell Link resolution may lose the original target as soon as
+    the EXE is deleted. Keep original shortcut bytes to restore on a failed
+    directory removal, but never overwrite a new/foreign link on rollback.
+    """
+    if os.name != "nt":
+        return None
+    link = _desktop() / SHORTCUT_TITLE
+    if _is_directory_link(link):
+        raise MaintenanceError("SHORTCUT_LINK_REFUSED")
+    try:
+        original = link.read_bytes()
+    except FileNotFoundError:
+        return None
+    except OSError:
+        raise MaintenanceError("SHORTCUT_READ_FAILED") from None
+    if len(original) > 1024 * 1024:
+        raise MaintenanceError("SHORTCUT_TOO_LARGE")
+    try:
+        remove_shortcut_if_matches(executable)
+    except (OSError, subprocess.SubprocessError):
+        raise MaintenanceError("SHORTCUT_REMOVE_FAILED") from None
+    if _is_directory_link(link):
+        raise MaintenanceError("SHORTCUT_LINK_CHANGED")
+    # A link for an unrelated program is never removed.
+    return None if link.exists() else (link, original)
+
+
+def _restore_desktop_shortcut(snapshot: tuple[Path, bytes] | None) -> None:
+    if snapshot is None:
+        return
+    link, content = snapshot
+    try:
+        with link.open("xb") as output:
+            output.write(content)
+    except FileExistsError:
+        pass  # Someone else created a shortcut; do not overwrite it.
+
+
+def _remove_owned_qsettings() -> None:
+    """Remove only BLACK.BOX Universal's own HKCU QSettings subtree."""
+    if os.name != "nt":
+        return
+    import winreg
+    root = winreg.HKEY_CURRENT_USER
+    app_key = r"Software\BlackBox\BLACK.BOX Universal"
+
+    def remove_subtree(path: str) -> None:
+        try:
+            with winreg.OpenKey(root, path, 0, winreg.KEY_READ | winreg.KEY_WRITE) as key:
+                children = []
+                index = 0
+                while True:
+                    try:
+                        children.append(winreg.EnumKey(key, index))
+                    except OSError as error:
+                        if getattr(error, "winerror", None) != 259:  # ERROR_NO_MORE_ITEMS
+                            raise
+                        break
+                    index += 1
+        except FileNotFoundError:
+            return
+        for child in children:
+            remove_subtree(path + "\\" + child)
+        winreg.DeleteKey(root, path)
+
+    try:
+        remove_subtree(app_key)
+    except OSError:
+        raise MaintenanceError("QSETTINGS_REMOVE_FAILED") from None
+
+
 def uninstall(install: Path) -> None:
     install = _safe_install(install)
     data = _user_data_root()
@@ -146,18 +257,23 @@ def uninstall(install: Path) -> None:
     preserved = data / ("Preserved-" + datetime.now().strftime("%Y%m%d-%H%M%S")
                         + "-" + uuid4().hex[:6])
     moves = _keep_local_logs(install, preserved)
+    shortcut_snapshot = None
     try:
+        # The original EXE must still exist when Windows resolves its .lnk.
+        shortcut_snapshot = _detach_matching_desktop_shortcut(
+            install / EXECUTABLE_NAME)
         shutil.rmtree(install)
     except Exception:
-        for moved, previous in reversed(moves):
-            if previous.parent.exists() and moved.exists():
-                moved.replace(previous)
+        try:
+            _restore_desktop_shortcut(shortcut_snapshot)
+        finally:
+            for moved, previous in reversed(moves):
+                if previous.parent.exists() and moved.exists():
+                    moved.replace(previous)
         raise
-    # Desktop link only removed if it actually points to this executable.
-    try:
-        remove_shortcut_if_matches(install / EXECUTABLE_NAME)
-    except Exception:
-        pass  # Do not undo successful removal due to optional shell-link issues.
+    # No program files remain. Remove only this application's Qt preferences;
+    # the user's diagnostic sessions and their own files remain untouched.
+    _remove_owned_qsettings()
 
 
 def apply_update(install: Path, staged: Path) -> None:
@@ -225,6 +341,61 @@ def apply_update(install: Path, staged: Path) -> None:
         pass  # Successful update must not be rolled back due to shell issues.
 
 
+def prepare_external_helper(install: Path) -> Path:
+    """Create a marker-scoped temporary frozen maintenance copy.
+
+    The source install remains untouched. A failed preparation removes its
+    own new temp folder. Never use a pre-existing temp directory.
+    """
+    install = _safe_install(install)
+    scratch = Path(tempfile.mkdtemp(prefix="bb-maintenance-"))
+    try:
+        helper = scratch / MAINTENANCE_NAME
+        shutil.copy2(install / MAINTENANCE_NAME, helper)
+        (scratch / HELPER_TICKET).write_text(
+            json.dumps(HELPER_TICKET_VALUE), encoding="utf-8")
+        return helper
+    except Exception:
+        shutil.rmtree(scratch, ignore_errors=True)
+        raise
+
+
+def _schedule_external_helper_cleanup() -> None:
+    """Schedule cleanup after our *own* frozen copy exits, never another EXE."""
+    if os.name != "nt" or not getattr(sys, "frozen", False):
+        return
+    helper = Path(os.path.abspath(sys.executable))
+    scratch = helper.parent
+    if (helper.name != MAINTENANCE_NAME
+            or not scratch.name.startswith("bb-maintenance-")
+            or scratch.parent != Path(tempfile.gettempdir())):
+        return
+    if _has_reparse_ancestor(scratch):
+        raise MaintenanceError("TEMP_HELPER_PATH_REFUSED")
+    ticket = scratch / HELPER_TICKET
+    if _is_directory_link(ticket) or not ticket.is_file():
+        raise MaintenanceError("TEMP_HELPER_MARKER_MISSING")
+    try:
+        observed = json.loads(ticket.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        raise MaintenanceError("TEMP_HELPER_MARKER_INVALID") from None
+    if observed != HELPER_TICKET_VALUE:
+        raise MaintenanceError("TEMP_HELPER_MARKER_INVALID")
+    cleaner = scratch / HELPER_CLEANER
+    # Exclusive create: never overwrite a foreign file inside our folder.
+    with cleaner.open("x", encoding="utf-16") as output:
+        output.write(_CLEAN_HELPER_VBS)
+    try:
+        subprocess.Popen(
+            ["cscript.exe", "//B", "//NoLogo", str(cleaner), str(scratch)],
+            cwd=str(scratch.parent), stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            close_fds=True, creationflags=subprocess.CREATE_NO_WINDOW)
+    except Exception:
+        cleaner.unlink(missing_ok=True)
+        raise MaintenanceError("TEMP_HELPER_CLEANUP_NOT_SCHEDULED") from None
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("command", choices=("uninstall", "update"))
@@ -232,6 +403,19 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--wait-pid", type=int, required=True)
     parser.add_argument("--staged", type=Path)
     opts = parser.parse_args(argv)
+    def log_problem(error: Exception) -> None:
+        # Independent breadcrumb, without changing user evidence.
+        root = _user_data_root()
+        try:
+            root.mkdir(parents=True, exist_ok=True)
+            with (root / "maintenance-errors.log").open("a", encoding="utf-8") as log:
+                log.write(datetime.now().isoformat() + "  " +
+                          type(error).__name__ + "  " +
+                          (str(error)[:160]) + "\n")
+        except OSError:
+            pass
+
+    status = 0
     try:
         if opts.wait_pid <= 0:
             raise MaintenanceError("INVALID_WAIT_PID")
@@ -243,19 +427,16 @@ def main(argv: list[str] | None = None) -> int:
             uninstall(opts.install)
         else:
             apply_update(opts.install, opts.staged)
-        return 0
     except Exception as error:
-        # This is an independent, data-preserving diagnostic breadcrumb.
-        root = _user_data_root()
-        try:
-            root.mkdir(parents=True, exist_ok=True)
-            with (root / "maintenance-errors.log").open("a", encoding="utf-8") as log:
-                log.write(datetime.now().isoformat() + "  " +
-                          type(error).__name__ + "  " +
-                          (str(error)[:160]) + "\n")
-        except OSError:
-            pass
-        return 2
+        log_problem(error)
+        status = 2
+    # Even a failed maintenance attempt must not leave the transient helper.
+    try:
+        _schedule_external_helper_cleanup()
+    except Exception as error:
+        log_problem(error)
+        status = 2
+    return status
 
 
 if __name__ == "__main__":
