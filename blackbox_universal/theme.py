@@ -9,7 +9,7 @@ import os
 from pathlib import Path
 
 from PySide6.QtGui import QColor, QFont, QFontInfo, QFontDatabase, QPalette, QRawFont, QTextLayout
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QProxyStyle, QStyle
 
 COLORS = {
     "teal": "#078b84",
@@ -309,9 +309,19 @@ def font_coverage(app: QApplication) -> dict:
             "alphabet_ok":alphabet_ok,"symbols_ok":symbols_ok,"fonts":rows,"symbols":symbol_rows}
 
 
+class RetroStyle(QProxyStyle):
+    """Use list rendering instead of menu rendering for styled combo popups."""
+    def styleHint(self, hint, option=None, widget=None, returnData=None):
+        if hint == QStyle.StyleHint.SH_ComboBox_Popup:
+            return 0
+        if hint == QStyle.StyleHint.SH_ComboBox_ListMouseTracking:
+            return 1
+        return super().styleHint(hint, option, widget, returnData)
+
+
 def set_retro_theme(app: QApplication) -> None:
     _load_windows_offscreen_fonts(app)
-    app.setStyle("Fusion")
+    app.setStyle(RetroStyle("Fusion"))
     app.setFont(QFont("Segoe UI", 10))
     palette = app.palette()
     palette.setColor(QPalette.ColorRole.Window, QColor(COLORS["cream"]))
