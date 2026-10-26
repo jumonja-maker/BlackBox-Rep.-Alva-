@@ -115,7 +115,8 @@ class EventTail:
         self.client_dropped = None
         self.discontinuities = 0
         self.file_identity = None
-        # Hash only the trailing file boundary, not any application text.
+        # Hash at least the entire most recent accepted JSONL record (<=8192
+        # bytes), not raw application text in memory.
         # An in-place truncate/rewrite can keep the same inode and size.
         self._boundary_hash = None
 
@@ -148,7 +149,7 @@ class EventTail:
                 # previously read bytes BEFORE treating the next offset as
                 # continuous. A mismatch means previously accepted lines
                 # cannot attest the new file's prefix.
-                back = min(self.offset, 128)
+                back = min(self.offset, 8192)
                 stream.seek(self.offset - back)
                 if hashlib.sha256(stream.read(back)).digest() != self._boundary_hash:
                     reset = True
@@ -160,7 +161,7 @@ class EventTail:
             raw = stream.read(max_bytes)
             self.offset += len(raw)
             if self.offset:
-                back = min(self.offset, 128)
+                back = min(self.offset, 8192)
                 stream.seek(self.offset - back)
                 self._boundary_hash = hashlib.sha256(stream.read(back)).digest()
             # Truncation while reading cannot be misreported as a clean tail.
