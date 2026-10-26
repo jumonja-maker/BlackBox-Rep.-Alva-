@@ -14,3 +14,10 @@ report.html
 .qa-build/
 blackbox-qa-error.txt
 blackbox-smoke-progress.json
+# Self-contained decoder build outputs, never source or user evidence.
+/decoder/
+/decoder-qa/
+/tools/decoder-host/bin/
+/tools/decoder-host/obj/
+/tools/decoder-fixture/bin/
+/tools/decoder-fixture/obj/

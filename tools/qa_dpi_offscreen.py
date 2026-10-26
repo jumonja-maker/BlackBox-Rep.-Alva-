@@ -15,7 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from PySide6.QtCore import QPoint
 from PySide6.QtWidgets import QApplication, QWidget
-from blackbox_universal.window import UniversalWindow
+from blackbox_universal.decoder_window import DecoderWindow as UniversalWindow
 from blackbox_universal.theme import set_retro_theme, font_coverage
 
 
@@ -36,8 +36,8 @@ def main() -> int:
     window.show()
     app.processEvents()
     try:
-        if window.stack.count() != 5 or len(window.PAGES) != 5:
-            raise RuntimeError("DPI_FIVE_PAGES_REQUIRED")
+        if window.stack.count() != 6 or len(window.PAGES) != 6:
+            raise RuntimeError("DPI_SIX_PAGES_REQUIRED")
         scale = os.environ.get("QT_SCALE_FACTOR", "1")
         header_evidence = []
         for lang in ("EN", "RU"):
@@ -63,7 +63,7 @@ def main() -> int:
             json.dumps(header_evidence, ensure_ascii=False, indent=2), encoding="utf-8")
         from tools.qa_integrated_layout import capture_integrated_layout
         capture_integrated_layout(window, app, output, scale)
-        print(f"DPI offscreen capture PASS: scale={scale}, 10 page and 8 expanded snapshots")
+        print(f"DPI offscreen capture PASS: scale={scale}, 12 page and 8 expanded snapshots")
         return 0
     finally:
         window.close()

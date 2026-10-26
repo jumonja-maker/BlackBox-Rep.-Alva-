@@ -36,7 +36,7 @@ def capture_integrated_layout(window, app, output: Path, scale: str) -> None:
         raise RuntimeError("INTEGRATED_ACTION_INVENTORY_CHANGED")
     result = {"status": "RUNNING", "scale": scale,
               "scope": "EMPTY_OFFSCREEN_EXPANDED_ACTION_GEOMETRY",
-              "five_pages": window.stack.count() == 5,
+              "six_pages": window.stack.count() == 6 and len(window.PAGES) == 6,
               "requested_window_size": [1020, 690], "cases": []}
     failures = []
     window.resize(1020, 690)
@@ -116,7 +116,7 @@ def capture_integrated_layout(window, app, output: Path, scale: str) -> None:
                         failures.append([language, name, index, "UNREACHABLE_AFTER_SCROLL"])
                     _save(window, output,
                           f"expanded-{scale}-{language}-{name}-{index}.png")
-        if not result["five_pages"]:
+        if not result["six_pages"]:
             failures.append(["PAGES", window.stack.count()])
         result["failures"] = failures
         result["status"] = "PASS" if not failures else "FAIL"

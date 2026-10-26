@@ -49,7 +49,7 @@ from PySide6.QtWidgets import QApplication
 
 from blackbox_universal.monitor import ReadOnlyProbe
 from blackbox_universal.theme import set_retro_theme, font_coverage
-from blackbox_universal.window import UniversalWindow
+from blackbox_universal.decoder_window import DecoderWindow as UniversalWindow
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -102,11 +102,23 @@ def main(argv: list[str] | None = None) -> int:
     if options.smoke:
         # Exercise the ACTUAL Python/frozen binary, not only a Qt import.
         # Entirely temporary and offline.
-        expected = ("dashboard", "processes", "events", "reports", "settings")
+        expected = ("dashboard", "processes", "events", "reports", "settings", "decoder")
         if tuple(key for key, _ in window.PAGES) != expected:
             raise RuntimeError("SMOKE_GUI_PAGES_INCORRECT")
-        if window.stack.count() != 5:
-            raise RuntimeError("SMOKE_PLATFORM_PAGE_PRESENT")
+        if window.stack.count() != 6:
+            raise RuntimeError("SMOKE_GUI_PAGE_COUNT_INCORRECT")
+        window._navigate("decoder")
+        if not hasattr(window, "decoder_panel"):
+            raise RuntimeError("SMOKE_DECODER_PAGE_MISSING")
+        if getattr(sys, "frozen", False):
+            import json
+            import subprocess
+            from blackbox_core.decoder_service import helper_path
+            check = subprocess.run([str(helper_path()), "--version"], capture_output=True,
+                text=True, timeout=20, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            if check.returncode or json.loads(check.stdout).get("protocol") != "blackbox.trace-event/1":
+                raise RuntimeError("SMOKE_PACKAGED_DECODER_FAILED")
+        window._navigate("dashboard")
         with tempfile.TemporaryDirectory(prefix="bb-human-smoke-") as temp:
             from blackbox_universal.qa_fixtures import observer_identity
             probe = ReadOnlyProbe(output_root=Path(temp))

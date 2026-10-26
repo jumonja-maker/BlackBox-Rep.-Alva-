@@ -49,7 +49,7 @@ jobs:
         run: |
           python -m pip install -r requirements.txt
           python -m pip install -e .
-      - name: Test five-page Qt interface and process observer
+      - name: Test six-page application, legacy shell and process observer
         run: python -m unittest discover -s tests -v
       - name: Real Qt offscreen startup smoke
         run: python app.py --smoke
@@ -163,6 +163,22 @@ jobs:
         run: |
           python -m pip install -r requirements.txt "pyinstaller>=6,<7" "Pillow>=10,<13"
           python -m pip install -e .
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '10.0.x'
+      - name: Build self-contained Microsoft TraceEvent decoder (MAIN artifact only)
+        run: python tools/build_decoder.py --rid win-x64
+      - name: Real EventPipe payload GC stacks and owned ETL decode
+        run: python tools/qa_decoder.py --helper decoder/BLACK.BOX-Decoder.exe --output decoder-qa
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: BLACKBOX-TRACEEVENT-DECODER-QA
+          path: |
+            decoder-qa/
+            decoder/decoder-manifest.json
+          if-no-files-found: warn
+          retention-days: 14
       - name: Generate original retro Windows icon
         run: python tools/generate_icon.py
       - name: Record actual source identity for the frozen executable
@@ -176,6 +192,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'GUI build failed' }
           Copy-Item "dist/BLACK.BOX-Maintenance.exe" "dist/BLACK.BOX-Universal/BLACK.BOX-Maintenance.exe"
           Copy-Item ".blackbox-portable.json" "dist/BLACK.BOX-Universal/.blackbox-portable.json"
+          Copy-Item "decoder" "dist/BLACK.BOX-Universal/decoder" -Recurse
+          if (-not (Test-Path "dist/BLACK.BOX-Universal/decoder/BLACK.BOX-Decoder.exe")) { throw 'Decoder helper missing' }
           if (-not (Test-Path "dist/BLACK.BOX-Universal/BLACK.BOX-Maintenance.exe")) { throw 'Maintenance helper missing' }
           if (-not (Test-Path "dist/BLACK.BOX-Universal/_internal/assets/blackbox.png")) { throw 'App icon missing' }
       - name: Verify real embedded research modules before startup
