@@ -78,7 +78,7 @@ QLabel#h2 { color: #302c43; font-size: 16px; font-weight: 900; }
 QLabel#caption { color: #77718a; font-size: 11px; }
 QLabel#cardTitle { color: #70677f; font-size: 11px; font-weight: 800; }
 QLabel#metricValue { color: #302c43; font-size: 25px; font-weight: 900; }
-QLabel#logo { color: #fff7e4; font-size: 19px; font-weight: 900; letter-spacing: 1px; }
+QLabel#logo { color: #fff7e4; font-size: 17px; font-weight: 900; letter-spacing: 1px; }
 QLabel#signal { color: #046e64; font-weight: 800; }
 QPushButton {
     min-height: 29px;
@@ -145,7 +145,7 @@ QPushButton#smallLink[active="true"] {
     border-bottom: 3px solid #056c6d;
 }
 QPushButton#update {
-    min-height: 25px;
+    min-height: 23px;
     padding: 2px 10px;
     font-family: "Consolas", monospace;
     font-weight: 900;
@@ -162,6 +162,11 @@ QPushButton#update[available="true"] {
     border-bottom: 2px solid #056c6d;
 }
 QPushButton#update[available="true"]:hover { background: #a6f0c6; }
+QPushButton#toolbarMenu {
+    min-height: 23px;
+    padding: 2px 10px;
+    font-size: 11px;
+}
 QPushButton#windowControl {
     min-width: 24px;
     max-width: 24px;

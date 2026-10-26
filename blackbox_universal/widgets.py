@@ -11,13 +11,15 @@ from .theme import COLORS
 class DesktopMark(QWidget):
     """Small vector monitor glyph: no copied 1990s icons or external assets."""
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, *, compact=False):
         super().__init__(parent)
-        self.setFixedSize(46, 44)
+        # Compact only the header instance; keep the reusable default intact.
+        self.setFixedSize(36, 34) if compact else self.setFixedSize(46, 44)
 
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+        painter.scale(self.width() / 46, self.height() / 44)
         painter.setPen(QPen(QColor(COLORS["navy"]), 2))
         painter.setBrush(QColor(COLORS["cream"]))
         painter.drawRect(5, 5, 34, 27)

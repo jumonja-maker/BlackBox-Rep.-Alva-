@@ -9,8 +9,8 @@ on:
       - main
   workflow_dispatch:
     inputs:
-      publish_v041:
-        description: "Publish tested v0.4.1 from the exact accepted main SHA"
+      publish_v042:
+        description: "Publish tested v0.4.2 from the exact accepted main SHA"
         required: true
         type: boolean
         default: false
@@ -277,7 +277,7 @@ jobs:
         run: |
           Compress-Archive -LiteralPath "dist\BLACK.BOX-Universal" -DestinationPath "BLACK.BOX-Universal-Windows.zip" -Force
           if (-not (Test-Path "BLACK.BOX-Universal-Windows.zip")) { throw "ZIP missing" }
-      - name: Native official v0.4.0 to v0.4.1 update and full portable uninstall
+      - name: Native official v0.4.1 to v0.4.2 update and full portable uninstall
         shell: pwsh
         timeout-minutes: 16
         run: |
@@ -301,12 +301,12 @@ jobs:
 # Explicit release gate: NEVER publish just because a PR is merged or main is pushed.
 # A manual dispatch from main with exact reviewed SHA reruns all three QA jobs.
   publish-updater-test:
-    name: Publish verified BLACK.BOX v0.4.1 (manual owner gate)
+    name: Publish verified BLACK.BOX v0.4.2 (manual owner gate)
     needs: [shell-tests, linux-tests, windows-portable]
     if: >-
       github.event_name == 'workflow_dispatch' &&
       github.ref == 'refs/heads/main' &&
-      inputs.publish_v041 == true
+      inputs.publish_v042 == true
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -336,7 +336,7 @@ jobs:
           fi
           VERSION="$(python -c 'from blackbox_universal import __version__; print(__version__)')"
           PACKAGE_VERSION="$(python -c 'import tomllib; print(tomllib.load(open("pyproject.toml","rb"))["project"]["version"])')"
-          [[ "$VERSION" == "0.4.1" && "$PACKAGE_VERSION" == "$VERSION" ]] || {
+          [[ "$VERSION" == "0.4.2" && "$PACKAGE_VERSION" == "$VERSION" ]] || {
             echo "::error::Release version mismatch"
             exit 1
           }
@@ -365,29 +365,27 @@ jobs:
           set -euo pipefail
           ZIP="verified-portable/BLACK.BOX-Universal-Windows.zip"
           cat > release-notes.md <<'EOF'
-          BLACK.BOX Universal v0.4.1 — expanded monitoring workspace
+          BLACK.BOX Universal v0.4.2 — compact top chrome
 
-          - Main window starts maximized, with native window minimize/restore
-            and resize controls retained; no exclusive fullscreen mode.
-          - Removed the decorative START taskbar and redundant VIEW menu;
-            kept FILE/HELP and five-sidebar navigation.
-          - Removed the duplicated PRIVACY & SECURITY paragraph in Settings.
-          - Overview lets Resource Telemetry and Current Session use the
-            available vertical viewport instead of reserving taskbar space.
-          - Updated the in-app About caption to match available optional
-            diagnostic sources. Monitoring and evidence semantics remain the same.
-          - Real v0.4.0 portable Windows EXE to v0.4.1 update/relaunch and
-            uninstall tested on disposable Windows CI with verified SHA-256.
-          - Saved user diagnostics under Documents remain PRESERVED.
+          - Reclaimed vertical screen space at the TOP as well as the bottom:
+            smaller turquoise brand banner and vector monitor icon, no full
+            row reserved for decorative sparkles.
+          - Reduced chrome/toolbar spacing and menu height so Resource
+            Telemetry, Current Session and other pages start higher.
+          - Preserved native window framing, FILE/HELP menus, five page
+            navigation, update control, recording and evidence behavior.
+          - Added actual Qt geometry regression checks at 1330x850 and
+            1020x690 in RU/EN plus Windows offscreen DPI checks.
+          - Real official v0.4.1 portable Windows EXE to v0.4.2 update,
+            relaunch and uninstall tested on disposable Windows CI with
+            SHA-256 validation. User sessions under Documents preserved.
 
-          Release QA includes Windows/Linux source tests, genuine frozen
-          application tests, native maintenance, Windows DPI/offscreen and
-          WPR/real process checks. This does NOT assert physical Win10/11,
-          antivirus/ACL/OneDrive, screen-reader or independent full 128-item
-          diagnostic acceptance. No automated detective is introduced here.
+          GitHub-hosted Windows/Linux/portable CI is not independent physical
+          Win10/11, antivirus/ACL/OneDrive, screen-reader or full 128-item
+          diagnostic acceptance. No automated detective is introduced.
           EOF
-          gh release create "v0.4.1" "$ZIP" "$ZIP.sha256" \
+          gh release create "v0.4.2" "$ZIP" "$ZIP.sha256" \
             --target "$GITHUB_SHA" \
-            --title "BLACK.BOX Universal v0.4.1 — expanded monitoring workspace" \
+            --title "BLACK.BOX Universal v0.4.2 — compact top chrome" \
             --notes-file release-notes.md --latest
-          echo "Published v0.4.1 at exact reviewed SHA $GITHUB_SHA"
+          echo "Published v0.4.2 at exact reviewed SHA $GITHUB_SHA"

@@ -13,7 +13,8 @@ import sys
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from PySide6.QtWidgets import QApplication
+from PySide6.QtCore import QPoint
+from PySide6.QtWidgets import QApplication, QWidget
 from blackbox_universal.window import UniversalWindow
 from blackbox_universal.theme import set_retro_theme, font_coverage
 
@@ -38,8 +39,16 @@ def main() -> int:
         if window.stack.count() != 5 or len(window.PAGES) != 5:
             raise RuntimeError("DPI_FIVE_PAGES_REQUIRED")
         scale = os.environ.get("QT_SCALE_FACTOR", "1")
+        header_evidence = []
         for lang in ("EN", "RU"):
             window._set_language(lang)
+            app.processEvents()
+            body = window.findChild(QWidget, "shellBody")
+            workspace_y = body.mapTo(window.centralWidget(), QPoint(0, 0)).y()
+            header_evidence.append({"language": lang, "workspace_top_y": workspace_y,
+                                    "window_size": [window.width(), window.height()]})
+            if workspace_y > 145:
+                raise RuntimeError(f"DPI_TOP_CHROME_NOT_COMPACT:{scale}:{lang}:{workspace_y}")
             for page, _ in window.PAGES:
                 (output/"progress.json").write_text(json.dumps({"scale":scale,"language":lang,"page":page}),encoding="utf-8")
                 window._navigate(page)
@@ -50,6 +59,8 @@ def main() -> int:
                 path = output / f"dpi-{scale}-{lang}-{page}.png"
                 if not shot.save(str(path), "PNG"):
                     raise RuntimeError("DPI_SCREENSHOT_WRITE_FAILED")
+        (output / f"top-chrome-{scale}.json").write_text(
+            json.dumps(header_evidence, ensure_ascii=False, indent=2), encoding="utf-8")
         from tools.qa_integrated_layout import capture_integrated_layout
         capture_integrated_layout(window, app, output, scale)
         print(f"DPI offscreen capture PASS: scale={scale}, 10 page and 8 expanded snapshots")
