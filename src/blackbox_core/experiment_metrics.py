@@ -34,8 +34,12 @@ def measure_interval(view,start,end,*,series):
                 first.setdefault(field,value);last[field]=value;peaks[field]=max(peaks.get(field,value),value)
         if previous:
             dt=row['time_ns']-previous['time_ns'];requested=row.get('requested_interval_ns')
+            # A cadence switch/unknown interval is a coverage boundary, not
+            # proof that the intervening cumulative counters are continuous.
+            same_cadence=(type(requested) is int and requested>0 and
+                requested==previous.get('requested_interval_ns'))
             continuous=(dt>0 and row['series_seq']==previous['series_seq']+1 and
-                (not requested or dt<=max(2*requested,requested+500_000_000)))
+                same_cadence and dt<=max(2*requested,requested+500_000_000))
             if not continuous:gaps+=1
             else:
                 for metric,fields in (('cpu_seconds',('cpu_user_s','cpu_system_s')),
