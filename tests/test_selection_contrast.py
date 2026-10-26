@@ -93,20 +93,33 @@ class SelectionContrastTests(unittest.TestCase):
                     shutil.copytree(folder, Path('popup-qa') / 'unit', dirs_exist_ok=True)
 
     def test_pixel_gate_detects_regression_even_with_correct_palette(self):
-        # Reintroduce only the old parent background leak in this QA fixture.
-        # The rendered-pixel gate must fail, even though the palette is correct.
-        self.panel.body.setStyleSheet('background: #fffaf0;')
-        self.combo.showPopup()
-        self.app.processEvents()
+        # Deliberately broken local styles test the detector, not production.
+        # The separate Windows workflow runs the unmodified original checkout
+        # to reproduce the real defect. A repaired list delegate can correctly
+        # resist the old parent-only leak, so that alone is no longer a valid
+        # negative fixture.
         view = self.combo.view()
-        index = self.combo.model().index(1, 0)
-        QTest.mouseMove(view.viewport(), QPoint(1, 1))
-        QTest.mouseMove(view.viewport(), view.visualRect(index).center())
-        QTest.qWait(35)
-        self.app.processEvents()
-        stats = row_pixels(view, index)
-        with self.assertRaisesRegex(AssertionError, 'POPUP_SELECTION_BACKGROUND_LOST'):
-            assert_readable(stats)
+        for background, foreground, error in (
+                ('#fffaf0', '#fffaf0', 'POPUP_SELECTION_BACKGROUND_LOST'),
+                ('#ffddaa', '#ffddaa', 'POPUP_SELECTED_TEXT_UNREADABLE')):
+            with self.subTest(error=error):
+                view.setStyleSheet(
+                    'QAbstractItemView { selection-background-color: ' + background +
+                    '; selection-color: ' + foreground + '; } '
+                    'QAbstractItemView::item:selected, QAbstractItemView::item:hover {'
+                    'background: ' + background + '; color: ' + foreground + '; }')
+                self.combo.showPopup()
+                self.app.processEvents()
+                QTest.keyClick(view, Qt.Key.Key_Home)
+                QTest.qWait(80)
+                self.app.processEvents()
+                index = self.combo.model().index(0, 0)
+                self.assertEqual(view.currentIndex().row(), 0)
+                stats = row_pixels(view, index)
+                with self.assertRaisesRegex(AssertionError, error):
+                    assert_readable(stats)
+                self.combo.hidePopup()
+                self.app.processEvents()
 
     def test_disabled_primary_and_accent_do_not_look_actionable(self):
         for kind in ('primary', 'accent'):
