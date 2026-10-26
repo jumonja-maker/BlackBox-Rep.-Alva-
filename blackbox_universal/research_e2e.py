@@ -7,6 +7,20 @@ import time
 from PySide6.QtCore import QTimer
 
 
+def _pages_match_build(window):
+    """The production desktop adds a sixth page; embedders retain five.
+
+    The session E2E must verify the complete page inventory, not a stale
+    hardcoded v0.4.1 count that rejects a working six-page application.
+    """
+    expected = ("dashboard", "processes", "events", "reports", "settings")
+    if hasattr(window, "decoder_panel"):
+        expected += ("decoder",)
+    return (tuple(key for key, _ in window.PAGES) == expected
+            and window.stack.count() == len(expected)
+            and set(window._page_ids) == set(expected))
+
+
 def run_e2e(app,window,destination):
     destination=Path(destination);destination.mkdir(parents=True,exist_ok=False)
     bridge=window.probe
@@ -142,7 +156,7 @@ def run_e2e(app,window,destination):
             for language in ('RU','EN'):
                 window._set_language(language);app.processEvents()
                 if not window.grab().save(str(destination/('library-'+language+'.png'))):fail('LIBRARY_SCREENSHOT_FAILED');return
-            if window.stack.count()!=5:fail("PAGE_COUNT");return
+            if not _pages_match_build(window):fail("PAGE_COUNT");return
             state["proof"]={"status":"AWAITING_HELPER_SHUTDOWN","scenario":"REAL_QT_ISOLATED_ACTION_PACKAGE_ROUNDTRIP",
                 "folder":str(bridge.session_folder),"helper_pid":bridge.data.get("helper_pid"),"gui_pid":os.getpid(),
                 "privilege":bridge.capabilities.get("privilege"),"verified":True,

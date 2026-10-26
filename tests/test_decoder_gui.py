@@ -63,6 +63,22 @@ class DecoderGuiTests(unittest.TestCase):
         self.assertNotIn("PRIVATE", panel.details.toPlainText())
         self.assertFalse(self.window.probe.active)
 
+    def test_research_roundtrip_page_contract_accepts_six_and_legacy_five(self):
+        from types import SimpleNamespace
+        from blackbox_universal.research_e2e import _pages_match_build
+        from blackbox_universal.window import UniversalWindow
+        self.assertTrue(_pages_match_build(self.window))
+        original = UniversalWindow.PAGES
+        legacy = SimpleNamespace(PAGES=original,
+            stack=SimpleNamespace(count=lambda: len(original)),
+            _page_ids={name: i for i, (name, _) in enumerate(original)})
+        self.assertTrue(_pages_match_build(legacy))
+        legacy.stack = SimpleNamespace(count=lambda: 6)
+        self.assertFalse(_pages_match_build(legacy))
+        legacy.stack = SimpleNamespace(count=lambda: 5)
+        legacy.PAGES = original + (("wrong", "SYNTHETIC"),)
+        self.assertFalse(_pages_match_build(legacy))
+
     def test_decoder_navigation_uses_standard_scroll_page_at_two_window_sizes(self):
         from PySide6.QtWidgets import QScrollArea
         for width, height in ((1330, 850), (1020, 690)):
