@@ -4,17 +4,24 @@ from pathlib import Path
 import psutil
 from blackbox_core.detailed_capture import sample_process
 from blackbox_core.library_files import atomic_json
-from blackbox_core.qa_fixture_status import wait_fixture_ack
+from blackbox_core.qa_fixture_status import wait_fixture_ack, wait_fixture_ready
 
 class RealScaleTests(unittest.TestCase):
  def launch(self,mode,count,root):
   child=subprocess.Popen([sys.executable,'-m','blackbox_core.qa_workloads',mode,str(root),'--count',str(count),'--seconds','40'],stdout=subprocess.DEVNULL,stderr=subprocess.PIPE)
   self.addCleanup(lambda:self.finish(child,root))
-  deadline=time.monotonic()+25
-  while not (root/'ready.json').is_file() and child.poll() is None and time.monotonic()<deadline:time.sleep(.02)
-  if not (root/'ready.json').is_file():
-   child.terminate();_,err=child.communicate(timeout=5);self.fail('REAL_FIXTURE_START_FAILED: '+err.decode(errors='replace')[-2000:])
-  info=json.loads((root/'ready.json').read_text());return child,info
+  try:
+   info=wait_fixture_ready(root/'ready.json',expected_pid=child.pid,
+       expected_mode=mode,expected_count=count,alive=lambda:child.poll() is None,
+       timeout=25)
+  except (OSError,ValueError,TimeoutError) as exc:
+   if child.poll() is None:child.terminate()
+   try:_,err=child.communicate(timeout=5)
+   except subprocess.TimeoutExpired:
+    child.kill();_,err=child.communicate(timeout=5)
+   self.fail('REAL_FIXTURE_START_FAILED: '+type(exc).__name__+': '+str(exc)+
+       '; producer stderr: '+err.decode(errors='replace')[-2000:])
+  return child,info
  @staticmethod
  def finish(child,root):
   if child.poll() is None:
