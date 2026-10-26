@@ -103,13 +103,18 @@ class SessionStore:
 
     def write_sample(self, sample: Sample) -> None:
         fields = sample.as_dict()
-        self.seq += 1
+        next_seq = self.seq + 1
         try:
             self.db.execute("INSERT INTO samples VALUES (?,?,?,?,?,?,?,?)",
-                            (self.seq, *(fields[k] for k in ("elapsed_ms", "rss_bytes", "cpu_percent",
+                            (next_seq, *(fields[k] for k in ("elapsed_ms", "rss_bytes", "cpu_percent",
                                 "num_threads", "read_bytes", "write_bytes", "children_count"))))
             self.db.commit()
+            self.seq = next_seq
         except sqlite3.Error:
+            try:
+                self.db.rollback()
+            except sqlite3.Error:
+                pass
             raise ObserverError("STORAGE_ERROR", "storage") from None
 
     def write_event(self, record: dict) -> None:
