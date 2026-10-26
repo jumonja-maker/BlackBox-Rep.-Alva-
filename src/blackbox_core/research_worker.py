@@ -51,6 +51,7 @@ class ResearchSession:
         self.last_command=None;self.command_latency_ms=None
         self.last_app_health=None
         self.app_source_error=None
+        self.app_events_unconfirmed=0
         self.research_state="NO_SESSION";self.research_error=None
         try:
             import psutil
@@ -87,6 +88,7 @@ class ResearchSession:
             eventpipe_active=bool(self.runtime_trace and self.runtime_trace.process is not None),
             app_ready=bool(self.tail and self.tail.ready),
             app_source_error=self.app_source_error,
+            app_events_unconfirmed=self.app_events_unconfirmed,
             helper_pid=os.getpid(),last_command=self.last_command,
             research_state=self.research_state,research_error=self.research_error,
             command_latency_ms=self.command_latency_ms,
@@ -278,11 +280,32 @@ class ResearchSession:
             self.book.put("application.source_failed",{"error":self.app_source_error},
                           source="APPLICATION_EVENT_READER",quality="SOURCE_FAILED")
             return
-        for r in rows:
+        for index,r in enumerate(rows):
             # Source clocks are retained, not silently equated to ours.
-            self.book.put(r["kind"],r,source="APPLICATION_EVENT",
-                quality="APP_SUPPLIED_UNAUTHENTICATED",tid=r["tid"] if r.get("tid_kind","OS_NATIVE")=="OS_NATIVE" else None,
-                operation_id=r.get("operation_id"))
+            try:
+                self.book.put(r["kind"],r,source="APPLICATION_EVENT",
+                    quality="APP_SUPPLIED_UNAUTHENTICATED",tid=r["tid"] if r.get("tid_kind","OS_NATIVE")=="OS_NATIVE" else None,
+                    operation_id=r.get("operation_id"))
+            except Exception as exc:
+                # EventTail has consumed this batch, but CaseBook.put can fail
+                # before commit, or after its commit while mirroring a v2
+                # reference. We cannot honestly acknowledge either outcome.
+                # Preserve the original spool and fail the research coverage,
+                # while keeping the independent base sampler alive.
+                self.app_events_unconfirmed += len(rows)-index
+                self.app_source_error = (
+                    "APPLICATION_EVENT_PERSISTENCE_UNCONFIRMED:" +
+                    type(exc).__name__)
+                self.tail.ready = False
+                try:
+                    self.book.put("application.index_failed",
+                        {"unconfirmed_rows":self.app_events_unconfirmed,
+                         "reason":"APPLICATION_EVENT_PERSISTENCE_UNCONFIRMED"},
+                        source="APPLICATION_EVENT_READER",quality="SOURCE_FAILED",
+                        mirror=False)
+                except Exception:
+                    pass
+                return
 
     def _drain_application_events(self):
         if not self.tail:return {}
@@ -292,6 +315,9 @@ class ResearchSession:
                 if not t.path.exists():cutoff=0
                 elif t.path.is_symlink() or not t.path.is_file():raise ValueError("INVALID_APPLICATION_EVENT_FILE")
                 else:cutoff=t.path.stat().st_size
+                # An equal-size rewrite (or deletion) after the final tick
+                # must be detected even when no new bytes need draining.
+                t.poll(max_bytes=0)
                 # Freeze the byte boundary. The target may continue emitting;
                 # never wait for it or drain an infinite live file at Stop.
                 deadline=time.monotonic()+2;budget=1024*1024
@@ -305,7 +331,8 @@ class ResearchSession:
             "application_stop_byte_boundary":cutoff,
             "application_unread_bytes_at_stop":max(0,cutoff-t.offset) if cutoff is not None else None,
             "application_partial_line_bytes":len(t.pending),
-            "application_source_discontinuities":t.discontinuities}
+            "application_source_discontinuities":t.discontinuities,
+            "application_event_persistence_unconfirmed_rows":self.app_events_unconfirmed}
 
     def _start_registry(self):
         self.sensors=SensorRegistry(("base", "application", "detail", "windows", "optional",'threads','memory','process_tree','wct','etw','runtime','dump','crash_events'))
@@ -532,6 +559,7 @@ class ResearchSession:
             self.probe._store.v2.max_bytes=self.budget_bytes
             self.native_enabled=False;self.runtime_trace=None;self.wpr=None;self._last_detail_capture=None
             self.app_source_error=None
+            self.app_events_unconfirmed=0
             self.research_state="RECORDING";self.research_error=None
             self._configuration_changed=False;self._library_started_ns=None
             try:

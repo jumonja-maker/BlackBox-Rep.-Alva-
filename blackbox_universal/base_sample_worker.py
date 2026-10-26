@@ -35,26 +35,35 @@ class BaseSampleWorker(QThread):
             started_ns = time.monotonic_ns()
             sample = self.core.sample()
             sensor_done_ns = time.monotonic_ns()
+        except ObserverError as exc:
+            self.result_ready.emit(None, exc.code)
+            return
+        except Exception:
+            self.result_ready.emit(None, "SAMPLE_UNAVAILABLE")
+            return
+        try:
             seq = write_sample_from_worker(self.folder, sample)
             if self.session_writer is not None and self.core.last_observation is not None:
                 self.session_writer.submit("base", {
                     **self.core.last_observation,
                     "requested_interval_ns": self.requested_interval_ms*1_000_000,
                     "correlation_key": f"schema1:{seq}"})
-            write_done_ns = time.monotonic_ns()
-            self.result_ready.emit({
-                "sample": sample, "seq": seq,
-                "folder": str(self.folder),
-                "requested_interval_ms": self.requested_interval_ms,
-                "worker_timing": {
-                    "started_ns": started_ns,
-                    "sensor_done_ns": sensor_done_ns,
-                    "write_done_ns": write_done_ns,
-                },
-            }, "")
         except ObserverError as exc:
             self.result_ready.emit(None, exc.code)
+            return
         except Exception:
-            # Unexpected psutil/SQLite failures cannot be reclassified as
-            # successful collection. Never leak full OS paths or exceptions.
-            self.result_ready.emit(None, "SAMPLE_UNAVAILABLE")
+            # A real sample may already be committed in schema 1. A failed
+            # schema-2 mirror or unforeseen SQLite error is not a sensor error.
+            self.result_ready.emit(None, "STORAGE_ERROR")
+            return
+        write_done_ns = time.monotonic_ns()
+        self.result_ready.emit({
+            "sample": sample, "seq": seq,
+            "folder": str(self.folder),
+            "requested_interval_ms": self.requested_interval_ms,
+            "worker_timing": {
+                "started_ns": started_ns,
+                "sensor_done_ns": sensor_done_ns,
+                "write_done_ns": write_done_ns,
+            },
+        }, "")

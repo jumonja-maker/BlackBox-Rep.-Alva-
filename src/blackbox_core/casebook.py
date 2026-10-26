@@ -131,7 +131,7 @@ class CaseBook:
                         continue
                     kind = payload.get("event", payload.get("kind", "legacy_event"))
                     at = payload.get("timestamp_monotonic_ns")
-                    self.put(str(kind)[:80], {"legacy_event_seq": row["seq"], "event": payload},
+                    evidence_id = self.put(str(kind)[:80], {"legacy_event_seq": row["seq"], "event": payload},
                              source=payload.get("source", "BLACKBOX_LEGACY"),
                              quality="USER_REPORTED" if payload.get("source", "").startswith("USER") else "OBSERVED",
                              at_ns=at, operation_id=payload.get("action_id"),mirror=False)
@@ -139,7 +139,7 @@ class CaseBook:
                             0<=payload["duration_ns"]<=30*86400*10**9 and
                             isinstance(payload.get("action_id"),str)):
                         self.db.execute("INSERT OR IGNORE INTO action_runs VALUES(?,?,?,?)",
-                            (payload["action_id"],payload.get("experiment_id"),payload["duration_ns"],row["seq"]))
+                            (payload["action_id"],payload.get("experiment_id"),payload["duration_ns"],evidence_id))
                         self.db.commit()
                     self.last_legacy=row["seq"]
                 if not drain or not count:break

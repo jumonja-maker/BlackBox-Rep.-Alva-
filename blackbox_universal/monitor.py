@@ -273,6 +273,12 @@ class ReadOnlyProbe:
         store = self._store
         self.session_state = status
         self._event(reason)
+        # Incidents, aborted actions and the final lifecycle event are
+        # durability obligations. A successful base write cannot conceal
+        # a failed required event write.
+        if self.last_error in ("STORAGE_ERROR", "INCIDENT_STORAGE_ERROR"):
+            status = "STORAGE_ERROR"
+            self.session_state = status
         self._store = None
         try:
             store.finish(status)
