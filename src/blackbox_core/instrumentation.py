@@ -126,7 +126,7 @@ class EventTail:
         self._boundary_hash = None
 
     def poll(self, *, max_bytes=65536):
-        if type(max_bytes) is not int or not 1 <= max_bytes <= 1024*1024:
+        if type(max_bytes) is not int or not 0 <= max_bytes <= 1024*1024:
             raise ValueError("INVALID_APPLICATION_READ_BUDGET")
         if not self.path.exists():
             if self.file_identity is not None:
