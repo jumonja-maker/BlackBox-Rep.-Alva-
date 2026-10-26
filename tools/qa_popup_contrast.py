@@ -183,6 +183,32 @@ def capture_combo(app, combo, output: Path, prefix: str, *, after_choice=None) -
     return records
 
 
+def reveal_combo(app, scroll, combo) -> None:
+    """Use the real page scrollbar, accounting for the exposed screen area.
+
+    ensureWidgetVisible alone considers the logical viewport, which may extend
+    below a small hosted screen at 150-200% when the app has a minimum size.
+    Centre the control in the visible portion using ordinary scrolling. Do not
+    move or resize the popup, change its styles, or fake its pointer events.
+    """
+    scroll.ensureWidgetVisible(combo)
+    app.processEvents()
+    for _ in range(3):
+        viewport = scroll.viewport()
+        visible = QRect(viewport.mapToGlobal(QPoint(0, 0)), viewport.size())
+        screens = [screen.availableGeometry().getRect() for screen in app.screens()]
+        point = QPoint(*visible_row_point(visible.getRect(), screens))
+        delta = combo.mapToGlobal(combo.rect().center()) - point
+        horizontal, vertical = scroll.horizontalScrollBar(), scroll.verticalScrollBar()
+        before = (horizontal.value(), vertical.value())
+        horizontal.setValue(horizontal.value() + delta.x())
+        vertical.setValue(vertical.value() + delta.y())
+        app.processEvents()
+        QTest.qWait(30)
+        if before == (horizontal.value(), vertical.value()):
+            break
+
+
 def run(output: Path, *, expect_baseline_failure=False) -> dict:
     output.mkdir(parents=True, exist_ok=False)
     app = QApplication.instance() or QApplication([])
@@ -210,7 +236,7 @@ def run(output: Path, *, expect_baseline_failure=False) -> dict:
                 window._set_language(lang)
                 window._navigate('dashboard')
                 app.processEvents()
-                window.stack.currentWidget().ensureWidgetVisible(window.dashboard_profile)
+                reveal_combo(app, window.stack.currentWidget(), window.dashboard_profile)
                 app.processEvents()
                 def verify_profile(value):
                     wait_until(app, lambda: not window.probe.pending and
@@ -223,17 +249,17 @@ def run(output: Path, *, expect_baseline_failure=False) -> dict:
                         'PROFILE_KEYS_CHANGED')
                 window._navigate('settings')
                 app.processEvents()
-                window.stack.currentWidget().ensureWidgetVisible(window.capture_settings.profile)
+                reveal_combo(app, window.stack.currentWidget(), window.capture_settings.profile)
                 app.processEvents()
                 result['records'].extend(capture_combo(
                     app, window.capture_settings.profile, output, f'{lang}-settings'))
-                window.stack.currentWidget().ensureWidgetVisible(window.interval_combo)
+                reveal_combo(app, window.stack.currentWidget(), window.interval_combo)
                 app.processEvents()
                 result['records'].extend(capture_combo(
                     app, window.interval_combo, output, f'{lang}-interval',
                     after_choice=lambda value: wait_until(app, lambda: not window.probe.pending)))
             window._navigate('dashboard')
-            window.stack.currentWidget().ensureWidgetVisible(window.dashboard_profile)
+            reveal_combo(app, window.stack.currentWidget(), window.dashboard_profile)
             app.processEvents()
             require(window.grab().save(str(output / 'overview-patched.png')),
                     'POPUP_SCREENSHOT_WRITE_FAILED')

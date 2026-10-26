@@ -13,12 +13,12 @@ os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 from PySide6.QtCore import QPoint, Qt
 from PySide6.QtGui import QColor, QPalette
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QComboBox, QPushButton
+from PySide6.QtWidgets import QApplication, QComboBox, QPushButton, QScrollArea, QVBoxLayout, QWidget
 
 from blackbox_universal.theme import COLORS, set_retro_theme
 from blackbox_universal.widgets import WindowPanel
 from blackbox_universal.window import _page
-from tools.qa_popup_contrast import assert_readable, capture_combo, row_pixels
+from tools.qa_popup_contrast import assert_readable, capture_combo, row_pixels, reveal_combo
 
 
 def luminance(color):
@@ -120,6 +120,37 @@ class SelectionContrastTests(unittest.TestCase):
                     assert_readable(stats)
                 self.combo.hidePopup()
                 self.app.processEvents()
+
+    def test_reveal_uses_bounded_page_scroll_without_selecting_or_starting_anything(self):
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.addSpacing(1200)
+        combo = QComboBox()
+        combo.addItem('STANDARD', 'STANDARD')
+        combo.addItem('DETAILED', 'DETAILED')
+        layout.addWidget(combo)
+        layout.addSpacing(1200)
+        scroll.setWidget(page)
+        scroll.resize(500, 360)
+        scroll.show()
+        scroll.activateWindow()
+        self.app.processEvents()
+        original = combo.currentData()
+        try:
+            reveal_combo(self.app, scroll, combo)
+            bar = scroll.verticalScrollBar()
+            self.assertGreater(bar.value(), 0)
+            self.assertLessEqual(bar.value(), bar.maximum())
+            centre = scroll.viewport().mapFromGlobal(combo.mapToGlobal(combo.rect().center()))
+            self.assertTrue(scroll.viewport().rect().contains(centre))
+            self.assertEqual(combo.currentData(), original)
+            self.assertFalse(combo.view().isVisible())
+        finally:
+            scroll.close()
+            scroll.deleteLater()
+            self.app.processEvents()
 
     def test_disabled_primary_and_accent_do_not_look_actionable(self):
         for kind in ('primary', 'accent'):
