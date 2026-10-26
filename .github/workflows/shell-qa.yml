@@ -30,7 +30,9 @@ jobs:
   shell-tests:
     name: Windows shell / read-only observer
     runs-on: windows-latest
-    timeout-minutes: 18
+    # 536 source tests plus real WPR/DPI/E2E can exceed 18 minutes on a
+    # loaded hosted runner even when every assertion passes. Keep all gates.
+    timeout-minutes: 30
     env:
       QT_QPA_PLATFORM: offscreen
       PYTHONUTF8: "1"
