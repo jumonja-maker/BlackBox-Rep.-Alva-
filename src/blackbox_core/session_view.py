@@ -389,11 +389,14 @@ class SessionView:
         ), observations AS (
             SELECT t.tid,t.cpu_user_s,t.cpu_system_s,s.*,
             lag(series_seq) OVER w AS previous_seq,lag(monotonic_ns) OVER w AS previous_ns,
+            lag(requested_interval_ns) OVER w AS previous_interval,
             lag(cpu_user_s) OVER w AS previous_user,lag(cpu_system_s) OVER w AS previous_system
             FROM selected s JOIN thread_samples t USING(sample_id)
             WINDOW w AS (PARTITION BY tid ORDER BY series_seq)
         ), boundaries AS (
             SELECT *,CASE WHEN previous_seq IS NULL OR series_seq<>previous_seq+1 OR
+                requested_interval_ns<>previous_interval OR
+                typeof(requested_interval_ns)<>'integer' OR requested_interval_ns<=0 OR
                 monotonic_ns<=previous_ns OR
                 monotonic_ns-previous_ns>max(2*requested_interval_ns,requested_interval_ns+500000000) OR
                 cpu_user_s<previous_user OR cpu_system_s<previous_system THEN 1 ELSE 0 END AS boundary
@@ -410,7 +413,7 @@ class SessionView:
                 100.0*sum(delta)/sum(dt) AS cpu_percent
             FROM segments GROUP BY tid,segment_id
         ) """
-        totals=self.db.execute(cte+"SELECT count(*),sum(cpu_seconds),sum(cpu_seconds IS NULL) FROM ranked",args).fetchone()
+        totals=self.db.execute(cte+"SELECT count(*),sum(cpu_seconds),sum(cpu_seconds IS NULL),sum(observed_pairs) FROM ranked",args).fetchone()
         ranked=[dict(r) for r in self.db.execute(cte+"SELECT * FROM ranked ORDER BY cpu_seconds DESC,tid,segment_id LIMIT ?",
                                                 (*args,top_n))]
         selected_count,omitted=self.db.execute("""SELECT count(*),sum(threads_omitted) FROM samples
@@ -440,7 +443,8 @@ class SessionView:
                                   if totals[1] is not None else None,
             "segments_without_comparable_pairs":totals[2] or 0,
             "omitted_cpu_quality":"PARTIAL_OR_UNKNOWN" if totals[2] else "OBSERVED_PAIRS_ONLY",
-            "sample_window":selected_count,"pair_count":max(0,selected_count-1),
+            "sample_window":selected_count,
+            "pair_count":int(totals[3] or 0),
             "selected_interval_ns":[start,end],"total_session_samples":total,
             "source_kind":"PSUTIL","verification_class":"DERIVED","file_trust":"UNVERIFIED_IMPORT",
             "root_cause_proven":False,"tid_reuse_uncertain":True,"cpu_unit":"single_core_percent",
