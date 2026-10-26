@@ -124,7 +124,40 @@ class QtShellTests(unittest.TestCase):
                         "No administrator privileges requested by this shell",
                         "PREVIEW / v0.3"):
             self.assertNotIn(removed, labels)
-        self.assertIn("v0.4.1", labels)
+        self.assertIn("v0.4.2", labels)
+
+    def test_top_chrome_reclaims_real_workspace_at_both_window_sizes(self):
+        from PySide6.QtCore import QPoint
+        from PySide6.QtWidgets import QFrame, QLabel, QWidget
+        from blackbox_universal.widgets import SparkleBorder
+
+        self.window.show()
+        self.assertFalse(self.window.findChildren(SparkleBorder),
+                         "Decorative sparkle strip must not consume a whole row")
+        for width, height in ((1330, 850), (1020, 690)):
+            self.window.resize(width, height)
+            for language in ("EN", "RU"):
+                self.window._set_language(language)
+                self.window._navigate("dashboard")
+                self.app.processEvents()
+                desktop = self.window.centralWidget()
+                body = self.window.findChild(QWidget, "shellBody")
+                chrome = self.window.findChild(QFrame, "topChrome")
+                toolbar = self.window.findChild(QFrame, "toolbar")
+                logo = self.window.findChild(QLabel, "logo")
+                self.assertIsNotNone(body)
+                self.assertIsNotNone(chrome)
+                self.assertIsNotNone(toolbar)
+                self.assertTrue(logo.isVisible())
+                # This checks the actual workspace Y, not just layout stretch.
+                y = body.mapTo(desktop, QPoint(0, 0)).y()
+                self.assertLessEqual(y, 145, (width, height, language, y))
+                self.assertLessEqual(chrome.height(), 36)
+                self.assertLessEqual(toolbar.height(), 46)
+                self.assertGreaterEqual(body.height(), desktop.height() - 155)
+                self.assertGreater(body.width(), 0)
+                self.assertTrue(self.window.update_button.isVisible())
+                self.assertEqual(len(self.window._nav_buttons), 5)
 
     def test_dashboard_gives_remaining_vertical_space_to_telemetry(self):
         from PySide6.QtWidgets import QVBoxLayout

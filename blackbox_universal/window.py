@@ -49,7 +49,7 @@ from .shortcuts import create_shortcut
 from .maintenance import prepare_external_helper
 from .theme import COLORS
 from .chrome_icons import ChromeButton
-from .widgets import DesktopMark, MetricCard, SparkleBorder, TrendChart, WindowPanel
+from .widgets import DesktopMark, MetricCard, TrendChart, WindowPanel
 
 
 def _label(text: str, kind: str = "", wrap: bool = True) -> QLabel:
@@ -73,7 +73,7 @@ def _page() -> tuple[QWidget, QVBoxLayout]:
     widget.setObjectName("pageBody")
     widget.setStyleSheet("QWidget#pageBody { background: transparent; }")
     content = QVBoxLayout(widget)
-    content.setContentsMargins(24, 21, 24, 26)
+    content.setContentsMargins(18, 12, 18, 20)
     content.setSpacing(17)
     content.setAlignment(Qt.AlignmentFlag.AlignTop)
     return widget, content
@@ -188,25 +188,25 @@ class UniversalWindow(QMainWindow):
         desktop.setObjectName("desktop")
         self.setCentralWidget(desktop)
         root = QVBoxLayout(desktop)
-        root.setContentsMargins(17, 8, 17, 8)
-        root.setSpacing(7)
+        root.setContentsMargins(10, 3, 10, 6)
+        root.setSpacing(3)
 
         banner = QHBoxLayout()
-        banner.setSpacing(10)
-        icon = DesktopMark()
+        banner.setSpacing(8)
+        icon = DesktopMark(compact=True)
         banner.addWidget(icon)
         title_col = QVBoxLayout()
         title_col.setSpacing(0)
         title_col.addWidget(_label("BLACK.BOX", "logo", False))
         subtitle = _label("U N I V E R S A L   W O R K S T A T I O N", wrap=False)
-        subtitle.setStyleSheet("color: #d7f5d4; font: 700 10px 'Consolas';")
+        subtitle.setStyleSheet("color: #d7f5d4; font: 700 9px 'Consolas';")
         title_col.addWidget(subtitle)
         banner.addLayout(title_col)
         banner.addStretch()
         banner.addWidget(_label("LOCAL MODE   ●   PRIVATE BY DESIGN",
                                 wrap=False))
         root.addLayout(banner)
-        root.addWidget(SparkleBorder())
+        # No separate sparkle row: return its height to the monitoring workspace.
 
         shell = QFrame()
         shell.setObjectName("shell")
@@ -218,7 +218,7 @@ class UniversalWindow(QMainWindow):
         chrome = QFrame()
         chrome.setObjectName("topChrome")
         header = QHBoxLayout(chrome)
-        header.setContentsMargins(12, 4, 7, 4)
+        header.setContentsMargins(10, 2, 7, 2)
         header.setSpacing(5)
         header.addWidget(_label("BLACK.BOX UNIVERSAL  /  MONITOR.EXE", "chromeTitle", False))
         header.addStretch()
@@ -235,8 +235,8 @@ class UniversalWindow(QMainWindow):
         toolbar = QFrame()
         toolbar.setObjectName("toolbar")
         tl = QHBoxLayout(toolbar)
-        tl.setContentsMargins(11, 4, 12, 4)
-        tl.setSpacing(7)
+        tl.setContentsMargins(9, 2, 10, 2)
+        tl.setSpacing(6)
         file_menu = QMenu(self)
         file_menu.addAction("Save snapshot as JSON…", self._export)
         file_menu.addSeparator()
@@ -244,7 +244,7 @@ class UniversalWindow(QMainWindow):
         help_menu = QMenu(self)
         help_menu.addAction("About / safety notes", self._about)
         for name, menu in (("FILE", file_menu), ("HELP", help_menu)):
-            button = _button(name + "  ▾")
+            button = _button(name + "  ▾", "toolbarMenu")
             button.setMenu(menu)
             tl.addWidget(button)
         tl.addStretch()
@@ -270,7 +270,7 @@ class UniversalWindow(QMainWindow):
         sidebar.setObjectName("sideNav")
         sidebar.setFixedWidth(198)
         side = QVBoxLayout(sidebar)
-        side.setContentsMargins(0, 14, 0, 11)
+        side.setContentsMargins(0, 8, 0, 11)
         side.setSpacing(3)
         brand = _label("  SYSTEM DISK (C:)", wrap=False)
         brand.setStyleSheet("font: bold 11px 'Consolas'; color: #736b7e; padding: 5px;")
@@ -833,7 +833,7 @@ class UniversalWindow(QMainWindow):
             lambda value: self._prefs.setValue("check_updates_at_start", value))
         setting.content.addWidget(self.auto_check)
         content.addWidget(setting)
-        about = WindowPanel("About BLACK.BOX", "v0.4.1")
+        about = WindowPanel("About BLACK.BOX", "v0.4.2")
         about.content.addWidget(_label(
             "A public-domain-independent desktop shell built from original "
             "PySide6 widgets. Inspired by classic desktop window geometry "
