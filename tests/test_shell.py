@@ -103,6 +103,48 @@ class QtShellTests(unittest.TestCase):
         self.default_root.stop()
         self.tmp.cleanup()
 
+    def test_simplified_shell_keeps_file_help_navigation_but_no_start_footer(self):
+        from PySide6.QtWidgets import QFrame, QLabel
+        self.window._set_language("EN")
+        self.assertIsNone(self.window.findChild(QFrame, "taskbar"))
+        self.assertFalse(hasattr(self.window, "clock"))
+        toolbar = self.window.findChild(QFrame, "toolbar")
+        self.assertIsNotNone(toolbar)
+        buttons = [item.text() for item in toolbar.findChildren(QPushButton)]
+        self.assertTrue(any(text.startswith("FILE") for text in buttons))
+        self.assertTrue(any(text.startswith("HELP") for text in buttons))
+        self.assertFalse(any(text.startswith("VIEW") for text in buttons))
+        self.assertEqual(len(self.window._nav_buttons), 5)
+        settings = self.window.stack.widget(self.window._page_ids["settings"])
+        labels = " ".join(item.text() for item in settings.findChildren(QLabel))
+        for removed in ("PRIVACY & SECURITY", "Read-only process counters",
+                        "No code injection or target manipulation",
+                        "No automatic upload or account sign-in",
+                        "Report export only when explicitly requested",
+                        "No administrator privileges requested by this shell",
+                        "PREVIEW / v0.3"):
+            self.assertNotIn(removed, labels)
+        self.assertIn("v0.4.1", labels)
+
+    def test_dashboard_gives_remaining_vertical_space_to_telemetry(self):
+        from PySide6.QtWidgets import QVBoxLayout
+        page = self.window.stack.widget(self.window._page_ids["dashboard"]).widget()
+        layout = page.layout()
+        self.assertIsInstance(layout, QVBoxLayout)
+        self.assertGreater(sum(layout.stretch(i) for i in range(layout.count())), 0)
+        self.assertGreaterEqual(self.window.chart.minimumHeight(), 205)
+
+    def test_maximized_desktop_keeps_normal_window_restore_controls(self):
+        self.window.showMaximized()
+        self.app.processEvents()
+        self.assertTrue(self.window.isMaximized())
+        self.window._toggle_maximized()
+        self.app.processEvents()
+        self.assertFalse(self.window.isMaximized())
+        self.window._toggle_maximized()
+        self.app.processEvents()
+        self.assertTrue(self.window.isMaximized())
+
     def test_five_real_pages_and_classic_three_window_controls(self):
         self.assertEqual(len(self.window.PAGES), 5)
         self.assertEqual(self.window.stack.count(), 5)
