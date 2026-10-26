@@ -209,6 +209,35 @@ class MeasurementIntegrityTests(unittest.TestCase):
                         view.interval()
 
 
+    def test_thread_cpu_ignores_cadence_switch_and_pair_count_is_real(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            origin = time.monotonic_ns()
+            created = time.time()
+            writer = SessionV2Writer(
+                folder, pid=os.getpid(), created=created,
+                name="thread-switch-test", origin_ns=origin)
+            for offset, period, cpu in ((1, 1, 0.), (4, 3, 30.), (5, 3, 31.)):
+                writer.submit("detail", {
+                    "pid": os.getpid(), "created": created,
+                    "time_ns": origin + offset * 1_000_000_000,
+                    "requested_interval_ns": period * 1_000_000_000,
+                    "thread_capture_status": "OK",
+                    "threads": [{"tid": 123, "cpu_user_s": cpu,
+                                 "cpu_system_s": 0.}],
+                })
+            writer.finish("COMPLETED")
+            with SessionView.open(folder) as view:
+                summary = view.thread_summary()
+            self.assertEqual(summary["sample_window"], 3)
+            self.assertEqual(summary["pair_count"], 1)
+            self.assertEqual(summary["segments_without_comparable_pairs"], 1)
+            self.assertEqual(sum(r["observed_pairs"] for r in summary["top_threads"]), 1)
+            self.assertAlmostEqual(sum(r["cpu_seconds"] or 0 for r in
+                                       summary["top_threads"]), 1.0)
+            self.assertAlmostEqual(summary["top_threads"][0]["cpu_percent"], 100.0)
+
+
 class StopDurabilityTests(unittest.TestCase):
     def start_probe(self, root):
         probe = ReadOnlyProbe(Path(root))
