@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "blackbox-core"
-version = "0.4.0"
+version = "0.4.1"
 description = "Local-first, read-only process observation and evidence reports"
 readme = "README.md"
 requires-python = ">=3.11"

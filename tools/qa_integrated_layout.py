@@ -64,8 +64,13 @@ def capture_integrated_layout(window, app, output: Path, scale: str) -> None:
                         button.width() < text_width + 40):
                     failures.append([language, "menu", str(source_key), "CLIPPED_MENU_LABEL"])
             result.setdefault("menus", {})[language] = menu_rows
-            if len(menu_rows) < 3:
-                failures.append([language, "menu", "MISSING_MENU"])
+            # The v0.4.1 shell intentionally has FILE and HELP only. Keep
+            # both menu availability and geometry assertions; removing VIEW
+            # must not be mistaken for a missing navigation control.
+            menu_roles = [row["source"].split()[0] for row in menu_rows]
+            if menu_roles != ["FILE", "HELP"]:
+                failures.append([language, "menu", menu_roles,
+                                 "EXPECTED_FILE_HELP_ONLY"])
             scroll = window.stack.currentWidget()
             if not isinstance(scroll, QScrollArea):
                 raise RuntimeError("INTEGRATED_REPORT_SCROLL_MISSING")

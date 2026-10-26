@@ -5,13 +5,15 @@
 [**Download latest published Windows x64 release**](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/releases/latest) · [Releases](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/releases) · [Русская версия](README.ru.md)
 
 [![Windows/Linux QA](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/actions/workflows/shell-qa.yml/badge.svg?branch=main)](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/actions/workflows/shell-qa.yml)
-![Development version](https://img.shields.io/badge/source-0.4.0%20candidate-40766c) ![Windows](https://img.shields.io/badge/platform-Windows%20x64-40766c) ![MIT](https://img.shields.io/badge/license-MIT-40766c)
+![Development version](https://img.shields.io/badge/source-0.4.1-40766c) ![Windows](https://img.shields.io/badge/platform-Windows%20x64-40766c) ![MIT](https://img.shields.io/badge/license-MIT-40766c)
 
-**Build version: v0.4.0.** The [official latest release](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/releases/latest) is the authority for public availability; source builds, draft PRs and CI artifacts are not automatically delivered as updates. A running v0.3.6 installation can find v0.4.0 only after its verified higher-version release has actually been published.
+**Source version: v0.4.1.** Only the [official latest GitHub Release](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/releases/latest) determines what can be downloaded or installed by the updater. A source branch or CI artifact does not automatically become an update.
 
 BLACK.BOX Universal lets you **select a running process or choose an application file**. It records operating-system measurements from a running process and saves sessions as local SQLite, JSON, and HTML files. File selection itself only reads file metadata. It does not inject code, modify the target program, or require a service, account, cloud server, subscription, or separately installed Python.
 
 > **Important:** BLACK.BOX provides observational evidence, not proof of an application's internal root cause. High CPU, rising memory, or a process exiting do not, on their own, establish why it failed.
+
+**v0.4.1 desktop:** The window starts maximized but can be restored or resized. The decorative START footer and redundant VIEW menu are removed; the telemetry chart uses the available vertical area. Privacy/security details remain in this README rather than occupying space in Settings.
 
 ## Download and first run
 
@@ -148,30 +150,8 @@ The original source is available under [MIT](LICENSE). Packaged dependencies, in
 
 To report a problem, [open an issue](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/issues) with your BLACK.BOX version, Windows version, reproduction steps, and only **non-sensitive** report excerpts.
 
-### BB-DI-001 development branch (Draft PR #17, not a release)
+### Integrated diagnostics and scope
 
-New recordings also write a normalized `session-v2.sqlite3` with a bounded owner
-writer. Reports → Load recorded session/Open saved session reads the whole
-selected interval, with peak/gap preserving zoom/pan/A-B tracks. Processes and
-Events show persisted history and cumulative TID CPU for the selected range.
-Export selected interval offers offline JSON/HTML/CSV/events, checksums and an
-explicit optional ZIP; identifiers and notes are off by default. Old sessions
-open read-only and retain their original hashes.
+BLACK.BOX includes Standard, Detailed and incident-burst observations, persisted process/thread histories, local interval analysis and optional native Windows/WCT, ETW, EventPipe and minidump sources. Additional capture is explicitly controlled; recorded counters do not prove an internal root cause. Session files and local evidence are not uploaded automatically.
 
-Overview can opt into actual Windows HWND timeout observations and async WCT.
-Missing GUI is NOT_APPLICABLE; denied/unsupported WCT is explicit, not a fake
-chain. No titles, mutex names, privilege changes or ETW are collected. Settings
-lets users configure the CPU trigger threshold/duration. CPU 100% is one logical
-CPU; sustained load and memory growth do not prove a defect.
-
-Real-process QA: `python app.py --deep-smoke --qa-output <owned-output-dir>`
-drives three actions, actual TID CPU, an auto incident, selected-range analysis
-and privacy-selected exports. CI runs it in Python and the actual frozen EXE
-without Python on PATH. This does not certify all BB-DI-001 criteria: ETW, full
-resource repeat comparison/incident cards, full async stop, 8h/1h endurance and
-physical Windows 10/11 acceptance remain outstanding. See `docs/ADR-01*` through
-`ADR-04*` and `docs/BB_DI_001_IMPLEMENTATION_STATUS.md`.
-
-### Integrated research development patch — Draft PR #17 continuation
-
-The development branch adds an isolated recording owner, a verified application-preparation wizard, source-linked evidence, repeat statistics and portable investigation packages. Reports exposes explicit Windows/WCT snapshots, minidumps, named WPR, optional local EventPipe and offline symbol/dump tools. Overview retains continuous HWND/WCT; these controls are forwarded to the same isolated owner. Raw sources are opt-in and limitations remain visible. See [implementation and acceptance](docs/RESEARCH_PRODUCT_IMPLEMENTATION.md). This is separate from the published v0.3.6 release.
+The v0.4.1 patch refines desktop layout only: it does **not** add an automatic detective, new system collectors or higher sampling overhead. Physical Windows 10/11, assistive technology, antivirus/OneDrive and the full 128-point diagnostic acceptance remain separate validations. See [implementation status](docs/BB_DI_001_IMPLEMENTATION_STATUS.md) and [research scope](docs/RESEARCH_PRODUCT_IMPLEMENTATION.md).

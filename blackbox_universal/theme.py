@@ -55,11 +55,6 @@ QFrame#toolbar {
     border: 0;
     border-bottom: 1px solid #a99c9b;
 }
-QFrame#taskbar {
-    background: #c8c6bf;
-    border-top: 2px solid #fffdf1;
-    border-bottom: 2px solid #302c43;
-}
 QFrame#card, QFrame#paperCard {
     background: #fffaf0;
     border: 2px solid #302c43;
@@ -84,7 +79,6 @@ QLabel#caption { color: #77718a; font-size: 11px; }
 QLabel#cardTitle { color: #70677f; font-size: 11px; font-weight: 800; }
 QLabel#metricValue { color: #302c43; font-size: 25px; font-weight: 900; }
 QLabel#logo { color: #fff7e4; font-size: 19px; font-weight: 900; letter-spacing: 1px; }
-QLabel#taskText { color: #302c43; font-family: "Consolas", monospace; font-size: 11px; }
 QLabel#signal { color: #046e64; font-weight: 800; }
 QPushButton {
     min-height: 29px;

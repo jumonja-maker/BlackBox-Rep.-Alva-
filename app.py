@@ -80,7 +80,9 @@ def main(argv: list[str] | None = None) -> int:
     window = UniversalWindow(isolated=True,
         output_root=(options.research_e2e or options.qa_output) / "sessions" if (options.research_e2e or options.deep_smoke) else None,
         allow_update_check=not (options.smoke or options.research_e2e or options.deep_smoke))
-    window.show()
+    # Native Windows starts maximized, while retaining the normal window frame,
+    # minimize/restore and user resizing (not exclusive fullscreen mode).
+    window.showMaximized()
     if options.deep_smoke:
         if options.qa_output is None:
             parser.error("--deep-smoke requires --qa-output")
