@@ -70,7 +70,10 @@ def _button(text: str, kind: str = "") -> QPushButton:
 
 def _page() -> tuple[QWidget, QVBoxLayout]:
     widget = QWidget()
-    widget.setStyleSheet("background: transparent;")
+    # A declaration without a selector also styles every descendant, including
+    # popup rows. Keep the page transparent without erasing their highlights.
+    widget.setObjectName("pageBody")
+    widget.setStyleSheet("QWidget#pageBody { background: transparent; }")
     content = QVBoxLayout(widget)
     content.setContentsMargins(24, 21, 24, 26)
     content.setSpacing(17)
@@ -261,7 +264,8 @@ class UniversalWindow(QMainWindow):
         shell_layout.addWidget(toolbar)
 
         body = QWidget()
-        body.setStyleSheet("background: #fff7e4;")
+        body.setObjectName("shellBody")
+        body.setStyleSheet("QWidget#shellBody { background: #fff7e4; }")
         body_layout = QHBoxLayout(body)
         body_layout.setContentsMargins(0, 0, 0, 0)
         body_layout.setSpacing(0)
@@ -317,7 +321,8 @@ class UniversalWindow(QMainWindow):
         body_layout.addWidget(sidebar)
 
         self.stack = QStackedWidget()
-        self.stack.setStyleSheet("background: #fff7e4;")
+        self.stack.setObjectName("pageStack")
+        self.stack.setStyleSheet("QStackedWidget#pageStack { background: #fff7e4; }")
         body_layout.addWidget(self.stack, 1)
         builders = (
             ("dashboard", self._build_dashboard),
@@ -764,7 +769,7 @@ class UniversalWindow(QMainWindow):
         self.investigation_table.horizontalHeader().setSectionResizeMode(
             1, QHeaderView.ResizeMode.ResizeToContents)
         self.investigation_table.horizontalHeader().setSectionResizeMode(
-            2, QHeaderView.ResizeMode.Stretch)
+            2, QHeaderView.ResizeMode.ResizeToContents)
         self.investigation_table.setSelectionBehavior(
             QAbstractItemView.SelectionBehavior.SelectRows)
         self.investigation_table.setSelectionMode(
@@ -2427,8 +2432,8 @@ class UniversalWindow(QMainWindow):
         if self._update_worker is not None and self._update_worker.isRunning():
             event.ignore()
             QMessageBox.information(
-                self, "BLACK.BOX Universal",
-                self._t("Finish the current update before closing."))
+                self, "BLACK.BOX Universal", self._t(
+                    "Finish the current update before closing."))
             return
         if self.probe.active:
             self._pending_close = True
