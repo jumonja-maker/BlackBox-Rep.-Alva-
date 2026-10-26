@@ -35,8 +35,13 @@ def available_processes(limit: int = 500) -> list[dict]:
     process unselectable, even with an exact PID query. Never silently drop
     discovered targets; limit the expensive RSS/status inspection instead.
     """
-    if type(limit) is not int or not 1 <= limit <= 5000:
+    # Legacy callers pass limit=10000. It is a *requested* inspection
+    # budget, never permission to perform 10,000 costly psutil probes.
+    # Preserve the old public API while capping actual RAM/status lookups;
+    # process names and PIDs remain searchable beyond the inspection budget.
+    if type(limit) is not int or not 1 <= limit <= 10000:
         raise ValueError("INVALID_PROCESS_DETAIL_LIMIT")
+    inspection_budget = min(limit, 500)
     try:
         import psutil
     except ImportError:
@@ -44,7 +49,7 @@ def available_processes(limit: int = 500) -> list[dict]:
     rows: list[dict] = []
     discovered = sorted(list_processes(), key=lambda row: (row["name"].casefold(), row["pid"]))
     for index, item in enumerate(discovered):
-        if index < limit:
+        if index < inspection_budget:
             try:
                 proc = psutil.Process(item["pid"])
                 memory = proc.memory_info()

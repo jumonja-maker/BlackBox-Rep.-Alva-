@@ -208,6 +208,13 @@ class DiagnosticTruthRegressions(unittest.TestCase):
             factory.return_value.status.return_value = "running"
             rows = available_processes(limit=3)
             self.assertEqual(factory.call_count, 3)
+            # Compatibility with the pre-audit call in tests/test_shell.py:
+            # requesting 10,000 must not trigger 10,000 costly RSS reads.
+            factory.reset_mock()
+            large_limit_rows = available_processes(limit=10000)
+            self.assertEqual(len(large_limit_rows), 504)
+            self.assertEqual(factory.call_count, 500)
+            self.assertEqual(large_limit_rows[-1]["status"], "not sampled")
         self.assertEqual(len(rows), 504)
         self.assertEqual(rows[-1]["pid"], 900000)
         self.assertIsNone(rows[-1]["rss_mb"])
