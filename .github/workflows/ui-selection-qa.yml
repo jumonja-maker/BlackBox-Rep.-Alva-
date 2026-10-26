@@ -1,0 +1,77 @@
+name: BLACK.BOX UI selection contrast
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: blackbox-popup-qa-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  popup:
+    name: Popup contrast / ${{ matrix.platform }}
+    runs-on: windows-latest
+    timeout-minutes: 12
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [windows, offscreen]
+    env:
+      PYTHONUTF8: '1'
+      QT_QPA_PLATFORM: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+      - name: Install current application and test dependencies
+        shell: pwsh
+        run: |
+          python -m pip install -r requirements.txt
+          if ($LASTEXITCODE -ne 0) { throw 'Dependency installation failed' }
+          python -m pip install -e .
+          if ($LASTEXITCODE -ne 0) { throw 'Application installation failed' }
+      - name: Test palette, rendered popup, keyboard and disabled actions
+        run: python -m unittest discover -s tests -p test_selection_contrast.py -v
+      - uses: actions/checkout@v4
+        with:
+          ref: 03df9cc874a310f46a4724b3b813e03898dc532a
+          path: baseline-source
+          persist-credentials: false
+      - name: Reproduce original unreadable popup without changing its code
+        shell: pwsh
+        run: |
+          $env:QT_SCALE_FACTOR = '1'
+          python tools/qa_popup_contrast.py --source-root baseline-source --output popup-qa/baseline --expect-baseline-failure
+          if ($LASTEXITCODE -ne 0) { throw 'Original popup failure not reproduced as expected' }
+      - name: Verify production popup hover and keyboard selection at 100-200 percent
+        shell: pwsh
+        run: |
+          foreach ($scale in @('1', '1.25', '1.5', '2')) {
+            $env:QT_SCALE_FACTOR = $scale
+            python tools/qa_popup_contrast.py --output "popup-qa/scale-$scale"
+            if ($LASTEXITCODE -ne 0) { throw "Popup acceptance failed at scale $scale" }
+          }
+      - name: Preserve exact source identity and limitations
+        if: always()
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force popup-qa | Out-Null
+          git rev-parse HEAD | Out-File -Encoding utf8 popup-qa/source-sha.txt
+          'Hosted Windows UI tests; not physical Win10/11, accessibility or full BB-DI-001 acceptance.' | Out-File -Encoding utf8 popup-qa/limits.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: BLACKBOX-POPUP-${{ matrix.platform }}-${{ github.run_id }}
+          path: popup-qa/
+          if-no-files-found: error
+          retention-days: 14
