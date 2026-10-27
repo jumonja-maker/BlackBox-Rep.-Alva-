@@ -243,6 +243,10 @@ class DecoderPanel(QWidget):
             self._table_headers()
             self.rows = page["rows"]
             self.table.setRowCount(len(self.rows))
+            # Never carry a selected QTableWidget row across result sets.
+            # If selection remains, selecting that same row later emits no
+            # change signal and keeps the generic summary instead of details.
+            self.table.clearSelection()
             for i, item in enumerate(self.rows):
                 row = item["event"]
                 if mode == "cpu_stacks":
