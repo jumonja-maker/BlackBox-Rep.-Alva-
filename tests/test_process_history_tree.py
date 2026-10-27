@@ -17,7 +17,7 @@ from blackbox_core.session_view import SessionReadError, SessionView
 from test_investigation_v2 import ORIGIN, observation
 
 
-def recorded_tree(folder):
+def recorded_tree(folder, *, finish_timeout=25):
     writer = SessionV2Writer(folder, pid=123, created=1., name="TEST_ONLY_ROOT", origin_ns=ORIGIN)
     for n in range(1, 4):
         row = observation(n)
@@ -34,7 +34,7 @@ def recorded_tree(folder):
     # release its WAL/filesystem handles under antivirus/IO contention.
     # Wait for the REAL owner to close; never fabricate a committed result.
     try:
-        writer.finish("COMPLETED", timeout=25)
+        writer.finish("COMPLETED", timeout=finish_timeout)
     except ObserverError as exc:
         # Preserve a genuine storage error with its writer-origin reason.
         # Reap the owner before TemporaryDirectory attempts Windows deletion.
@@ -56,6 +56,7 @@ class ProcessHistoryTreeTests(unittest.TestCase):
 
     def test_real_sqlite_writer_delayed_beyond_five_seconds_finishes_with_real_rows(self):
         # Reproduce hosted Windows full-sync startup delay, without mocking
+        # Extension to 75s is limited to this QA fixture, not production.
         # committed evidence or changing the production five-second barrier.
         from threading import Event, Thread
         from unittest.mock import patch
@@ -73,7 +74,7 @@ class ProcessHistoryTreeTests(unittest.TestCase):
             folder = Path(temp)
             def exercise():
                 try:
-                    recorded_tree(folder)
+                    recorded_tree(folder, finish_timeout=75)
                 except BaseException as exc:
                     errors.append(exc)
             with patch.object(SessionV2Writer, "_initialize", delayed_initialize):
@@ -86,7 +87,7 @@ class ProcessHistoryTreeTests(unittest.TestCase):
                     self.assertTrue(runner.is_alive())
                 finally:
                     release.set()
-                    runner.join(timeout=30)
+                    runner.join(timeout=90)
                 self.assertFalse(runner.is_alive(), "QA_FIXTURE_OWNER_NOT_REAPED")
                 self.assertEqual(errors, [], repr(errors))
             with closing(sqlite3.connect(folder / FILENAME)) as db:

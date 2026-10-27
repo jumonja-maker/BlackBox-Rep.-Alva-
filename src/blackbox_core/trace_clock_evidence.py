@@ -91,18 +91,27 @@ def capture_trace_clock_bracket():
 
 
 def assess_trace_capture_journal(index_path, journal_path):
-    """Review a hash-linked capture journal without claiming synchronization.
+    """Review all capture stages without claiming clock synchronization.
 
-    Matching unsigned local JSON is *weak provenance*, not a clock binding.
-    The source trace and session files are never modified.
+    The journal is editable. Coarse elapsed-time checks can REJECT discordant
+    clocks, but even coherent records cannot attest origin, drift, or a
+    relation to session-v2's independent monotonic timeline.
     """
     from .decoder_index import read_index
     from .trace_owner import _read
 
     summary = read_index(index_path, mode="events", limit=1)["summary"]
-    data = _read(journal_path)
+    raw = _read(journal_path)
+    document_ok = isinstance(raw, dict)
+    data = raw if document_ok else {}
     source = data.get("source")
     fmt = summary.get("format")
+    stages_by_source = {
+        "ETW_WPR": ("before_tool_start", "after_tool_start",
+                    "before_tool_stop", "after_tool_stop"),
+        "EVENTPIPE_DOTNET_TRACE": ("before_tool_spawn",
+                                   "after_tool_spawn", "after_tool_exit"),
+    }
     expected_format = {"ETW_WPR": ".etl",
                        "EVENTPIPE_DOTNET_TRACE": ".nettrace"}.get(source)
     common = {
@@ -116,6 +125,8 @@ def assess_trace_capture_journal(index_path, journal_path):
     def response(status, **other):
         return {**common, "status": status, **other}
 
+    if not document_ok:
+        return response("INVALID_CAPTURE_JOURNAL")
     if expected_format is None or fmt != expected_format:
         return response("JOURNAL_AND_TRACE_SOURCE_MISMATCH")
     if data.get("state") != "COMPLETED" or not isinstance(data.get("result"), dict):
@@ -126,21 +137,22 @@ def assess_trace_capture_journal(index_path, journal_path):
         return response("CAPTURE_DIGEST_UNAVAILABLE")
     if digest != summary.get("input_sha256"):
         return response("JOURNAL_TRACE_HASH_MISMATCH")
+
     anchors = data.get("clock_anchors")
     if not isinstance(anchors, dict):
         return response("QPC_ANCHORS_NOT_RECORDED")
-    names = (("before_tool_start", "after_tool_stop") if source == "ETW_WPR"
-             else ("before_tool_spawn", "after_tool_exit"))
-    first, last = (anchors.get(name) for name in names)
+    names = stages_by_source[source]
+    items = [anchors.get(name) for name in names]
+    # First/last alone do not establish that startup, capture and shutdown
+    # were measured. Missing/wide intermediate stages must fail closed.
     if not all(isinstance(item, dict) and
                item.get("schema") == SCHEMA and
                item.get("status") == "BRACKET_OBSERVED_UNVERIFIED"
-               for item in (first, last)):
+               for item in items):
         return response("QPC_ANCHORS_INCOMPLETE_OR_UNRELIABLE")
-    # Strictly validate every numeric field with the exact same pure builder.
     try:
         validated = []
-        for item in (first, last):
+        for item in items:
             check = bracket(item["qpc_before_ticks"], item["qpc_after_ticks"],
                             item["qpc_frequency_hz"], item["monotonic_before_ns"],
                             item["monotonic_after_ns"], item["sampled_utc_ns"],
@@ -150,26 +162,48 @@ def assess_trace_capture_journal(index_path, journal_path):
             validated.append(check)
     except (ValueError, KeyError, TypeError):
         return response("INVALID_QPC_ANCHOR_CONTRACT")
-    before, after = validated
-    if (before["qpc_frequency_hz"] != after["qpc_frequency_hz"] or
-            before["owner_pid"] != after["owner_pid"]):
+
+    if (len({item["owner_pid"] for item in validated}) != 1 or
+            len({item["qpc_frequency_hz"] for item in validated}) != 1):
         return response("INCONSISTENT_CAPTURE_OWNER_OR_QPC_FREQUENCY")
-    if (before["qpc_after_ticks"] > after["qpc_before_ticks"] or
-            before["monotonic_after_ns"] > after["monotonic_before_ns"] or
-            before["sampled_utc_ns"] > after["sampled_utc_ns"]):
-        return response("NONMONOTONIC_CAPTURE_CLOCK_ANCHORS")
+    freq = validated[0]["qpc_frequency_hz"]
+    for before, after in zip(validated, validated[1:]):
+        if (before["qpc_after_ticks"] > after["qpc_before_ticks"] or
+                before["monotonic_after_ns"] > after["monotonic_before_ns"] or
+                before["sampled_utc_ns"] > after["sampled_utc_ns"]):
+            return response("NONMONOTONIC_CAPTURE_CLOCK_ANCHORS")
+
+        # These intervals conservatively bound elapsed time between separate
+        # probes. Intersection is a necessary check, not a clock calibration.
+        qpc_low_ns = ((after["qpc_before_ticks"] - before["qpc_after_ticks"])
+                      * 1_000_000_000) // freq
+        qpc_high_ns = (((after["qpc_after_ticks"] - before["qpc_before_ticks"])
+                        * 1_000_000_000 + freq - 1) // freq)
+        mono_low_ns = after["monotonic_before_ns"] - before["monotonic_after_ns"]
+        mono_high_ns = after["monotonic_after_ns"] - before["monotonic_before_ns"]
+        if (qpc_high_ns + 50_000_000 < mono_low_ns or
+                mono_high_ns + 50_000_000 < qpc_low_ns):
+            return response("QPC_MONOTONIC_ELAPSED_DISAGREEMENT")
+        utc_elapsed_ns = after["sampled_utc_ns"] - before["sampled_utc_ns"]
+        if (utc_elapsed_ns + 1_000_000_000 < qpc_low_ns or
+                utc_elapsed_ns - 1_000_000_000 > qpc_high_ns):
+            return response("UTC_QPC_ELAPSED_DISAGREEMENT")
+
+    first, last = validated[0], validated[-1]
     return response(
         "HASH_MATCHED_QPC_BRACKETS_UNVERIFIED",
         clock_anchor_evidence="CAPTURE_SIDE_ONLY_NOT_TRACE_TIME_ALIGNMENT",
-        before_tool={key:before[key] for key in
+        clock_progression_quality="COARSE_CHECKS_PASSED_UNVERIFIED_NOT_CALIBRATED",
+        checked_clock_stages=list(names),
+        before_tool={key: first[key] for key in
                      ("qpc_before_ticks", "qpc_after_ticks",
                       "monotonic_before_ns", "monotonic_after_ns",
                       "sampled_utc_ns")},
-        after_tool={key:after[key] for key in
+        after_tool={key: last[key] for key in
                     ("qpc_before_ticks", "qpc_after_ticks",
                      "monotonic_before_ns", "monotonic_after_ns",
                      "sampled_utc_ns")},
-        qpc_frequency_hz=before["qpc_frequency_hz"],
-        qpc_tick_span_from_capture_brackets=(after["qpc_after_ticks"] -
-                                             before["qpc_before_ticks"]),
+        qpc_frequency_hz=freq,
+        qpc_tick_span_from_capture_brackets=(last["qpc_after_ticks"] -
+                                             first["qpc_before_ticks"]),
     )

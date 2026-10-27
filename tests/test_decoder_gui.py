@@ -222,6 +222,14 @@ class DecoderGuiTests(unittest.TestCase):
         document = {"source": "ETW_WPR", "state": "COMPLETED",
                     "result": {"sha256": "a"*64},
                     "clock_anchors": {"before_tool_start": before,
+                                      "after_tool_start": bracket(
+                                          12_000_000, 12_000_100, 10_000_000,
+                                          5_200_000_000, 5_200_010_000,
+                                          1_800_000_000_200_000_000, pid=1234),
+                                      "before_tool_stop": bracket(
+                                          18_000_000, 18_000_100, 10_000_000,
+                                          5_800_000_000, 5_800_010_000,
+                                          1_800_000_000_800_000_000, pid=1234),
                                       "after_tool_stop": after}}
         journal.write_text(json.dumps(document), encoding="utf-8")
         for lang in ("EN", "RU"):

@@ -26,8 +26,10 @@ service, automatic investigation, or change to the ordinary sampling cadence.
   `.etl`/`.nettrace`, the user may select the corresponding
   `*.trace.json` journal. BLACK.BOX checks that the decoder and
   journal agree on source format and SHA-256, that capture completed,
-  and that first/last native QPC and monotonic brackets are
-  structurally consistent.
+  and that **all required capture stages** have valid QPC/monotonic
+  brackets, consistent owner and frequency, ordered observations and no
+  gross QPC/monotonic or UTC elapsed-time disagreement. Missing middle
+  stages fail closed; the checks do **not** certify calibrated clocks.
 - A successful review is named
   `HASH_MATCHED_QPC_BRACKETS_UNVERIFIED`, **not `CLOCK_SYNCED`**.
   Every review (even the positive case) reports
@@ -59,9 +61,11 @@ service, automatic investigation, or change to the ordinary sampling cadence.
 
 ## Validation / Регрессионные тесты
 
-- `tests/test_trace_clock_evidence.py`: 7 adversarial fixtures
-  (bracket width, bool/negative/overflow, hash mismatch, missing/modified
-  clocks, source type mismatch, non-monotonic anchors, unsupported OS).
+- `tests/test_trace_clock_evidence.py`: adversarial fixtures for
+  missing/modified intermediate stages, malformed JSON root, coarse QPC versus
+  monotonic/UTC disagreement, source mismatch, non-monotonic anchors, unsupported
+  OS, and a complete EventPipe chain. Negative evidence rejects alignment;
+  agreement is never attestation.
 - `tests/test_trace_guardian.py`: ownership guardian really records
   labelled clock brackets during a synthetic capture without causing
   target/recorder side effects.
@@ -72,6 +76,9 @@ service, automatic investigation, or change to the ordinary sampling cadence.
   disabled review when a replacement trace fails.
 - `tests/test_decoder_index.py`: reject malformed signed QPC strings
   from untrusted intermediate JSONL; no partial index is published.
+- `tests/test_process_history_tree.py`: the intentionally delayed SQLite writer
+  QA fixture has a longer **test-only** completion deadline; production's
+  five-second durability barrier and fail-closed status remain unchanged.
 - Existing Windows/Linux/PySide6 and portable EXE suites remain mandatory.
   An Actions runner is NOT independent physical Windows 10/11, sensor
   calibration, signed provenance or full acceptance of runtime clocks.
