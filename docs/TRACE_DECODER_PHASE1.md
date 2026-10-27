@@ -1,5 +1,9 @@
 # BLACK.BOX Trace Decoder — phase 1, MAIN development build
 
+**Historical phase-1 contract.** Current MAIN development uses decoder-index/2
+for derived CPU-sample stack groups and GC generation statistics. See
+[Phase 2](TRACE_DECODER_PHASE2.md). This is not an official Release.
+
 This is a development patch, NOT an official new release. The owner explicitly
 requested direct MAIN delivery and no release/tag without a separate command.
 The existing manual release gate remains unchanged and is not dispatched.

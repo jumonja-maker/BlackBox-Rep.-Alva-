@@ -13,6 +13,8 @@ BLACK.BOX Universal lets you **select a running process or choose an application
 
 > **Important:** BLACK.BOX provides observational evidence, not proof of an application's internal root cause. High CPU, rising memory, or a process exiting do not, on their own, establish why it failed.
 
+**MAIN-only Trace Decoder (not in the published v0.4.2 Release):** The sixth page decodes offline ETL, EventPipe and BLACK.BOX JSONL using Microsoft TraceEvent plus a local SQLite adapter. Phase 2 adds **actual CPU profiler Thread/Sample stack groups** and **GC pair statistics by CLR instance/generation**, strictly separated from arbitrary event-associated stacks. Sample counts are not CPU%, GC elapsed is not an application pause, and trace clocks are not aligned to saved sessions. [Phase 2 engineering contract](docs/TRACE_DECODER_PHASE2.md). Download a green main CI Windows portable artifact to test; the Release ZIP remains v0.4.2 without this development feature.
+
 **v0.4.2 desktop:** The turquoise banner and monitor icon are compact, the decorative sparkle row is gone, and the FILE/HELP toolbar uses less height. The chart, Current Session and other pages begin higher on screen; normal Windows window controls remain. CI measures the actual workspace start at full and minimum window sizes in RU/EN, with Windows offscreen DPI captures at 100–200%. This is layout-only: evidence collection and recording behavior are unchanged.
 
 **v0.4.1 desktop:** The window starts maximized but can be restored or resized. The decorative START footer and redundant VIEW menu are removed; the telemetry chart uses the available vertical area. Privacy/security details remain in this README rather than occupying space in Settings.
@@ -25,12 +27,13 @@ BLACK.BOX Universal lets you **select a running process or choose an application
 4. If you chose an EXE, click **Find Running EXE** to attach to an already running instance, or **Launch Selected EXE** and explicitly approve starting the file. Then go to **Overview**, click **Start**, interact with the application, and click **Stop**.
 5. In **Reports**, examine the recorded data, open the saved HTML, export a snapshot, or compare two sessions.
 
-**Why two EXE files?**
+**Which EXE files are in the current MAIN development build?**
 
 | File | Purpose |
 | --- | --- |
 | `BLACK.BOX-Universal.exe` | Main application. **Launch this one.** |
 | `BLACK.BOX-Maintenance.exe` | Helps update or remove the portable application after the main EXE closes. Usually runs automatically. |
+| `decoder/BLACK.BOX-Decoder.exe` | Optional offline ETW/EventPipe decoder, packaged with its .NET runtime in MAIN CI artifacts. The app launches it when needed; **do not launch manually**. This file is not part of the published v0.4.2 ZIP. |
 
 Keep the entire `_internal` folder and the other extracted files. The main EXE is **not** a standalone file you can copy out of the portable folder.
 

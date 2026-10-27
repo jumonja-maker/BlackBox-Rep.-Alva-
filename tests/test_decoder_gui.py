@@ -133,6 +133,55 @@ class DecoderGuiTests(unittest.TestCase):
         self.assertEqual(panel.table.rowCount(), 1)
         self.assertIn("beta", panel.table.item(0, 4).text())
 
+    def test_cpu_profiler_and_gc_generation_views_keep_semantic_units_and_language(self):
+        from blackbox_core.decoder_index import PROTOCOL, build_index
+        from blackbox_core.decoder_profiles import SAMPLE_PROVIDER, SAMPLE_EVENT
+
+        rows = [
+            {"type": "header", "protocol": PROTOCOL, "input_sha256": "a"*64},
+            {"type": "event", "ordinal": 1, "time_ms": 1., "pid": 87, "tid": 42,
+             "process_instance": 2, "provider": SAMPLE_PROVIDER, "name": SAMPLE_EVENT,
+             "payload": {}, "frames": [{"address": "0x1234", "name": "TEST_Leaf"}],
+             "stack_status": "RECORDED_ADDRESSES_OFFLINE_NAMES", "semantic": None},
+            {"type": "event", "ordinal": 2, "time_ms": 2., "pid": 87, "tid": 42,
+             "process_instance": 2, "provider": "Microsoft-Windows-DotNETRuntime", "name": "GC/Start",
+             "payload": {}, "frames": [],
+             "semantic": {"kind": "gc_start", "runtime": 1, "number": 3,
+                          "generation": 2, "gc_type": "Blocking"}},
+            {"type": "event", "ordinal": 3, "time_ms": 4., "pid": 87, "tid": 42,
+             "process_instance": 2, "provider": "Microsoft-Windows-DotNETRuntime", "name": "GC/Stop",
+             "payload": {}, "frames": [],
+             "semantic": {"kind": "gc_stop", "runtime": 1, "number": 3}},
+            {"type": "footer", "protocol": PROTOCOL, "rows": 3, "status": "DECODED"}]
+        source = Path(self.temp.name) / "audit-typed.jsonl"
+        source.write_text("".join(json.dumps(x) + "\n" for x in rows), encoding="utf-8")
+        target = Path(self.temp.name) / "audit-typed.sqlite3"
+        panel = self.window.decoder_panel
+        panel.index = target
+        panel.summary = build_index(source, target, input_sha256="a"*64, format_name=".nettrace")
+        panel.state = "decoded"
+        self.window._navigate("decoder")
+        for language in ("EN", "RU"):
+            self.window._set_language(language)
+            index = panel.mode.findData("cpu_stacks")
+            self.assertGreaterEqual(index, 0)
+            panel.mode.setCurrentIndex(index)
+            panel.pid.setValue(87)
+            panel.apply_button.click()
+            self.assertEqual(panel.table.rowCount(), 1)
+            self.assertEqual(panel.table.horizontalHeaderItem(1).text(), "SAMPLES")
+            self.assertEqual(panel.table.item(0, 1).text(), "1")
+            self.assertIn("TEST_Leaf", panel.table.item(0, 4).text())
+            panel.table.selectRow(0)
+            self.assertIn("EVENT_OCCURRENCES_NOT_CPU_TIME_OR_CPU_PERCENT",
+                          panel.details.toPlainText())
+            panel.mode.setCurrentIndex(panel.mode.findData("gc_summary"))
+            panel.apply_button.click()
+            self.assertEqual(panel.table.rowCount(), 1)
+            self.assertEqual(panel.table.horizontalHeaderItem(1).text(), "PAIRS")
+            self.assertIn("Gen2", panel.table.item(0, 4).text())
+            self.assertIn("NOT_PAUSE", panel.table.item(0, 4).text())
+
     def test_close_cancels_and_drains_worker_without_qthread_destruction(self):
         def blocked(*args, cancel, **kwargs):
             if not cancel.wait(5):

@@ -49,8 +49,43 @@ def main():
     require(meta["status"] == "DECODED", "REAL_NETTRACE_NOT_COMPLETELY_PARSED")
     require(meta["gc"]["gc_pairs"] >= 12, "REAL_GC_PAIRS_MISSING")
     require(meta["events_with_stacks"] > 0, "REAL_RECORDED_STACKS_MISSING")
+    # GC allocation event stacks are NOT sampled CPU stacks. Require actual
+    # Microsoft-DotNETCore-SampleProfiler Thread/Sample and reconcile counts.
+    profiles = meta.get("profiles", {})
+    require(profiles.get("cpu_profiler_samples_recorded", 0) > 0,
+            "REAL_CPU_PROFILER_SAMPLES_MISSING")
+    require(profiles.get("cpu_stack_groups_indexed", 0) > 0,
+            "REAL_CPU_STACK_PROFILE_MISSING")
+    require(profiles["cpu_profiler_samples_with_stacks"] > 0,
+            "REAL_CPU_STACK_FRAMES_MISSING")
+    require(profiles["gc_summary_groups"] > 0, "REAL_GC_AGGREGATES_MISSING")
+    require(profiles["cpu_sample_interval_and_cpu_percent"] == "NOT_ESTABLISHED",
+            "CPU_SAMPLE_COUNT_MISLABELLED_AS_CPU_TIME")
+    sample_page = read_index(index, mode="cpu_stacks", limit=1)
+    require(sample_page["rows"] and
+            sample_page["rows"][0]["event"]["recorded_sample_count"] > 0,
+            "REAL_CPU_STACK_GROUP_UNREADABLE")
+    gc_page = read_index(index, mode="gc_summary")
+    require(any(r["event"]["kind"] == "GC_ELAPSED_NOT_PAUSE" and
+                r["event"]["is_application_pause"] is False
+                for r in gc_page["rows"]), "REAL_GC_ELAPSED_NOT_PAUSE_MISSING")
     require(file_hash(trace) == digest, "INPUT_TRACE_WAS_MODIFIED")
     with closing(sqlite3.connect(index)) as db:
+        observed_profiler = db.execute(
+            "SELECT count(*) FROM events WHERE provider='Microsoft-DotNETCore-SampleProfiler' "
+            "AND name='Thread/Sample'").fetchone()[0]
+        grouped_profiler = db.execute(
+            "SELECT coalesce(sum(sample_count),0) FROM stack_profiles").fetchone()[0]
+        paired_gc_intervals = db.execute(
+            "SELECT coalesce(sum(interval_count),0) FROM gc_profiles "
+            "WHERE kind='GC_ELAPSED_NOT_PAUSE'").fetchone()[0]
+        require(observed_profiler == profiles["cpu_profiler_samples_recorded"],
+                "REAL_CPU_PROFILER_INPUT_COUNT_MISMATCH")
+        require(grouped_profiler + profiles["cpu_profiler_samples_omitted_from_groups"] ==
+                profiles["cpu_profiler_samples_with_stacks"],
+                "REAL_CPU_PROFILER_GROUP_COVERAGE_MISMATCH")
+        require(paired_gc_intervals == meta["gc"]["gc_pairs"],
+                "REAL_GC_PAIR_AGGREGATE_MISMATCH")
         markers = [json.loads(row[0]) for row in db.execute(
             "SELECT data FROM events WHERE provider='BlackBox-Decoder-QA'")]
     markers = [row for row in markers if row["payload"].get("label") == "BLACKBOX_REAL_EVENTPIPE_FIXTURE"]

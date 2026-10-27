@@ -66,7 +66,7 @@ class DecoderPanel(QWidget):
         layout.addWidget(self.status)
         filters = QHBoxLayout()
         self.mode = QComboBox()
-        for key in ("events", "stacks", "gc"):
+        for key in ("events", "stacks", "gc", "cpu_stacks", "gc_summary"):
             self.mode.addItem(key, key)
         self.pid = QSpinBox()
         self.pid.setRange(0, 2147483647)
@@ -109,6 +109,7 @@ class DecoderPanel(QWidget):
         layout.addLayout(paging)
         self.next_cursor = 0
         self.retranslate()
+        self.mode.currentIndexChanged.connect(self.reset_page)
 
     def tr2(self, en, ru):
         return ru if self.window.language == "RU" else en
@@ -126,13 +127,20 @@ class DecoderPanel(QWidget):
                 (self.prev_button, "PREVIOUS", "НАЗАД"), (self.next_button, "NEXT", "ДАЛЕЕ"),
                 (self.export_button, "SAVE INDEX…", "СОХРАНИТЬ ИНДЕКС…")):
             button.setText(self.tr2(en, ru))
-        for i, pair in enumerate((("Events", "События"), ("Recorded stacks", "Записанные стеки"),
-                                  ("GC / suspension intervals", "GC / интервалы остановки"))):
+        for i, pair in enumerate((("Events", "События"), ("Event-associated stacks", "Стеки событий"),
+                                  ("GC / suspension intervals", "GC / интервалы остановки"),
+                                  ("CPU profiler samples", "Выборки CPU-профилировщика"),
+                                  ("GC statistics by generation", "Статистика GC по поколениям"))):
             self.mode.setItemText(i, self.tr2(*pair))
         self.search.setPlaceholderText(self.tr2("Find provider or event…", "Поиск источника или события…"))
-        self.table.setHorizontalHeaderLabels(("#", "ms", "PID", self.tr2("SOURCE", "ИСТОЧНИК"),
-                                               self.tr2("EVENT / INTERVAL", "СОБЫТИЕ / ИНТЕРВАЛ")))
+        self._table_headers()
         self.render_status()
+
+    def _table_headers(self):
+        mode = self.mode.currentData()
+        unit = ("SAMPLES" if mode == "cpu_stacks" else "PAIRS" if mode == "gc_summary" else "ms")
+        self.table.setHorizontalHeaderLabels(("#", unit, "PID", self.tr2("SOURCE", "ИСТОЧНИК"),
+                                               self.tr2("EVENT / INTERVAL", "СОБЫТИЕ / ИНТЕРВАЛ")))
 
     def render_status(self):
         if self.state == "decoding":
@@ -144,7 +152,13 @@ class DecoderPanel(QWidget):
             s = self.summary
             text = self.tr2("Result", "Результат") + f": {s['status']} · {s['rows']} events · {s['events_with_stacks']} stacks · "
             text += f"GC pairs: {s['gc']['gc_pairs']} · errors: {s['events_with_errors']} · bounded: {s['bounded_events']}"
-            text += self.tr2(" · capture completeness UNKNOWN", " · полнота записи НЕИЗВЕСТНА")
+            profiles = s.get("profiles", {})
+            if profiles:
+                text += (f" · CPU profiler: {profiles['cpu_profiler_samples_recorded']} recorded, "
+                         f"{profiles['cpu_stack_groups_indexed']} stack groups "
+                         f"({profiles['cpu_profiler_samples_omitted_from_groups']} ungrouped)")
+            text += self.tr2(" · capture completeness UNKNOWN; sample counts ≠ CPU%",
+                             " · полнота записи НЕИЗВЕСТНА; число выборок ≠ CPU%")
         else:
             c = capability()
             text = c["engine"] + self.tr2(" · helper ready" if c["helper_present"] else " · helper not built (JSONL available)",
@@ -223,14 +237,31 @@ class DecoderPanel(QWidget):
         if not self.index:
             return
         try:
-            page = read_index(self.index, after=self.cursors[-1], mode=self.mode.currentData(),
+            mode = self.mode.currentData()
+            page = read_index(self.index, after=self.cursors[-1], mode=mode,
                               pid=self.pid.value(), search=self.search.text())
+            self._table_headers()
             self.rows = page["rows"]
             self.table.setRowCount(len(self.rows))
             for i, item in enumerate(self.rows):
                 row = item["event"]
-                cells = (item["index_id"], round(row.get("time_ms", row.get("start_ms", 0)), 4), row["pid"],
-                         row.get("provider", "DERIVED"), row.get("name", row.get("kind", "")))
+                if mode == "cpu_stacks":
+                    # Only confirmed profiler Thread/Sample events participate;
+                    # other event-associated stacks do NOT become CPU weight.
+                    frames = row.get("frames") or []
+                    first_frame = frames[0] if frames else {}
+                    display = first_frame.get("name") or first_frame.get("address") or "UNRESOLVED"
+                    cells = (item["index_id"], row["recorded_sample_count"], row["pid"],
+                             "SampleProfiler", display)
+                elif mode == "gc_summary":
+                    gen = row.get("generation")
+                    suffix = f" · Gen{gen}" if gen is not None else ""
+                    cells = (item["index_id"], row["interval_count"], row["pid"],
+                             "CLR", row["kind"] + suffix)
+                else:
+                    cells = (item["index_id"], round(row.get("time_ms", row.get("start_ms", 0)), 4),
+                             row["pid"], row.get("provider", "DERIVED"),
+                             row.get("name", row.get("kind", "")))
                 for col, value in enumerate(cells):
                     self.table.setItem(i, col, QTableWidgetItem(str(value)))
             self.next_cursor = page["next_cursor"]

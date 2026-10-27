@@ -195,6 +195,102 @@ class DecoderIndexTests(unittest.TestCase):
         self.assertEqual(read_index(path, mode="stacks")["rows"][0]["event"]["frames"], row["frames"])
         self.assertEqual(read_index(path, pid=999)["rows"], [])
 
+    def test_cpu_profile_uses_only_real_profiler_event_kind_and_preserves_unknown_frames(self):
+        from blackbox_core.decoder_profiles import SAMPLE_PROVIDER, SAMPLE_EVENT
+        frames = [{"address": "0x123", "name": "TEST_Leaf%_A"},
+                  {"address": "0x456", "name": ""}]
+        a = event(1)
+        a["provider"], a["name"], a["frames"] = "Microsoft-Windows-DotNETRuntime", "GC/AllocationTick", frames
+        b, c, d, e, f = (event(i) for i in range(2, 7))
+        for row in (b, c, d, e, f):
+            row["provider"], row["name"] = SAMPLE_PROVIDER, SAMPLE_EVENT
+        b["frames"] = frames
+        c["frames"] = frames
+        d["frames"] = [{"address": "0xbeef", "name": "OtherFunction"}]
+        e["frames"] = []
+        f["frames"] = frames
+        f["process_instance"] = 2  # same PID, different observed process instance
+        path, meta = self.build([a, b, c, d, e, f])
+        self.assertEqual(meta["events_with_stacks"], 5)
+        profiles = meta["profiles"]
+        self.assertEqual(profiles["cpu_profiler_samples_recorded"], 5)
+        self.assertEqual(profiles["cpu_profiler_samples_with_stacks"], 4)
+        self.assertEqual(profiles["cpu_profiler_samples_without_stacks"], 1)
+        self.assertEqual(profiles["cpu_stack_groups_indexed"], 3)
+        page = read_index(path, mode="cpu_stacks", limit=1)
+        self.assertTrue(page["has_more"])
+        first = page["rows"][0]["event"]
+        self.assertEqual(first["recorded_sample_count"], 2)
+        self.assertEqual(first["frames_without_names"], 1)
+        self.assertEqual(first["frames"][1]["name"], "")
+        self.assertEqual(first["measurement"], "EVENT_OCCURRENCES_NOT_CPU_TIME_OR_CPU_PERCENT")
+        second = read_index(path, mode="cpu_stacks", after=page["next_cursor"], limit=2)
+        self.assertEqual([r["event"]["recorded_sample_count"] for r in second["rows"]], [1, 1])
+        exact = read_index(path, mode="cpu_stacks", search="Leaf%_A")
+        self.assertEqual(len(exact["rows"]), 2)
+        self.assertEqual(read_index(path, mode="cpu_stacks", search="LeafZ_A")["rows"], [])
+        self.assertEqual(read_index(path, mode="cpu_stacks", pid=999)["rows"], [])
+        self.assertIsNone(meta["capture_complete"])
+
+    def test_unknown_process_instances_are_not_grouped_by_reused_pid(self):
+        from blackbox_core.decoder_profiles import SAMPLE_PROVIDER, SAMPLE_EVENT
+        rows = [event(1), event(2)]
+        for row in rows:
+            row["provider"], row["name"], row["process_instance"] = SAMPLE_PROVIDER, SAMPLE_EVENT, None
+            row["frames"] = [{"address": "0x100", "name": ""}]
+        path, meta = self.build(rows)
+        self.assertEqual(meta["profiles"]["cpu_stack_groups_indexed"], 2)
+        self.assertEqual(meta["profiles"]["cpu_profiler_samples_without_process_identity"], 2)
+        values = read_index(path, mode="cpu_stacks")["rows"]
+        self.assertTrue(all(r["event"]["recorded_sample_count"] == 1 for r in values))
+        self.assertTrue(all(r["event"]["identity_quality"] ==
+                            "UNKNOWN_PROCESS_INSTANCE_PID_REUSE_POSSIBLE" for r in values))
+
+    def test_gc_statistics_keep_runtime_generation_and_pause_uncertainty(self):
+        rows = [
+            event(1, "gc_start", stamp=1, number=1, generation=2, gc_type="Blocking"),
+            event(2, "gc_stop", stamp=4, number=1),
+            event(3, "gc_start", stamp=6, number=2, generation=2, gc_type="Blocking"),
+            event(4, "gc_stop", stamp=11, number=2),
+            event(5, "suspend_begin", stamp=12),
+            event(6, "suspend_end", stamp=13),
+            event(7, "restart_begin", stamp=15),
+            event(8, "restart_end", stamp=16)]
+        path, meta = self.build(rows)
+        profile = read_index(path, mode="gc_summary")
+        self.assertEqual(meta["gc"]["gc_pairs"], 2)
+        self.assertEqual(meta["profiles"]["gc_summary_groups"], 3)
+        gc = next(x["event"] for x in profile["rows"] if x["event"]["kind"] == "GC_ELAPSED_NOT_PAUSE")
+        self.assertEqual((gc["generation"], gc["runtime"], gc["interval_count"]), (2, 1, 2))
+        self.assertEqual(gc["total_pair_duration_ms"], 8)
+        self.assertEqual(gc["peak_pair_duration_ms"], 5)
+        self.assertIs(gc["is_application_pause"], False)
+        self.assertEqual(gc["measurement"], "SUM_OF_OBSERVED_PAIRS_NOT_WALL_TIME")
+        self.assertEqual(len(read_index(path, mode="gc_summary", search="GC_ELAPSED")["rows"]), 1)
+        self.assertEqual(read_index(path, mode="gc_summary", pid=999)["rows"], [])
+        self.assertTrue(any(r["event"]["kind"] == "RUNTIME_FULLY_SUSPENDED" for r in profile["rows"]))
+
+    def test_cpu_profile_group_cap_and_saved_index_v1_compatibility(self):
+        import sqlite3
+        from unittest.mock import patch
+        from blackbox_core.decoder_profiles import SAMPLE_PROVIDER, SAMPLE_EVENT
+        rows = [event(1), event(2)]
+        for i, row in enumerate(rows):
+            row["provider"], row["name"] = SAMPLE_PROVIDER, SAMPLE_EVENT
+            row["frames"] = [{"address": f"0x{i+1:x}", "name": ""}]
+        with patch("blackbox_core.decoder_profiles.MAX_DISTINCT_STACKS", 1):
+            path, meta = self.build(rows)
+        self.assertEqual(meta["profiles"]["cpu_profiler_samples_recorded"], 2)
+        self.assertEqual(meta["profiles"]["cpu_stack_groups_indexed"], 1)
+        self.assertEqual(meta["profiles"]["cpu_profiler_samples_omitted_from_groups"], 1)
+        self.assertEqual(len(read_index(path, mode="cpu_stacks")["rows"]), 1)
+        with sqlite3.connect(path) as db:
+            self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], 2)
+            db.execute("PRAGMA user_version=1")
+        self.assertEqual(len(read_index(path, mode="events")["rows"]), 2)
+        with self.assertRaisesRegex(ValueError, "REDECODE_REQUIRED"):
+            read_index(path, mode="cpu_stacks")
+
 
 if __name__ == "__main__":
     unittest.main()

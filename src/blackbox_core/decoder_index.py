@@ -13,6 +13,7 @@ from pathlib import Path
 import sqlite3
 import tempfile
 import time
+from .decoder_profiles import ProfileBuilder, read_profiles
 
 PROTOCOL = "blackbox.trace-event/1"
 MAX_LINE = 256 * 1024
@@ -175,6 +176,7 @@ class GCAdapter:
     def _interval(kind, start, end, details):
         return {"kind": kind, "start_event": start["ordinal"], "end_event": end["ordinal"],
                 "pid": start["pid"], "process_instance": start["process_instance"],
+                "runtime": start.get("semantic", {}).get("runtime"),
                 "start_ms": start["time_ms"], "duration_ms": end["time_ms"] - start["time_ms"],
                 "details": details, "quality": "DERIVED_FROM_IMPORTED_EVENTS",
                 "root_cause": "UNKNOWN"}
@@ -242,7 +244,7 @@ def build_index(source, output, *, input_sha256, format_name, cancel=None):
     try:
         db = sqlite3.connect(part)
         db.execute(f"PRAGMA application_id={APP_ID}")
-        db.execute("PRAGMA user_version=1")
+        db.execute("PRAGMA user_version=2")
         db.executescript("""
         CREATE TABLE metadata(key TEXT PRIMARY KEY,value TEXT NOT NULL);
         CREATE TABLE events(id INTEGER PRIMARY KEY,time_ms REAL NOT NULL,pid INTEGER,
@@ -254,6 +256,7 @@ def build_index(source, output, *, input_sha256, format_name, cancel=None):
             start_ms REAL NOT NULL,duration_ms REAL NOT NULL,data TEXT NOT NULL);
         """)
         adapter = GCAdapter()
+        profiler = ProfileBuilder(db)
         engine_header = None
         footer = None
         rows = 0
@@ -290,6 +293,7 @@ def build_index(source, output, *, input_sha256, format_name, cancel=None):
             stacked += bool(row["frames"])
             db.execute("INSERT INTO events VALUES(?,?,?,?,?,?,?)", (rows, row["time_ms"], row["pid"],
                        row["provider"], row["name"], int(bool(row["frames"])), data))
+            profiler.accept(row)
             for interval in adapter.accept(row):
                 db.execute("INSERT INTO intervals(kind,pid,start_ms,duration_ms,data) VALUES(?,?,?,?,?)",
                            (interval["kind"], interval["pid"], interval["start_ms"], interval["duration_ms"],
@@ -304,7 +308,9 @@ def build_index(source, output, *, input_sha256, format_name, cancel=None):
                 footer.get("status") not in ("DECODED", "TRUNCATED") or
                 format_name != ".jsonl" and footer.get("protocol") != PROTOCOL):
             raise ValueError("MISSING_OR_INVALID_COMPLETION_FOOTER")
-        meta = {"schema": "blackbox.decoder-index/1", "engine": engine_header,
+        profile_meta = profiler.finish()
+        meta = {"schema": "blackbox.decoder-index/2", "engine": engine_header,
+                "profiles": profile_meta,
                 "input_sha256": input_sha256, "format": format_name, "rows": rows,
                 "status": footer["status"], "bounded_events": bounded, "events_with_errors": errors,
                 "events_without_fields_or_schema": without_fields, "events_with_stacks": stacked,
@@ -313,7 +319,10 @@ def build_index(source, output, *, input_sha256, format_name, cancel=None):
                 "clock_alignment_to_session": "NOT_ESTABLISHED", "gc": adapter.health(),
                 "limitations": ["NO_AUTOMATIC_ROOT_CAUSE", "NO_SYMBOL_SERVER_DOWNLOADS",
                     "NO_INVENTED_MISSING_STACKS", "GC_ELAPSED_IS_NOT_APPLICATION_PAUSE",
-                    "DECODED_IS_NOT_PROOF_OF_COMPLETE_CAPTURE"]}
+                    "DECODED_IS_NOT_PROOF_OF_COMPLETE_CAPTURE",
+                    "CPU_PROFILER_EVENT_FREQUENCY_NOT_CPU_PERCENT",
+                    "GC_AGGREGATE_DURATIONS_NOT_WALL_CLOCK_PAUSES",
+                    "INDEX_V2_ADDS_DERIVED_PROFILES_WITHOUT_REWRITING_TRACE"]}
         db.execute("INSERT INTO metadata VALUES('summary',?)", (json.dumps(meta, allow_nan=False),))
         db.commit()
         if cancel is not None and cancel.is_set():
@@ -333,7 +342,7 @@ def read_index(path, *, after=0, mode="events", pid=0, limit=200, search=""):
     if (not _integer(after) or not _integer(pid) or type(limit) is not int or
             not 1 <= limit <= 200 or type(search) is not str or len(search) > 120):
         raise ValueError("INVALID_INDEX_PAGE")
-    if mode not in ("events", "stacks", "gc"):
+    if mode not in ("events", "stacks", "gc", "cpu_stacks", "gc_summary"):
         raise ValueError("INVALID_INDEX_MODE")
     path = Path(path)
     if path.is_symlink() or not path.is_file():
@@ -344,9 +353,17 @@ def read_index(path, *, after=0, mode="events", pid=0, limit=200, search=""):
         db.setlimit(sqlite3.SQLITE_LIMIT_LENGTH, 2 * 1024 * 1024)
         deadline = time.monotonic() + 1.5
         db.set_progress_handler(lambda: int(time.monotonic() > deadline), 1000)
-        if (db.execute("PRAGMA application_id").fetchone()[0] != APP_ID or
-                db.execute("PRAGMA user_version").fetchone()[0] != 1):
+        version = db.execute("PRAGMA user_version").fetchone()[0]
+        if db.execute("PRAGMA application_id").fetchone()[0] != APP_ID or version not in (1, 2):
             raise ValueError("INVALID_INDEX_SCHEMA")
+        if mode in ("cpu_stacks", "gc_summary"):
+            if version != 2:
+                raise ValueError("REDECODE_REQUIRED_FOR_INDEX_V2_PROFILES")
+            result = read_profiles(db, mode=mode, after=after, pid=pid,
+                                   limit=limit, search=search)
+            result["summary"] = json.loads(db.execute(
+                "SELECT value FROM metadata WHERE key='summary'").fetchone()[0])
+            return result
         table = "intervals" if mode == "gc" else "events"
         sql, values = f"SELECT id,data FROM {table} WHERE id>?", [after]
         if pid:
