@@ -60,6 +60,7 @@ Keep the entire `_internal` folder and the other extracted files. The main EXE i
 | **Event Log** | Local observation messages; session start/stop events are persisted in SQLite. |
 | **Reports** | Current snapshot, `report.json`, readable offline `report.html`, manual export and session comparison. |
 | **Settings** | RU/EN interface, 1/2/5-second sampling intervals, update checks, desktop shortcut, feedback and removal. |
+| **Trace Decoder — main development only** | Offline ETL/EventPipe/JSONL reading with separate CPU sample stacks and GC intervals. **Not available in the published v0.4.2 release.** |
 
 ### Settings — capture profiles and recovery controls
 
