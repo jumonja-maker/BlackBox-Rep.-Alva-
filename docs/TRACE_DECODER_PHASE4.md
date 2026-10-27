@@ -72,6 +72,17 @@ service, automatic investigation, or change to the ordinary sampling cadence.
 - `tests/test_managed_runtime_fixture.py`: when local
   `dotnet-trace` and SDK are present, a real opt-in EventPipe capture
   checks `result.sha256` and guardian bracket markers.
+- On the disposable Windows portable runner, CI installs Microsoft's
+  `dotnet-trace` **10.0.750501** into a CI-local directory. The actual
+  guardian captures a controlled .NET test process, the built TraceEvent
+  helper decodes the produced `.nettrace`, and QA checks source SHA-256
+  before/after decode and the full 3-stage QPC journal. The result still
+  reports `NOT_ESTABLISHED` alignment and `UNKNOWN` capture completeness.
+- When WPR and administrative privileges exist on that runner, a separately
+  named, time-bounded real WPR ETL capture is also decoded; QA compares its
+  original hash to the guardian journal and checks all four QPC stages.
+  Unsupported WPR is marked `NOT_AVAILABLE_NO_WPR_OR_ADMIN`, not success.
+  The independent Windows shell raw-capture TTL test remains unchanged.
 - `tests/test_decoder_gui.py`: RU/EN manual journal review and
   disabled review when a replacement trace fails.
 - `tests/test_decoder_index.py`: reject malformed signed QPC strings

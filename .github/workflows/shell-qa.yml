@@ -168,7 +168,14 @@ jobs:
           dotnet-version: '10.0.x'
       - name: Build self-contained Microsoft TraceEvent decoder (MAIN artifact only)
         run: python tools/build_decoder.py --rid win-x64
-      - name: Real EventPipe payload GC stacks and owned ETL decode
+      - name: Install pinned Microsoft dotnet-trace for owned EventPipe QA
+        shell: pwsh
+        run: |
+          $toolDir = Join-Path $env:RUNNER_TEMP 'blackbox-trace-tools'
+          dotnet tool install dotnet-trace --tool-path $toolDir --version 10.0.750501
+          if ($LASTEXITCODE -ne 0) { throw 'Pinned dotnet-trace installation failed' }
+          Add-Content -Path $env:GITHUB_PATH -Value $toolDir
+      - name: Real EventPipe/ETW and guardian capture-clock integration
         run: python tools/qa_decoder.py --helper decoder/BLACK.BOX-Decoder.exe --output decoder-qa
       - uses: actions/upload-artifact@v4
         if: always()
