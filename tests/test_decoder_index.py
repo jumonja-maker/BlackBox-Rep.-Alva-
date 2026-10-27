@@ -361,7 +361,9 @@ class DecoderIndexTests(unittest.TestCase):
         # A dangling read/write handle blocks TemporaryDirectory cleanup
         # on Windows (WinError 32), even though Linux silently unlinks it.
         with closing(sqlite3.connect(path)) as db:
-            self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], 2)
+            # New development index has UTC provenance (v3). Legacy
+            # readers still accept previously exported v1/v2 indexes.
+            self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], 3)
             db.execute("PRAGMA user_version=1")
             db.commit()
         self.assertEqual(len(read_index(path, mode="events")["rows"]), 2)
