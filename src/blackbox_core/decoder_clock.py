@@ -41,8 +41,28 @@ class TraceClockAudit:
         self.latest_ns = None
         self._baseline_ns = None
         self.max_offset_disagreement_ns = 0
+        # TraceEvent's original QPC-like counters are indexed without
+        # projecting them onto the independent BLACK.BOX session clock.
+        self.source_counter_observed = 0
+        self.source_counter_missing = 0
+        self.source_counter_min = None
+        self.source_counter_max = None
 
     def project(self, row: dict) -> int | None:
+        # Validate original counters even when the UTC projection is absent:
+        # an untrusted malformed QPC must never reach a persistent index.
+        source_ticks = row.get("source_ticks")
+        if source_ticks is not None:
+            if not _valid_source_ticks(source_ticks):
+                raise ValueError("INVALID_TRACE_SOURCE_TICKS")
+            value = int(source_ticks)
+            self.source_counter_observed += 1
+            if self.source_counter_min is None or value < self.source_counter_min:
+                self.source_counter_min = value
+            if self.source_counter_max is None or value > self.source_counter_max:
+                self.source_counter_max = value
+        else:
+            self.source_counter_missing += 1
         ticks = row.get("utc_ticks")
         if ticks is None:
             self.missing += 1
@@ -52,9 +72,6 @@ class TraceClockAudit:
         nanoseconds = (int(ticks) - UNIX_EPOCH_DOTNET_TICKS) * 100
         if not 0 < nanoseconds <= MAX_SQLITE_NS:
             raise ValueError("UNSUPPORTED_TRACE_UTC_RANGE")
-        source_ticks = row.get("source_ticks")
-        if source_ticks is not None and not _valid_source_ticks(source_ticks):
-            raise ValueError("INVALID_TRACE_SOURCE_TICKS")
         seconds, subsecond = divmod(nanoseconds, 1_000_000_000)
         utc = datetime.fromtimestamp(seconds, timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
         row["utc_time_ns"] = nanoseconds
@@ -86,6 +103,11 @@ class TraceClockAudit:
             "status": status,
             "events_with_utc_projection": self.recorded,
             "events_without_utc_projection": self.missing,
+            "source_counter_events_observed": self.source_counter_observed,
+            "source_counter_events_missing": self.source_counter_missing,
+            "source_counter_min_ticks": self.source_counter_min,
+            "source_counter_max_ticks": self.source_counter_max,
+            "source_counter_provenance": "TRACE_INPUT_UNVERIFIED_NOT_A_BOOT_OR_SESSION_PROOF",
             "relative_vs_utc_offset_disagreements_over_10ms": self.offset_disagreements,
             "max_relative_vs_utc_offset_disagreement_ns": self.max_offset_disagreement_ns,
             "earliest_utc_ns": self.earliest_ns,

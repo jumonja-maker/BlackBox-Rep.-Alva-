@@ -304,8 +304,15 @@ class LanguageAndFeedbackQtTests(unittest.TestCase):
                              "https://github.com/jumonja-maker/BlackBox-Rep.-Alva-")
             self.assertTrue(open_url.call_args_list[1].args[0].toString().startswith(
                 "mailto:DonJeoJesky@outlook.com"))
-            self.assertEqual(self.window.email_button.toolTip(),
-                             "DonJeoJesky@outlook.com")
+            # RU/EN language switches preserve the actual destination;
+            # the tooltip is NOT just an old localized "Send feedback" label.
+            for language in ("EN", "RU"):
+                self.window._set_language(language)
+                self.assertEqual(self.window.email_button.toolTip(),
+                                 "DonJeoJesky@outlook.com")
+                self.window.email_button.click()
+                self.assertTrue(open_url.call_args.args[0].toString().startswith(
+                    "mailto:DonJeoJesky@outlook.com"))
 
     def test_update_button_only_green_for_a_verified_new_release(self):
         self.window._available_release = None

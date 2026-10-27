@@ -903,9 +903,12 @@ class UniversalWindow(QMainWindow):
                 original = button.text()
                 button.setProperty("bb_english", original)
             button.setText(self._t(str(original)))
-            if button in (self.github_button, self.email_button):
-                button.setToolTip(self._t(
-                    "GitHub repository" if button is self.github_button else "Send feedback"))
+            if button is self.github_button:
+                button.setToolTip(self._t("GitHub repository"))
+            elif button is self.email_button:
+                # A language switch must never silently restore an obsolete
+                # address or hide the current feedback destination.
+                button.setToolTip(FEEDBACK_EMAIL)
         for checkbox in self.findChildren(QCheckBox):
             original=checkbox.property("bb_english")
             if original is None:

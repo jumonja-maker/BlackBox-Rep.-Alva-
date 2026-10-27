@@ -280,6 +280,10 @@ class DecoderIndexTests(unittest.TestCase):
         path, meta = self.build(rows)
         self.assertEqual(meta["schema"], "blackbox.decoder-index/3")
         self.assertEqual(meta["calendar_clock"]["events_with_utc_projection"], 3)
+        self.assertEqual(meta["calendar_clock"]["source_counter_events_observed"], 3)
+        self.assertEqual(meta["calendar_clock"]["source_counter_events_missing"], 0)
+        self.assertEqual(meta["calendar_clock"]["source_counter_min_ticks"], 100_001_000)
+        self.assertEqual(meta["calendar_clock"]["source_counter_max_ticks"], 100_003_000)
         self.assertEqual(meta["calendar_clock"]["relative_vs_utc_offset_disagreements_over_10ms"], 0)
         self.assertEqual(meta["calendar_clock"]["trace_to_blackbox_session_clock_alignment"], "NOT_ESTABLISHED")
         self.assertEqual(meta["calendar_clock"]["same_boot_same_machine_and_time_sync"], "NOT_VERIFIED")
@@ -340,6 +344,18 @@ class DecoderIndexTests(unittest.TestCase):
         output, _ = self.build([good])
         self.assertEqual(read_index(output, mode="clock")["rows"][0]["event"]["source_ticks"],
                          "-123456")
+
+
+    def test_malformed_source_counter_without_utc_never_publishes_index(self):
+        for bad in ("1.5", "１２３", "--123", "", str(2**63), True):
+            item = event(1)
+            item["source_ticks"] = bad
+            source = self.stream([item])
+            output = self.root / "bad-counter-without-utc.sqlite3"
+            with self.assertRaisesRegex(ValueError, "INVALID_TRACE_SOURCE_TICKS"):
+                build_index(source, output, input_sha256=HASH, format_name=".etl")
+            self.assertFalse(output.exists())
+            self.assertFalse(list(self.root.glob(".decoder-building-*")))
 
     def test_jsonl_absence_of_utc_is_not_fabricated_and_v2_profile_reader_still_works(self):
         import sqlite3

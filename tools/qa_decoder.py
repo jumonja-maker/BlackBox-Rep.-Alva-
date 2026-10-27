@@ -24,6 +24,24 @@ def require(value, message):
         raise AssertionError(message)
 
 
+def require_bounded_trace_qpc(review, meta, stages):
+    """Numbers inside guardian bounds are weak evidence, NEVER clock alignment."""
+    clock = meta.get("calendar_clock", {})
+    seen = clock.get("source_counter_events_observed")
+    missing = clock.get("source_counter_events_missing")
+    require(type(seen) is int and seen > 0 and type(missing) is int and
+            seen + missing == meta["rows"], "REAL_TRACE_QPC_COUNTER_COVERAGE_INVALID")
+    require(review.get("status") == "HASH_MATCHED_QPC_BRACKETS_UNVERIFIED" and
+            review.get("trace_qpc_range_quality") in (
+                "NUMERIC_RANGE_WITHIN_CAPTURE_BRACKETS_UNVERIFIED",
+                "PARTIAL_COUNTER_RANGE_WITHIN_BRACKETS_UNVERIFIED") and
+            review.get("trace_qpc_counter_events_observed") == seen and
+            len(review.get("checked_clock_stages", [])) == stages,
+            "REAL_TRACE_QPC_CAPTURE_WINDOW_MISMATCH: " + repr(review))
+    require(review.get("trace_to_blackbox_session_clock_alignment") == "NOT_ESTABLISHED",
+            "TRACE_QPC_RANGE_IS_NOT_SESSION_CLOCK_ALIGNMENT")
+
+
 def real_owned_eventpipe_qa(helper, output):
     """Real opt-in dotnet-trace guardian, independent decoder and journal review.
 
@@ -100,10 +118,7 @@ def real_owned_eventpipe_qa(helper, output):
                 meta["input_sha256"] == digest,
                 "REAL_EVENTPIPE_QA_DECODE_OR_HASH_FAILED")
         review = assess_trace_capture_journal(index, journal)
-        require(review["status"] == "HASH_MATCHED_QPC_BRACKETS_UNVERIFIED" and
-                review["trace_to_blackbox_session_clock_alignment"] == "NOT_ESTABLISHED" and
-                len(review["checked_clock_stages"]) == 3,
-                "REAL_EVENTPIPE_QA_CLOCK_REVIEW_FAILED: " + repr(review))
+        require_bounded_trace_qpc(review, meta, 3)
         require(file_hash(trace_file) == digest, "REAL_EVENTPIPE_QA_INPUT_CHANGED")
         return {"status": "PASS_HASH_LINKED_CLOCK_UNVERIFIED", "sha256": digest,
                 "decoded_rows": meta["rows"], "clock_review": review,
@@ -172,10 +187,7 @@ def real_owned_wpr_decoder_qa(helper, output):
                 meta["input_sha256"] == digest,
                 "REAL_WPR_QA_ETL_DECODE_OR_HASH_FAILED")
         review = assess_trace_capture_journal(index, trace.path)
-        require(review["status"] == "HASH_MATCHED_QPC_BRACKETS_UNVERIFIED" and
-                review["trace_to_blackbox_session_clock_alignment"] == "NOT_ESTABLISHED" and
-                len(review["checked_clock_stages"]) == 4,
-                "REAL_WPR_QA_CLOCK_REVIEW_FAILED: " + repr(review))
+        require_bounded_trace_qpc(review, meta, 4)
         require(file_hash(source) == digest, "REAL_WPR_QA_INPUT_CHANGED")
         return {"status": "PASS_HASH_LINKED_CLOCK_UNVERIFIED", "sha256": digest,
                 "decoded_rows": meta["rows"], "clock_review": review,

@@ -46,6 +46,7 @@ class DecoderPanel(QWidget):
         self.summary = None
         self.state = "ready"
         self.error = ""
+        self.clock_review = None  # Manual journal review, scoped to current index.
         layout = QVBoxLayout(self)
         layout.setContentsMargins(18, 12, 18, 12)
         self.notice = QLabel()
@@ -178,6 +179,11 @@ class DecoderPanel(QWidget):
             c = capability()
             text = c["engine"] + self.tr2(" · helper ready" if c["helper_present"] else " · helper not built (JSONL available)",
                          " · модуль готов" if c["helper_present"] else " · модуль не собран (JSONL доступен)")
+        if self.clock_review is not None and self.summary and self.state == "decoded":
+            review = self.clock_review
+            text += self.tr2(" · CAPTURE CLOCK REVIEW: ", " · ПРОВЕРКА ЧАСОВ ЗАПИСИ: ")
+            text += str(review.get("status", "UNKNOWN"))
+            text += " · trace/session: NOT_ESTABLISHED"
         self.status.setText(text)
 
     def choose(self, from_session):
@@ -199,6 +205,7 @@ class DecoderPanel(QWidget):
         # including while decoding or after a malformed file fails.
         previous = self.index
         self.index, self.summary, self.rows = None, None, []
+        self.clock_review = None
         self.cursors, self.next_cursor = [0], 0
         self.table.clearContents()
         self.table.setRowCount(0)
@@ -223,6 +230,7 @@ class DecoderPanel(QWidget):
             self.worker.cancel_event.set()
 
     def received(self, packet, error):
+        self.clock_review = None
         if error:
             self.state, self.error = "error", error
         else:
@@ -336,6 +344,8 @@ class DecoderPanel(QWidget):
             }
         self.table.clearSelection()
         self.details.setPlainText(json.dumps(report, ensure_ascii=False, indent=2))
+        self.clock_review = report
+        self.render_status()
         return report
 
     def export_index(self):

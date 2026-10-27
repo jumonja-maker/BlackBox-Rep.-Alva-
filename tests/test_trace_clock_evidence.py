@@ -18,13 +18,14 @@ from blackbox_core.trace_clock_evidence import (
 SHA = "a" * 64
 
 
-def fixture_index(folder, fmt=".etl"):
+def fixture_index(folder, fmt=".etl", *, source_ticks="15000000"):
     source = folder / "synthetic-decoder.jsonl"
     rows = [
         {"type": "header", "protocol": PROTOCOL, "input_sha256": SHA},
         {"type": "event", "ordinal": 1, "time_ms": 1., "pid": 123,
          "tid": 2, "process_instance": 1, "provider": "TEST",
-         "name": "synthetic.clock", "payload": {}, "frames": [], "semantic": None},
+         "name": "synthetic.clock", "payload": {}, "frames": [], "semantic": None,
+         "source_ticks": source_ticks},
         {"type": "footer", "protocol": PROTOCOL, "rows": 1, "status": "DECODED"}]
     source.write_text("".join(json.dumps(row) + "\n" for row in rows),
                       encoding="utf-8")
@@ -104,6 +105,8 @@ class TraceClockEvidenceTests(unittest.TestCase):
             result = assess_trace_capture_journal(index, journal)
             self.assertEqual(result["status"], "HASH_MATCHED_QPC_BRACKETS_UNVERIFIED")
             self.assertEqual(result["qpc_frequency_hz"], 10_000_000)
+            self.assertEqual(result["trace_qpc_range_quality"],
+                             "NUMERIC_RANGE_WITHIN_CAPTURE_BRACKETS_UNVERIFIED")
             self.assertEqual(result["trace_to_blackbox_session_clock_alignment"], "NOT_ESTABLISHED")
             self.assertEqual(result["same_boot_and_process_identity"], "NOT_INDEPENDENTLY_VERIFIED")
             self.assertEqual(index.read_bytes(), digest_before)
@@ -215,6 +218,29 @@ class TraceClockEvidenceTests(unittest.TestCase):
             result = assess_trace_capture_journal(index, journal)
             self.assertEqual(result["status"], "HASH_MATCHED_QPC_BRACKETS_UNVERIFIED")
             self.assertEqual(len(result["checked_clock_stages"]), 3)
+            self.assertEqual(result["trace_to_blackbox_session_clock_alignment"],
+                             "NOT_ESTABLISHED")
+
+    def test_trace_event_qpc_extrema_must_fit_capture_brackets(self):
+        with tempfile.TemporaryDirectory() as td:
+            folder = Path(td)
+            index = fixture_index(folder, source_ticks="21000000")
+            journal, _ = fixture_journal(folder)
+            result = assess_trace_capture_journal(index, journal)
+            self.assertEqual(result["status"], "TRACE_QPC_COUNTER_OUTSIDE_GUARDIAN_WINDOW")
+            self.assertEqual(result["trace_to_blackbox_session_clock_alignment"],
+                             "NOT_ESTABLISHED")
+            self.assertEqual(result["trace_qpc_counter_max_ticks"], 21_000_000)
+
+    def test_absent_qpc_is_explicitly_not_assessed_without_fabrication(self):
+        with tempfile.TemporaryDirectory() as td:
+            folder = Path(td); index = fixture_index(folder, source_ticks=None)
+            journal, _ = fixture_journal(folder)
+            result = assess_trace_capture_journal(index, journal)
+            self.assertEqual(result["status"], "HASH_MATCHED_QPC_BRACKETS_UNVERIFIED")
+            self.assertEqual(result["trace_qpc_range_quality"],
+                             "NO_TRACE_QPC_COUNTERS_RECOVERED")
+            self.assertEqual(result["trace_qpc_counter_events_observed"], 0)
             self.assertEqual(result["trace_to_blackbox_session_clock_alignment"],
                              "NOT_ESTABLISHED")
 

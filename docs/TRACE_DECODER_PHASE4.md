@@ -30,6 +30,14 @@ service, automatic investigation, or change to the ordinary sampling cadence.
   brackets, consistent owner and frequency, ordered observations and no
   gross QPC/monotonic or UTC elapsed-time disagreement. Missing middle
   stages fail closed; the checks do **not** certify calibrated clocks.
+- New imports also summarize the validated extrema and coverage of original
+  TraceEvent `source_ticks` counters without retaining a second complete
+  event scan. The manual journal review can now reject numeric trace QPC
+  counters outside the guardian's outer capture brackets. Numeric agreement
+  is a **necessary sanity check only**, never independent same-boot evidence,
+  time-scale calibration, or causal attribution. Older indexes and missing
+  source counters clearly report `NOT_ASSESSED` / `NO_TRACE_QPC_COUNTERS_RECOVERED`.
+  Re-import the source to obtain the new extrema.
 - A successful review is named
   `HASH_MATCHED_QPC_BRACKETS_UNVERIFIED`, **not `CLOCK_SYNCED`**.
   Every review (even the positive case) reports
@@ -86,7 +94,16 @@ service, automatic investigation, or change to the ordinary sampling cadence.
 - `tests/test_decoder_gui.py`: RU/EN manual journal review and
   disabled review when a replacement trace fails.
 - `tests/test_decoder_index.py`: reject malformed signed QPC strings
-  from untrusted intermediate JSONL; no partial index is published.
+  even when the UTC projection is absent; no partial index is published.
+- `tests/test_trace_clock_evidence.py`: positive and negative trace-source
+  QPC-range review and explicit missing-counter coverage.
+- `tools/qa_decoder.py`: real Windows EventPipe/WPR captures now require
+  nonempty validated source-counter coverage and numerical containment
+  within the guardian's capture window. This is an offline sanity check
+  only, not evidence of shared boot or calibrated clock alignment.
+- `tests/test_decoder_gui.py`: the RU/EN status line retains the last
+  manual clock review verdict for the loaded index and clears it when a
+  different trace is opened, including after failed import.
 - `tests/test_process_history_tree.py`: the intentionally delayed SQLite writer
   QA fixture has a longer **test-only** completion deadline; production's
   five-second durability barrier and fail-closed status remain unchanged.

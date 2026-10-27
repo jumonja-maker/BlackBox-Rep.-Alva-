@@ -190,10 +190,54 @@ def assess_trace_capture_journal(index_path, journal_path):
             return response("UTC_QPC_ELAPSED_DISAGREEMENT")
 
     first, last = validated[0], validated[-1]
+    # The already-indexed TraceEvent numeric QPC extrema are cheap to review:
+    # never rescan 250k JSON rows on the Qt UI thread. Older indexes lack
+    # these OPTIONAL audit fields and cannot receive a range verdict.
+    trace_clock = summary.get("calendar_clock")
+    trace_clock = trace_clock if isinstance(trace_clock, dict) else {}
+    qpc_seen = trace_clock.get("source_counter_events_observed")
+    qpc_missing = trace_clock.get("source_counter_events_missing")
+    qpc_min = trace_clock.get("source_counter_min_ticks")
+    qpc_max = trace_clock.get("source_counter_max_ticks")
+    qpc_quality = "NOT_ASSESSED_LEGACY_INDEX_OR_MISSING_AUDIT"
+    if qpc_seen is not None or qpc_missing is not None:
+        counts_ok = (
+            type(qpc_seen) is int and type(qpc_missing) is int and
+            type(summary.get("rows")) is int and
+            qpc_seen >= 0 and qpc_missing >= 0 and
+            qpc_seen + qpc_missing == summary["rows"]
+        )
+        if not counts_ok:
+            return response("INVALID_TRACE_QPC_AUDIT_SUMMARY")
+        if qpc_seen:
+            if (type(qpc_min) is not int or type(qpc_max) is not int or
+                    not -(2**63) <= qpc_min <= qpc_max < 2**63):
+                return response("INVALID_TRACE_QPC_AUDIT_SUMMARY")
+            if (qpc_min < first["qpc_before_ticks"] or
+                    qpc_max > last["qpc_after_ticks"]):
+                return response(
+                    "TRACE_QPC_COUNTER_OUTSIDE_GUARDIAN_WINDOW",
+                    trace_qpc_counter_min_ticks=qpc_min,
+                    trace_qpc_counter_max_ticks=qpc_max,
+                    trace_qpc_range_quality="NUMERIC_ORIGIN_NOT_INDEPENDENTLY_ATTESTED",
+                )
+            qpc_quality = ("NUMERIC_RANGE_WITHIN_CAPTURE_BRACKETS_UNVERIFIED"
+                           if not qpc_missing else
+                           "PARTIAL_COUNTER_RANGE_WITHIN_BRACKETS_UNVERIFIED")
+        elif qpc_min is not None or qpc_max is not None:
+            return response("INVALID_TRACE_QPC_AUDIT_SUMMARY")
+        else:
+            qpc_quality = "NO_TRACE_QPC_COUNTERS_RECOVERED"
+
     return response(
         "HASH_MATCHED_QPC_BRACKETS_UNVERIFIED",
         clock_anchor_evidence="CAPTURE_SIDE_ONLY_NOT_TRACE_TIME_ALIGNMENT",
         clock_progression_quality="COARSE_CHECKS_PASSED_UNVERIFIED_NOT_CALIBRATED",
+        trace_qpc_range_quality=qpc_quality,
+        trace_qpc_counter_events_observed=qpc_seen,
+        trace_qpc_counter_events_missing=qpc_missing,
+        trace_qpc_counter_min_ticks=qpc_min,
+        trace_qpc_counter_max_ticks=qpc_max,
         checked_clock_stages=list(names),
         before_tool={key: first[key] for key in
                      ("qpc_before_ticks", "qpc_after_ticks",

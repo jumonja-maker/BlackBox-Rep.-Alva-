@@ -239,11 +239,29 @@ class DecoderGuiTests(unittest.TestCase):
             self.assertEqual(report["trace_to_blackbox_session_clock_alignment"],
                              "NOT_ESTABLISHED")
             self.assertIn("UNVERIFIED", panel.details.toPlainText())
+            self.assertIn("HASH_MATCHED_QPC_BRACKETS_UNVERIFIED", panel.status.text())
+            self.assertIn("ПРОВЕРКА ЧАСОВ ЗАПИСИ:" if lang == "RU"
+                          else "CAPTURE CLOCK REVIEW:", panel.status.text())
+            self.assertIn("NOT_ESTABLISHED", panel.status.text())
         document["result"]["sha256"] = "b"*64
         journal.write_text(json.dumps(document), encoding="utf-8")
         result = panel.review_clock_journal_path(journal)
         self.assertEqual(result["status"], "JOURNAL_TRACE_HASH_MISMATCH")
         self.assertIn("NOT_ESTABLISHED", panel.details.toPlainText())
+        self.assertIn("JOURNAL_TRACE_HASH_MISMATCH", panel.status.text())
+        # Changing input invalidates ALL previous journal assertions. A failed
+        # decode must never leave a green old clock review visible.
+        next_source = Path(self.temp.name) / "next-trace.jsonl"
+        next_source.write_text(json.dumps({
+            "schema_version": 1, "pid": 555, "tid": 9, "seq": 1,
+            "source_ns": 1_000_000, "source_clock": "TEST_NEXT",
+            "kind": "next.trace"}) + "\n", encoding="utf-8")
+        panel.start_decode(next_source)
+        self.assertIsNone(panel.clock_review)
+        self.assertNotIn("JOURNAL_TRACE_HASH_MISMATCH", panel.status.text())
+        self.wait_idle()
+        self.assertEqual(panel.state, "decoded", panel.error)
+        self.assertNotIn("ПРОВЕРКА ЧАСОВ ЗАПИСИ:", panel.status.text())
 
     def test_close_cancels_and_drains_worker_without_qthread_destruction(self):
         def blocked(*args, cancel, **kwargs):
