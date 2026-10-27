@@ -98,8 +98,13 @@ internal static class Program
         Dictionary<string, object?>? semantic = null;
         try { semantic = Semantic(e); }
         catch (Exception ex) { errors.Add("SEMANTIC:" + ex.GetType().Name); }
+        // UTC is TraceEvent's reconstruction from the trace clock (QPC), NOT
+        // an independently authenticated wall-clock sample or proof that this
+        // trace can be aligned to another BLACK.BOX session.
+        string utcTicks = e.TimeStamp.ToUniversalTime().Ticks.ToString(CultureInfo.InvariantCulture);
         return new { type = "event", ordinal, source_index = e.EventIndex.ToString(),
             time_ms = e.TimeStampRelativeMSec, source_ticks = e.TimeStampQPC.ToString(CultureInfo.InvariantCulture),
+            utc_ticks = utcTicks,
             pid = e.ProcessID, tid = e.ThreadID, process_instance = processIndex,
             provider = Bounded(e.ProviderName, ref clipped, 256), provider_guid = e.ProviderGuid.ToString(),
             event_id = (int)e.ID, version = e.Version, name = Bounded(e.EventName, ref clipped, 256),
@@ -143,6 +148,9 @@ internal static class Program
             writer.WriteLine(JsonSerializer.Serialize(new { type = "header", protocol = Protocol,
                 engine = "Microsoft.Diagnostics.Tracing.TraceEvent", package_version = "4.0.0", host_version = "0.1.0",
                 source_format = ext, input_sha256 = before, clock = "TRACE_RELATIVE_MILLISECONDS",
+                calendar_clock = "TRACEEVENT_QPC_TO_UTC_RECONSTRUCTION_NOT_ATTESTED",
+                utc_encoding = "DOTNET_DATETIME_100NS_TICKS_NOT_CAPTURE_ACCURACY",
+                trace_to_blackbox_session_clock_alignment = "NOT_ESTABLISHED",
                 capture_loss = (int?)null, symbol_policy = "NO_SYMBOL_SERVER_OR_SOURCE_DOWNLOAD" }, Json));
             long count = 0; bool limited = false;
             foreach (var e in log.Events)

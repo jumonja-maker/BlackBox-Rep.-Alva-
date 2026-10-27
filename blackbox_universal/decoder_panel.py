@@ -66,7 +66,7 @@ class DecoderPanel(QWidget):
         layout.addWidget(self.status)
         filters = QHBoxLayout()
         self.mode = QComboBox()
-        for key in ("events", "stacks", "gc", "cpu_stacks", "gc_summary"):
+        for key in ("events", "stacks", "gc", "cpu_stacks", "gc_summary", "clock"):
             self.mode.addItem(key, key)
         self.pid = QSpinBox()
         self.pid.setRange(0, 2147483647)
@@ -117,9 +117,11 @@ class DecoderPanel(QWidget):
     def retranslate(self):
         self.notice.setText(self.tr2(
             "OFFLINE TRACE DECODER · ETL / EventPipe / BLACK.BOX JSONL. No recording or symbol downloads. "
-            "Trace time is not aligned to your session. GC elapsed time is NOT a pause. Imported data is unverified.",
+            "Trace time is NOT aligned to your session. UTC is reconstructed by TraceEvent, NOT independently synchronized. "
+            "GC elapsed time is NOT a pause. Imported data is unverified.",
             "ДЕКОДЕР ТРАСС · ETL / EventPipe / JSONL BLACK.BOX. Без записи и загрузки символов. "
-            "Время трассы не совмещено с сеансом. Длительность GC — НЕ пауза. Импорт не удостоверяет источник."))
+            "Время НЕ совмещено с сеансом. UTC восстановлено TraceEvent, а НЕ независимо синхронизировано. "
+            "Длительность GC — НЕ пауза. Импорт не удостоверяет источник."))
         for button, en, ru in ((self.open_button, "OPEN TRACE…", "ОТКРЫТЬ ТРАССУ…"),
                 (self.session_button, "FROM SESSION…", "ИЗ СЕАНСА…"),
                 (self.cancel_button, "CANCEL", "ОТМЕНА"),
@@ -130,7 +132,8 @@ class DecoderPanel(QWidget):
         for i, pair in enumerate((("Events", "События"), ("Event-associated stacks", "Стеки событий"),
                                   ("GC / suspension intervals", "GC / интервалы остановки"),
                                   ("CPU profiler samples", "Выборки CPU-профилировщика"),
-                                  ("GC statistics by generation", "Статистика GC по поколениям"))):
+                                  ("GC statistics by generation", "Статистика GC по поколениям"),
+                                  ("Trace UTC estimates", "Оценки времени UTC"))):
             self.mode.setItemText(i, self.tr2(*pair))
         self.search.setPlaceholderText(self.tr2("Find provider or event…", "Поиск источника или события…"))
         self._table_headers()
@@ -138,9 +141,11 @@ class DecoderPanel(QWidget):
 
     def _table_headers(self):
         mode = self.mode.currentData()
-        unit = ("SAMPLES" if mode == "cpu_stacks" else "PAIRS" if mode == "gc_summary" else "ms")
+        unit = ("SAMPLES" if mode == "cpu_stacks" else "PAIRS" if mode == "gc_summary"
+                else "UTC" if mode == "clock" else "ms")
         self.table.setHorizontalHeaderLabels(("#", unit, "PID", self.tr2("SOURCE", "ИСТОЧНИК"),
                                                self.tr2("EVENT / INTERVAL", "СОБЫТИЕ / ИНТЕРВАЛ")))
+        self.table.setColumnWidth(1, 195 if mode == "clock" else 85)
 
     def render_status(self):
         if self.state == "decoding":
@@ -157,6 +162,11 @@ class DecoderPanel(QWidget):
                 text += (f" · CPU profiler: {profiles['cpu_profiler_samples_recorded']} recorded, "
                          f"{profiles['cpu_stack_groups_indexed']} stack groups "
                          f"({profiles['cpu_profiler_samples_omitted_from_groups']} ungrouped)")
+            clock = s.get("calendar_clock", {})
+            if clock:
+                text += (f" · UTC projections: {clock['events_with_utc_projection']}/{s['rows']}, "
+                         f"offset discrepancies: {clock['relative_vs_utc_offset_disagreements_over_10ms']}, "
+                         f"session alignment: {clock['trace_to_blackbox_session_clock_alignment']}")
             text += self.tr2(" · capture completeness UNKNOWN; sample counts ≠ CPU%",
                              " · полнота записи НЕИЗВЕСТНА; число выборок ≠ CPU%")
         else:
@@ -262,6 +272,9 @@ class DecoderPanel(QWidget):
                     suffix = f" · Gen{gen}" if gen is not None else ""
                     cells = (item["index_id"], row["interval_count"], row["pid"],
                              "CLR", row["kind"] + suffix)
+                elif mode == "clock":
+                    cells = (item["index_id"], row.get("utc_time_iso", "UNKNOWN"), row["pid"],
+                             row.get("provider", "TRACE"), row.get("name", ""))
                 else:
                     cells = (item["index_id"], round(row.get("time_ms", row.get("start_ms", 0)), 4),
                              row["pid"], row.get("provider", "DERIVED"),

@@ -270,6 +270,78 @@ class DecoderIndexTests(unittest.TestCase):
         self.assertEqual(read_index(path, mode="gc_summary", pid=999)["rows"], [])
         self.assertTrue(any(r["event"]["kind"] == "RUNTIME_FULLY_SUSPENDED" for r in profile["rows"]))
 
+    def test_trace_utc_projection_is_queryable_but_never_called_session_aligned(self):
+        from blackbox_core.decoder_clock import UNIX_EPOCH_DOTNET_TICKS
+        base_ns = 1_700_000_000_000_000_000
+        rows = [event(i) for i in range(1, 4)]
+        for n, row in enumerate(rows, 1):
+            row["utc_ticks"] = str(UNIX_EPOCH_DOTNET_TICKS + (base_ns+n*1_000_000)//100)
+            row["source_ticks"] = str(100_000_000+n*1_000)
+        path, meta = self.build(rows)
+        self.assertEqual(meta["schema"], "blackbox.decoder-index/3")
+        self.assertEqual(meta["calendar_clock"]["events_with_utc_projection"], 3)
+        self.assertEqual(meta["calendar_clock"]["relative_vs_utc_offset_disagreements_over_10ms"], 0)
+        self.assertEqual(meta["calendar_clock"]["trace_to_blackbox_session_clock_alignment"], "NOT_ESTABLISHED")
+        self.assertEqual(meta["calendar_clock"]["same_boot_same_machine_and_time_sync"], "NOT_VERIFIED")
+        first = read_index(path, mode="clock", limit=2)
+        self.assertTrue(first["has_more"])
+        self.assertEqual(len(first["rows"]), 2)
+        self.assertEqual(first["rows"][0]["event"]["utc_time_ns"], base_ns+1_000_000)
+        self.assertTrue(first["rows"][0]["event"]["utc_time_iso"].endswith("Z"))
+        self.assertEqual(first["rows"][0]["event"]["utc_projection_quality"],
+                         "TRACEEVENT_DERIVED_UTC_UNVERIFIED")
+        last = read_index(path, mode="clock", limit=2, after=first["next_cursor"])
+        self.assertEqual([r["index_id"] for r in last["rows"]], [3])
+        self.assertEqual(len(read_index(path, mode="clock", pid=999)["rows"]), 0)
+
+    def test_trace_utc_disagreement_is_reported_not_silently_aligned(self):
+        from blackbox_core.decoder_clock import UNIX_EPOCH_DOTNET_TICKS
+        base_ns = 1_700_000_000_000_000_000
+        first, second = event(1), event(2)
+        first["utc_ticks"] = str(UNIX_EPOCH_DOTNET_TICKS+(base_ns+1_000_000)//100)
+        # The second event claims 100 ms more wall clock than trace elapsed.
+        second["utc_ticks"] = str(UNIX_EPOCH_DOTNET_TICKS+(base_ns+102_000_000)//100)
+        path, meta = self.build([first, second])
+        health = meta["calendar_clock"]
+        self.assertEqual(health["status"], "TRACE_RELATIVE_VS_UTC_DISAGREEMENT_UNCERTAIN")
+        self.assertEqual(health["relative_vs_utc_offset_disagreements_over_10ms"], 1)
+        self.assertGreaterEqual(health["max_relative_vs_utc_offset_disagreement_ns"], 90_000_000)
+        self.assertEqual(len(read_index(path, mode="clock")["rows"]), 2)
+
+    def test_untrusted_utc_malformed_ticks_never_publish_a_partial_index(self):
+        invalid = [123, "１２３４５６７８９０１２３４５６７８", "bad", "-638355968000000000",
+                   "9999999999999999999", "621355968000000000"]
+        for bad in invalid:
+            row = event(1)
+            row["utc_ticks"] = bad
+            path = self.stream([row])
+            output = self.root / "bad-index.sqlite3"
+            with self.assertRaisesRegex(ValueError, "TRACE_UTC"):
+                build_index(path, output, input_sha256=HASH, format_name=".etl")
+            self.assertFalse(output.exists())
+            self.assertFalse(list(self.root.glob(".decoder-building-*")))
+
+    def test_jsonl_absence_of_utc_is_not_fabricated_and_v2_profile_reader_still_works(self):
+        import sqlite3
+        from contextlib import closing
+        path = self.root / "own.jsonl"
+        path.write_text(json.dumps({"schema_version": 1, "pid": 123, "tid": 7,
+                  "seq": 1, "kind": "sample", "source_ns": 100,
+                  "source_clock": "SOURCE_TEST"}) + "\n", encoding="utf-8")
+        index = self.root / "own.sqlite3"
+        meta = build_index(path,index,input_sha256=HASH,format_name=".jsonl")
+        self.assertEqual(meta["calendar_clock"]["status"], "TRACE_UTC_NOT_RECORDED")
+        self.assertEqual(meta["calendar_clock"]["events_with_utc_projection"], 0)
+        self.assertEqual(read_index(index,mode="clock")["rows"], [])
+        # A previously exported v2 index retains its existing CPU/GC readers
+        # but cannot manufacture an absent v3 UTC column.
+        with closing(sqlite3.connect(index)) as db:
+            db.execute("PRAGMA user_version=2")
+            db.commit()
+        self.assertEqual(read_index(index,mode="cpu_stacks")["rows"], [])
+        with self.assertRaisesRegex(ValueError, "REDECODE_REQUIRED_FOR_CLOCK_VIEW"):
+            read_index(index,mode="clock")
+
     def test_cpu_profile_group_cap_and_saved_index_v1_compatibility(self):
         import sqlite3
         from unittest.mock import patch

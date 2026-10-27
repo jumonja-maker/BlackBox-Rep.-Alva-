@@ -153,6 +153,9 @@ class DecoderGuiTests(unittest.TestCase):
              "payload": {}, "frames": [],
              "semantic": {"kind": "gc_stop", "runtime": 1, "number": 3}},
             {"type": "footer", "protocol": PROTOCOL, "rows": 3, "status": "DECODED"}]
+        from blackbox_core.decoder_clock import UNIX_EPOCH_DOTNET_TICKS
+        rows[1]["utc_ticks"] = str(UNIX_EPOCH_DOTNET_TICKS+17_000_000_000_000_000+10_000)
+        rows[1]["source_ticks"] = "1234567"
         source = Path(self.temp.name) / "audit-typed.jsonl"
         source.write_text("".join(json.dumps(x) + "\n" for x in rows), encoding="utf-8")
         target = Path(self.temp.name) / "audit-typed.sqlite3"
@@ -181,6 +184,14 @@ class DecoderGuiTests(unittest.TestCase):
             self.assertEqual(panel.table.horizontalHeaderItem(1).text(), "PAIRS")
             self.assertIn("Gen2", panel.table.item(0, 4).text())
             self.assertIn("NOT_PAUSE", panel.table.item(0, 4).text())
+            panel.mode.setCurrentIndex(panel.mode.findData("clock"))
+            panel.apply_button.click()
+            self.assertEqual(panel.table.rowCount(), 1)
+            self.assertEqual(panel.table.horizontalHeaderItem(1).text(), "UTC")
+            self.assertTrue(panel.table.item(0, 1).text().endswith("Z"))
+            panel.table.selectRow(0)
+            self.assertIn("TRACEEVENT_DERIVED_UTC_UNVERIFIED",panel.details.toPlainText())
+            self.assertIn("NOT_ESTABLISHED",panel.status.text())
 
     def test_close_cancels_and_drains_worker_without_qthread_destruction(self):
         def blocked(*args, cancel, **kwargs):

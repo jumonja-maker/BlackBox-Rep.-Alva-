@@ -14,6 +14,7 @@ import sqlite3
 import tempfile
 import time
 from .decoder_profiles import ProfileBuilder, read_profiles
+from .decoder_clock import TraceClockAudit
 
 PROTOCOL = "blackbox.trace-event/1"
 MAX_LINE = 256 * 1024
@@ -244,12 +245,14 @@ def build_index(source, output, *, input_sha256, format_name, cancel=None):
     try:
         db = sqlite3.connect(part)
         db.execute(f"PRAGMA application_id={APP_ID}")
-        db.execute("PRAGMA user_version=2")
+        db.execute("PRAGMA user_version=3")
         db.executescript("""
         CREATE TABLE metadata(key TEXT PRIMARY KEY,value TEXT NOT NULL);
         CREATE TABLE events(id INTEGER PRIMARY KEY,time_ms REAL NOT NULL,pid INTEGER,
-            provider TEXT NOT NULL,name TEXT NOT NULL,has_stack INTEGER NOT NULL,data TEXT NOT NULL);
+            provider TEXT NOT NULL,name TEXT NOT NULL,has_stack INTEGER NOT NULL,
+            utc_time_ns INTEGER,data TEXT NOT NULL);
         CREATE INDEX ix_events_pid ON events(pid,id);
+        CREATE INDEX ix_events_utc ON events(utc_time_ns,id);
         CREATE INDEX ix_events_provider ON events(provider,id);
         CREATE INDEX ix_events_stack ON events(has_stack,id);
         CREATE TABLE intervals(id INTEGER PRIMARY KEY,kind TEXT NOT NULL,pid INTEGER,
@@ -257,6 +260,7 @@ def build_index(source, output, *, input_sha256, format_name, cancel=None):
         """)
         adapter = GCAdapter()
         profiler = ProfileBuilder(db)
+        clock_audit = TraceClockAudit()
         engine_header = None
         footer = None
         rows = 0
@@ -283,6 +287,7 @@ def build_index(source, output, *, input_sha256, format_name, cancel=None):
                 footer = {"status": "TRUNCATED", "rows": rows}
                 break
             validate_event(row, rows + 1)
+            utc_ns = clock_audit.project(row)
             rows += 1
             data = json.dumps(row, ensure_ascii=True, allow_nan=False, separators=(",", ":"))
             if len(data) > MAX_LINE * 6:
@@ -291,8 +296,8 @@ def build_index(source, output, *, input_sha256, format_name, cancel=None):
             errors += bool(row.get("errors"))
             without_fields += row.get("payload_status") == "NO_FIELDS_OR_SCHEMA"
             stacked += bool(row["frames"])
-            db.execute("INSERT INTO events VALUES(?,?,?,?,?,?,?)", (rows, row["time_ms"], row["pid"],
-                       row["provider"], row["name"], int(bool(row["frames"])), data))
+            db.execute("INSERT INTO events VALUES(?,?,?,?,?,?,?,?)", (rows, row["time_ms"], row["pid"],
+                       row["provider"], row["name"], int(bool(row["frames"])), utc_ns, data))
             profiler.accept(row)
             for interval in adapter.accept(row):
                 db.execute("INSERT INTO intervals(kind,pid,start_ms,duration_ms,data) VALUES(?,?,?,?,?)",
@@ -309,8 +314,8 @@ def build_index(source, output, *, input_sha256, format_name, cancel=None):
                 format_name != ".jsonl" and footer.get("protocol") != PROTOCOL):
             raise ValueError("MISSING_OR_INVALID_COMPLETION_FOOTER")
         profile_meta = profiler.finish()
-        meta = {"schema": "blackbox.decoder-index/2", "engine": engine_header,
-                "profiles": profile_meta,
+        meta = {"schema": "blackbox.decoder-index/3", "engine": engine_header,
+                "profiles": profile_meta, "calendar_clock": clock_audit.summary(),
                 "input_sha256": input_sha256, "format": format_name, "rows": rows,
                 "status": footer["status"], "bounded_events": bounded, "events_with_errors": errors,
                 "events_without_fields_or_schema": without_fields, "events_with_stacks": stacked,
@@ -322,7 +327,9 @@ def build_index(source, output, *, input_sha256, format_name, cancel=None):
                     "DECODED_IS_NOT_PROOF_OF_COMPLETE_CAPTURE",
                     "CPU_PROFILER_EVENT_FREQUENCY_NOT_CPU_PERCENT",
                     "GC_AGGREGATE_DURATIONS_NOT_WALL_CLOCK_PAUSES",
-                    "INDEX_V2_ADDS_DERIVED_PROFILES_WITHOUT_REWRITING_TRACE"]}
+                    "INDEX_V2_ADDS_DERIVED_PROFILES_WITHOUT_REWRITING_TRACE",
+                    "TRACE_UTC_RECONSTRUCTION_NOT_AUTHENTICATED",
+                    "TRACE_UTC_DOES_NOT_PROVE_SESSION_CLOCK_ALIGNMENT"]}
         db.execute("INSERT INTO metadata VALUES('summary',?)", (json.dumps(meta, allow_nan=False),))
         db.commit()
         if cancel is not None and cancel.is_set():
@@ -342,7 +349,7 @@ def read_index(path, *, after=0, mode="events", pid=0, limit=200, search=""):
     if (not _integer(after) or not _integer(pid) or type(limit) is not int or
             not 1 <= limit <= 200 or type(search) is not str or len(search) > 120):
         raise ValueError("INVALID_INDEX_PAGE")
-    if mode not in ("events", "stacks", "gc", "cpu_stacks", "gc_summary"):
+    if mode not in ("events", "stacks", "gc", "cpu_stacks", "gc_summary", "clock"):
         raise ValueError("INVALID_INDEX_MODE")
     path = Path(path)
     if path.is_symlink() or not path.is_file():
@@ -354,10 +361,12 @@ def read_index(path, *, after=0, mode="events", pid=0, limit=200, search=""):
         deadline = time.monotonic() + 1.5
         db.set_progress_handler(lambda: int(time.monotonic() > deadline), 1000)
         version = db.execute("PRAGMA user_version").fetchone()[0]
-        if db.execute("PRAGMA application_id").fetchone()[0] != APP_ID or version not in (1, 2):
+        if db.execute("PRAGMA application_id").fetchone()[0] != APP_ID or version not in (1, 2, 3):
             raise ValueError("INVALID_INDEX_SCHEMA")
+        if mode == "clock" and version < 3:
+            raise ValueError("REDECODE_REQUIRED_FOR_CLOCK_VIEW")
         if mode in ("cpu_stacks", "gc_summary"):
-            if version != 2:
+            if version < 2:
                 raise ValueError("REDECODE_REQUIRED_FOR_INDEX_V2_PROFILES")
             result = read_profiles(db, mode=mode, after=after, pid=pid,
                                    limit=limit, search=search)
@@ -371,6 +380,8 @@ def read_index(path, *, after=0, mode="events", pid=0, limit=200, search=""):
             values.append(pid)
         if mode == "stacks":
             sql += " AND has_stack=1"
+        if mode == "clock":
+            sql += " AND utc_time_ns IS NOT NULL"
         # Literal search for event names/providers and derived interval kinds.
         # Wildcards typed by a user must not silently match every event.
         if search.strip():

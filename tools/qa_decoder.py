@@ -69,6 +69,26 @@ def main():
     require(any(r["event"]["kind"] == "GC_ELAPSED_NOT_PAUSE" and
                 r["event"]["is_application_pause"] is False
                 for r in gc_page["rows"]), "REAL_GC_ELAPSED_NOT_PAUSE_MISSING")
+    # Actual TraceEvent timestamps: both a relative trace timestamp and a
+    # QPC-derived DateTime UTC projection must survive the native helper.
+    # This does NOT independently attest the UTC clock or align another session.
+    clock = meta["calendar_clock"]
+    require(clock["events_with_utc_projection"] > 0,
+            "REAL_TRACEEVENT_CALENDAR_CLOCK_MISSING")
+    require(clock["events_with_utc_projection"] +
+            clock["events_without_utc_projection"] == meta["rows"],
+            "REAL_TRACEEVENT_CLOCK_COVERAGE_MISMATCH")
+    require(clock["trace_to_blackbox_session_clock_alignment"] == "NOT_ESTABLISHED",
+            "TRACEEVENT_CALENDAR_CLOCK_MISREPRESENTED_AS_SESSION_ALIGNMENT")
+    clock_page = read_index(index, mode="clock", limit=1)
+    require(len(clock_page["rows"]) == 1, "REAL_UTC_MODE_EMPTY")
+    clock_event = clock_page["rows"][0]["event"]
+    require(clock_event["utc_time_ns"] > 1_000_000_000_000_000_000 and
+            clock_event["utc_time_iso"].endswith("Z") and
+            clock_event["utc_projection_quality"] == "TRACEEVENT_DERIVED_UTC_UNVERIFIED",
+            "REAL_UTC_PROJECTION_INVALID")
+    require(isinstance(clock_event.get("source_ticks"), str),
+            "REAL_TRACE_SOURCE_TICKS_MISSING")
     require(file_hash(trace) == digest, "INPUT_TRACE_WAS_MODIFIED")
     with closing(sqlite3.connect(index)) as db:
         observed_profiler = db.execute(
