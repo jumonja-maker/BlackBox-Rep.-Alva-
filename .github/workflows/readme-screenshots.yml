@@ -1,0 +1,85 @@
+name: Publish authentic README screenshots from Windows UI CI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/readme-screenshots.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: read
+
+concurrency:
+  group: readme-screenshots-main
+  cancel-in-progress: false
+
+jobs:
+  sync-screenshots:
+    name: Save genuine CI screenshots to docs/screenshots
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - name: Checkout exact main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          persist-credentials: true
+      - name: Download successful Windows screenshot QA artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: BLACKBOX-OFFSCREEN-DPI-QA
+          run-id: 40564970140
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/blackbox-readme-qa
+      - name: Check PNG signatures and store only named genuine screenshots
+        shell: python
+        run: |
+          from pathlib import Path
+          import os, shutil, struct
+          original = Path(os.environ["RUNNER_TEMP"]) / "blackbox-readme-qa"
+          output = Path("docs/screenshots")
+          output.mkdir(parents=True, exist_ok=True)
+          sources = {
+              "overview": "dashboard",
+              "processes": "processes",
+              "settings": "settings",
+              "reports": "reports",
+              "decoder": "decoder",
+              "investigation": "research",
+          }
+          manifest = []
+          for lang in ("EN", "RU"):
+              for title, source in sources.items():
+                  original_name = (
+                      f"expanded-1.25-{lang}-research-16.png"
+                      if title == "investigation"
+                      else f"dpi-1.25-{lang}-{source}.png"
+                  )
+                  src = original / original_name
+                  if not src.is_file():
+                      raise RuntimeError(f"MISSING_AUTHENTIC_CI_SCREENSHOT: {original_name}")
+                  with src.open("rb") as handle:
+                      header = handle.read(24)
+                  if header[:8] != bytes.fromhex("89504e470d0a1a0a") or header[12:16] != b"IHDR":
+                      raise RuntimeError(f"NOT_A_PNG: {original_name}")
+                  width, height = struct.unpack(">II", header[16:24])
+                  if not 640 <= width <= 4096 or not 400 <= height <= 4096:
+                      raise RuntimeError(f"UNEXPECTED_CAPTURE_GEOMETRY: {original_name}")
+                  dest = output / f"{lang.lower()}-{title}.png"
+                  shutil.copyfile(src, dest)
+                  manifest.append(f"{dest}: {width}x{height}, {src.stat().st_size} bytes")
+          print("\n".join(manifest))
+      - name: Commit screenshots only (do not publish a Release)
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add docs/screenshots/*.png
+          if git diff --cached --quiet; then
+            echo "Screenshots already present; nothing to change."
+            exit 0
+          fi
+          git commit -m "docs: add authentic bilingual Windows UI screenshots [skip ci]"
+          git push origin HEAD:main

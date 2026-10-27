@@ -1,5 +1,7 @@
 # BLACK.BOX Universal
 
+> **Antivirus / Windows SmartScreen notice:** Antivirus software or Microsoft Defender SmartScreen may warn about BLACK.BOX because its portable executable is unsigned and can inspect processes. **If the project interests you, you may add a narrowly scoped antivirus exception only after independently verifying and trusting the file.** Download from the [official repository Releases](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/releases), check the published ZIP SHA-256, and scan/review the download first. A warning is **not proof of a false positive**, and an exception reduces protection. Do **not** disable antivirus globally.
+
 **A portable Windows process and application-file inspector.**
 
 [**Download latest published Windows x64 release**](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/releases/latest) · [Releases](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/releases) · [Русская версия](README.ru.md)
@@ -19,6 +21,12 @@ BLACK.BOX Universal lets you **select a running process or choose an application
 
 **v0.4.1 desktop:** The window starts maximized but can be restored or resized. The decorative START footer and redundant VIEW menu are removed; the telemetry chart uses the available vertical area. Privacy/security details remain in this README rather than occupying space in Settings.
 
+## What BLACK.BOX looks like
+
+![Real Windows CI capture of BLACK.BOX Universal Overview with telemetry chart and recording controls](docs/screenshots/en-overview.png)
+
+*Overview — actual Windows CI/offscreen screenshot of the current `main` development build. The dashboard is waiting for a target; no measurement is fabricated. The published v0.4.2 release does not yet include the sixth Trace Decoder page.*
+
 ## Download and first run
 
 1. Download the [latest Windows ZIP](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/releases/latest) and **extract it completely** to a writable directory.
@@ -26,6 +34,12 @@ BLACK.BOX Universal lets you **select a running process or choose an application
 3. Open **Processes**. Either select a running application from the list and click **Attach**, or click **Select Application File** to choose an EXE (or another file).
 4. If you chose an EXE, click **Find Running EXE** to attach to an already running instance, or **Launch Selected EXE** and explicitly approve starting the file. Then go to **Overview**, click **Start**, interact with the application, and click **Stop**.
 5. In **Reports**, examine the recorded data, open the saved HTML, export a snapshot, or compare two sessions.
+
+### Select and attach a process
+
+![Real Windows CI process explorer showing the executable picker, process search and Attach Selected Process](docs/screenshots/en-processes.png)
+
+*Processes — search by process name or PID, or choose an EXE file. Attaching does not start recording; use **Start** in Overview when you are ready.*
 
 **Which EXE files are in the current MAIN development build?**
 
@@ -46,6 +60,24 @@ Keep the entire `_internal` folder and the other extracted files. The main EXE i
 | **Event Log** | Local observation messages; session start/stop events are persisted in SQLite. |
 | **Reports** | Current snapshot, `report.json`, readable offline `report.html`, manual export and session comparison. |
 | **Settings** | RU/EN interface, 1/2/5-second sampling intervals, update checks, desktop shortcut, feedback and removal. |
+
+### Settings — capture profiles and recovery controls
+
+![Windows CI screenshot of BLACK.BOX Settings with Standard capture profile, recording policy and interrupted-export recovery](docs/screenshots/en-settings.png)
+
+*Settings — select a capture profile **before recording**. Standard provides base counters, Detailed adds bounded thread/child/memory queries, and Burst adds incident-triggered detail. Disabled actions require an applicable target or state. Scroll down for export recovery and measurement definitions. Language switching (RU / ENG) is in the left sidebar; **Check Updates** is in the top toolbar. Choosing a profile does not automatically capture ETW or dumps.*
+
+### Reports and saved observations
+
+![Windows CI screenshot of Reports page with saved-session investigation and export controls](docs/screenshots/en-reports.png)
+
+*Reports — inspect or export local evidence after a session; incomplete or inaccessible measurements are not silently reported as zero.*
+
+### Development-only trace analysis
+
+![Windows CI screenshot of the sixth Trace Decoder tab in the current main development build](docs/screenshots/en-decoder.png)
+
+*Trace Decoder (current `main` **only**) — import an ETL, EventPipe `.nettrace`, or BLACK.BOX JSONL file offline. CPU profiler samples, event-associated stacks and GC intervals have distinct meanings. This tab is **not present** in the published v0.4.2 Release.*
 
 Some counters are inaccessible for protected processes or unavailable on a particular system. Missing values are displayed as **unknown**, not misleading zeros. RSS describes the selected process; it is **not** the summed memory usage of a complete process tree.
 
@@ -91,6 +123,10 @@ See [Updates and maintenance](docs/UPDATES_FEEDBACK_UNINSTALL.md).
 [Independent review and remaining acceptance limitations](docs/DEEP_HARDENING_REVIEW.md).
 
 ## Investigation Engine 0.1.2
+
+![Windows CI screenshot of optional investigation controls in Reports, including ETW and EventPipe actions](docs/screenshots/en-investigation.png)
+
+*Expanded research controls in the current `main` build (not all available in the published version). Greyed-out actions need a suitable target, permission or recording state; advanced sources such as ETW/EventPipe are **explicit opt-in**, not automatic.*
 
 - While recording, click **Mark Problem** (after at least one sample) to save a timestamp and an optional note. This is an explicitly **unverified user mark**, never OS-attested evidence of a hang.
 - Stop recording. In **Reports**, click **Investigate Session** to analyze the just-completed recording or **Investigate Saved** for another local session.
