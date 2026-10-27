@@ -17,4 +17,4 @@ The built-in updater checks the official latest GitHub Release for a strictly ne
 
 Windows/Linux integration tests, simulated Windows rollback tests, frozen EXE smoke and native old-v0.3.6-to-v0.4.0 update/uninstall acceptance on disposable GitHub-hosted Windows are automated. The native test must pass on the exact candidate HEAD before these paths can be called CI-verified. A live in-use update, OneDrive redirection, antivirus locks, physical 100–200% DPI, and screen reader acceptance **remain manual and are not guaranteed by CI**.
 
-Feedback opens the repository or email client on explicit user action. No session data is automatically uploaded.
+Feedback opens the repository or the user's mail client on explicit user action. The recipient is **[DonJeoJesky@outlook.com](mailto:DonJeoJesky@outlook.com)**. No session data is automatically uploaded; review excerpts before sending and remove sensitive information.

@@ -52,6 +52,9 @@ from .chrome_icons import ChromeButton
 from .widgets import DesktopMark, MetricCard, TrendChart, WindowPanel
 
 
+FEEDBACK_EMAIL = "DonJeoJesky@outlook.com"
+
+
 def _label(text: str, kind: str = "", wrap: bool = True) -> QLabel:
     item = QLabel(text)
     if kind:
@@ -292,7 +295,7 @@ class UniversalWindow(QMainWindow):
         self.github_button.setToolTip("GitHub repository")
         self.github_button.clicked.connect(self._open_github)
         self.email_button = _button("✉ E-MAIL", "smallLink")
-        self.email_button.setToolTip("Send feedback")
+        self.email_button.setToolTip(FEEDBACK_EMAIL)
         self.email_button.clicked.connect(self._open_email)
         feedback.addWidget(self.github_button)
         feedback.addWidget(self.email_button)
@@ -981,7 +984,7 @@ class UniversalWindow(QMainWindow):
 
     def _open_email(self) -> None:
         QDesktopServices.openUrl(
-            QUrl("mailto:jumonjescu@mail.ru?subject=BLACK.BOX%20Universal%20feedback"))
+            QUrl(f"mailto:{FEEDBACK_EMAIL}?subject=BLACK.BOX%20Universal%20feedback"))
 
     def _refresh_update_button(self, state: str = "") -> None:
         if self._available_release:

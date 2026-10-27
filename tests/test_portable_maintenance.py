@@ -303,7 +303,9 @@ class LanguageAndFeedbackQtTests(unittest.TestCase):
             self.assertEqual(open_url.call_args_list[0].args[0].toString(),
                              "https://github.com/jumonja-maker/BlackBox-Rep.-Alva-")
             self.assertTrue(open_url.call_args_list[1].args[0].toString().startswith(
-                "mailto:jumonjescu@mail.ru"))
+                "mailto:DonJeoJesky@outlook.com"))
+            self.assertEqual(self.window.email_button.toolTip(),
+                             "DonJeoJesky@outlook.com")
 
     def test_update_button_only_green_for_a_verified_new_release(self):
         self.window._available_release = None
