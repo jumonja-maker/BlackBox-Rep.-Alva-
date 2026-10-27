@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushB
 
 from blackbox_core.decoder_service import capability, decode_file
 from blackbox_core.decoder_index import read_index
+from blackbox_core.trace_clock_evidence import assess_trace_capture_journal
 
 
 class DecodeWorker(QThread):
@@ -100,10 +101,13 @@ class DecoderPanel(QWidget):
         self.prev_button = QPushButton()
         self.next_button = QPushButton()
         self.export_button = QPushButton()
+        self.review_clock_button = QPushButton()
         self.prev_button.clicked.connect(self.previous)
         self.next_button.clicked.connect(self.next)
         self.export_button.clicked.connect(self.export_index)
-        for button in (self.prev_button, self.next_button, self.export_button):
+        self.review_clock_button.clicked.connect(self.review_clock_journal)
+        for button in (self.prev_button, self.next_button,
+                       self.review_clock_button, self.export_button):
             paging.addWidget(button)
             button.setEnabled(False)
         layout.addLayout(paging)
@@ -127,7 +131,8 @@ class DecoderPanel(QWidget):
                 (self.cancel_button, "CANCEL", "ОТМЕНА"),
                 (self.apply_button, "APPLY FILTER", "ПРИМЕНИТЬ ФИЛЬТР"),
                 (self.prev_button, "PREVIOUS", "НАЗАД"), (self.next_button, "NEXT", "ДАЛЕЕ"),
-                (self.export_button, "SAVE INDEX…", "СОХРАНИТЬ ИНДЕКС…")):
+                (self.export_button, "SAVE INDEX…", "СОХРАНИТЬ ИНДЕКС…"),
+                (self.review_clock_button, "CHECK CAPTURE CLOCK…", "ПРОВЕРИТЬ ЧАСЫ ЗАПИСИ…")):
             button.setText(self.tr2(en, ru))
         for i, pair in enumerate((("Events", "События"), ("Event-associated stacks", "Стеки событий"),
                                   ("GC / suspension intervals", "GC / интервалы остановки"),
@@ -198,7 +203,8 @@ class DecoderPanel(QWidget):
         self.table.clearContents()
         self.table.setRowCount(0)
         self.details.clear()
-        for button in (self.prev_button, self.next_button, self.export_button):
+        for button in (self.prev_button, self.next_button, self.export_button,
+                       self.review_clock_button):
             button.setEnabled(False)
         if previous is not None:
             previous.unlink(missing_ok=True)
@@ -227,6 +233,7 @@ class DecoderPanel(QWidget):
             if old and old != self.index:
                 old.unlink(missing_ok=True)
             self.export_button.setEnabled(True)
+            self.review_clock_button.setEnabled(True)
             self.reset_page()
         self.render_status()
 
@@ -302,6 +309,34 @@ class DecoderPanel(QWidget):
         index = self.table.currentRow()
         if 0 <= index < len(self.rows):
             self.details.setPlainText(json.dumps(self.rows[index]["event"], ensure_ascii=False, indent=2))
+
+    def review_clock_journal(self):
+        """Optional, manual review of a matching *.trace.json capture journal."""
+        if not self.index or self.worker is not None:
+            return
+        folder = getattr(self.window.probe, "session_folder", None)
+        selected, _ = QFileDialog.getOpenFileName(
+            self, self.tr2("Select owned capture journal", "Выберите журнал записи"),
+            str(folder or ""), "Capture journals (*.trace.json)")
+        if selected:
+            self.review_clock_journal_path(Path(selected))
+
+    def review_clock_journal_path(self, journal_path):
+        """Structured offline review; a matching hash is NOT clock alignment."""
+        if not self.index or self.worker is not None:
+            return None
+        try:
+            report = assess_trace_capture_journal(self.index, journal_path)
+        except (OSError, ValueError, KeyError, RuntimeError) as exc:
+            report = {
+                "status": "CLOCK_PROVENANCE_UNAVAILABLE",
+                "error": type(exc).__name__,
+                "trace_to_blackbox_session_clock_alignment": "NOT_ESTABLISHED",
+                "verification_class": "UNVERIFIED_LOCAL_JOURNAL",
+            }
+        self.table.clearSelection()
+        self.details.setPlainText(json.dumps(report, ensure_ascii=False, indent=2))
+        return report
 
     def export_index(self):
         if not self.index:

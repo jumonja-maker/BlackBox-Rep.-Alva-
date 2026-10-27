@@ -45,6 +45,17 @@ class ManagedRuntimeFixtureTests(unittest.TestCase):
     while result is None and time.monotonic()<deadline:result=trace.poll();time.sleep(.05)
     self.assertIsNotNone(result);self.assertEqual(result['status'],'COMPLETED',result)
     self.assertFalse(result['decoded']);self.assertIsNone(result['lost_events']);self.assertIsNone(process.poll())
-    self.assertGreater(next(artifacts.glob('*.nettrace')).stat().st_size,0)
+    captured=next(artifacts.glob('*.nettrace'))
+    self.assertGreater(captured.stat().st_size,0)
+    import hashlib
+    expected=hashlib.sha256(captured.read_bytes()).hexdigest()
+    recorded=result['details']['result']
+    self.assertEqual(recorded['sha256'],expected)
+    anchors=result['details']['clock_anchors']
+    for name in ('before_tool_spawn','after_tool_spawn','after_tool_exit',
+                 'guardian_finally'):
+     self.assertEqual(anchors[name]['trace_to_session_alignment'],'NOT_ESTABLISHED')
+    self.assertEqual(anchors['before_tool_spawn']['schema'],
+                     'blackbox.trace-clock-bracket/1')
    finally:trace.stop();self.finish(process,state)
 if __name__=='__main__':unittest.main()

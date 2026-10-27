@@ -7,7 +7,6 @@ or safe clock alignment with BLACK.BOX session-v2. Imported JSONL is untrusted.
 from __future__ import annotations
 
 from datetime import datetime, timezone
-import math
 
 UNIX_EPOCH_DOTNET_TICKS = 621355968000000000
 MAX_SQLITE_NS = 2**63 - 1
@@ -17,6 +16,18 @@ UTC_QUALITY = "TRACEEVENT_DERIVED_UTC_UNVERIFIED"
 
 def _is_ascii_digits(value):
     return type(value) is str and 16 <= len(value) <= 19 and value.isascii() and value.isdecimal()
+
+
+def _valid_source_ticks(value):
+    # .NET serializes an Int64 QPC counter as ASCII decimal. Accept an
+    # optional leading minus, but not repeated signs, Unicode numbers or
+    # out-of-range values in an untrusted imported protocol.
+    if type(value) is not str or not 1 <= len(value) <= 20:
+        return False
+    digits = value[1:] if value.startswith("-") else value
+    return (bool(digits) and len(digits) <= 19 and
+            digits.isascii() and digits.isdecimal() and
+            -(2**63) <= int(value) <= 2**63-1)
 
 
 class TraceClockAudit:
@@ -42,10 +53,7 @@ class TraceClockAudit:
         if not 0 < nanoseconds <= MAX_SQLITE_NS:
             raise ValueError("UNSUPPORTED_TRACE_UTC_RANGE")
         source_ticks = row.get("source_ticks")
-        if source_ticks is not None and (
-                type(source_ticks) is not str or len(source_ticks) > 22 or
-                not source_ticks.lstrip("+-").isascii() or
-                not source_ticks.lstrip("+-").isdecimal()):
+        if source_ticks is not None and not _valid_source_ticks(source_ticks):
             raise ValueError("INVALID_TRACE_SOURCE_TICKS")
         seconds, subsecond = divmod(nanoseconds, 1_000_000_000)
         utc = datetime.fromtimestamp(seconds, timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")

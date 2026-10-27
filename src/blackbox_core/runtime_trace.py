@@ -5,6 +5,7 @@ from threading import Thread,Event
 from uuid import uuid4
 from .trace_owner import _read,_write
 from .session_v2 import safe_path
+from .trace_clock_evidence import capture_trace_clock_bracket
 PROFILES=('gc-collect','gc-verbose')
 def runtime_capability(pid):
  from .preparation import inspect_target
@@ -47,7 +48,11 @@ def run(journal):
    minutes,seconds=divmod(policy['seconds'],60)
    args=[tool,'collect','--process-id',str(data['target']['pid']),'--duration',f'00:00:{minutes:02}:{seconds:02}',
     '--profile',policy['profile'],'--buffersize','16','--format','NetTrace','--output',str(capture)]
+   # Record brackets around launcher activity; they do NOT mark the exact
+   # first/last EventPipe event nor authenticate session-v2 clock alignment.
+   data['clock_anchors']={'before_tool_spawn':capture_trace_clock_bracket()}
    owner=OwnedProcess(args,stdin=subprocess.PIPE,stdout=stream,stderr=stream,env={**os.environ,'DOTNET_CLI_TELEMETRY_OPTOUT':'1'})
+   data['clock_anchors']['after_tool_spawn']=capture_trace_clock_bracket()
    data.update(state='RECORDING',collector_pid=owner.process.pid,collector_created=psutil.Process(owner.process.pid).create_time());_write(path,data)
    deadline=time.monotonic()+policy['seconds']+5;reason=None
    while owner.process.poll() is None:
@@ -61,17 +66,30 @@ def run(journal):
     try:owner.process.wait(timeout=2)
     except subprocess.TimeoutExpired:owner.close(kill=True)
    rc=owner.process.poll();size=capture.stat().st_size if capture.is_file() else 0
+   data['clock_anchors']['after_tool_exit']=capture_trace_clock_bracket()
    if owner.process.stdin:owner.process.stdin.close()
   success=rc==0 and size>0
+  # An independently computed local trace digest can later be compared to
+  # decoder-index.input_sha256. The journal itself is NOT authenticated.
+  captured_sha256=None
+  if success:
+   digest=hashlib.sha256()
+   with capture.open('rb') as recorded:
+    for block in iter(lambda:recorded.read(1024*1024),b''):digest.update(block)
+   captured_sha256=digest.hexdigest()
   data.update(state='COMPLETED' if success else 'FAILED',stop_reason=reason or 'TOOL_COMPLETED',
    result={'source':'EVENTPIPE_DOTNET_TRACE','status':'TOOL_CAPTURED_UNDECODED' if success else 'INCOMPLETE_OR_UNSUPPORTED',
-    'exit_code':rc,'bytes':size,'path':capture.name,'profile':policy['profile'],'decoded':False,'lost_events':None,
+    'exit_code':rc,'bytes':size,'path':capture.name,'sha256':captured_sha256,
+    'profile':policy['profile'],'decoded':False,'lost_events':None,
     'handshake_status':'TOOL_SUCCESS_NONEMPTY_OUTPUT_NOT_INDEPENDENTLY_ATTESTED' if success else 'NOT_CONFIRMED',
     'size_policy':'POLLED_SOFT_LIMIT_NOT_FILESYSTEM_QUOTA'})
  except BaseException as exc:data.update(state='FAILED',error=(type(exc).__name__+': '+str(exc))[:512])
  finally:
   if owner:owner.close(kill=True)
-  data['ended_ns']=time.monotonic_ns();_write(path,data)
+  data['ended_ns']=time.monotonic_ns()
+  if isinstance(data.get('clock_anchors'),dict):
+   data['clock_anchors']['guardian_finally']=capture_trace_clock_bracket()
+  _write(path,data)
  return 0 if data['state']=='COMPLETED' else 1
 class DotnetTrace:
  def __init__(self,folder,pid,seconds=10,*,tool=None,profile='gc-collect',max_bytes=256*1024**2):

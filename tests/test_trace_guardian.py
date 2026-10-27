@@ -32,6 +32,16 @@ class TraceGuardianTests(unittest.TestCase):
             data=_read(trace.path);self.assertEqual(data['state'],'COMPLETED')
             self.assertEqual(data['stop_reason'],'LEASE_EOF_OR_EXPLICIT_STOP');self.assertFalse(captures[0].active)
             self.assertEqual(len(data['result']['sha256']),64)
+            # The journal carries brackets from the owning capture guardian,
+            # never a derived claim of cross-session clock synchronization.
+            anchors=data['clock_anchors']
+            for name in ('before_tool_start','after_tool_start',
+                         'before_tool_stop','after_tool_stop','guardian_finally'):
+                self.assertIn(name,anchors)
+                self.assertEqual(anchors[name]['trace_to_session_alignment'],
+                                 'NOT_ESTABLISHED')
+            self.assertEqual(anchors['before_tool_start']['schema'],
+                             'blackbox.trace-clock-bracket/1')
     def test_ttl_and_size_policy_cannot_be_unbounded(self):
         for seconds in (0,61,True):
             with self.assertRaises(ValueError):TraceSupervisor('.',seconds=seconds)

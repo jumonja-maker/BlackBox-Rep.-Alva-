@@ -15,6 +15,7 @@ from threading import Event, Thread
 import time
 from uuid import uuid4
 from .library_files import replace_owned_status
+from .trace_clock_evidence import capture_trace_clock_bracket
 
 MAX_JOURNAL_BYTES=65536
 
@@ -66,12 +67,21 @@ def run(journal):
                 source='ETW_WPR',lost_events=None,decoded=False)
     _write(path,data)
     try:
+        # Capture-side Windows QPC/monotonic/UTC brackets. These are
+        # unauthenticated journal evidence, NOT a calibrated TraceEvent clock
+        # or proof of shared boot with BLACK.BOX session-v2.
+        data['clock_anchors']={'before_tool_start':capture_trace_clock_bracket()}
         data['start_result']=capture.start();data['state']='RECORDING'
+        data['clock_anchors']['after_tool_start']=capture_trace_clock_bracket()
         deadline=time.monotonic()+seconds;_write(path,data)
         while not lease_lost.wait(min(.1,max(0,deadline-time.monotonic()))) and time.monotonic()<deadline:pass
         data['stop_reason']='LEASE_EOF_OR_EXPLICIT_STOP' if lease_lost.is_set() else 'TTL_EXPIRED'
-        data['state']='STOPPING';_write(path,data)
-        result=capture.stop();output=path.parent/result['path']
+        data['state']='STOPPING'
+        data['clock_anchors']['before_tool_stop']=capture_trace_clock_bracket()
+        _write(path,data)
+        result=capture.stop()
+        data['clock_anchors']['after_tool_stop']=capture_trace_clock_bracket()
+        output=path.parent/result['path']
         digest=hashlib.sha256()
         with output.open('rb') as stream:
             for block in iter(lambda:stream.read(1024*1024),b''):digest.update(block)
@@ -85,7 +95,10 @@ def run(journal):
             except BaseException as error:
                 data['state']='CLEANUP_REQUIRED';data['cleanup_error']=(type(error).__name__+': '+str(error))[:1000]
     finally:
-        data['ended_monotonic_ns']=time.monotonic_ns();_write(path,data)
+        data['ended_monotonic_ns']=time.monotonic_ns()
+        if isinstance(data.get('clock_anchors'),dict):
+            data['clock_anchors']['guardian_finally']=capture_trace_clock_bracket()
+        _write(path,data)
     return 0 if data['state']=='COMPLETED' else 1
 
 

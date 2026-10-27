@@ -113,6 +113,7 @@ class DecoderGuiTests(unittest.TestCase):
         panel.start_decode(broken)
         self.assertEqual(panel.table.rowCount(), 0)
         self.assertFalse(panel.export_button.isEnabled())
+        self.assertFalse(panel.review_clock_button.isEnabled())
         self.assertIsNone(panel.index)
         self.wait_idle()
         self.assertEqual(panel.state, "error")
@@ -192,6 +193,49 @@ class DecoderGuiTests(unittest.TestCase):
             panel.table.selectRow(0)
             self.assertIn("TRACEEVENT_DERIVED_UTC_UNVERIFIED",panel.details.toPlainText())
             self.assertIn("NOT_ESTABLISHED",panel.status.text())
+
+    def test_capture_clock_journal_manual_review_is_hash_linked_not_aligned(self):
+        from blackbox_core.decoder_index import PROTOCOL, build_index
+        from blackbox_core.trace_clock_evidence import bracket
+        panel = self.window.decoder_panel
+        source = Path(self.temp.name) / "synthetic-etl-events.jsonl"
+        rows = [
+            {"type": "header", "protocol": PROTOCOL, "input_sha256": "a"*64},
+            {"type": "event", "ordinal": 1, "time_ms": 1., "pid": 123,
+             "tid": 2, "process_instance": 1, "provider": "TEST",
+             "name": "synthetic", "payload": {}, "frames": [],
+             "semantic": None},
+            {"type": "footer", "protocol": PROTOCOL, "rows": 1, "status": "DECODED"}]
+        source.write_text("".join(json.dumps(x) + "\n" for x in rows), encoding="utf-8")
+        index = Path(self.temp.name) / "captured.sqlite3"
+        meta = build_index(source, index, input_sha256="a"*64, format_name=".etl")
+        panel.received({"path": str(index), "summary": meta}, "")
+        self.assertTrue(panel.review_clock_button.isEnabled())
+        self.window._navigate("decoder")
+        before = bracket(10_000_000, 10_000_100, 10_000_000,
+                         5_000_000_000, 5_000_010_000,
+                         1_800_000_000_000_000_000, pid=1234)
+        after = bracket(20_000_000, 20_000_100, 10_000_000,
+                        6_000_000_000, 6_000_010_000,
+                        1_800_000_001_000_000_000, pid=1234)
+        journal = Path(self.temp.name) / "synthetic.trace.json"
+        document = {"source": "ETW_WPR", "state": "COMPLETED",
+                    "result": {"sha256": "a"*64},
+                    "clock_anchors": {"before_tool_start": before,
+                                      "after_tool_stop": after}}
+        journal.write_text(json.dumps(document), encoding="utf-8")
+        for lang in ("EN", "RU"):
+            self.window._set_language(lang)
+            report = panel.review_clock_journal_path(journal)
+            self.assertEqual(report["status"], "HASH_MATCHED_QPC_BRACKETS_UNVERIFIED")
+            self.assertEqual(report["trace_to_blackbox_session_clock_alignment"],
+                             "NOT_ESTABLISHED")
+            self.assertIn("UNVERIFIED", panel.details.toPlainText())
+        document["result"]["sha256"] = "b"*64
+        journal.write_text(json.dumps(document), encoding="utf-8")
+        result = panel.review_clock_journal_path(journal)
+        self.assertEqual(result["status"], "JOURNAL_TRACE_HASH_MISMATCH")
+        self.assertIn("NOT_ESTABLISHED", panel.details.toPlainText())
 
     def test_close_cancels_and_drains_worker_without_qthread_destruction(self):
         def blocked(*args, cancel, **kwargs):

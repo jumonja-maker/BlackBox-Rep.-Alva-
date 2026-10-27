@@ -321,6 +321,26 @@ class DecoderIndexTests(unittest.TestCase):
             self.assertFalse(output.exists())
             self.assertFalse(list(self.root.glob(".decoder-building-*")))
 
+    def test_malformed_qpc_counter_refuses_untrusted_trace_projection(self):
+        from blackbox_core.decoder_clock import UNIX_EPOCH_DOTNET_TICKS
+        for bad in ("--123", "+123", "+-10", "", "１２３", "1.0",
+                    str(2**63), str(-(2**63)-1), True, 123):
+            item = event(1)
+            item["utc_ticks"] = str(UNIX_EPOCH_DOTNET_TICKS+17_000_000_000_000_000)
+            item["source_ticks"] = bad
+            src = self.stream([item])
+            output = self.root / "bad-qpc.sqlite3"
+            with self.assertRaisesRegex(ValueError, "INVALID_TRACE_SOURCE_TICKS"):
+                build_index(src,output,input_sha256=HASH,format_name=".etl")
+            self.assertFalse(output.exists())
+            self.assertFalse(list(self.root.glob(".decoder-building-*")))
+        good = event(1)
+        good["utc_ticks"] = str(UNIX_EPOCH_DOTNET_TICKS+17_000_000_000_000_000)
+        good["source_ticks"] = "-123456"
+        output, _ = self.build([good])
+        self.assertEqual(read_index(output, mode="clock")["rows"][0]["event"]["source_ticks"],
+                         "-123456")
+
     def test_jsonl_absence_of_utc_is_not_fabricated_and_v2_profile_reader_still_works(self):
         import sqlite3
         from contextlib import closing
