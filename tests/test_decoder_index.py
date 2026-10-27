@@ -284,9 +284,14 @@ class DecoderIndexTests(unittest.TestCase):
         self.assertEqual(meta["profiles"]["cpu_stack_groups_indexed"], 1)
         self.assertEqual(meta["profiles"]["cpu_profiler_samples_omitted_from_groups"], 1)
         self.assertEqual(len(read_index(path, mode="cpu_stacks")["rows"]), 1)
-        with sqlite3.connect(path) as db:
+        from contextlib import closing
+        # sqlite3.Connection.__exit__ commits/rolls back but DOES NOT close.
+        # A dangling read/write handle blocks TemporaryDirectory cleanup
+        # on Windows (WinError 32), even though Linux silently unlinks it.
+        with closing(sqlite3.connect(path)) as db:
             self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], 2)
             db.execute("PRAGMA user_version=1")
+            db.commit()
         self.assertEqual(len(read_index(path, mode="events")["rows"]), 2)
         with self.assertRaisesRegex(ValueError, "REDECODE_REQUIRED"):
             read_index(path, mode="cpu_stacks")
