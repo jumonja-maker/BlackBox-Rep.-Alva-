@@ -1,0 +1,173 @@
+name: Owner-approved v0.5.0 integration and release handoff
+
+on:
+  push:
+    branches: [release/decoder-v0.5.0]
+    paths:
+      - '.github/release-requests/v0.5.0/**'
+      - '.github/workflows/promote-decoder-v050.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: owner-approved-decoder-v050
+  cancel-in-progress: false
+
+env:
+  QT_QPA_PLATFORM: offscreen
+  PYTHONUTF8: '1'
+
+jobs:
+  candidate-linux:
+    if: >-
+      github.repository == 'jumonja-maker/BlackBox-Rep.-Alva-' &&
+      github.actor == 'jumonja-maker' &&
+      contains(github.event.head_commit.message, 'owner-release-v050-20261028-ceb7172311')
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Apply both packets and verify exact final source tree
+        run: python .github/release-requests/v0.5.0/prepare.py
+      - name: Install Qt and native parser test prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libegl1 libopengl0 libgl1 libxcb-cursor0 libxkbcommon-x11-0 clang lld
+          python -m pip install -r requirements.txt
+          python -m pip install -e .
+      - name: Decoder, Qt, capture ownership and release-gate regression
+        run: |
+          python -m unittest discover -s tests -p 'test_decoder*.py' -v
+          python -m unittest discover -s tests -p 'test_trace_clock_evidence.py' -v
+          python -m unittest discover -s tests -p 'test_trace_guardian.py' -v
+          python -m unittest discover -s tests -p 'test_release_gate.py' -v
+      - name: Real native PE/PDB parser acceptance
+        run: python tools/qa_decoder_patch.py --output candidate-native-linux
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: V050-CANDIDATE-LINUX
+          path: candidate-native-linux/
+          retention-days: 14
+          if-no-files-found: warn
+
+  candidate-windows:
+    if: >-
+      github.repository == 'jumonja-maker/BlackBox-Rep.-Alva-' &&
+      github.actor == 'jumonja-maker' &&
+      contains(github.event.head_commit.message, 'owner-release-v050-20261028-ceb7172311')
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Apply both packets and verify exact final source tree
+        run: python .github/release-requests/v0.5.0/prepare.py
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '10.0.x'
+      - name: Install dependencies and pinned capture tool
+        shell: pwsh
+        run: |
+          python -m pip install -r requirements.txt
+          if ($LASTEXITCODE -ne 0) { throw 'Dependencies failed' }
+          python -m pip install -e .
+          if ($LASTEXITCODE -ne 0) { throw 'Core installation failed' }
+          $toolDir = Join-Path $env:RUNNER_TEMP 'blackbox-v050-trace-tools'
+          dotnet tool install dotnet-trace --tool-path $toolDir --version 10.0.750501
+          if ($LASTEXITCODE -ne 0) { throw 'Capture tool failed' }
+          Add-Content -Path $env:GITHUB_PATH -Value $toolDir
+          $llvm = Join-Path $env:ProgramFiles 'LLVM\bin'
+          if (Test-Path $llvm) { Add-Content -Path $env:GITHUB_PATH -Value $llvm }
+      - name: Compile exact candidate TraceEvent helper
+        run: python tools/build_decoder.py --rid win-x64
+      - name: Decoder, Qt, capture ownership and release-gate regression
+        shell: pwsh
+        run: |
+          python -m unittest discover -s tests -p 'test_decoder*.py' -v
+          if ($LASTEXITCODE -ne 0) { throw 'Decoder tests failed' }
+          python -m unittest discover -s tests -p 'test_trace_clock_evidence.py' -v
+          if ($LASTEXITCODE -ne 0) { throw 'Clock evidence failed' }
+          python -m unittest discover -s tests -p 'test_trace_guardian.py' -v
+          if ($LASTEXITCODE -ne 0) { throw 'Capture ownership failed' }
+          python -m unittest discover -s tests -p 'test_release_gate.py' -v
+          if ($LASTEXITCODE -ne 0) { throw 'Release gate failed' }
+      - name: Real EventPipe and ETW regression
+        run: python tools/qa_decoder.py --helper decoder/BLACK.BOX-Decoder.exe --output candidate-decoder-qa
+      - name: Real native CPU tree and local symbols acceptance
+        run: python tools/qa_decoder_patch.py --output candidate-native-windows --helper decoder/BLACK.BOX-Decoder.exe --trace-index candidate-decoder-qa/eventpipe.sqlite3
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: V050-CANDIDATE-WINDOWS
+          path: |
+            candidate-decoder-qa/
+            candidate-native-windows/
+            decoder/decoder-manifest.json
+          retention-days: 14
+          if-no-files-found: warn
+
+  promote-and-dispatch:
+    needs: [candidate-linux, candidate-windows]
+    if: >-
+      needs.candidate-linux.result == 'success' &&
+      needs.candidate-windows.result == 'success' &&
+      github.repository == 'jumonja-maker/BlackBox-Rep.-Alva-' &&
+      github.actor == 'jumonja-maker'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      actions: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Reproduce the exact source tree accepted by both jobs
+        run: python .github/release-requests/v0.5.0/prepare.py
+      - name: Atomically integrate and explicitly dispatch full release QA
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUEST_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          MAIN='36885efb5eef6552c06e7a2d9d0f3b2219a6c87d'
+          BASE='963f27b1976770ba38608950ca4168eca2607a9f'
+          TREE='ceb71723118733641b32a0af052a1c2925064390'
+          [[ "$GITHUB_REF" == 'refs/heads/release/decoder-v0.5.0' ]]
+          [[ "$(git write-tree)" == "$TREE" ]]
+          [[ "$(git ls-remote origin refs/heads/main | cut -f1)" == "$MAIN" ]]
+          [[ "$(git ls-remote origin refs/heads/patch/trace-decoder-phase5 | cut -f1)" == "$BASE" ]]
+          [[ "$(git ls-remote origin refs/heads/release/decoder-v0.5.0 | cut -f1)" == "$REQUEST_SHA" ]]
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          NEW=$(git commit-tree "$TREE" -p "$REQUEST_SHA" -m 'Release v0.5.0: integrate both owner-approved decoder packets after native Windows/Linux acceptance')
+          [[ "$(git rev-parse "$NEW^{tree}")" == "$TREE" ]]
+          git push --atomic origin "$NEW:refs/heads/main" "$NEW:refs/heads/patch/trace-decoder-phase5" "$NEW:refs/heads/release/decoder-v0.5.0"
+          echo "Approved source SHA: $NEW" | tee promotion-result.txt
+          echo "Approved source tree: $TREE" | tee -a promotion-result.txt
+          # A token push does not trigger recursive push CI. workflow_dispatch
+          # explicitly starts the complete Windows/Linux/portable release gate.
+          gh workflow run shell-qa.yml --ref main -f publish_v050=true -f accepted_source_sha="$NEW"
+          echo 'Full release QA dispatched; publication remains gated on all jobs and archive verification.' | tee -a promotion-result.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: V050-INTEGRATION-RESULT
+          path: promotion-result.txt
+          retention-days: 30
+          if-no-files-found: warn
