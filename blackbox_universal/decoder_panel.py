@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushB
 from blackbox_core.decoder_service import capability, decode_file
 from blackbox_core.decoder_index import read_index
 from blackbox_core.trace_clock_evidence import assess_trace_capture_journal
+from blackbox_core.decoder_pdb import review_local_pe_pdb
 
 
 class DecodeWorker(QThread):
@@ -47,6 +48,7 @@ class DecoderPanel(QWidget):
         self.state = "ready"
         self.error = ""
         self.clock_review = None  # Manual journal review, scoped to current index.
+        self.pdb_review = None  # Independent local file pair, not bound to trace.
         layout = QVBoxLayout(self)
         layout.setContentsMargins(18, 12, 18, 12)
         self.notice = QLabel()
@@ -103,12 +105,15 @@ class DecoderPanel(QWidget):
         self.next_button = QPushButton()
         self.export_button = QPushButton()
         self.review_clock_button = QPushButton()
+        self.review_pdb_button = QPushButton()
         self.prev_button.clicked.connect(self.previous)
         self.next_button.clicked.connect(self.next)
         self.export_button.clicked.connect(self.export_index)
         self.review_clock_button.clicked.connect(self.review_clock_journal)
+        self.review_pdb_button.clicked.connect(self.review_local_pdb)
         for button in (self.prev_button, self.next_button,
-                       self.review_clock_button, self.export_button):
+                       self.review_clock_button, self.review_pdb_button,
+                       self.export_button):
             paging.addWidget(button)
             button.setEnabled(False)
         layout.addLayout(paging)
@@ -133,8 +138,12 @@ class DecoderPanel(QWidget):
                 (self.apply_button, "APPLY FILTER", "ПРИМЕНИТЬ ФИЛЬТР"),
                 (self.prev_button, "PREVIOUS", "НАЗАД"), (self.next_button, "NEXT", "ДАЛЕЕ"),
                 (self.export_button, "SAVE INDEX…", "СОХРАНИТЬ ИНДЕКС…"),
-                (self.review_clock_button, "CHECK CAPTURE CLOCK…", "ПРОВЕРИТЬ ЧАСЫ ЗАПИСИ…")):
+                (self.review_clock_button, "CHECK CAPTURE CLOCK…", "ПРОВЕРИТЬ ЧАСЫ ЗАПИСИ…"),
+                (self.review_pdb_button, "CHECK LOCAL PDB…", "ПРОВЕРИТЬ ЛОКАЛЬНЫЙ PDB…")):
             button.setText(self.tr2(en, ru))
+        self.review_pdb_button.setToolTip(self.tr2(
+            "Offline GUID/Age check of selected PE and PDB only; imported trace stacks are not symbolized.",
+            "Офлайн-проверка GUID/Age выбранных PE и PDB; стеки импортированной трассы не разрешаются."))
         for i, pair in enumerate((("Events", "События"), ("Event-associated stacks", "Стеки событий"),
                                   ("GC / suspension intervals", "GC / интервалы остановки"),
                                   ("CPU profiler samples", "Выборки CPU-профилировщика"),
@@ -184,6 +193,10 @@ class DecoderPanel(QWidget):
             text += self.tr2(" · CAPTURE CLOCK REVIEW: ", " · ПРОВЕРКА ЧАСОВ ЗАПИСИ: ")
             text += str(review.get("status", "UNKNOWN"))
             text += " · trace/session: NOT_ESTABLISHED"
+        if self.pdb_review is not None and self.summary and self.state == "decoded":
+            text += self.tr2(" · LOCAL PDB: ", " · ЛОКАЛЬНЫЙ PDB: ")
+            text += str(self.pdb_review.get("status", "UNKNOWN"))
+            text += " · trace module: NOT_ESTABLISHED"
         self.status.setText(text)
 
     def choose(self, from_session):
@@ -206,12 +219,13 @@ class DecoderPanel(QWidget):
         previous = self.index
         self.index, self.summary, self.rows = None, None, []
         self.clock_review = None
+        self.pdb_review = None
         self.cursors, self.next_cursor = [0], 0
         self.table.clearContents()
         self.table.setRowCount(0)
         self.details.clear()
         for button in (self.prev_button, self.next_button, self.export_button,
-                       self.review_clock_button):
+                       self.review_clock_button, self.review_pdb_button):
             button.setEnabled(False)
         if previous is not None:
             previous.unlink(missing_ok=True)
@@ -231,6 +245,7 @@ class DecoderPanel(QWidget):
 
     def received(self, packet, error):
         self.clock_review = None
+        self.pdb_review = None
         if error:
             self.state, self.error = "error", error
         else:
@@ -242,6 +257,7 @@ class DecoderPanel(QWidget):
                 old.unlink(missing_ok=True)
             self.export_button.setEnabled(True)
             self.review_clock_button.setEnabled(True)
+            self.review_pdb_button.setEnabled(True)
             self.reset_page()
         self.render_status()
 
@@ -345,6 +361,44 @@ class DecoderPanel(QWidget):
         self.table.clearSelection()
         self.details.setPlainText(json.dumps(report, ensure_ascii=False, indent=2))
         self.clock_review = report
+        self.render_status()
+        return report
+
+
+    def review_local_pdb(self):
+        """User-controlled offline pair review; no PDB names injected into traces."""
+        if not self.index or self.worker is not None:
+            return
+        folder = getattr(self.window.probe, "session_folder", None)
+        binary, _ = QFileDialog.getOpenFileName(
+            self, self.tr2("Select local PE module", "Выберите локальный PE-модуль"),
+            str(folder or ""),
+            "PE modules (*.exe *.dll *.sys *.ocx);;All files (*)")
+        if not binary:
+            return
+        pdb, _ = QFileDialog.getOpenFileName(
+            self, self.tr2("Select local Windows PDB", "Выберите локальный Windows PDB"),
+            str(Path(binary).parent), "PDB (*.pdb);;All files (*)")
+        if pdb:
+            self.review_local_pdb_paths(Path(binary), Path(pdb))
+
+    def review_local_pdb_paths(self, binary_path, pdb_path):
+        """GUID/Age preflight only, never proof of a trace module association."""
+        if not self.index or self.worker is not None:
+            return None
+        try:
+            report = review_local_pe_pdb(binary_path, pdb_path)
+        except (OSError, ValueError, TypeError, RuntimeError) as exc:
+            report = {
+                "status": "LOCAL_IDENTITY_UNAVAILABLE",
+                "reason": type(exc).__name__,
+                "trace_module_identity": "NOT_ESTABLISHED",
+                "stack_symbols_resolved": False,
+                "symbol_server_contacted": False,
+            }
+        self.table.clearSelection()
+        self.details.setPlainText(json.dumps(report, ensure_ascii=False, indent=2))
+        self.pdb_review = report
         self.render_status()
         return report
 

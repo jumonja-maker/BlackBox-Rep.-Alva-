@@ -263,6 +263,49 @@ class DecoderGuiTests(unittest.TestCase):
         self.assertEqual(panel.state, "decoded", panel.error)
         self.assertNotIn("ПРОВЕРКА ЧАСОВ ЗАПИСИ:", panel.status.text())
 
+    def test_local_pdb_review_is_manual_bilingual_and_not_trace_symbolization(self):
+        panel = self.window.decoder_panel
+        source = Path(self.temp.name) / "first-pdb-context.jsonl"
+        source.write_text(json.dumps({
+            "schema_version": 1, "pid": 89, "tid": 7, "seq": 1,
+            "source_ns": 1_000_000, "source_clock": "QA",
+            "kind": "source.event"}) + "\n", encoding="utf-8")
+        panel.start_decode(source)
+        self.wait_idle()
+        self.assertTrue(panel.review_pdb_button.isEnabled())
+        verdict = {
+            "status": "PE_PDB_GUID_AGE_MATCH_UNLINKED_TO_TRACE",
+            "trace_module_identity": "NOT_ESTABLISHED",
+            "stack_symbols_resolved": False,
+            "symbol_server_contacted": False,
+        }
+        with patch("blackbox_universal.decoder_panel.review_local_pe_pdb",
+                   return_value=verdict) as inspect:
+            for language, label in (("EN", "LOCAL PDB:"),
+                                    ("RU", "ЛОКАЛЬНЫЙ PDB:")):
+                self.window._set_language(language)
+                result = panel.review_local_pdb_paths(
+                    Path("test-module.exe"), Path("test-module.pdb"))
+                self.assertEqual(result["status"],
+                                 "PE_PDB_GUID_AGE_MATCH_UNLINKED_TO_TRACE")
+                self.assertIn(label, panel.status.text())
+                self.assertIn("trace module: NOT_ESTABLISHED", panel.status.text())
+                self.assertIn('"stack_symbols_resolved": false',
+                              panel.details.toPlainText())
+            self.assertEqual(inspect.call_count, 2)
+        other = Path(self.temp.name) / "second-pdb-context.jsonl"
+        other.write_text(json.dumps({
+            "schema_version": 1, "pid": 100, "tid": 7, "seq": 1,
+            "source_ns": 2_000_000, "source_clock": "QA",
+            "kind": "other.event"}) + "\n", encoding="utf-8")
+        panel.start_decode(other)
+        self.assertIsNone(panel.pdb_review)
+        self.assertNotIn("ЛОКАЛЬНЫЙ PDB:", panel.status.text())
+        self.wait_idle()
+        self.assertEqual(panel.state, "decoded", panel.error)
+        self.assertTrue(panel.review_pdb_button.isEnabled())
+        self.assertIsNone(panel.pdb_review)
+
     def test_close_cancels_and_drains_worker_without_qthread_destruction(self):
         def blocked(*args, cancel, **kwargs):
             if not cancel.wait(5):
