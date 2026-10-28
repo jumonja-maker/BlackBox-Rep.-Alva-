@@ -67,7 +67,19 @@ internal static class Program
     }
     static readonly ModuleBindings Modules = new();
 
-    static object Row(TraceEvent e, long ordinal)
+    static long? SourceCounterFrequency(TraceLog log)
+    {
+        // TraceEvent 4.0.0 persists the original source counter frequency in
+        // ETLX, but exposes it only internally. Read that one pinned metadata
+        // property; do not estimate a frequency from event pairs or UTC.
+        // If a future engine changes it, leave the value unknown and let the
+        // alignment gate refuse correlation rather than guessing OS frequency.
+        var property = typeof(TraceEventSource).GetProperty("QPCFreq",
+            BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+        return property?.GetValue(log) is long hz && hz > 0 ? hz : null;
+    }
+
+    static object Row(TraceEvent e, long ordinal, TraceLog log)
     {
         bool clipped = false;
         var payload = new Dictionary<string, object?>();
@@ -136,13 +148,16 @@ internal static class Program
                 };
         }
         catch (Exception ex) { errors.Add("CPU_CLASSIFICATION:" + ex.GetType().Name); }
+        object? schedule = null;
+        try { schedule = ThreadSchedule.Project(e, log); }
+        catch (Exception ex) { errors.Add("SCHEDULER_CLASSIFICATION:" + ex.GetType().Name); }
         // UTC is TraceEvent's reconstruction from the trace clock (QPC), NOT
         // an independently authenticated wall-clock sample or proof that this
         // trace can be aligned to another BLACK.BOX session.
         string utcTicks = e.TimeStamp.ToUniversalTime().Ticks.ToString(CultureInfo.InvariantCulture);
         return new { type = "event", ordinal, source_index = e.EventIndex.ToString(),
             time_ms = e.TimeStampRelativeMSec, source_ticks = e.TimeStampQPC.ToString(CultureInfo.InvariantCulture),
-            utc_ticks = utcTicks, cpu_sample = cpuSample,
+            utc_ticks = utcTicks, cpu_sample = cpuSample, thread_schedule = schedule,
             pid = e.ProcessID, tid = e.ThreadID, process_instance = processIndex,
             provider = Bounded(e.ProviderName, ref clipped, 256), provider_guid = e.ProviderGuid.ToString(),
             event_id = (int)e.ID, version = e.Version, name = Bounded(e.EventName, ref clipped, 256),
@@ -190,12 +205,16 @@ internal static class Program
                 utc_encoding = "DOTNET_DATETIME_100NS_TICKS_NOT_CAPTURE_ACCURACY",
                 trace_to_blackbox_session_clock_alignment = "NOT_ESTABLISHED",
                 native_module_contract = "blackbox.trace-module/1",
+                trace_counter_frequency_hz = SourceCounterFrequency(log),
+                trace_counter_kind = "TRACEEVENT_SOURCE_COUNTER",
+                trace_counter_frequency_provenance = "TRACEEVENT_4_0_PERSISTED_SOURCE_METADATA",
+                thread_schedule_contract = "blackbox.thread-schedule/1",
                 capture_loss = (int?)null, cpu_sample_contract = "blackbox.cpu-sample/1", symbol_policy = "NO_SYMBOL_SERVER_OR_SOURCE_DOWNLOAD" }, Json));
             long count = 0; bool limited = false;
             foreach (var e in log.Events)
             {
                 if (count >= MaxEvents || stream.Position > MaxOutput) { limited = true; break; }
-                var row = Row(e, ++count);
+                var row = Row(e, ++count, log);
                 string line = JsonSerializer.Serialize(row, Json);
                 if (Encoding.UTF8.GetByteCount(line) > 256 * 1024) throw new InvalidDataException("EVENT_OUTPUT_BUDGET");
                 writer.WriteLine(line);

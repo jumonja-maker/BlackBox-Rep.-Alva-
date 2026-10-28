@@ -9,13 +9,15 @@
 [**Download latest published Windows x64 release**](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/releases/latest) · [Releases](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/releases) · [Русская версия](README.ru.md)
 
 [![Windows/Linux QA](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/actions/workflows/shell-qa.yml/badge.svg?branch=main)](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/actions/workflows/shell-qa.yml)
-![Development version](https://img.shields.io/badge/source-0.5.1-40766c) ![Windows](https://img.shields.io/badge/platform-Windows%20x64-40766c) ![MIT](https://img.shields.io/badge/license-MIT-40766c)
+![Development version](https://img.shields.io/badge/source-0.5.2-40766c) ![Windows](https://img.shields.io/badge/platform-Windows%20x64-40766c) ![MIT](https://img.shields.io/badge/license-MIT-40766c)
 
-**Source version: v0.5.1.** Only the [official latest GitHub Release](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/releases/latest) determines what can be downloaded or installed by the updater. A source branch or CI artifact does not automatically become an update.
+**Source version: v0.5.2.** Only the [official latest GitHub Release](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/releases/latest) determines what can be downloaded or installed by the updater. A source branch or CI artifact does not automatically become an update.
 
 BLACK.BOX Universal lets you **select a running process or choose an application file**. It records operating-system measurements from a running process and saves sessions as local SQLite, JSON, and HTML files. File selection itself only reads file metadata. It does not inject code, modify the target program, or require a service, account, cloud server, subscription, or separately installed Python.
 
 > **Important:** BLACK.BOX provides observational evidence, not proof of an application's internal root cause. High CPU, rising memory, or a process exiting do not, on their own, establish why it failed.
+
+**Decoder completion in v0.5.2 source:** Offline trace/session clock correlation (with explicit uncertainty), ETW off-CPU/ready-delay analysis, native PDB source lines/inline sites/OMAP and bounded import recovery. Clock evidence is not trace authentication, scheduler events do not prove a lock owner, and unsupported symbols remain unknown. See [completion scope and acceptance limits](docs/TRACE_DECODER_COMPLETION_PATCH.md) and [v0.5.2 release notes](docs/RELEASE_v0.5.2.md). The installed version is determined only by the published GitHub Release, not a source commit.
 
 **v0.5.0 Trace Decoder:** The sixth page imports ETL, EventPipe and BLACK.BOX JSONL offline using the bundled self-contained Microsoft TraceEvent helper. It provides events, GC intervals, capture-clock evidence, module observations, local native PE/PDB checks and derived symbol names, and separate .NET/native ETW CPU sample trees. Select PID, process instance, thread and the time interval explicitly; export JSON or script-free HTML/SVG flame views. The decoder does not record automatically or download symbols. Counts are not CPU%, GC elapsed is not a pause, and trace/session clock alignment remains **NOT_ESTABLISHED**. See [release scope and limits](docs/RELEASE_v0.5.0.md), [module/PDB contract](docs/TRACE_DECODER_PHASE5_PATCH.md) and [native CPU/filter contract](docs/TRACE_DECODER_PHASE5_PACKET2.md). Publication is gated on the exact commit's Windows/Linux/portable and real trace acceptance; a source branch is not itself a published update.
 
@@ -64,7 +66,7 @@ Keep the entire `_internal` folder and the other extracted files. The main EXE i
 | **Event Log** | Local observation messages; session start/stop events are persisted in SQLite. |
 | **Reports** | Current snapshot, `report.json`, readable offline `report.html`, manual export and session comparison. |
 | **Settings** | RU/EN interface, 1/2/5-second sampling intervals, update checks, desktop shortcut, feedback and removal. |
-| **Trace Decoder — main development only** | Offline ETL/EventPipe/JSONL reading with separate CPU sample stacks and GC intervals. **Not available in the published v0.4.2 release.** |
+| **Trace Decoder — included since v0.5.0** | Offline ETL/EventPipe/JSONL reading with separate CPU sample stacks and GC intervals. Included in the published v0.5.1 release; v0.4.2 predates this page. |
 
 ### Settings — capture profiles and recovery controls
 
@@ -82,7 +84,7 @@ Keep the entire `_internal` folder and the other extracted files. The main EXE i
 
 ![Windows CI screenshot of the sixth Trace Decoder tab in the current main development build](docs/screenshots/en-decoder.png)
 
-*Trace Decoder (current `main` **only**) — import an ETL, EventPipe `.nettrace`, or BLACK.BOX JSONL file offline. CPU profiler samples, event-associated stacks and GC intervals have distinct meanings. This tab is **not present** in the published v0.4.2 Release.*
+*Trace Decoder (published since v0.5.0, retained in v0.5.1) — import an ETL, EventPipe `.nettrace`, or BLACK.BOX JSONL file offline. CPU profiler samples, event-associated stacks and GC intervals have distinct meanings. Older v0.4.2 packages do not contain this tab.*
 
 Some counters are inaccessible for protected processes or unavailable on a particular system. Missing values are displayed as **unknown**, not misleading zeros. RSS describes the selected process; it is **not** the summed memory usage of a complete process tree.
 

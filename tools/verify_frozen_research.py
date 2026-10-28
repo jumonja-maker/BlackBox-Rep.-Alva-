@@ -23,7 +23,10 @@ def verify(path):
         "blackbox_core.instrumentation","blackbox_core.session_v2",
         "blackbox_core.session_view","blackbox_core.windows_research",
         "blackbox_investigation.engine","blackbox_investigation.sqlite_adapter",
-        "blackbox_universal.research_bridge","blackbox_universal.preparation_dialog")
+        "blackbox_universal.research_bridge","blackbox_universal.preparation_dialog",
+        "blackbox_core.decoder_alignment","blackbox_core.decoder_waits",
+        "blackbox_core.decoder_codeview","blackbox_core.decoder_limits",
+        "blackbox_core.decoder_export","blackbox_universal.decoder_analysis")
     missing=[name for name in required if name not in archive.toc]
     if missing:raise RuntimeError("FROZEN_MODULES_MISSING: "+", ".join(missing))
     source=path.parent/"_internal"/"blackbox_core"/"instrumentation.py"

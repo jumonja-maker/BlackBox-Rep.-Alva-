@@ -12,11 +12,13 @@ from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, Q
     QPlainTextEdit, QSplitter)
 
 from blackbox_core.decoder_service import capability, decode_file
+from blackbox_core.decoder_limits import failure_details
+from blackbox_core.decoder_export import export_index_copy
 from blackbox_core.decoder_index import read_index
 from blackbox_core.trace_clock_evidence import assess_trace_capture_journal
 from blackbox_core.decoder_pdb import review_local_pe_pdb
 from blackbox_core.decoder_calltree import export_analysis, parse_calltree_filters
-from .decoder_analysis import DecoderAnalysisWorker, CallTreeDialog
+from .decoder_analysis import DecoderAnalysisWorker, CallTreeDialog, DiagnosticReportDialog
 
 
 class DecodeWorker(QThread):
@@ -32,7 +34,8 @@ class DecodeWorker(QThread):
             meta = decode_file(self.source, self.output, cancel=self.cancel_event)
             self.result_ready.emit({"path": str(self.output), "summary": meta}, "")
         except Exception as exc:
-            self.result_ready.emit(None, (type(exc).__name__ + ": " + str(exc))[:350])
+            self.result_ready.emit({"failure": failure_details(exc)},
+                                   (type(exc).__name__ + ": " + str(exc))[:350])
 
 
 class DecoderPanel(QWidget):
@@ -49,9 +52,11 @@ class DecoderPanel(QWidget):
         self.summary = None
         self.state = "ready"
         self.error = ""
+        self.import_failure = None
         self.clock_review = None  # Manual journal review, scoped to current index.
         self.pdb_review = None  # Independent local file pair, not bound to trace.
         self.analysis_report = None
+        self.alignment_report = None
         self._analysis_kind = None
         layout = QVBoxLayout(self)
         layout.setContentsMargins(18, 12, 18, 12)
@@ -118,12 +123,17 @@ class DecoderPanel(QWidget):
         self.resolve_tree_button = QPushButton()
         self.resolve_stack_button = QPushButton()
         self.export_analysis_button = QPushButton()
+        self.waits_button = QPushButton()
+        self.align_session_button = QPushButton()
         self.calltree_button.clicked.connect(self.start_calltree)
         self.resolve_tree_button.clicked.connect(self.choose_calltree_symbols)
         self.resolve_stack_button.clicked.connect(self.choose_stack_symbols)
         self.export_analysis_button.clicked.connect(self.save_analysis)
+        self.waits_button.clicked.connect(self.start_wait_analysis)
+        self.align_session_button.clicked.connect(self.choose_session_alignment)
         for i, button in enumerate((self.calltree_button, self.resolve_tree_button,
-                                    self.resolve_stack_button, self.export_analysis_button)):
+                                    self.resolve_stack_button, self.export_analysis_button,
+                                    self.waits_button, self.align_session_button)):
             button.setEnabled(False)
             analysis_controls.addWidget(button, i//2, i%2)
         layout.addLayout(analysis_controls)
@@ -169,10 +179,10 @@ class DecoderPanel(QWidget):
     def retranslate(self):
         self.notice.setText(self.tr2(
             "OFFLINE TRACE DECODER · ETL / EventPipe / BLACK.BOX JSONL. No recording or symbol downloads. "
-            "Trace time is NOT aligned to your session. UTC is reconstructed by TraceEvent, NOT independently synchronized. "
+            "Session time requires checked clock evidence; UTC alone does not establish synchronization. "
             "GC elapsed time is NOT a pause. Imported data is unverified.",
             "ДЕКОДЕР ТРАСС · ETL / EventPipe / JSONL BLACK.BOX. Без записи и загрузки символов. "
-            "Время НЕ совмещено с сеансом. UTC восстановлено TraceEvent, а НЕ независимо синхронизировано. "
+            "Связь с сеансом требует проверки часов; одного UTC недостаточно для синхронизации. "
             "Длительность GC — НЕ пауза. Импорт не удостоверяет источник."))
         for button, en, ru in ((self.open_button, "OPEN TRACE…", "ОТКРЫТЬ ТРАССУ…"),
                 (self.session_button, "FROM SESSION…", "ИЗ СЕАНСА…"),
@@ -185,9 +195,11 @@ class DecoderPanel(QWidget):
                 (self.calltree_button, "CPU CALL TREE…", "ДЕРЕВО CPU-ВЫБОРОК…"),
                 (self.resolve_tree_button, "TREE + LOCAL PDB…", "ДЕРЕВО + ЛОКАЛЬНЫЙ PDB…"),
                 (self.resolve_stack_button, "RESOLVE SELECTED STACK…", "ИМЕНА ВЫБРАННОГО СТЕКА…"),
+                (self.waits_button, "THREAD WAITS (ETW)…", "ОЖИДАНИЯ ПОТОКОВ (ETW)…"),
+                (self.align_session_button, "CORRELATE WITH SESSION…", "СОПОСТАВИТЬ С СЕАНСОМ…"),
                 (self.export_analysis_button, "SAVE ANALYSIS…", "СОХРАНИТЬ АНАЛИЗ…")):
             button.setText(self.tr2(en, ru))
-        self.cpu_scope_label.setText(self.tr2("CPU tree:", "Дерево CPU:"))
+        self.cpu_scope_label.setText(self.tr2("CPU / waits:", "CPU / ожидания:"))
         self.cpu_source.setItemText(0, ".NET SampleProfiler")
         self.cpu_source.setItemText(1, self.tr2("Native ETW", "Нативный ETW"))
         self.cpu_source.setAccessibleName(self.tr2("CPU sample source", "Источник CPU-выборок"))
@@ -202,9 +214,9 @@ class DecoderPanel(QWidget):
             field.setPlaceholderText(self.tr2(en, ru))
             field.setAccessibleName(self.tr2(en, ru))
         scope_help = self.tr2(
-            "Only CPU trees use these filters and the PID above. Blank means all. "
+            "CPU trees and ETW waits use these filters and the PID above. Blank means all. "
             "Times are trace-relative milliseconds [from, to); use a decimal point.",
-            "Эти фильтры и PID выше относятся к дереву CPU. Пустое поле — все. "
+            "Эти фильтры и PID выше относятся к дереву CPU и ожиданиям ETW. Пустое поле — все. "
             "Время относительно трассы, мс [от, до); дробная часть через точку.")
         for field in (self.cpu_instance, self.cpu_tid, self.cpu_start, self.cpu_end):
             field.setToolTip(scope_help)
@@ -241,7 +253,14 @@ class DecoderPanel(QWidget):
             text = self.tr2("Decoding in a separate process. Cancel is available.",
                             "Декодирование в отдельном процессе. Можно отменить.")
         elif self.state == "error":
-            text = self.tr2("Not decoded: ", "Не расшифровано: ") + self.error
+            failure_state = (self.import_failure or {}).get("state")
+            labels = {"CANCELLED": ("Import cancelled: ", "Импорт отменён: "),
+                      "TIMED_OUT": ("Import time limit: ", "Лимит времени импорта: "),
+                      "LIMIT_REACHED": ("Import size or memory limit: ", "Лимит размера или памяти: ")}
+            text = self.tr2(*labels.get(failure_state, ("Not decoded: ", "Не расшифровано: "))) + self.error
+            if self.import_failure:
+                text += self.tr2(" Open the original again to retry. No partial result was published.",
+                                 " Для повтора откройте исходный файл заново. Частичный результат не опубликован.")
         elif self.summary:
             s = self.summary
             text = self.tr2("Result", "Результат") + f": {s['status']} · {s['rows']} events · {s['events_with_stacks']} stacks · "
@@ -253,9 +272,11 @@ class DecoderPanel(QWidget):
                          f"({profiles['cpu_profiler_samples_omitted_from_groups']} ungrouped)")
             clock = s.get("calendar_clock", {})
             if clock:
+                alignment = (self.alignment_report.get("status") if self.alignment_report is not None
+                             else clock['trace_to_blackbox_session_clock_alignment'])
                 text += (f" · UTC projections: {clock['events_with_utc_projection']}/{s['rows']}, "
                          f"offset discrepancies: {clock['relative_vs_utc_offset_disagreements_over_10ms']}, "
-                         f"session alignment: {clock['trace_to_blackbox_session_clock_alignment']}")
+                         f"session alignment: {alignment}")
             text += self.tr2(" · capture completeness UNKNOWN; sample counts ≠ CPU%",
                              " · полнота записи НЕИЗВЕСТНА; число выборок ≠ CPU%")
         else:
@@ -267,6 +288,9 @@ class DecoderPanel(QWidget):
             text += self.tr2(" · CAPTURE CLOCK REVIEW: ", " · ПРОВЕРКА ЧАСОВ ЗАПИСИ: ")
             text += str(review.get("status", "UNKNOWN"))
             text += " · trace/session: NOT_ESTABLISHED"
+        if self.alignment_report is not None and self.summary and self.state == "decoded":
+            text += self.tr2(" · SESSION CORRELATION: ", " · СВЯЗЬ С СЕАНСОМ: ")
+            text += str(self.alignment_report.get("status", "NOT_ESTABLISHED"))
         if self.pdb_review is not None and self.summary and self.state == "decoded":
             text += self.tr2(" · LOCAL PDB: ", " · ЛОКАЛЬНЫЙ PDB: ")
             text += str(self.pdb_review.get("status", "UNKNOWN"))
@@ -295,10 +319,15 @@ class DecoderPanel(QWidget):
         self.clock_review = None
         self.pdb_review = None
         self.analysis_report = None
+        self.alignment_report = None
+        self.import_failure = None
         self.reset_cpu_scope()
         for dialog in self.findChildren(CallTreeDialog):
             dialog.close()
-        for button in (self.calltree_button, self.resolve_tree_button, self.resolve_stack_button, self.export_analysis_button):
+        for dialog in self.findChildren(DiagnosticReportDialog):
+            dialog.close()
+        for button in (self.calltree_button, self.resolve_tree_button, self.resolve_stack_button,
+                       self.export_analysis_button, self.waits_button, self.align_session_button):
             button.setEnabled(False)
         self.cursors, self.next_cursor = [0], 0
         self.table.clearContents()
@@ -326,9 +355,12 @@ class DecoderPanel(QWidget):
     def received(self, packet, error):
         self.clock_review = None
         self.pdb_review = None
+        self.alignment_report = None
         if error:
             self.state, self.error = "error", error
+            self.import_failure = (packet or {}).get("failure")
         else:
+            self.import_failure = None
             old = self.index
             self.index = Path(packet["path"])
             self.summary = packet["summary"]
@@ -340,6 +372,8 @@ class DecoderPanel(QWidget):
             self.review_pdb_button.setEnabled(True)
             self.calltree_button.setEnabled(True)
             self.resolve_tree_button.setEnabled(True)
+            self.waits_button.setEnabled(True)
+            self.align_session_button.setEnabled(True)
             self.reset_page()
         self.render_status()
 
@@ -353,6 +387,8 @@ class DecoderPanel(QWidget):
         if self.index is not None:
             self.calltree_button.setEnabled(True)
             self.resolve_tree_button.setEnabled(True)
+            self.waits_button.setEnabled(True)
+            self.align_session_button.setEnabled(True)
             self.review_clock_button.setEnabled(True)
             self.review_pdb_button.setEnabled(True)
             self.export_analysis_button.setEnabled(self.analysis_report is not None)
@@ -434,7 +470,13 @@ class DecoderPanel(QWidget):
         self._refresh_stack_action()
         index = self.table.currentRow()
         if 0 <= index < len(self.rows):
-            self.details.setPlainText(json.dumps(self.rows[index]["event"], ensure_ascii=False, indent=2))
+            row = self.rows[index]["event"]
+            detail = row
+            if self.alignment_report is not None and row.get("type") == "event":
+                from blackbox_core.decoder_alignment import project_event_time
+                detail = {"original_event": row,
+                          "session_time_projection": project_event_time(self.alignment_report, row)}
+            self.details.setPlainText(json.dumps(detail, ensure_ascii=False, indent=2))
 
     def review_clock_journal(self):
         """Optional, manual review of a matching *.trace.json capture journal."""
@@ -451,6 +493,10 @@ class DecoderPanel(QWidget):
         """Structured offline review; a matching hash is NOT clock alignment."""
         if not self.index or self.worker is not None:
             return None
+        self.alignment_report = None
+        if self._analysis_kind == "alignment":
+            self.analysis_report = None
+            self.export_analysis_button.setEnabled(False)
         try:
             report = assess_trace_capture_journal(self.index, journal_path)
         except (OSError, ValueError, KeyError, RuntimeError) as exc:
@@ -512,10 +558,12 @@ class DecoderPanel(QWidget):
             except RuntimeError:
                 pass  # WA_DeleteOnClose may already have deleted its C++ object.
             self._calltree_dialog = None
+        for report_dialog in self.findChildren(DiagnosticReportDialog):
+            report_dialog.close()
 
     def _analysis_filter_changed(self, *_):
         # Do not export an old tree as though it used newly edited filters.
-        if self._analysis_kind == "calltree" and self.worker is None:
+        if self._analysis_kind in ("calltree", "waits") and self.worker is None:
             self.analysis_report = None
             self.export_analysis_button.setEnabled(False)
             self._close_calltree()
@@ -545,6 +593,34 @@ class DecoderPanel(QWidget):
             self.state, self.error = "error", str(exc)
             self.render_status(); return
         self.start_analysis("calltree", arguments)
+
+    def start_wait_analysis(self):
+        if self.index is None or self.worker is not None:
+            return
+        try:
+            arguments = self._calltree_arguments()
+            arguments.pop("source")
+        except ValueError as exc:
+            self.state, self.error = "error", str(exc)
+            self.render_status()
+            return
+        self.start_analysis("waits", arguments)
+
+    def choose_session_alignment(self):
+        if self.index is None or self.worker is not None:
+            return
+        folder = str(getattr(self.window.probe, "session_folder", None) or "")
+        journal, _ = QFileDialog.getOpenFileName(self,
+            self.tr2("Choose capture clock journal", "Выберите журнал часов записи"),
+            folder, "Capture journal (*.trace.json)")
+        if not journal:
+            return
+        session, _ = QFileDialog.getOpenFileName(self,
+            self.tr2("Choose BLACK.BOX session database", "Выберите базу сеанса BLACK.BOX"),
+            str(Path(journal).parent), "Session database (session-v2.sqlite3);;SQLite (*.sqlite3)")
+        if session:
+            self.start_analysis("alignment", {"index_path": self.index,
+                "journal_path": Path(journal), "session_path": Path(session)})
 
     def choose_calltree_symbols(self):
         if self.index is None or self.worker is not None:
@@ -594,12 +670,16 @@ class DecoderPanel(QWidget):
             self.render_status(); return
         self._close_calltree()
         self.analysis_report = None
+        if kind == "alignment":
+            self.alignment_report = None
         self._analysis_kind = kind
         self.state, self.error = "analyzing", ""
+        self.import_failure = None
         self.details.clear()
         for button in (self.open_button, self.session_button, self.calltree_button, self.resolve_tree_button,
                        self.resolve_stack_button, self.export_analysis_button,
-                       self.review_pdb_button, self.review_clock_button):
+                       self.review_pdb_button, self.review_clock_button, self.waits_button,
+                       self.align_session_button):
             button.setEnabled(False)
         self.cancel_button.setEnabled(True)
         self._enable_cpu_scope(False)
@@ -619,6 +699,12 @@ class DecoderPanel(QWidget):
             if self._analysis_kind == "calltree":
                 self._calltree_dialog = CallTreeDialog(report, self.window.language, self)
                 self._calltree_dialog.show()
+            elif self._analysis_kind in ("alignment", "waits"):
+                if self._analysis_kind == "alignment":
+                    self.alignment_report = report
+                    self.clock_review = None
+                dialog = DiagnosticReportDialog(report, self.window.language, self)
+                dialog.show()
         self.render_status()
 
     def save_analysis(self):
@@ -646,10 +732,7 @@ class DecoderPanel(QWidget):
         if not name:
             return
         try:
-            # Create-new, even when a file dialog offers overwrite confirmation.
-            with self.index.open("rb") as source, Path(name).open("xb") as target:
-                import shutil
-                shutil.copyfileobj(source, target)
-        except OSError as exc:
+            export_index_copy(self.index, Path(name))
+        except (OSError, ValueError) as exc:
             self.state, self.error = "error", type(exc).__name__ + ": " + str(exc)
             self.render_status()

@@ -124,6 +124,8 @@ CREATE TABLE capabilities (
     privilege_level TEXT NOT NULL, requires_optin INTEGER NOT NULL,
     supported_os TEXT NOT NULL, accuracy_notes TEXT NOT NULL,
     failure_reason TEXT);
+CREATE TABLE clock_evidence (
+    schema TEXT PRIMARY KEY, evidence_json TEXT NOT NULL);
 """
 
 
@@ -175,6 +177,8 @@ class SessionV2Writer:
         self.origin_ns = origin_ns
         self.anchor = capture_clock_anchor()
         self.session_uuid = str(uuid4())
+        from .decoder_alignment import session_clock_record
+        self.clock_evidence = session_clock_record(self.session_uuid, origin_ns, self.anchor)
         self.max_bytes = max_bytes
         self._commands: Queue[_Command | None] = Queue(capacity)
         self._gate = Lock()
@@ -232,6 +236,9 @@ class SessionV2Writer:
             self.anchor.monotonic_ns, self.anchor.utc_ns, self.anchor.uncertainty_ns,
             resolution, self.anchor.source, os.cpu_count(), "RECORDING", None, None, 0,
         ))
+        db.execute("INSERT INTO clock_evidence VALUES (?,?)", (
+            self.clock_evidence["schema"],
+            json.dumps(self.clock_evidence, ensure_ascii=True, allow_nan=False)))
 
     def _instance(self, db, pid, created, stamp, *, parent=None, name=None):
         if (type(pid) is not int or pid <= 0 or type(created) not in (int,float)

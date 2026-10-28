@@ -15,8 +15,10 @@ from .operation_worker import OPERATIONS, MAX_RESULT_BYTES
 
 class OwnedProcess:
     """A kill boundary confined to our operation and its own descendants."""
-    def __init__(self, args, *, stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,env=None):
+    def __init__(self, args, *, stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,env=None,
+                 detach_console=False):
         self.job = None;self._closed=False
+        self.windows_creation_flags = 0
         options = dict(stdin=stdin,stdout=stdout,stderr=stderr,env=env)
         if os.name == 'nt':
             import ctypes as C
@@ -42,7 +44,13 @@ class OwnedProcess:
             if not k.SetInformationJobObject(self.job,9,C.byref(limits),C.sizeof(limits)):
                 k.CloseHandle(self.job);self.job=None
                 raise OSError(C.get_last_error(),'OPTIONAL_JOB_LIMIT_FAILED')
-            options['creationflags'] = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
+            # Offline decoder helpers need only their redirected file handles.
+            # Detaching avoids the console startup path; it still uses the same
+            # token and owned job. Other optional operations retain their mode.
+            self.windows_creation_flags = (getattr(subprocess, 'DETACHED_PROCESS', 0x8)
+                                           if detach_console else
+                                           getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+            options['creationflags'] = self.windows_creation_flags
         else: options['start_new_session'] = True
         try:
             self.process = subprocess.Popen(args, **options)

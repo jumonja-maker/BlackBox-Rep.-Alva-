@@ -15,7 +15,8 @@ from threading import Event, Thread
 import time
 from uuid import uuid4
 from .library_files import replace_owned_status
-from .trace_clock_evidence import capture_trace_clock_bracket
+from .trace_clock_evidence import (capture_trace_clock_bracket,
+                                   new_clock_order_samples, append_clock_order_sample)
 from .windows_research import WPR_PROFILES
 
 MAX_JOURNAL_BYTES=65536
@@ -77,8 +78,13 @@ def run(journal):
         data['clock_anchors']={'before_tool_start':capture_trace_clock_bracket()}
         data['start_result']=capture.start();data['state']='RECORDING'
         data['clock_anchors']['after_tool_start']=capture_trace_clock_bracket()
+        data['clock_order_samples']=new_clock_order_samples(data['clock_anchors']['after_tool_start'])
         deadline=time.monotonic()+seconds;_write(path,data)
-        while not lease_lost.wait(min(.1,max(0,deadline-time.monotonic()))) and time.monotonic()<deadline:pass
+        next_clock_sample=time.monotonic()+.2
+        while not lease_lost.wait(min(.1,max(0,deadline-time.monotonic()))) and time.monotonic()<deadline:
+            if time.monotonic()>=next_clock_sample:
+                append_clock_order_sample(data['clock_order_samples'],capture_trace_clock_bracket())
+                next_clock_sample=time.monotonic()+.2
         data['stop_reason']='LEASE_EOF_OR_EXPLICIT_STOP' if lease_lost.is_set() else 'TTL_EXPIRED'
         data['state']='STOPPING'
         data['clock_anchors']['before_tool_stop']=capture_trace_clock_bracket()
@@ -107,7 +113,7 @@ def run(journal):
 
 
 class TraceSupervisor:
-    def __init__(self,folder,*,seconds=30,max_output_bytes=256*1024**2,target=None,profile="GeneralProfile.Light"):
+    def __init__(self,folder,*,seconds=30,max_output_bytes=256*1024**2,target=None,profile="GeneralProfile.Light",session_path=None):
         if type(profile) is not str or profile not in WPR_PROFILES:
             raise ValueError("INVALID_WPR_PROFILE")
         if type(seconds) is not int or not 1<=seconds<=60:raise ValueError('INVALID_TRACE_DURATION')
@@ -122,6 +128,9 @@ class TraceSupervisor:
             'recovery':'ONLY_THIS_NAMED_INSTANCE_MAY_BE_CANCELLED'}
         import psutil
         self.data.update(owner_pid=os.getpid(),owner_created=psutil.Process().create_time())
+        from .decoder_alignment import capture_session_binding
+        self.data['session_clock_binding']=capture_session_binding(
+            session_path if session_path is not None else self.folder.parent/'session-v2.sqlite3')
     @property
     def active(self):return self.process is not None and self.process.poll() is None
     def start(self):
