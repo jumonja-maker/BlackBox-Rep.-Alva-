@@ -1,0 +1,56 @@
+name: Publish owner-approved v0.5.0 draft by verified release ID
+
+on:
+  push:
+    branches: [release/decoder-v0.5.0]
+    paths:
+      - '.github/workflows/publish-verified-v050-draft.yml'
+      - '.github/release-requests/v0.5.0/publish_verified_draft.py'
+
+permissions:
+  contents: write
+  actions: read
+
+concurrency:
+  group: publish-verified-v050-draft
+  cancel-in-progress: false
+
+jobs:
+  publish-verified-draft:
+    if: >-
+      github.repository == 'jumonja-maker/BlackBox-Rep.-Alva-' &&
+      github.actor == 'jumonja-maker' &&
+      contains(github.event.head_commit.message, 'publish-draft-426702785-source-7651560')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: control
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          ref: 765156068a2d2f0171be4d048e74c7676feba143
+          path: source
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - uses: actions/download-artifact@v4
+        with:
+          name: BLACKBOX-INDEPENDENT-WINDOWS-QA
+          repository: jumonja-maker/BlackBox-Rep.-Alva-
+          run-id: 40692494930
+          github-token: ${{ github.token }}
+          path: verified-portable
+      - name: Revalidate full code gates, archive and existing assets; publish only the verified draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python control/.github/release-requests/v0.5.0/publish_verified_draft.py --source source --archive verified-portable/BLACK.BOX-Universal-Windows.zip
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: BLACKBOX-V050-PUBLICATION-PROOF
+          path: publish-proof/
+          retention-days: 90
+          if-no-files-found: warn
