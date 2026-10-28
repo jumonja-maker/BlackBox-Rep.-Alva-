@@ -1,5 +1,6 @@
 """Explicit, cancellable offline decoder analysis. No recording or network."""
 import json
+from html import escape
 from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtWidgets import (QDialog, QVBoxLayout, QLabel, QTreeWidget,
                               QTreeWidgetItem, QDialogButtonBox)
@@ -45,8 +46,16 @@ class CallTreeDialog(QDialog):
             'Числа — количество записанных выборок, НЕ CPU% и НЕ время. '
             'Отсутствующие и обрезанные стеки показаны явно. ' if ru else
             'Counts are recorded samples, NOT CPU% or time. Missing and clipped stacks remain explicit. '
-        ) + json.dumps(coverage, ensure_ascii=False))
+        ) + json.dumps({"status": report.get("status"), "filters": report["filters"],
+                       "coverage": coverage}, ensure_ascii=False))
         notice.setWordWrap(True); layout.addWidget(notice)
+        symbols = report.get("symbolization", {})
+        if symbols.get("status") == "LOCAL_PAIR_REVIEWED":
+            symbol_notice = QLabel((
+                "Имена из локального PDB — производные; исходные кадры сохранены. Разрешено: " if ru else
+                "Local PDB names are derived; original frames are preserved. Resolved: "
+            ) + f'{symbols["frame_occurrences_resolved"]}/{symbols["frame_occurrences_reviewed"]}')
+            symbol_notice.setWordWrap(True); layout.addWidget(symbol_notice)
         tree = QTreeWidget(); tree.setColumnCount(3)
         tree.setHeaderLabels(['Кадр / процесс','С потомками','В самом кадре'] if ru else
                             ['Frame / process','Inclusive samples','Self samples'])
@@ -56,6 +65,9 @@ class CallTreeDialog(QDialog):
             item = QTreeWidgetItem([node['label'],str(node['inclusive_samples']),str(node['self_samples'])])
             # QTreeWidget text is plain text, never render imported symbol names as HTML.
             item.setData(0, Qt.ItemDataRole.UserRole, node['id'])
+            if node.get('frame'):
+                item.setToolTip(0, "<pre>" + escape(json.dumps({"raw_frame": node['frame'],
+                    "derived_symbol": node.get('derived_symbol')}, ensure_ascii=False, indent=2)) + "</pre>")
             if node['parent_id'] is None:tree.addTopLevelItem(item)
             else:items[node['parent_id']].addChild(item)
             items[node['id']] = item

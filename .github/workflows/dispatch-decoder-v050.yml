@@ -1,0 +1,47 @@
+name: Dispatch exact owner-approved v0.5.0 release gate
+
+on:
+  push:
+    branches: [release/decoder-v0.5.0]
+    paths: ['.github/workflows/dispatch-decoder-v050.yml']
+
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  group: dispatch-owner-v050
+  cancel-in-progress: false
+
+jobs:
+  dispatch:
+    if: >-
+      github.repository == 'jumonja-maker/BlackBox-Rep.-Alva-' &&
+      github.actor == 'jumonja-maker' &&
+      contains(github.event.head_commit.message, 'dispatch-approved-7651560-v050')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Verify exact main and completed candidate acceptance, then dispatch
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          SOURCE='765156068a2d2f0171be4d048e74c7676feba143'
+          TREE='ceb71723118733641b32a0af052a1c2925064390'
+          [[ "$GITHUB_REF" == 'refs/heads/release/decoder-v0.5.0' ]]
+          [[ "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq '.object.sha')" == "$SOURCE" ]]
+          [[ "$(gh api "repos/$GITHUB_REPOSITORY/git/commits/$SOURCE" --jq '.tree.sha')" == "$TREE" ]]
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/40691436071/jobs" > candidate-jobs.json
+          python - <<'VERIFY'
+          import json
+          from pathlib import Path
+          jobs = json.loads(Path('candidate-jobs.json').read_text())['jobs']
+          checks = [j for j in jobs if j['name'] in ('candidate-linux', 'candidate-windows')]
+          assert len(checks) == 2
+          assert all(j['status'] == 'completed' and j['conclusion'] == 'success' for j in checks)
+          assert all(j['head_sha'] == '88510ebccf1099cdeefef492b7132dfe5eee5634' for j in checks)
+          VERIFY
+          gh workflow run shell-qa.yml --repo "$GITHUB_REPOSITORY" --ref main -f publish_v050=true -f accepted_source_sha="$SOURCE"
+          echo "Full release QA dispatched on approved source $SOURCE. Publication remains gated on all Windows/Linux/portable checks and verified assets."

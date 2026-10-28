@@ -9,8 +9,8 @@ on:
       - main
   workflow_dispatch:
     inputs:
-      publish_v042:
-        description: "Publish tested v0.4.2 from the exact accepted main SHA"
+      publish_v050:
+        description: "Publish tested v0.5.0 from the exact accepted main SHA"
         required: true
         type: boolean
         default: false
@@ -166,7 +166,7 @@ jobs:
       - uses: actions/setup-dotnet@v5
         with:
           dotnet-version: '10.0.x'
-      - name: Build self-contained Microsoft TraceEvent decoder (MAIN artifact only)
+      - name: Build bundled self-contained Microsoft TraceEvent decoder
         run: python tools/build_decoder.py --rid win-x64
       - name: Install pinned Microsoft dotnet-trace for owned EventPipe QA
         shell: pwsh
@@ -175,8 +175,19 @@ jobs:
           dotnet tool install dotnet-trace --tool-path $toolDir --version 10.0.750501
           if ($LASTEXITCODE -ne 0) { throw 'Pinned dotnet-trace installation failed' }
           Add-Content -Path $env:GITHUB_PATH -Value $toolDir
+          $llvm = Join-Path $env:ProgramFiles 'LLVM\bin'
+          if (Test-Path $llvm) { Add-Content -Path $env:GITHUB_PATH -Value $llvm }
       - name: Real EventPipe/ETW and guardian capture-clock integration
         run: python tools/qa_decoder.py --helper decoder/BLACK.BOX-Decoder.exe --output decoder-qa
+      - name: Real native ETW filtered trees and local PE/PDB acceptance
+        run: python tools/qa_decoder_patch.py --output decoder-native-qa --helper decoder/BLACK.BOX-Decoder.exe --trace-index decoder-qa/eventpipe.sqlite3
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: BLACKBOX-NATIVE-DECODER-ACCEPTANCE
+          path: decoder-native-qa/
+          if-no-files-found: warn
+          retention-days: 14
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -297,12 +308,13 @@ jobs:
           if (-not (Test-Path "$output\INVESTIGATION-LICENSE.txt")) { throw 'Investigation license missing' }
           if (-not (Test-Path "$output\LICENSE")) { throw "Missing public application license" }
           if (-not (Test-Path "$output\README.ru.md")) { throw "Russian README missing from Windows release" }
+          Copy-Item -LiteralPath "docs\RELEASE_v0.5.0.md" -Destination "$output\RELEASE-NOTES.md" -Force
       - name: Package portable folder without installing anything
         shell: pwsh
         run: |
           Compress-Archive -LiteralPath "dist\BLACK.BOX-Universal" -DestinationPath "BLACK.BOX-Universal-Windows.zip" -Force
           if (-not (Test-Path "BLACK.BOX-Universal-Windows.zip")) { throw "ZIP missing" }
-      - name: Native official v0.4.1 to v0.4.2 update and full portable uninstall
+      - name: Native official v0.4.2 to v0.5.0 update and full portable uninstall
         shell: pwsh
         timeout-minutes: 16
         run: |
@@ -323,15 +335,18 @@ jobs:
           retention-days: 14
 
 
-# Explicit release gate: NEVER publish just because a PR is merged or main is pushed.
-# A manual dispatch from main with exact reviewed SHA reruns all three QA jobs.
+# Publication still requires an explicit owner-authorized workflow_dispatch.
+# No push, branch build or pull request can publish a release.
   publish-updater-test:
-    name: Publish verified BLACK.BOX v0.4.2 (manual owner gate)
+    name: Publish verified BLACK.BOX v0.5.0 (exact approved main SHA)
     needs: [shell-tests, linux-tests, windows-portable]
     if: >-
       github.event_name == 'workflow_dispatch' &&
       github.ref == 'refs/heads/main' &&
-      inputs.publish_v042 == true
+      inputs.publish_v050 == true &&
+      needs.shell-tests.result == 'success' &&
+      needs.linux-tests.result == 'success' &&
+      needs.windows-portable.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -339,6 +354,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ github.sha }}
           persist-credentials: false
       - uses: actions/setup-python@v5
         with:
@@ -347,7 +363,7 @@ jobs:
         with:
           name: BLACKBOX-INDEPENDENT-WINDOWS-QA
           path: verified-portable
-      - name: Check exact SHA, source metadata, frozen provenance and no old tag
+      - name: Verify approved source, complete archive and decoder inventory
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -355,62 +371,54 @@ jobs:
         run: |
           set -euo pipefail
           [[ "$GITHUB_REF" == "refs/heads/main" ]]
-          if [[ ! "$ACCEPTED_SHA" =~ ^[0-9a-f]{40}$ || "$ACCEPTED_SHA" != "$GITHUB_SHA" ]]; then
-            echo "::error::Published source must equal the manually approved exact main SHA"
-            exit 1
-          fi
+          [[ "$ACCEPTED_SHA" =~ ^[0-9a-f]{40}$ && "$ACCEPTED_SHA" == "$GITHUB_SHA" ]]
+          [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]]
+          [[ "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq '.object.sha')" == "$GITHUB_SHA" ]]
           VERSION="$(python -c 'from blackbox_universal import __version__; print(__version__)')"
           PACKAGE_VERSION="$(python -c 'import tomllib; print(tomllib.load(open("pyproject.toml","rb"))["project"]["version"])')"
-          [[ "$VERSION" == "0.4.2" && "$PACKAGE_VERSION" == "$VERSION" ]] || {
-            echo "::error::Release version mismatch"
-            exit 1
-          }
+          [[ "$VERSION" == "0.5.0" && "$PACKAGE_VERSION" == "$VERSION" ]]
           ZIP="verified-portable/BLACK.BOX-Universal-Windows.zip"
-          test -s "$ZIP"
-          unzip -p "$ZIP" BLACK.BOX-Universal/_internal/blackbox-build.json > frozen-source.json
-          python -c 'import json,os; s=json.load(open("frozen-source.json")); assert s["source_sha"]==os.environ["GITHUB_SHA"] and s["tracked_worktree_clean"] is True, "Frozen archive source mismatch"'
-          TAG="v$VERSION"
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            echo "::error::Existing release $TAG will not be overwritten"
-            exit 1
-          fi
-          # Disallow publishing over an existing tag even if it has no release.
-          TAG_HTTP="$(gh api -i "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" 2>/dev/null | head -n 1 || true)"
-          if [[ "$TAG_HTTP" != *"404"* ]]; then
-            echo "::error::Tag existence could not be disproved; refusing unsafe publication: $TAG_HTTP"
-            exit 1
-          fi
-          sha256sum "$ZIP" > "$ZIP.sha256"
-          sha256sum -c "$ZIP.sha256"
-      - name: Publish owner-approved release without clobber
+          python tools/release_gate.py --archive "$ZIP" --source-sha "$GITHUB_SHA" --source-tree "$(git rev-parse HEAD^{tree})" --report release-verification.json
+          (cd verified-portable && sha256sum -c BLACK.BOX-Universal-Windows.zip.sha256)
+          # Fail closed on network/auth errors. Neither an old release nor tag may be replaced.
+          for resource in "releases/tags/v0.5.0" "git/ref/tags/v0.5.0"; do
+            HTTP="$(gh api -i "repos/$GITHUB_REPOSITORY/$resource" 2>/dev/null | head -n 1 || true)"
+            [[ "$HTTP" == *"404"* ]] || { echo "::error::Existing or unverifiable release/tag: $resource"; exit 1; }
+          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: BLACKBOX-RELEASE-VERIFICATION
+          path: release-verification.json
+          if-no-files-found: error
+          retention-days: 90
+      - name: Upload to draft, verify server digests, then publish
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           ZIP="verified-portable/BLACK.BOX-Universal-Windows.zip"
-          cat > release-notes.md <<'EOF'
-          BLACK.BOX Universal v0.4.2 — compact top chrome
-
-          - Reclaimed vertical screen space at the TOP as well as the bottom:
-            smaller turquoise brand banner and vector monitor icon, no full
-            row reserved for decorative sparkles.
-          - Reduced chrome/toolbar spacing and menu height so Resource
-            Telemetry, Current Session and other pages start higher.
-          - Preserved native window framing, FILE/HELP menus, five page
-            navigation, update control, recording and evidence behavior.
-          - Added actual Qt geometry regression checks at 1330x850 and
-            1020x690 in RU/EN plus Windows offscreen DPI checks.
-          - Real official v0.4.1 portable Windows EXE to v0.4.2 update,
-            relaunch and uninstall tested on disposable Windows CI with
-            SHA-256 validation. User sessions under Documents preserved.
-
-          GitHub-hosted Windows/Linux/portable CI is not independent physical
-          Win10/11, antivirus/ACL/OneDrive, screen-reader or full 128-item
-          diagnostic acceptance. No automated detective is introduced.
-          EOF
-          gh release create "v0.4.2" "$ZIP" "$ZIP.sha256" \
-            --target "$GITHUB_SHA" \
-            --title "BLACK.BOX Universal v0.4.2 — compact top chrome" \
-            --notes-file release-notes.md --latest
-          echo "Published v0.4.2 at exact reviewed SHA $GITHUB_SHA"
+          gh release create "v0.5.0" "$ZIP" "$ZIP.sha256" --draft \
+            --target "$GITHUB_SHA" --title "BLACK.BOX Universal v0.5.0 — offline trace decoder" \
+            --notes-file docs/RELEASE_v0.5.0.md
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/v0.5.0" > draft-release.json
+          python - <<'VERIFY'
+          import hashlib, json, os
+          from pathlib import Path
+          release = json.loads(Path('draft-release.json').read_text())
+          assert release['draft'] is True and release['tag_name'] == 'v0.5.0'
+          assert release['target_commitish'] == os.environ['GITHUB_SHA']
+          assets = release['assets']
+          expected = ['BLACK.BOX-Universal-Windows.zip', 'BLACK.BOX-Universal-Windows.zip.sha256']
+          assert len(assets) == 2 and {a['name'] for a in assets} == set(expected)
+          for asset in assets:
+              path = Path('verified-portable') / asset['name']
+              with path.open('rb') as stream:
+                  checksum = hashlib.file_digest(stream, 'sha256').hexdigest()
+              assert asset['state'] == 'uploaded' and asset['size'] == path.stat().st_size
+              assert asset['digest'] == 'sha256:' + checksum, 'Uploaded asset differs from verified archive'
+          VERIFY
+          [[ "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq '.object.sha')" == "$GITHUB_SHA" ]]
+          gh release edit "v0.5.0" --draft=false --latest
+          [[ "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/v0.5.0" --jq '.object.sha')" == "$GITHUB_SHA" ]]
+          gh release view "v0.5.0" --json url,tagName,isDraft,targetCommitish

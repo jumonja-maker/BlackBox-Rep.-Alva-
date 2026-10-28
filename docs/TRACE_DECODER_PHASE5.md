@@ -1,5 +1,9 @@
 # BLACK.BOX Trace Decoder — Phase 5A: local PE/PDB identity preflight
 
+> Integration note (2026-10-28): included in the owner-authorized v0.5.0
+> candidate. Historical patch-test results below do not certify the release;
+> the exact candidate must pass the full release workflow.
+
 **Status:** development on `main` only. This is not symbol resolution or a
 new officially published Release. No automatic search, download, capture or
 execution is performed.

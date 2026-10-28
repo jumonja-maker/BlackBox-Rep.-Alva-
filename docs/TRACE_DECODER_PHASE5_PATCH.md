@@ -1,8 +1,15 @@
 # Decoder Phase 5 patch: modules, local functions and CPU sample trees
 
+> Integration note (2026-10-28): included in the owner-authorized v0.5.0
+> candidate. Historical patch-test results below do not certify the release;
+> the exact candidate must pass the full release workflow.
+
 **Development branch only:** `patch/trace-decoder-phase5`. No main merge,
 version bump, PR or release is implied. Main stays at the accepted Phase 5A.
 The original first-line author messages and feedback email are unchanged.
+
+See [packet 2](TRACE_DECODER_PHASE5_PACKET2.md) for the native ETW tree,
+GUI filters and optional per-frame PDB tree overlay. Its acceptance is separate.
 
 ## Three workstreams
 

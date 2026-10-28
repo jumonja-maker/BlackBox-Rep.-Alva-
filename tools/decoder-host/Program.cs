@@ -8,6 +8,7 @@ using Microsoft.Diagnostics.Tracing;
 using Microsoft.Diagnostics.Tracing.Etlx;
 using Microsoft.Diagnostics.Tracing.Parsers;
 using Microsoft.Diagnostics.Tracing.Parsers.Clr;
+using Microsoft.Diagnostics.Tracing.Parsers.Kernel;
 
 internal static class Program
 {
@@ -117,13 +118,31 @@ internal static class Program
         Dictionary<string, object?>? semantic = null;
         try { semantic = Semantic(e); }
         catch (Exception ex) { errors.Add("SEMANTIC:" + ex.GetType().Name); }
+        object? cpuSample = null;
+        try
+        {
+            // Only the typed kernel profile record. GC, PMC, stackwalk and
+            // similarly named arbitrary events must never become CPU weight.
+            if (e is SampledProfileTraceData sample &&
+                e.ProviderGuid == KernelTraceEventParser.ProviderGuid &&
+                (int)e.ID == 65535 && (int)e.Opcode == 46)
+                cpuSample = new {
+                    schema = "blackbox.cpu-sample/1", source = "ETW_KERNEL_PROFILE",
+                    parser = "TRACEEVENT_SAMPLED_PROFILE",
+                    instruction_pointer = "0x" + sample.InstructionPointer.ToString("x", CultureInfo.InvariantCulture),
+                    processor_index = e.ProcessorNumber,
+                    executing_dpc = e.Version >= 2 ? (bool?)sample.ExecutingDPC : null,
+                    executing_isr = e.Version >= 2 ? (bool?)sample.ExecutingISR : null
+                };
+        }
+        catch (Exception ex) { errors.Add("CPU_CLASSIFICATION:" + ex.GetType().Name); }
         // UTC is TraceEvent's reconstruction from the trace clock (QPC), NOT
         // an independently authenticated wall-clock sample or proof that this
         // trace can be aligned to another BLACK.BOX session.
         string utcTicks = e.TimeStamp.ToUniversalTime().Ticks.ToString(CultureInfo.InvariantCulture);
         return new { type = "event", ordinal, source_index = e.EventIndex.ToString(),
             time_ms = e.TimeStampRelativeMSec, source_ticks = e.TimeStampQPC.ToString(CultureInfo.InvariantCulture),
-            utc_ticks = utcTicks,
+            utc_ticks = utcTicks, cpu_sample = cpuSample,
             pid = e.ProcessID, tid = e.ThreadID, process_instance = processIndex,
             provider = Bounded(e.ProviderName, ref clipped, 256), provider_guid = e.ProviderGuid.ToString(),
             event_id = (int)e.ID, version = e.Version, name = Bounded(e.EventName, ref clipped, 256),
@@ -136,7 +155,7 @@ internal static class Program
     {
         if (args.Length == 1 && args[0] == "--version")
         {
-            Console.WriteLine(JsonSerializer.Serialize(new { protocol = Protocol, host = "0.1.0",
+            Console.WriteLine(JsonSerializer.Serialize(new { protocol = Protocol, host = "0.2.0",
                 engine = "Microsoft.Diagnostics.Tracing.TraceEvent",
                 version = typeof(TraceEvent).Assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion }));
             return 0;
@@ -165,13 +184,13 @@ internal static class Program
             using var stream = new FileStream(output, FileMode.CreateNew, FileAccess.Write, FileShare.Read);
             using var writer = new StreamWriter(stream, new UTF8Encoding(false));
             writer.WriteLine(JsonSerializer.Serialize(new { type = "header", protocol = Protocol,
-                engine = "Microsoft.Diagnostics.Tracing.TraceEvent", package_version = "4.0.0", host_version = "0.1.0",
+                engine = "Microsoft.Diagnostics.Tracing.TraceEvent", package_version = "4.0.0", host_version = "0.2.0",
                 source_format = ext, input_sha256 = before, clock = "TRACE_RELATIVE_MILLISECONDS",
                 calendar_clock = "TRACEEVENT_QPC_TO_UTC_RECONSTRUCTION_NOT_ATTESTED",
                 utc_encoding = "DOTNET_DATETIME_100NS_TICKS_NOT_CAPTURE_ACCURACY",
                 trace_to_blackbox_session_clock_alignment = "NOT_ESTABLISHED",
                 native_module_contract = "blackbox.trace-module/1",
-                capture_loss = (int?)null, symbol_policy = "NO_SYMBOL_SERVER_OR_SOURCE_DOWNLOAD" }, Json));
+                capture_loss = (int?)null, cpu_sample_contract = "blackbox.cpu-sample/1", symbol_policy = "NO_SYMBOL_SERVER_OR_SOURCE_DOWNLOAD" }, Json));
             long count = 0; bool limited = false;
             foreach (var e in log.Events)
             {

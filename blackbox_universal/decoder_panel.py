@@ -7,7 +7,7 @@ from threading import Event
 from uuid import uuid4
 
 from PySide6.QtCore import Qt, QThread, Signal
-from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
+from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QPushButton,
     QFileDialog, QComboBox, QSpinBox, QLineEdit, QTableWidget, QTableWidgetItem, QHeaderView,
     QPlainTextEdit, QSplitter)
 
@@ -15,7 +15,7 @@ from blackbox_core.decoder_service import capability, decode_file
 from blackbox_core.decoder_index import read_index
 from blackbox_core.trace_clock_evidence import assess_trace_capture_journal
 from blackbox_core.decoder_pdb import review_local_pe_pdb
-from blackbox_core.decoder_calltree import export_analysis
+from blackbox_core.decoder_calltree import export_analysis, parse_calltree_filters
 from .decoder_analysis import DecoderAnalysisWorker, CallTreeDialog
 
 
@@ -89,16 +89,43 @@ class DecoderPanel(QWidget):
         filters.addWidget(self.search, 1)
         filters.addWidget(self.apply_button)
         layout.addLayout(filters)
-        analysis_controls = QHBoxLayout()
+        cpu_filters = QGridLayout()
+        self.cpu_scope_label = QLabel()
+        self.cpu_time_label = QLabel()
+        self.cpu_source = QComboBox()
+        self.cpu_source.addItem(".NET", "dotnet")
+        self.cpu_source.addItem("Native ETW", "etw")
+        self.cpu_instance = QLineEdit()
+        self.cpu_tid = QLineEdit()
+        self.cpu_start = QLineEdit()
+        self.cpu_end = QLineEdit()
+        self.cpu_reset = QPushButton()
+        self.cpu_reset.clicked.connect(self.reset_cpu_scope)
+        cpu_filters.addWidget(self.cpu_scope_label, 0, 0)
+        cpu_filters.addWidget(self.cpu_time_label, 1, 0)
+        cpu_filters.addWidget(self.cpu_source, 0, 1)
+        for field, row, column in ((self.cpu_instance, 0, 2), (self.cpu_tid, 0, 3),
+                                   (self.cpu_start, 1, 1), (self.cpu_end, 1, 2)):
+            field.setMaxLength(32)
+            cpu_filters.addWidget(field, row, column)
+            field.textChanged.connect(self._analysis_filter_changed)
+        self.cpu_source.currentIndexChanged.connect(self._analysis_filter_changed)
+        self.pid.valueChanged.connect(self._analysis_filter_changed)
+        cpu_filters.addWidget(self.cpu_reset, 0, 4)
+        layout.addLayout(cpu_filters)
+        analysis_controls = QGridLayout()
         self.calltree_button = QPushButton()
+        self.resolve_tree_button = QPushButton()
         self.resolve_stack_button = QPushButton()
         self.export_analysis_button = QPushButton()
         self.calltree_button.clicked.connect(self.start_calltree)
+        self.resolve_tree_button.clicked.connect(self.choose_calltree_symbols)
         self.resolve_stack_button.clicked.connect(self.choose_stack_symbols)
         self.export_analysis_button.clicked.connect(self.save_analysis)
-        for button in (self.calltree_button, self.resolve_stack_button, self.export_analysis_button):
+        for i, button in enumerate((self.calltree_button, self.resolve_tree_button,
+                                    self.resolve_stack_button, self.export_analysis_button)):
             button.setEnabled(False)
-            analysis_controls.addWidget(button)
+            analysis_controls.addWidget(button, i//2, i%2)
         layout.addLayout(analysis_controls)
         split = QSplitter(Qt.Orientation.Vertical)
         self.table = QTableWidget(0, 5)
@@ -156,15 +183,40 @@ class DecoderPanel(QWidget):
                 (self.review_clock_button, "CHECK CAPTURE CLOCK…", "ПРОВЕРИТЬ ЧАСЫ ЗАПИСИ…"),
                 (self.review_pdb_button, "CHECK LOCAL PDB…", "ПРОВЕРИТЬ ЛОКАЛЬНЫЙ PDB…"),
                 (self.calltree_button, "CPU CALL TREE…", "ДЕРЕВО CPU-ВЫБОРОК…"),
+                (self.resolve_tree_button, "TREE + LOCAL PDB…", "ДЕРЕВО + ЛОКАЛЬНЫЙ PDB…"),
                 (self.resolve_stack_button, "RESOLVE SELECTED STACK…", "ИМЕНА ВЫБРАННОГО СТЕКА…"),
                 (self.export_analysis_button, "SAVE ANALYSIS…", "СОХРАНИТЬ АНАЛИЗ…")):
             button.setText(self.tr2(en, ru))
+        self.cpu_scope_label.setText(self.tr2("CPU tree:", "Дерево CPU:"))
+        self.cpu_source.setItemText(0, ".NET SampleProfiler")
+        self.cpu_source.setItemText(1, self.tr2("Native ETW", "Нативный ETW"))
+        self.cpu_source.setAccessibleName(self.tr2("CPU sample source", "Источник CPU-выборок"))
+        self.cpu_time_label.setText(self.tr2("Time, ms:", "Время, мс:"))
+        self.cpu_reset.setText(self.tr2("RESET", "СБРОС"))
+        self.cpu_reset.setToolTip(self.tr2("Clear instance, TID and time filters", "Сбросить экземпляр, TID и интервал"))
+        for field, en, ru in (
+                (self.cpu_instance, "Instance: all", "Экземпляр: все"),
+                (self.cpu_tid, "TID: all", "TID: все"),
+                (self.cpu_start, "From ms (inclusive)", "От мс (включительно)"),
+                (self.cpu_end, "To ms (exclusive)", "До мс (не включая)")):
+            field.setPlaceholderText(self.tr2(en, ru))
+            field.setAccessibleName(self.tr2(en, ru))
+        scope_help = self.tr2(
+            "Only CPU trees use these filters and the PID above. Blank means all. "
+            "Times are trace-relative milliseconds [from, to); use a decimal point.",
+            "Эти фильтры и PID выше относятся к дереву CPU. Пустое поле — все. "
+            "Время относительно трассы, мс [от, до); дробная часть через точку.")
+        for field in (self.cpu_instance, self.cpu_tid, self.cpu_start, self.cpu_end):
+            field.setToolTip(scope_help)
+        self.resolve_tree_button.setToolTip(self.tr2(
+            "Choose one PE/PDB pair. Only independently matched native frames get derived names; originals are kept.",
+            "Выберите пару PE/PDB. Имена добавляются только к соответствующим нативным кадрам; оригиналы сохранены."))
         self.review_pdb_button.setToolTip(self.tr2(
             "Offline GUID/Age check of selected PE and PDB only; imported trace stacks are not symbolized.",
             "Офлайн-проверка GUID/Age выбранных PE и PDB; стеки импортированной трассы не разрешаются."))
         for i, pair in enumerate((("Events", "События"), ("Event-associated stacks", "Стеки событий"),
                                   ("GC / suspension intervals", "GC / интервалы остановки"),
-                                  ("CPU profiler samples", "Выборки CPU-профилировщика"),
+                                  (".NET CPU profiler samples", "Выборки .NET CPU-профилировщика"),
                                   ("GC statistics by generation", "Статистика GC по поколениям"),
                                   ("Trace UTC estimates", "Оценки времени UTC"),
                                    ("Native modules in stacks", "Нативные модули в стеках"))):
@@ -243,9 +295,10 @@ class DecoderPanel(QWidget):
         self.clock_review = None
         self.pdb_review = None
         self.analysis_report = None
+        self.reset_cpu_scope()
         for dialog in self.findChildren(CallTreeDialog):
             dialog.close()
-        for button in (self.calltree_button, self.resolve_stack_button, self.export_analysis_button):
+        for button in (self.calltree_button, self.resolve_tree_button, self.resolve_stack_button, self.export_analysis_button):
             button.setEnabled(False)
         self.cursors, self.next_cursor = [0], 0
         self.table.clearContents()
@@ -286,6 +339,7 @@ class DecoderPanel(QWidget):
             self.review_clock_button.setEnabled(True)
             self.review_pdb_button.setEnabled(True)
             self.calltree_button.setEnabled(True)
+            self.resolve_tree_button.setEnabled(True)
             self.reset_page()
         self.render_status()
 
@@ -298,10 +352,12 @@ class DecoderPanel(QWidget):
         self.cancel_button.setEnabled(False)
         if self.index is not None:
             self.calltree_button.setEnabled(True)
+            self.resolve_tree_button.setEnabled(True)
             self.review_clock_button.setEnabled(True)
             self.review_pdb_button.setEnabled(True)
             self.export_analysis_button.setEnabled(self.analysis_report is not None)
             self._refresh_stack_action()
+        self._enable_cpu_scope(True)
         self.idle.emit()
 
     def reset_page(self):
@@ -448,9 +504,66 @@ class DecoderPanel(QWidget):
         self.render_status()
         return report
 
+    def _close_calltree(self):
+        dialog = getattr(self, "_calltree_dialog", None)
+        if dialog is not None:
+            try:
+                dialog.close()
+            except RuntimeError:
+                pass  # WA_DeleteOnClose may already have deleted its C++ object.
+            self._calltree_dialog = None
+
+    def _analysis_filter_changed(self, *_):
+        # Do not export an old tree as though it used newly edited filters.
+        if self._analysis_kind == "calltree" and self.worker is None:
+            self.analysis_report = None
+            self.export_analysis_button.setEnabled(False)
+            self._close_calltree()
+            self.details.clear()
+
+    def _enable_cpu_scope(self, enabled):
+        for control in (self.cpu_source, self.cpu_instance, self.cpu_tid,
+                        self.cpu_start, self.cpu_end, self.cpu_reset, self.pid):
+            control.setEnabled(enabled)
+
+    def reset_cpu_scope(self):
+        for field in (self.cpu_instance, self.cpu_tid, self.cpu_start, self.cpu_end):
+            field.clear()
+
+    def _calltree_arguments(self):
+        return {"index_path": self.index, **parse_calltree_filters(
+            source=self.cpu_source.currentData(), pid=self.pid.value(),
+            instance_text=self.cpu_instance.text(), tid_text=self.cpu_tid.text(),
+            start_text=self.cpu_start.text(), end_text=self.cpu_end.text())}
+
     def start_calltree(self):
-        if self.index is not None:
-            self.start_analysis("calltree", {"index_path": self.index, "pid": self.pid.value()})
+        if self.index is None or self.worker is not None:
+            return
+        try:
+            arguments = self._calltree_arguments()
+        except ValueError as exc:
+            self.state, self.error = "error", str(exc)
+            self.render_status(); return
+        self.start_analysis("calltree", arguments)
+
+    def choose_calltree_symbols(self):
+        if self.index is None or self.worker is not None:
+            return
+        try:
+            arguments = self._calltree_arguments()
+        except ValueError as exc:
+            self.state, self.error = "error", str(exc)
+            self.render_status(); return
+        binary, _ = QFileDialog.getOpenFileName(self,
+            self.tr2("Choose local PE for CPU tree", "Выберите локальный PE для дерева CPU"),
+            "", "PE (*.exe *.dll *.sys);;All files (*)")
+        if not binary:
+            return
+        pdb, _ = QFileDialog.getOpenFileName(self,
+            self.tr2("Choose matching Windows PDB", "Выберите соответствующий Windows PDB"),
+            str(Path(binary).parent), "PDB (*.pdb)")
+        if pdb:
+            self.start_analysis("calltree", {**arguments, "binary_path": Path(binary), "pdb_path": Path(pdb)})
 
     def choose_stack_symbols(self):
         if self.worker is not None:
@@ -479,15 +592,17 @@ class DecoderPanel(QWidget):
         if getattr(self.window.probe, "active", False):
             self.state, self.error = "error", "STOP_RECORDING_BEFORE_OFFLINE_ANALYSIS"
             self.render_status(); return
+        self._close_calltree()
         self.analysis_report = None
         self._analysis_kind = kind
         self.state, self.error = "analyzing", ""
         self.details.clear()
-        for button in (self.open_button, self.session_button, self.calltree_button,
+        for button in (self.open_button, self.session_button, self.calltree_button, self.resolve_tree_button,
                        self.resolve_stack_button, self.export_analysis_button,
                        self.review_pdb_button, self.review_clock_button):
             button.setEnabled(False)
         self.cancel_button.setEnabled(True)
+        self._enable_cpu_scope(False)
         self.worker = DecoderAnalysisWorker(kind, arguments, self)
         self.worker.result_ready.connect(self.analysis_received)
         self.worker.finished.connect(self.finished)
