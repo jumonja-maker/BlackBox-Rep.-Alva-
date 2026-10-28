@@ -58,6 +58,30 @@ def start_clock_session(folder, pid):
     return writer
 
 
+def changed_clock_capture_evidence(original, *, boot_id=None, frequency_multiplier=None):
+    """Change one complete recorded clock identity in a negative QA copy.
+
+    Dense probes share their identity in a compact header. Changing only the
+    stage probes tests an internally inconsistent journal, not a different
+    boot/frequency relative to the independent session or trace metadata.
+    """
+    changed = copy.deepcopy(original)
+    records = list(changed["clock_anchors"].values())
+    if isinstance(changed.get("clock_order_samples"), dict):
+        records.append(changed["clock_order_samples"])
+    for record in records:
+        if boot_id is not None and "clock_identity" in record:
+            record["clock_identity"]["boot_id"] = boot_id
+        if frequency_multiplier is not None and "qpc_frequency_hz" in record:
+            record["qpc_frequency_hz"] *= frequency_multiplier
+            if "qpc_bracket_width_ns" in record:
+                frequency = record["qpc_frequency_hz"]
+                record["qpc_bracket_width_ns"] = (
+                    (record["qpc_after_ticks"] - record["qpc_before_ticks"]) * 1_000_000_000
+                    + frequency - 1) // frequency
+    return changed
+
+
 def require_real_session_alignment(index, journal, session_path, output):
     """Real same-session correlation plus deliberately invalid evidence copies."""
     from blackbox_core.decoder_alignment import (ALIGNED, ORDER_MODEL, QPC_MODEL,
@@ -99,35 +123,49 @@ def require_real_session_alignment(index, journal, session_path, output):
     require(result.get("additional_observations", 0) > 0 and
             result.get("observation_sampling_status") == "RECORDED",
             "REAL_CAPTURE_HAS_NO_ADDITIONAL_CLOCK_OBSERVATIONS")
+    observed = {"status": "POSITIVE_OBSERVATION_PENDING_NEGATIVE_CONTROLS",
+                "alignment": result, "first_event_projection": projection,
+                "negative_evidence_copy_checks": {}}
+
+    def save_observation():
+        (output / "session-alignment-observed.json").write_text(
+            json.dumps(observed, indent=2), encoding="utf-8")
+
+    save_observation()
     original = json.loads(journal.read_text(encoding="utf-8"))
-    changed = copy.deepcopy(original)
-    for anchor in changed["clock_anchors"].values():
-        if "clock_identity" in anchor:
-            anchor["clock_identity"]["boot_id"] = "00000000-0000-0000-0000-000000000001"
+    changed = changed_clock_capture_evidence(
+        original, boot_id="00000000-0000-0000-0000-000000000001")
     bad_boot = output / "negative-changed-boot.trace.json"
     bad_boot.write_text(json.dumps(changed), encoding="utf-8")
     boot_result = assess_session_alignment(index, bad_boot, session_path)
+    observed["negative_evidence_copy_checks"]["different_boot"] = boot_result
+    save_observation()
     require(boot_result.get("status") == "NOT_ESTABLISHED" and
-            boot_result.get("reason") == "BOOT_ID_MISMATCH", "CHANGED_BOOT_WAS_CORRELATED")
-    changed = copy.deepcopy(original)
-    for anchor in changed["clock_anchors"].values():
-        if "qpc_frequency_hz" in anchor:
-            anchor["qpc_frequency_hz"] *= 2
+            boot_result.get("reason") == "BOOT_ID_MISMATCH",
+            "CHANGED_BOOT_REJECTION_CONTRACT_FAILED: " + repr(boot_result))
+    changed = changed_clock_capture_evidence(original, frequency_multiplier=2)
     bad_frequency = output / "negative-changed-frequency.trace.json"
     bad_frequency.write_text(json.dumps(changed), encoding="utf-8")
     frequency_result = assess_session_alignment(index, bad_frequency, session_path)
-    require(frequency_result.get("status") == "NOT_ESTABLISHED", "CHANGED_FREQUENCY_WAS_CORRELATED")
+    observed["negative_evidence_copy_checks"]["different_frequency"] = frequency_result
+    save_observation()
+    require(frequency_result.get("status") == "NOT_ESTABLISHED",
+            "CHANGED_FREQUENCY_REJECTION_CONTRACT_FAILED: " + repr(frequency_result))
     other = start_clock_session(output / "negative-other-session", os.getpid())
     other.finish("COMPLETED")
     session_result = assess_session_alignment(index, journal, other.path)
+    observed["negative_evidence_copy_checks"]["different_session"] = session_result
+    save_observation()
     require(session_result.get("reason") == "CAPTURE_SESSION_BINDING_MISMATCH_OR_ABSENT",
-            "DIFFERENT_SESSION_WAS_CORRELATED")
+            "DIFFERENT_SESSION_REJECTION_CONTRACT_FAILED: " + repr(session_result))
     proof = {"status": "PASS_REAL_BOUNDED_LOCAL_CLOCK_CORRELATION",
              "alignment": result, "first_event_projection": projection,
              "negative_evidence_copy_checks": {"different_boot": boot_result,
                  "different_frequency": frequency_result, "different_session": session_result},
              "capture_complete": "UNKNOWN", "evidence_authenticity": "LOCAL_NOT_CRYPTOGRAPHICALLY_ATTESTED"}
     (output / "session-alignment-qa.json").write_text(json.dumps(proof, indent=2), encoding="utf-8")
+    observed["status"] = "PASS_REAL_BOUNDED_LOCAL_CLOCK_CORRELATION"
+    save_observation()
     return proof
 
 

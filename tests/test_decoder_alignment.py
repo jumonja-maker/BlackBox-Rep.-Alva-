@@ -148,6 +148,38 @@ class DecoderAlignmentTests(unittest.TestCase):
             jp.write_text(json.dumps(data),encoding="utf-8")
             self.assertEqual(assess_session_alignment(idx,jp,sp)["status"],ALIGNED)
 
+    def test_native_qa_negative_clock_controls_change_the_whole_dense_identity(self):
+        from tools.qa_decoder import changed_clock_capture_evidence
+        with tempfile.TemporaryDirectory() as td:
+            idx,jp,sp,data=fixture(Path(td))
+            use_gettickcount_clock(jp,sp,data)
+            data["clock_order_samples"]=new_clock_order_samples(data["clock_anchors"]["before_tool_start"])
+            # Deserialize exactly as the native QA does; JSON has no shared
+            # object references between stage and compact clock identities.
+            original=json.loads(json.dumps(data))
+            before=copy.deepcopy(original)
+            changed=changed_clock_capture_evidence(original,boot_id=str(uuid4()))
+            jp.write_text(json.dumps(changed),encoding="utf-8")
+            result=assess_session_alignment(idx,jp,sp)
+            self.assertEqual(result["status"],"NOT_ESTABLISHED")
+            self.assertEqual(result["reason"],"BOOT_ID_MISMATCH")
+            # Deliberately retain a separate mixed-identity negative: it must
+            # fail before receiving the different-boot model verdict.
+            mixed=copy.deepcopy(changed)
+            mixed["clock_order_samples"]=copy.deepcopy(original["clock_order_samples"])
+            jp.write_text(json.dumps(mixed),encoding="utf-8")
+            self.assertEqual(assess_session_alignment(idx,jp,sp)["error"],
+                             "INVALID_COMPACT_CLOCK_OBSERVATIONS")
+            frequency=changed_clock_capture_evidence(original,frequency_multiplier=2)
+            self.assertEqual(frequency["clock_order_samples"]["qpc_frequency_hz"],20_000_000)
+            for point in frequency["clock_anchors"].values():
+                self.assertEqual(point,bracket(point["qpc_before_ticks"],point["qpc_after_ticks"],
+                    point["qpc_frequency_hz"],point["monotonic_before_ns"],point["monotonic_after_ns"],
+                    point["sampled_utc_ns"],pid=point["owner_pid"],clock_identity=point["clock_identity"]))
+            jp.write_text(json.dumps(frequency),encoding="utf-8")
+            self.assertEqual(assess_session_alignment(idx,jp,sp)["status"],"NOT_ESTABLISHED")
+            self.assertEqual(original,before)
+
     def test_compact_sample_cap_keeps_maximal_integer_journal_within_budget(self):
         from blackbox_core.trace_owner import _write,MAX_JOURNAL_BYTES
         with tempfile.TemporaryDirectory() as td:
