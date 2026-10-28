@@ -27,15 +27,47 @@ from blackbox_universal.window import UniversalWindow
 
 class InvestigationIntegrationTests(unittest.TestCase):
     def make_session(self, root: Path) -> Path:
+        """Real, fully closed SQLite fixture with bounded Windows QA cleanup.
+
+        On loaded Windows CI a fresh FULL-synchronous v2 writer can take longer
+        than the *production* five-second stop barrier. Only this disposable
+        fixture extends that wait; the actual writer, commit and v1/v2
+        completion verification are unchanged. Never fake committed rows.
+        """
         observer = ReadOnlyProbe(root)
         observer.attach(os.getpid())
         observer.start()
-        for _ in range(4):
-            time.sleep(0.012)
-            observer.tick()
-        observer.mark_problem("Settings dialog took too long")
-        observer.stop()
-        return observer.session_folder
+        writer = observer._store.v2
+        real_finish = writer.finish
+
+        def finish_for_qa(code, *, timeout=5.0):
+            return real_finish(code, timeout=max(timeout, 45.0))
+
+        try:
+            for _ in range(4):
+                time.sleep(0.012)
+                observer.tick()
+            observer.mark_problem("Settings dialog took too long")
+            with patch.object(writer, "finish", finish_for_qa):
+                observer.stop()
+            self.assertFalse(writer.thread.is_alive(), "QA_V2_WRITER_NOT_REAPED")
+            self.assertIsNone(writer.failure, "QA_V2_WRITER_FAILED")
+            self.assertEqual(
+                observer.session_state, "COMPLETED",
+                "QA_SESSION_NOT_DURABLY_COMPLETED: " +
+                str(observer.last_error or writer.failure))
+            return observer.session_folder
+        finally:
+            # TemporaryDirectory must never remove an actively-owned Windows
+            # SQLite DB. A real failure still fails assertions; do not ignore
+            # WinError 32, abandon a writer, or manufacture completion.
+            if observer.active:
+                with patch.object(writer, "finish", finish_for_qa):
+                    observer.stop("UI_CLOSED", defer_report=True)
+            if writer.thread.is_alive():
+                writer.thread.join(timeout=60.0)
+            self.assertFalse(writer.thread.is_alive(),
+                             "QA_V2_SQLITE_OWNER_STILL_ACTIVE_AT_CLEANUP")
 
     def test_real_user_marker_and_worker_exports_are_independent(self):
         with tempfile.TemporaryDirectory() as directory:
