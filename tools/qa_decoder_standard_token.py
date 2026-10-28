@@ -34,6 +34,50 @@ def save(path, value):
     Path(path).write_text(json.dumps(value, indent=2, allow_nan=False), encoding="utf-8")
 
 
+def restricted_interpreter(executable):
+    """Use this installation's windowed interpreter, without console creation.
+
+    The worker writes its proof to a file, so a console is unnecessary. In CI
+    the console interpreter with CREATE_NO_WINDOW exited with 0xC0000142 before
+    producing a worker proof. That observation does not identify which DLL
+    failed. pythonw uses the same installed runtime without that console path;
+    its actual restricted-token execution still has to pass every proof gate.
+    """
+    console = Path(executable).resolve(strict=True)
+    require(console.is_file() and console.name.casefold() == "python.exe",
+            "EXPECTED_WINDOWS_CPYTHON_INTERPRETER")
+    windowed = console.with_name("pythonw.exe")
+    require(windowed.is_file() and not windowed.is_symlink() and
+            windowed.resolve(strict=True).parent == console.parent,
+            "SAME_INSTALLATION_WINDOWED_INTERPRETER_MISSING")
+    return windowed
+
+
+def read_worker_proof(output, child):
+    path = Path(output) / "standard-token-worker.json"
+    require(path.is_file(), "STANDARD_WORKER_PROOF_MISSING_CHILD_EXIT_0x" +
+            format(child["exit_code"], "08X"))
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def runtime_access_diagnostics(interpreter):
+    """Read ACL descriptions for startup diagnosis; never modify permissions."""
+    tool = Path(os.environ.get("SystemRoot", "C:/Windows")) / "System32" / "icacls.exe"
+    result = {"scope": "READ_ONLY_RUNTIME_FILE_ACL_DESCRIPTIONS", "files": []}
+    for path in (interpreter, interpreter.with_name("python.exe"),
+                 interpreter.with_name(f"python{sys.version_info.major}{sys.version_info.minor}.dll")):
+        item = {"path": str(path), "exists": path.is_file()}
+        result["files"].append(item)
+        try:
+            check = subprocess.run([str(tool), str(path)], capture_output=True,
+                                   text=True, encoding="utf-8", errors="replace", timeout=10)
+            item.update(exit_code=check.returncode,
+                        acl_description=(check.stdout + check.stderr)[:8000])
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            item.update(diagnostic_error=type(exc).__name__, reason=str(exc)[:500])
+    return result
+
+
 def trace_plan(trace_root):
     """Only the two named artifacts produced by real qa_decoder.py are used."""
     root = Path(trace_root).resolve(strict=True)
@@ -60,7 +104,10 @@ def worker(helper, trace_root, output):
     output = Path(output).resolve(strict=True)
     proof = {"status": "RUNNING", "pid": os.getpid(), "privilege": privilege(),
              "source_sha": os.environ.get("GITHUB_SHA"), "captures_started": False,
-             "decoder_helper_sha256": file_hash(helper), "traces": []}
+             "decoder_helper_sha256": file_hash(helper), "traces": [],
+             "python_executable": str(Path(sys.executable).resolve(strict=True)),
+             "python_executable_sha256": file_hash(Path(sys.executable)),
+             "python_version": sys.version}
     code = 1
     try:
         require(os.name == "nt" and proof["privilege"] == {"mode": "STANDARD", "windows": True},
@@ -161,8 +208,11 @@ def restricted_child(args, *, cwd, timeout_seconds=210):
             raise OSError(C.get_last_error(), "QA_OWNED_JOB_LIMIT_FAILED")
         startup = Startup(); startup.cb = C.sizeof(startup)
         command = C.create_unicode_buffer(subprocess.list2cmdline([str(x) for x in args]))
+        # The GUI-subsystem pythonw worker needs no console. It remains
+        # suspended until the owned kill-on-close job has been assigned.
+        creation_flags = 0x4  # CREATE_SUSPENDED only.
         if not adv.CreateProcessAsUserW(restricted, str(args[0]), command, None, None, False,
-                                        0x4 | 0x08000000, None, str(cwd), C.byref(startup), C.byref(process)):
+                                        creation_flags, None, str(cwd), C.byref(startup), C.byref(process)):
             raise OSError(C.get_last_error(), "QA_RESTRICTED_START_FAILED")
         started = True
         if not kernel.AssignProcessToJobObject(job, process.process):
@@ -177,7 +227,9 @@ def restricted_child(args, *, cwd, timeout_seconds=210):
             raise OSError(C.get_last_error(), "QA_RESTRICTED_EXIT_UNAVAILABLE")
         return {"pid": process.pid, "exit_code": code.value,
                 "token": "ADMIN_SID_DISABLED_PRIVILEGES_REMOVED",
-                "cleanup": "OWNED_JOB_KILL_ON_CLOSE"}
+                "cleanup": "OWNED_JOB_KILL_ON_CLOSE",
+                "creation_flags": creation_flags,
+                "job_assigned_before_resume": True}
     finally:
         if job:
             kernel.TerminateJobObject(job, 1)
@@ -231,12 +283,21 @@ def main():
         plan = trace_plan(args.trace_root)
         report["inputs"] = plan
         report["parent_privilege"] = privilege()
-        child = restricted_child([Path(sys.executable).resolve(strict=True), Path(__file__).resolve(),
+        interpreter = restricted_interpreter(sys.executable)
+        report["launcher"] = {"path": str(interpreter), "sha256": file_hash(interpreter),
+                              "subsystem": "WINDOWED_CPYTHON_SAME_INSTALLATION",
+                              "creation_flags": 0x4}
+        report["runtime_access_diagnostics"] = runtime_access_diagnostics(interpreter)
+        child = restricted_child([interpreter, Path(__file__).resolve(),
                                   "--worker", "--helper", helper, "--trace-root", args.trace_root.resolve(),
                                   "--output", output], cwd=ROOT)
         report["child"] = child
-        proof = json.loads((output / "standard-token-worker.json").read_text(encoding="utf-8"))
+        proof = read_worker_proof(output, child)
         report["worker"] = proof
+        require(os.path.normcase(proof.get("python_executable", "")) ==
+                os.path.normcase(str(interpreter)) and
+                proof.get("python_executable_sha256") == report["launcher"]["sha256"],
+                "STANDARD_WORKER_INTERPRETER_IDENTITY_MISMATCH")
         validate_worker(proof, child, plan)
         require(all(file_hash(Path(x["source"])) == x["input_sha256"] for x in plan),
                 "STANDARD_QA_MODIFIED_ORIGINAL_TRACE")

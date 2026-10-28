@@ -1,8 +1,39 @@
 """Acceptance-proof validation only; actual tokens require Windows CI."""
 from copy import deepcopy
+import json
+from pathlib import Path
+import tempfile
 import unittest
 
-from tools.qa_decoder_standard_token import validate_worker
+from tools.qa_decoder_standard_token import (read_worker_proof, restricted_interpreter,
+                                             validate_worker)
+
+
+class RestrictedLauncherTests(unittest.TestCase):
+    def test_windowed_worker_uses_exact_same_installation(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            console = root / "python.exe"
+            console.write_bytes(b"console interpreter")
+            with self.assertRaisesRegex(AssertionError, "WINDOWED_INTERPRETER_MISSING"):
+                restricted_interpreter(console)
+            windowed = root / "pythonw.exe"
+            windowed.write_bytes(b"windowed interpreter")
+            self.assertEqual(restricted_interpreter(console), windowed.resolve())
+            foreign = root / "unrelated.exe"
+            foreign.write_bytes(b"not the recorded Python runtime")
+            with self.assertRaisesRegex(AssertionError, "EXPECTED_WINDOWS_CPYTHON"):
+                restricted_interpreter(foreign)
+
+    def test_missing_proof_preserves_actual_child_failure_status(self):
+        with tempfile.TemporaryDirectory() as temp:
+            with self.assertRaisesRegex(AssertionError, "PROOF_MISSING_CHILD_EXIT_0xC0000142"):
+                read_worker_proof(temp, {"exit_code": 0xC0000142})
+            with self.assertRaisesRegex(AssertionError, "PROOF_MISSING_CHILD_EXIT_0x00000000"):
+                read_worker_proof(temp, {"exit_code": 0})
+            expected = {"status": "FAIL", "reason": "observed decoder failure"}
+            (Path(temp) / "standard-token-worker.json").write_text(json.dumps(expected), encoding="utf-8")
+            self.assertEqual(read_worker_proof(temp, {"exit_code": 1}), expected)
 
 
 class RestrictedProofTests(unittest.TestCase):
