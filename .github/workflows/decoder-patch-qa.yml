@@ -1,0 +1,61 @@
+name: Decoder patch - isolated QA (never publish)
+
+on:
+  push:
+    branches: [patch/trace-decoder-phase5]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: decoder-patch-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  decoder-core:
+    if: github.ref == 'refs/heads/patch/trace-decoder-phase5'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      QT_QPA_PLATFORM: offscreen
+      PYTHONUTF8: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Preserve exact reviewed source snapshot
+        run: |
+          mkdir -p patch-evidence
+          git archive --format=zip --output=patch-evidence/decoder-patch-source.zip HEAD
+          git rev-parse HEAD > patch-evidence/source-sha.txt
+          sha256sum patch-evidence/decoder-patch-source.zip > patch-evidence/source-sha256.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DECODER-PATCH-SOURCE
+          path: patch-evidence/
+          retention-days: 14
+          if-no-files-found: error
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install headless Qt prerequisites and test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libegl1 libopengl0 libgl1 libxcb-cursor0 libxkbcommon-x11-0
+          python -m pip install -r requirements.txt
+          python -m pip install -e .
+      - name: Decoder unit and offscreen GUI tests
+        run: |
+          python -m unittest discover -s tests -p 'test_decoder*.py' -v
+          python -m unittest discover -s tests -p 'test_trace_clock_evidence.py' -v
+      - name: Patch-specific native/public-symbol QA when implemented
+        run: |
+          if [ -f tools/qa_decoder_patch.py ]; then
+            python tools/qa_decoder_patch.py --output patch-evidence/native
+          fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: DECODER-PATCH-LINUX-EVIDENCE
+          path: patch-evidence/native/
+          retention-days: 14
+          if-no-files-found: warn
