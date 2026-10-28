@@ -42,7 +42,7 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
-          python-version: "3.11.14"
+          python-version: "3.11.9"
           architecture: x64
           cache: pip
       - name: Install integrated shell and observer core
@@ -160,7 +160,7 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
-          python-version: "3.11.14"
+          python-version: "3.11.9"
           architecture: x64
           cache: pip
       - name: Install release tooling and public observer core
@@ -364,7 +364,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
-          python-version: "3.11.14"
+          python-version: "3.11.9"
       - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
         with:
           name: BLACKBOX-INDEPENDENT-WINDOWS-QA
