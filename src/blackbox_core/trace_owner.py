@@ -107,7 +107,7 @@ def run(journal):
 
 
 class TraceSupervisor:
-    def __init__(self,folder,*,seconds=30,max_output_bytes=256*1024**2,target=None,profile="GeneralProfile.Light"):
+    def __init__(self,folder,*,seconds=30,max_output_bytes=256*1024**2,target=None,profile="GeneralProfile.Light",session_path=None):
         if type(profile) is not str or profile not in WPR_PROFILES:
             raise ValueError("INVALID_WPR_PROFILE")
         if type(seconds) is not int or not 1<=seconds<=60:raise ValueError('INVALID_TRACE_DURATION')
@@ -122,6 +122,9 @@ class TraceSupervisor:
             'recovery':'ONLY_THIS_NAMED_INSTANCE_MAY_BE_CANCELLED'}
         import psutil
         self.data.update(owner_pid=os.getpid(),owner_created=psutil.Process().create_time())
+        from .decoder_alignment import capture_session_binding
+        self.data['session_clock_binding']=capture_session_binding(
+            session_path if session_path is not None else self.folder.parent/'session-v2.sqlite3')
     @property
     def active(self):return self.process is not None and self.process.poll() is None
     def start(self):

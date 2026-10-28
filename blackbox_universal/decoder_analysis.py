@@ -3,7 +3,8 @@ import json
 from html import escape
 from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtWidgets import (QDialog, QVBoxLayout, QLabel, QTreeWidget,
-                              QTreeWidgetItem, QDialogButtonBox)
+                              QTreeWidgetItem, QDialogButtonBox, QTableWidget,
+                              QTableWidgetItem, QHeaderView, QPlainTextEdit)
 from threading import Event
 
 from blackbox_core.decoder_calltree import build_calltree
@@ -24,6 +25,12 @@ class DecoderAnalysisWorker(QThread):
                 result = build_calltree(**self.arguments, cancel=self.cancel_event)
             elif self.kind == 'symbols':
                 result = resolve_event_stack(**self.arguments, cancel=self.cancel_event)
+            elif self.kind == 'waits':
+                from blackbox_core.decoder_waits import build_wait_report
+                result = build_wait_report(**self.arguments, cancel=self.cancel_event)
+            elif self.kind == 'alignment':
+                from blackbox_core.decoder_alignment import assess_session_alignment
+                result = assess_session_alignment(**self.arguments, cancel=self.cancel_event)
             else:
                 raise ValueError('UNKNOWN_DECODER_ANALYSIS')
             self.result_ready.emit(result, '')
@@ -31,6 +38,62 @@ class DecoderAnalysisWorker(QThread):
             # Reason codes only; no private local paths leaked to GUI status.
             reason = str(exc) if isinstance(exc, (ValueError, InterruptedError, TimeoutError)) else type(exc).__name__
             self.result_ready.emit(None, reason[:200])
+
+
+class DiagnosticReportDialog(QDialog):
+    """Human summary plus original derived evidence; imported strings stay plain."""
+    def __init__(self, report, language, parent=None):
+        super().__init__(parent)
+        ru = language == 'RU'
+        waits = report.get('schema') == 'blackbox.thread-waits/1'
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        self.setWindowTitle(('Ожидания потоков' if ru else 'Thread waits') if waits else
+                            ('Временная связь с сеансом' if ru else 'Session time correlation'))
+        self.resize(1000, 640)
+        layout = QVBoxLayout(self)
+        text = ((
+            'Интервалы получены из записанных переключений потоков ETW. '
+            'Время ожидания не доказывает владельца блокировки или причину зависания. '
+            'Неполные интервалы и потери учитываются отдельно.' if ru else
+            'Intervals come from recorded ETW thread switches. Waiting time does not prove '
+            'a lock owner or the cause of a hang. Incomplete intervals and losses remain separate.'
+        ) if waits else (
+            'Сопоставление действует только при выполнении проверенных условий. '
+            'Границы погрешности относятся к выбранным часам и файлам, а не к причинности. '
+            'Локальные доказательства не удостоверяют происхождение импортированной трассы.' if ru else
+            'Correlation applies only under the checked conditions. Uncertainty bounds apply to '
+            'the selected clocks and files, not causality. Local evidence does not authenticate an imported trace.'
+        ))
+        notice = QLabel(text + '\n' + str(report.get('status', 'UNKNOWN')))
+        notice.setTextFormat(Qt.TextFormat.PlainText)
+        notice.setWordWrap(True)
+        layout.addWidget(notice)
+        if waits:
+            rows = report.get('intervals', [])
+            shown = rows[:500]
+            count = QLabel((f'Показано {len(shown)} из {len(rows)} интервалов; JSON сохраняет полный результат.' if ru else
+                            f'Showing {len(shown)} of {len(rows)} intervals; JSON preserves the full result.'))
+            layout.addWidget(count)
+            table = QTableWidget(len(shown), 8)
+            table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+            table.setHorizontalHeaderLabels(['PID', 'TID', 'От, мс', 'До, мс', 'Off-CPU, мс', 'Готов, мс', 'Ожидание', 'Качество'] if ru else
+                                            ['PID', 'TID', 'From ms', 'To ms', 'Off-CPU ms', 'Ready ms', 'Wait', 'Quality'])
+            table.horizontalHeader().setSectionResizeMode(7, QHeaderView.ResizeMode.Stretch)
+            for i, row in enumerate(shown):
+                for j, key in enumerate(('pid', 'tid', 'start_ms', 'end_ms', 'off_cpu_ms',
+                                          'ready_delay_ms', 'wait_reason', 'quality')):
+                    value = row.get(key)
+                    cell = QTableWidgetItem('—' if value is None else str(round(value, 6) if type(value) is float else value))
+                    cell.setToolTip('<pre>' + escape(str(row.get('explanation', ''))) + '</pre>')
+                    table.setItem(i, j, cell)
+            layout.addWidget(table, 2)
+        evidence = QPlainTextEdit()
+        evidence.setReadOnly(True)
+        evidence.setPlainText(json.dumps(report, ensure_ascii=False, indent=2))
+        layout.addWidget(evidence, 1)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        buttons.rejected.connect(self.close)
+        layout.addWidget(buttons)
 
 
 class CallTreeDialog(QDialog):

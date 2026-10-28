@@ -17,6 +17,8 @@ BLACK.BOX Universal lets you **select a running process or choose an application
 
 > **Important:** BLACK.BOX provides observational evidence, not proof of an application's internal root cause. High CPU, rising memory, or a process exiting do not, on their own, establish why it failed.
 
+**Unpublished decoder completion patch:** This branch adds checked trace/session clock correlation, ETW off-CPU and ready-delay analysis, native PDB source lines/inline sites/OMAP, and bounded import recovery. Conditional clock evidence is not trace authentication, scheduler observations do not prove a lock owner, and unsupported symbol mappings remain explicit. See [patch scope, reproducible tests and acceptance boundaries](docs/TRACE_DECODER_COMPLETION_PATCH.md). The published release remains v0.5.1 until separately approved.
+
 **v0.5.0 Trace Decoder:** The sixth page imports ETL, EventPipe and BLACK.BOX JSONL offline using the bundled self-contained Microsoft TraceEvent helper. It provides events, GC intervals, capture-clock evidence, module observations, local native PE/PDB checks and derived symbol names, and separate .NET/native ETW CPU sample trees. Select PID, process instance, thread and the time interval explicitly; export JSON or script-free HTML/SVG flame views. The decoder does not record automatically or download symbols. Counts are not CPU%, GC elapsed is not a pause, and trace/session clock alignment remains **NOT_ESTABLISHED**. See [release scope and limits](docs/RELEASE_v0.5.0.md), [module/PDB contract](docs/TRACE_DECODER_PHASE5_PATCH.md) and [native CPU/filter contract](docs/TRACE_DECODER_PHASE5_PACKET2.md). Publication is gated on the exact commit's Windows/Linux/portable and real trace acceptance; a source branch is not itself a published update.
 
 **v0.4.2 desktop:** The turquoise banner and monitor icon are compact, the decorative sparkle row is gone, and the FILE/HELP toolbar uses less height. The chart, Current Session and other pages begin higher on screen; normal Windows window controls remain. CI measures the actual workspace start at full and minimum window sizes in RU/EN, with Windows offscreen DPI captures at 100–200%. This is layout-only: evidence collection and recording behavior are unchanged.
@@ -64,7 +66,7 @@ Keep the entire `_internal` folder and the other extracted files. The main EXE i
 | **Event Log** | Local observation messages; session start/stop events are persisted in SQLite. |
 | **Reports** | Current snapshot, `report.json`, readable offline `report.html`, manual export and session comparison. |
 | **Settings** | RU/EN interface, 1/2/5-second sampling intervals, update checks, desktop shortcut, feedback and removal. |
-| **Trace Decoder — main development only** | Offline ETL/EventPipe/JSONL reading with separate CPU sample stacks and GC intervals. **Not available in the published v0.4.2 release.** |
+| **Trace Decoder — included since v0.5.0** | Offline ETL/EventPipe/JSONL reading with separate CPU sample stacks and GC intervals. Included in the published v0.5.1 release; v0.4.2 predates this page. |
 
 ### Settings — capture profiles and recovery controls
 
@@ -82,7 +84,7 @@ Keep the entire `_internal` folder and the other extracted files. The main EXE i
 
 ![Windows CI screenshot of the sixth Trace Decoder tab in the current main development build](docs/screenshots/en-decoder.png)
 
-*Trace Decoder (current `main` **only**) — import an ETL, EventPipe `.nettrace`, or BLACK.BOX JSONL file offline. CPU profiler samples, event-associated stacks and GC intervals have distinct meanings. This tab is **not present** in the published v0.4.2 Release.*
+*Trace Decoder (published since v0.5.0, retained in v0.5.1) — import an ETL, EventPipe `.nettrace`, or BLACK.BOX JSONL file offline. CPU profiler samples, event-associated stacks and GC intervals have distinct meanings. Older v0.4.2 packages do not contain this tab.*
 
 Some counters are inaccessible for protected processes or unavailable on a particular system. Missing values are displayed as **unknown**, not misleading zeros. RSS describes the selected process; it is **not** the summed memory usage of a complete process tree.
 

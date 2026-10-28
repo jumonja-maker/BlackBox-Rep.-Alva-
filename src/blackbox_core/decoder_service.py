@@ -7,6 +7,7 @@ import tempfile
 import time
 
 from .decoder_index import build_index, file_hash
+from .decoder_limits import DecodeBudget, MAX_INPUT_BYTES, MAX_WORK_BYTES, failure_details
 
 
 def helper_path():
@@ -18,14 +19,16 @@ def capability():
     tool = helper_path()
     return {"engine": "Microsoft.Diagnostics.Tracing.TraceEvent 4.0.0", "helper_present": tool.is_file(),
             "formats": [".etl", ".nettrace", ".jsonl"], "etl_requires_windows": True,
-            "symbol_downloads": False, "capture_started": False}
+            "symbol_downloads": False, "capture_started": False,
+            "max_input_bytes": MAX_INPUT_BYTES, "timeout_scope": "ENTIRE_IMPORT",
+            "recovery": "RETRY_FROM_ORIGINAL; PARTIAL_INDEXES_ARE_NEVER_REUSED"}
 
 
 def _local_file(path):
     from .session_v2 import safe_path
     path = safe_path(path)
     # safe_path checks ancestors/reparse points as well as network paths.
-    if not path.is_file() or not 0 < path.stat().st_size <= 256 * 1024**2:
+    if not path.is_file() or not 0 < path.stat().st_size <= MAX_INPUT_BYTES:
         raise ValueError("DECODER_INPUT_SIZE_OR_TYPE")
     if path.suffix.lower() not in (".etl", ".nettrace", ".jsonl"):
         raise ValueError("UNSUPPORTED_FORMAT")
@@ -33,15 +36,16 @@ def _local_file(path):
 
 
 def decode_file(path, destination, *, cancel=None, timeout=180):
-    if type(timeout) not in (int, float) or not 1 <= timeout <= 600:
-        raise ValueError("INVALID_DECODE_TIMEOUT")
+    from .session_v2 import safe_path
+    budget = DecodeBudget(cancel, timeout)
+    budget.check("VALIDATE")
     path = _local_file(path)
-    destination = Path(destination)
+    destination = safe_path(destination)
     if destination.exists() or destination.is_symlink():
         raise ValueError("OUTPUT_EXISTS")
     if path.suffix.lower() == ".etl" and os.name != "nt":
         raise OSError("ETL_REQUIRES_WINDOWS")
-    before = file_hash(path, cancel)
+    before = file_hash(path, cancel, budget=budget, max_bytes=MAX_INPUT_BYTES)
     with tempfile.TemporaryDirectory(prefix="blackbox-decode-") as temp:
         root = Path(temp)
         snapshot = root / ("input" + path.suffix.lower())
@@ -49,19 +53,18 @@ def decode_file(path, destination, *, cancel=None, timeout=180):
         with path.open("rb") as source, snapshot.open("xb") as target:
             total = 0
             while chunk := source.read(1024 * 1024):
-                if cancel is not None and cancel.is_set():
-                    raise InterruptedError("DECODER_CANCELLED")
+                budget.check("SNAPSHOT")
                 total += len(chunk)
-                if total > 256 * 1024**2:
+                if total > MAX_INPUT_BYTES:
                     raise ValueError("INPUT_GREW_BEYOND_BUDGET")
                 target.write(chunk)
-        if file_hash(snapshot, cancel) != before:
+        if file_hash(snapshot, cancel, budget=budget, max_bytes=MAX_INPUT_BYTES) != before:
             raise ValueError("INPUT_CHANGED_DURING_SNAPSHOT")
         decoded = snapshot
         if path.suffix.lower() != ".jsonl":
             tool = helper_path()
             if not tool.is_file() or tool.is_symlink():
-                raise OSError("DECODER_HELPER_MISSING_BUILD_OR_DOWNLOAD_MAIN_ARTIFACT")
+                raise OSError("DECODER_HELPER_MISSING_REINSTALL_COMPLETE_PORTABLE_PACKAGE")
             from .optional_jobs import OwnedProcess
             import psutil
             decoded = root / "decoded.jsonl"
@@ -75,12 +78,8 @@ def decode_file(path, destination, *, cancel=None, timeout=180):
                     process = psutil.Process(owner.process.pid)
                     try: process.nice(psutil.BELOW_NORMAL_PRIORITY_CLASS if os.name == "nt" else 5)
                     except psutil.Error: pass
-                    deadline = time.monotonic() + timeout
                     while owner.process.poll() is None:
-                        if cancel is not None and cancel.is_set():
-                            raise InterruptedError("DECODER_CANCELLED")
-                        if time.monotonic() > deadline:
-                            raise TimeoutError("DECODER_TIMEOUT")
+                        budget.check("NATIVE_DECODE")
                         try:
                             if process.memory_info().rss > 1536 * 1024**2:
                                 raise MemoryError("DECODER_RSS_BUDGET")
@@ -90,14 +89,26 @@ def decode_file(path, destination, *, cancel=None, timeout=180):
                             try:
                                 if item.is_file(): size += item.stat().st_size
                             except FileNotFoundError: pass
-                        if size > 1024**3:
+                        if size > MAX_WORK_BYTES:
                             raise ValueError("DECODER_DISK_BUDGET")
                         time.sleep(.1)
                     if owner.process.returncode != 0:
                         raise OSError("DECODER_FAILED_EXIT_" + str(owner.process.returncode))
+                    budget.check("NATIVE_DECODE")
+                    # A fast helper can finish between polls. Enforce its
+                    # final disk budget as well, before indexing any output.
+                    if sum(item.stat().st_size for item in root.rglob("*")
+                           if item.is_file()) > MAX_WORK_BYTES:
+                        raise ValueError("DECODER_DISK_BUDGET")
                 finally:
                     if owner is not None:
                         owner.close(kill=True)
-        if file_hash(path, cancel) != before:
-            raise ValueError("ORIGINAL_INPUT_CHANGED_DURING_DECODE")
-        return build_index(decoded, destination, input_sha256=before, format_name=path.suffix.lower(), cancel=cancel)
+        def verify_original():
+            budget.check("VERIFY_ORIGINAL")
+            if _local_file(path) != path or file_hash(
+                    path, cancel, budget=budget, max_bytes=MAX_INPUT_BYTES) != before:
+                raise ValueError("ORIGINAL_INPUT_CHANGED_DURING_DECODE")
+
+        verify_original()
+        return build_index(decoded, destination, input_sha256=before, format_name=path.suffix.lower(),
+                           cancel=cancel, budget=budget, before_publish=verify_original)

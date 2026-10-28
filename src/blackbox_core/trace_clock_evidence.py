@@ -7,16 +7,49 @@ that a trace and BLACK.BOX session were recorded in the same boot.
 from __future__ import annotations
 
 import ctypes
+import math
 import os
 from pathlib import Path
 import time
+from uuid import UUID
 
 SCHEMA = "blackbox.trace-clock-bracket/1"
 MAX_BRACKET_NS = 250_000_000  # warn when bracket is wider than 250ms
+CLOCK_IDENTITY_SCHEMA = "blackbox.windows-clock-identity/1"
+
+
+def _windows_clock_identity():
+    """Read the OS boot GUID; never approximate a boot ID from wall time.
+
+    SystemBootEnvironmentInformation is local OS evidence, not a signature.
+    If the native query is unavailable, time correlation remains unavailable.
+    No machine name, hardware identifier or network lookup is collected.
+    """
+    class BootEnvironment(ctypes.Structure):
+        _fields_ = [("boot_guid", ctypes.c_ubyte * 16),
+                    ("firmware_type", ctypes.c_uint32),
+                    ("boot_flags", ctypes.c_uint64)]
+
+    query = ctypes.WinDLL("ntdll").NtQuerySystemInformation
+    query.argtypes = [ctypes.c_uint32, ctypes.c_void_p, ctypes.c_uint32,
+                      ctypes.POINTER(ctypes.c_uint32)]
+    query.restype = ctypes.c_int32
+    result, returned = BootEnvironment(), ctypes.c_uint32()
+    if query(90, ctypes.byref(result), ctypes.sizeof(result), ctypes.byref(returned)) != 0:
+        raise OSError("WINDOWS_BOOT_ID_UNAVAILABLE")
+    boot_id = str(UUID(bytes_le=bytes(result.boot_guid)))
+    if boot_id == str(UUID(int=0)):
+        raise ValueError("WINDOWS_BOOT_ID_UNAVAILABLE")
+    info = time.get_clock_info("monotonic")
+    return {"schema": CLOCK_IDENTITY_SCHEMA, "boot_id": boot_id,
+            "boot_id_source": "NT_SYSTEM_BOOT_ENVIRONMENT_INFORMATION",
+            "monotonic_implementation": info.implementation,
+            "monotonic_resolution_ns": max(1, math.ceil(info.resolution * 1e9)),
+            "evidence_class": "LOCAL_OS_OBSERVATION_NOT_AUTHENTICATED"}
 
 
 def bracket(qpc_before, qpc_after, frequency_hz, mono_before_ns,
-            mono_after_ns, sampled_utc_ns, *, pid):
+            mono_after_ns, sampled_utc_ns, *, pid, clock_identity=None):
     """Build one bounded capture-side observation (pure, testable)."""
     numbers = (qpc_before, qpc_after, frequency_hz, mono_before_ns,
                mono_after_ns, sampled_utc_ns, pid)
@@ -31,7 +64,7 @@ def bracket(qpc_before, qpc_after, frequency_hz, mono_before_ns,
     qpc_width_ns = ((qpc_after - qpc_before) * 1_000_000_000 +
                     frequency_hz - 1) // frequency_hz
     mono_width_ns = mono_after_ns - mono_before_ns
-    return {
+    result = {
         "schema": SCHEMA,
         "status": ("BRACKET_OBSERVED_UNVERIFIED"
                    if max(qpc_width_ns, mono_width_ns) <= MAX_BRACKET_NS
@@ -48,6 +81,11 @@ def bracket(qpc_before, qpc_after, frequency_hz, mono_before_ns,
         "trace_to_session_alignment": "NOT_ESTABLISHED",
         "clock_precision_claim": "BRACKET_WIDTH_NOT_CROSS_CLOCK_CALIBRATION",
     }
+    if clock_identity is not None:
+        if not isinstance(clock_identity, dict):
+            raise ValueError("INVALID_CLOCK_IDENTITY")
+        result["clock_identity"] = dict(clock_identity)
+    return result
 
 
 def capture_trace_clock_bracket():
@@ -77,13 +115,19 @@ def capture_trace_clock_bracket():
                 raise OSError(ctypes.get_last_error(), "QPC_READ_FAILED")
             return value.value
 
+        try:
+            identity = _windows_clock_identity()
+        except (OSError, ValueError, AttributeError, OverflowError):
+            identity = {"schema": CLOCK_IDENTITY_SCHEMA,
+                        "status": "WINDOWS_BOOT_ID_UNAVAILABLE"}
         mono_before = time.monotonic_ns()
         qpc_before = read_counter()
         utc = time.time_ns()
         qpc_after = read_counter()
         mono_after = time.monotonic_ns()
         return bracket(qpc_before, qpc_after, freq.value,
-                       mono_before, mono_after, utc, pid=os.getpid())
+                       mono_before, mono_after, utc, pid=os.getpid(),
+                       clock_identity=identity)
     except (OSError, ValueError, OverflowError, AttributeError) as exc:
         return {"schema": SCHEMA, "status": "CAPTURE_QPC_UNAVAILABLE",
                 "error_type": type(exc).__name__,
@@ -102,6 +146,15 @@ def assess_trace_capture_journal(index_path, journal_path):
 
     summary = read_index(index_path, mode="events", limit=1)["summary"]
     raw = _read(journal_path)
+    return assess_trace_capture_metadata(summary, raw)
+
+
+def assess_trace_capture_metadata(summary, raw):
+    """Pure review of one parsed snapshot; never reopen approved evidence.
+
+    Used by session correlation so a journal or index replaced between two
+    independent reads cannot inherit the approval of an older version.
+    """
     document_ok = isinstance(raw, dict)
     data = raw if document_ok else {}
     source = data.get("source")
@@ -156,7 +209,7 @@ def assess_trace_capture_journal(index_path, journal_path):
             check = bracket(item["qpc_before_ticks"], item["qpc_after_ticks"],
                             item["qpc_frequency_hz"], item["monotonic_before_ns"],
                             item["monotonic_after_ns"], item["sampled_utc_ns"],
-                            pid=item["owner_pid"])
+                            pid=item["owner_pid"], clock_identity=item.get("clock_identity"))
             if item != check:
                 raise ValueError("MODIFIED_ANCHOR_FIELDS")
             validated.append(check)

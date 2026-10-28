@@ -112,7 +112,7 @@ def run(journal):
   _write(path,data)
  return 0 if data['state']=='COMPLETED' else 1
 class DotnetTrace:
- def __init__(self,folder,pid,seconds=10,*,tool=None,profile='gc-collect',max_bytes=256*1024**2):
+ def __init__(self,folder,pid,seconds=10,*,tool=None,profile='gc-collect',max_bytes=256*1024**2,session_path=None):
   import psutil
   if tool is not None:raise ValueError('CUSTOM_EVENTPIPE_EXECUTABLE_NOT_ALLOWED')
   if type(seconds) is not int or not 1<=seconds<=60 or profile not in PROFILES or type(max_bytes) is not int or not 1024**2<=max_bytes<=1024**3:raise ValueError('INVALID_EVENTPIPE_POLICY')
@@ -121,6 +121,9 @@ class DotnetTrace:
   self.data={'schema_version':1,'uid':self.uid,'state':'RESERVED','consent':'EXPLICIT_USER_COMMAND',
    'owner_pid':os.getpid(),'owner_created':psutil.Process().create_time(),'target':{'pid':pid,'created':psutil.Process(pid).create_time()},
    'policy':{'seconds':seconds,'max_bytes':max_bytes,'profile':profile},'decoded':False,'lost_events':None}
+  from .decoder_alignment import capture_session_binding
+  self.data['session_clock_binding']=capture_session_binding(
+   session_path if session_path is not None else self.folder.parent/'session-v2.sqlite3')
  def start(self):
   if self.process is not None:raise ValueError('TRACE_ALREADY_STARTED')
   if self.path.exists() or self.path.is_symlink():raise ValueError('TRACE_JOURNAL_EXISTS')
