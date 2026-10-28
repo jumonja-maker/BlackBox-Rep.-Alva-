@@ -30,9 +30,11 @@ jobs:
   shell-tests:
     name: Windows shell / read-only observer
     runs-on: windows-latest
-    # 536 source tests plus real WPR/DPI/E2E can exceed 18 minutes on a
-    # loaded hosted runner even when every assertion passes. Keep all gates.
-    timeout-minutes: 30
+    # The full 825-test Windows source suite exceeded the previous 30-minute
+    # job cap on run #450. The isolated decoder patch suite took ~34 minutes;
+    # preserve every test and the real WPR/DPI/E2E gates with bounded headroom.
+    # This is a job ceiling, not a waiver for a hung or failing test.
+    timeout-minutes: 65
     env:
       QT_QPA_PLATFORM: offscreen
       PYTHONUTF8: "1"
