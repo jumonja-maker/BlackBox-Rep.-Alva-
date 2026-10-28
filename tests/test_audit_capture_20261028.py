@@ -118,13 +118,16 @@ class CaptureIndexFailureTests(unittest.TestCase):
             try:
                 with closing(sqlite3.connect(Path(tmp)/'blackbox-library.sqlite3')) as locked:
                     locked.execute('BEGIN EXCLUSIVE')
+                    session.last_health = time.monotonic()-6
                     tick = time.monotonic(); session.tick()
                     self.assertLess(time.monotonic()-tick, 3)
                     self.assertTrue(session.probe.active)
                     self.assertEqual(session._library_budget['status'], 'INDEX_UNAVAILABLE')
                     locked.rollback()
-                session._library_budget_at = 0
-                session.last_health = 0
+                # Expire relative to this clock's origin. Zero does not expire a
+                # 60-second cache on a recently booted Linux CI VM.
+                session._library_budget_at = time.monotonic()-61
+                session.last_health = time.monotonic()-6
                 session.tick()
                 self.assertEqual(session.probe.total_samples, 2)
                 self.assertNotEqual(session._library_budget.get('status'), 'INDEX_UNAVAILABLE')
@@ -157,8 +160,9 @@ class CaptureIndexFailureTests(unittest.TestCase):
             try:
                 from blackbox_core.library_catalog import LibraryCatalog
                 with patch.object(LibraryCatalog, 'storage_budget', side_effect=sqlite3.DatabaseError('TEST_ONLY_BAD_INDEX')) as budget:
+                    session.last_health = time.monotonic()-6
                     session.tick()
-                    for _ in range(3): session.last_health = 0; session.tick()
+                    for _ in range(3): session.last_health = time.monotonic()-6; session.tick()
                     self.assertEqual(budget.call_count, 1)
                     self.assertEqual(session.probe.total_samples, 4)
                     self.assertTrue(session.probe.active)
@@ -197,6 +201,27 @@ class CaptureHandlerContractTests(unittest.TestCase):
                 health=session.book.put.call_args_list[-1]
                 self.assertEqual(health.args[0],'observer.health')
                 self.assertEqual(health.args[1]['library_budget']['status'],'INDEX_UNAVAILABLE')
+            finally: session.book=None; session.probe.active=False; session.jobs.cancel()
+
+    def test_budget_retry_expiration_is_relative_even_before_one_minute_uptime(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session=self.make_session(Path(tmp))
+            from blackbox_core.library_catalog import LibraryCatalog
+            session._library_budget={'status':'INDEX_UNAVAILABLE'}
+            session._library_budget_at=9.
+            healthy={'policy':{'max_bytes':0},'known_bytes':0,'unknown_entries':0}
+            try:
+                with patch('blackbox_core.research_worker.time.monotonic',return_value=10.), \
+                        patch.object(LibraryCatalog,'storage_budget',return_value=healthy) as budget:
+                    session._health()
+                    budget.assert_not_called()
+                    self.assertEqual(session._library_budget['status'],'INDEX_UNAVAILABLE')
+                    session._library_budget_at=10.-61
+                    session._health()
+                    budget.assert_called_once()
+                    self.assertEqual(session._library_budget,healthy)
+                    self.assertEqual(session._library_budget_at,10.)
+                    self.assertTrue(session.probe.active)
             finally: session.book=None; session.probe.active=False; session.jobs.cancel()
 
     def test_sqlite_stage_failure_finalizes_as_incomplete_and_releases_primary_owner(self):
