@@ -1,0 +1,10 @@
+test_failed_copy_rolls_back_only_new_inventory_content (test_distribution_inventory.DistributionInventoryTests.test_failed_copy_rolls_back_only_new_inventory_content) ... ok
+test_mismatched_versions_refuse_fallback_but_actual_python_license_is_used (test_distribution_inventory.DistributionInventoryTests.test_mismatched_versions_refuse_fallback_but_actual_python_license_is_used) ... ok
+test_real_payload_hashes_copied_text_and_partial_coverage_are_explicit (test_distribution_inventory.DistributionInventoryTests.test_real_payload_hashes_copied_text_and_partial_coverage_are_explicit) ... ok
+test_reparse_or_link_cannot_be_inventory_bytes (test_distribution_inventory.DistributionInventoryTests.test_reparse_or_link_cannot_be_inventory_bytes) ... ok
+test_repeat_and_existing_destination_are_no_clobber (test_distribution_inventory.DistributionInventoryTests.test_repeat_and_existing_destination_are_no_clobber) ... ok
+
+----------------------------------------------------------------------
+Ran 5 tests in 0.075s
+
+OK

@@ -1,0 +1,43 @@
+test_copy_redaction_covers_detail_text_numeric_text_and_json_keys (test_audit_privacy_20261028.AuditPrivacyTests.test_copy_redaction_covers_detail_text_numeric_text_and_json_keys) ... FAIL
+test_csv_prefixes_share_the_safe_parsed_cell_policy (test_audit_privacy_20261028.AuditPrivacyTests.test_csv_prefixes_share_the_safe_parsed_cell_policy) ... FAIL
+test_explicit_note_opt_in_does_not_admit_attributes_or_known_paths (test_audit_privacy_20261028.AuditPrivacyTests.test_explicit_note_opt_in_does_not_admit_attributes_or_known_paths) ... ERROR
+test_share_scalar_paths_are_redacted_in_every_derived_member_and_originals_unchanged (test_audit_privacy_20261028.AuditPrivacyTests.test_share_scalar_paths_are_redacted_in_every_derived_member_and_originals_unchanged) ... FAIL
+
+======================================================================
+ERROR: test_explicit_note_opt_in_does_not_admit_attributes_or_known_paths (test_audit_privacy_20261028.AuditPrivacyTests.test_explicit_note_opt_in_does_not_admit_attributes_or_known_paths)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/workspace/scratch/c58945ad251a/blackbox-audit-patch-20261028/tests/test_audit_privacy_20261028.py", line 84, in test_explicit_note_opt_in_does_not_admit_attributes_or_known_paths
+    allowed=redact(value,include_notes=True)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+TypeError: redact() got an unexpected keyword argument 'include_notes'
+
+======================================================================
+FAIL: test_copy_redaction_covers_detail_text_numeric_text_and_json_keys (test_audit_privacy_20261028.AuditPrivacyTests.test_copy_redaction_covers_detail_text_numeric_text_and_json_keys)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/workspace/scratch/c58945ad251a/blackbox-audit-patch-20261028/tests/test_audit_privacy_20261028.py", line 77, in test_copy_redaction_covers_detail_text_numeric_text_and_json_keys
+    self.assertNotIn('BB_',value)
+AssertionError: 'BB_' unexpectedly found in '/tmp/BB_DETAIL_PRIVATE'
+
+======================================================================
+FAIL: test_csv_prefixes_share_the_safe_parsed_cell_policy (test_audit_privacy_20261028.AuditPrivacyTests.test_csv_prefixes_share_the_safe_parsed_cell_policy)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/workspace/scratch/c58945ad251a/blackbox-audit-patch-20261028/tests/test_audit_privacy_20261028.py", line 62, in test_csv_prefixes_share_the_safe_parsed_cell_policy
+    for v in values[:5]:self.assertIn("'"+v,kinds)
+                        ^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: "' =1+1" not found in {'observer.health', "'\t@SUM(A1)", '  +2', 'observer_lifecycle', '\n=1+1', 'plain', ' =1+1', 'x=1+1', "'\r-2"}
+
+======================================================================
+FAIL: test_share_scalar_paths_are_redacted_in_every_derived_member_and_originals_unchanged (test_audit_privacy_20261028.AuditPrivacyTests.test_share_scalar_paths_are_redacted_in_every_derived_member_and_originals_unchanged)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/workspace/scratch/c58945ad251a/blackbox-audit-patch-20261028/tests/test_audit_privacy_20261028.py", line 43, in test_share_scalar_paths_are_redacted_in_every_derived_member_and_originals_unchanged
+    self.assertNotIn(text.encode(), data, (name,text))
+AssertionError: b'BB_PRIV_PATH_a241' unexpectedly found in b'\xef\xbb\xbfevidence_ref,elapsed_ms,source,quality,kind\r\nresearch.sqlite3:evidence:1,65,/home/private/BB_POSIX_a241.txt,https://internal.invalid/BB_URL_a241,C:\\private\\BB_PRIV_PATH_a241.txt\r\nresearch.sqlite3:evidence:2,71,BLACKBOX_LEGACY,OBSERVED,observer_lifecycle\r\nresearch.sqlite3:evidence:3,73,BLACKBOX,OBSERVED,observer.health\r\nresearch.sqlite3:evidence:4,142,BLACKBOX_LEGACY,OBSERVED,observer_lifecycle\r\n' : ('evidence.csv', 'BB_PRIV_PATH_a241')
+
+----------------------------------------------------------------------
+Ran 4 tests in 0.541s
+
+FAILED (failures=3, errors=1)

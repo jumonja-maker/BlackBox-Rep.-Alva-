@@ -1,0 +1,17 @@
+test_copy_redaction_covers_detail_text_numeric_text_and_json_keys (test_audit_privacy_20261028.AuditPrivacyTests.test_copy_redaction_covers_detail_text_numeric_text_and_json_keys) ... ok
+test_csv_prefixes_share_the_safe_parsed_cell_policy (test_audit_privacy_20261028.AuditPrivacyTests.test_csv_prefixes_share_the_safe_parsed_cell_policy) ... ok
+test_explicit_note_opt_in_does_not_admit_attributes_or_known_paths (test_audit_privacy_20261028.AuditPrivacyTests.test_explicit_note_opt_in_does_not_admit_attributes_or_known_paths) ... ok
+test_export_copy_keeps_distinct_path_ids_and_foreign_links (test_audit_privacy_20261028.AuditPrivacyTests.test_export_copy_keeps_distinct_path_ids_and_foreign_links) ... ok
+test_full_path_fields_with_spaces_do_not_leave_private_basename (test_audit_privacy_20261028.AuditPrivacyTests.test_full_path_fields_with_spaces_do_not_leave_private_basename) ... ok
+test_nonregular_schema_refuses_before_running_triggers (test_audit_privacy_20261028.AuditPrivacyTests.test_nonregular_schema_refuses_before_running_triggers) ... ok
+test_private_index_schema_cannot_escape_redacted_manifest (test_audit_privacy_20261028.AuditPrivacyTests.test_private_index_schema_cannot_escape_redacted_manifest) ... ok
+test_private_scalar_columns_use_same_default_policy_as_json (test_audit_privacy_20261028.AuditPrivacyTests.test_private_scalar_columns_use_same_default_policy_as_json) ... ok
+test_raw_omitted_artifact_name_does_not_escape_default_share_policy (test_audit_privacy_20261028.AuditPrivacyTests.test_raw_omitted_artifact_name_does_not_escape_default_share_policy) ... ok
+test_share_scalar_paths_are_redacted_in_every_derived_member_and_originals_unchanged (test_audit_privacy_20261028.AuditPrivacyTests.test_share_scalar_paths_are_redacted_in_every_derived_member_and_originals_unchanged) ... ok
+test_stored_generated_column_cannot_hide_a_following_sensitive_field (test_audit_privacy_20261028.AuditPrivacyTests.test_stored_generated_column_cannot_hide_a_following_sensitive_field) ... ok
+test_virtual_generated_column_cannot_hide_a_following_sensitive_field (test_audit_privacy_20261028.AuditPrivacyTests.test_virtual_generated_column_cannot_hide_a_following_sensitive_field) ... ok
+
+----------------------------------------------------------------------
+Ran 12 tests in 0.833s
+
+OK

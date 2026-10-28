@@ -1,0 +1,39 @@
+{
+  "status": "PASS",
+  "source": {
+    "schema_version": 1,
+    "source_sha": "da63ea85749e9b484eb4af088de61385eb6c4caf",
+    "source_tree_sha": "6e219a0a8ff40c5a8ac4bfd779cab79b49a432b3",
+    "tracked_worktree_clean": true
+  },
+  "artifactId": 12826542643,
+  "artifactSHA256": "4d765a2eb3c50e0009c585aa47e33b26167f5d5762e2079326a0d0b8ebf2da6e",
+  "portableSHA256": "559d9b4519cb102b90dec25c004f5841b037a6bf83767f436d5faf824cdcd3b1",
+  "manifestSHA256": "7555a296db30adc175428f0bd5f0bd32ebf9b289d87a550d98b76bc9b025282a",
+  "verifiedFiles": 525,
+  "payloadFiles": 526,
+  "unexpectedOrMissingFiles": 0,
+  "mismatches": 0,
+  "noticesFiles": 73,
+  "decoderFilesVerified": 217,
+  "noticeProvenance": {
+    "python": {
+      "version": "3.11.9",
+      "licenseSource": "installed_python_license",
+      "licenseFile": "third_party_notices/python-runtime/LICENSE.txt"
+    },
+    "qtNotices": {
+      "source": "repository_vendored",
+      "validatedPySideVersion": "6.11.3",
+      "files": [
+        "third_party_notices/pyside-6.11.3/BSD-3-Clause.txt",
+        "third_party_notices/pyside-6.11.3/GPL-2.0-only.txt",
+        "third_party_notices/pyside-6.11.3/GPL-3.0-only.txt",
+        "third_party_notices/pyside-6.11.3/Qt-GPL-exception-1.0.txt",
+        "third_party_notices/pyside-6.11.3/LGPL-3.0-only.txt"
+      ]
+    }
+  },
+  "licenseCoverageReviewRequired": true,
+  "allNativeDllLicensesCertified": false
+}

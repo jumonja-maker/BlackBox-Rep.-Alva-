@@ -1,0 +1,15 @@
+test_launch_failure_cleanup_preserves_primary_error_if_temp_cleanup_fails (test_audit_optional_jobs_20261028.OptionalOwnershipAuditTests.test_launch_failure_cleanup_preserves_primary_error_if_temp_cleanup_fails) ... ok
+test_parent_exit_does_not_abandon_owned_descendant_or_signal_other_group (test_audit_optional_jobs_20261028.OptionalOwnershipAuditTests.test_parent_exit_does_not_abandon_owned_descendant_or_signal_other_group) ... ok
+test_ready_marker_failure_closes_already_started_owned_process (test_audit_optional_jobs_20261028.OptionalOwnershipAuditTests.test_ready_marker_failure_closes_already_started_owned_process) ... ok
+test_missing_dependency_is_incomplete_not_pass (test_audit_undefined_gate_20261028.UndefinedBindingGateTests.test_missing_dependency_is_incomplete_not_pass) ... ok
+test_missing_exception_import_is_caught_in_function_body (test_audit_undefined_gate_20261028.UndefinedBindingGateTests.test_missing_exception_import_is_caught_in_function_body) ... ok
+test_missing_source_and_empty_directory_cannot_pass (test_audit_undefined_gate_20261028.UndefinedBindingGateTests.test_missing_source_and_empty_directory_cannot_pass) ... ok
+test_syntax_error_cannot_be_ignored_as_nonbinding_warning (test_audit_undefined_gate_20261028.UndefinedBindingGateTests.test_syntax_error_cannot_be_ignored_as_nonbinding_warning) ... ok
+test_unbound_local_is_caught (test_audit_undefined_gate_20261028.UndefinedBindingGateTests.test_unbound_local_is_caught) ... ok
+test_undefined_public_export_is_caught (test_audit_undefined_gate_20261028.UndefinedBindingGateTests.test_undefined_public_export_is_caught) ... ok
+test_unused_import_does_not_fail_this_narrow_gate (test_audit_undefined_gate_20261028.UndefinedBindingGateTests.test_unused_import_does_not_fail_this_narrow_gate) ... ok
+
+----------------------------------------------------------------------
+Ran 10 tests in 0.694s
+
+OK

@@ -1,0 +1,75 @@
+test_action_findings_have_same_ids_in_ui_json_csv_and_html (test_audit_findings_20261028.FindingsAuditRegressions.test_action_findings_have_same_ids_in_ui_json_csv_and_html) ... FAIL
+test_cancelled_export_cleans_only_its_staging (test_audit_findings_20261028.FindingsAuditRegressions.test_cancelled_export_cleans_only_its_staging) ... ok
+test_default_notes_remain_omitted_in_every_export_file (test_audit_findings_20261028.FindingsAuditRegressions.test_default_notes_remain_omitted_in_every_export_file) ... ok
+test_explicit_note_consent_preserves_marker_and_legacy_notes_only (test_audit_findings_20261028.FindingsAuditRegressions.test_explicit_note_consent_preserves_marker_and_legacy_notes_only) ... FAIL
+test_export_never_overwrites_previous_report_or_changes_source (test_audit_findings_20261028.FindingsAuditRegressions.test_export_never_overwrites_previous_report_or_changes_source) ... ok
+test_interval_events_default_policy_redacts_scalar_paths (test_audit_findings_20261028.FindingsAuditRegressions.test_interval_events_default_policy_redacts_scalar_paths) ... FAIL
+test_marker_after_last_sample_is_in_full_default_export (test_audit_findings_20261028.FindingsAuditRegressions.test_marker_after_last_sample_is_in_full_default_export) ... FAIL
+test_more_than_one_ui_page_has_complete_action_export (test_audit_findings_20261028.FindingsAuditRegressions.test_more_than_one_ui_page_has_complete_action_export) ... FAIL
+test_same_explicit_interval_produces_same_action_ids (test_audit_findings_20261028.FindingsAuditRegressions.test_same_explicit_interval_produces_same_action_ids) ... FAIL
+test_selected_standard_series_is_used_by_finding_coverage (test_audit_findings_20261028.FindingsAuditRegressions.test_selected_standard_series_is_used_by_finding_coverage) ... FAIL
+
+======================================================================
+FAIL: test_action_findings_have_same_ids_in_ui_json_csv_and_html (test_audit_findings_20261028.FindingsAuditRegressions.test_action_findings_have_same_ids_in_ui_json_csv_and_html)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/workspace/scratch/c58945ad251a/blackbox-audit-patch-20261028/tests/test_audit_findings_20261028.py", line 93, in test_action_findings_have_same_ids_in_ui_json_csv_and_html
+    self.assertEqual(expected, {r['finding_id'] for r in data['findings']})
+AssertionError: Items in the first set but not the second:
+'752568933d01d384858af85e538f007a'
+
+======================================================================
+FAIL: test_explicit_note_consent_preserves_marker_and_legacy_notes_only (test_audit_findings_20261028.FindingsAuditRegressions.test_explicit_note_consent_preserves_marker_and_legacy_notes_only)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/workspace/scratch/c58945ad251a/blackbox-audit-patch-20261028/tests/test_audit_findings_20261028.py", line 114, in test_explicit_note_consent_preserves_marker_and_legacy_notes_only
+    self.assertIn(NOTE,encoded)
+AssertionError: 'EXPLICIT_USER_NOTE_AUDIT_28' not found in '{"schema_version": 2, "engine": "BLACKBOX_INVESTIGATION_2", "file_trust": "UNVERIFIED_IMPORT", "root_cause": "UNKNOWN", "findings": [{"finding_id": "12bd1d9e919e4fe9eb3865bd59d5224d", "schema_version": 2, "code": "application.source_failed", "severity": "INFO", "start_ns": 5000000000, "end_ns": 5000000000, "facts": [{"code": "SOURCE_STATUS", "values": {"note": "[OMITTED_BY_DEFAULT_PRIVACY_POLICY]", "attributes": {"privacy": "APPLICATION_ATTRIBUTES_OMITTED_BY_DEFAULT"}}}], "confidence_class": "UNAVAILABLE", "hypotheses": [{"code": "INSPECT_COINCIDENT_WORK_AND_SOURCE_COVERAGE", "class": "CANDIDATE"}], "alternative_explanations": ["SOURCE_FAILURE_OR_COLLECTION_LIMIT"], "limitations": ["COUNTERS_DO_NOT_ESTABLISH_ROOT_CAUSE", "SOURCE_FILE_NOT_AUTHENTICATED", "BETWEEN_SAMPLE_ACTIVITY_UNKNOWN", "TID_REUSE_CANNOT_BE_EXCLUDED"], "sources": [{"evidence_ref": "research.sqlite3:evidence:3", "verification_class": "UNVERIFIED_IMPORT"}], "coverage": {"selected_samples": 2, "total_samples": 2, "quality_contract": "PARTIAL_METRIC_FIELDS_OBSERVED", "quality_status_rows_expected": 26, "quality_status_rows_present": 26, "quality_status_ok_rows": 24, "actually_observed_metric_values": 24, "unavailable_metric_values": 2, "outside_selected_interval": 0, "first_sample_ns": 3000000000, "last_sample_ns": 7000000000, "observed_comparable_duration_ns": 0, "spacing_gap_pairs": 1, "counter_resets": 0, "sensor_error_records": 0, "exact_missed_samples": null, "expected_slots_estimate_between_samples": 4, "limitations": ["BETWEEN_SAMPLE_ACTIVITY_UNKNOWN", "SCHEDULE_COVERAGE_IS_AN_ESTIMATE", "BOUNDS_EXCLUDE_PARTIAL_COUNTER_PAIRS"]}, "group": "COVERAGE", "root_cause": "UNKNOWN", "root_cause_proven": false, "source_trust": "UNVERIFIED_IMPORT", "detail": {}}, {"finding_id": "f05e2ede2c73b76cf2dc598bfeb50305", "schema_version": 2, "code": "user.comment", "severity": "INFO", "start_ns": 5000000000, "end_ns": 5000000000, "facts": [{"code": "USER_STATEMENT", "values": {"kind": "COMMENT", "note": "[OMITTED_BY_DEFAULT_PRIVACY_POLICY]", "attributes": {"privacy": "APPLICATION_ATTRIBUTES_OMITTED_BY_DEFAULT"}, "command_line": "[OMITTED_BY_DEFAULT_PRIVACY_POLICY]"}}], "confidence_class": "USER_REPORTED", "hypotheses": [{"code": "INSPECT_COINCIDENT_WORK_AND_SOURCE_COVERAGE", "class": "CANDIDATE"}], "alternative_explanations": ["SOURCE_FAILURE_OR_COLLECTION_LIMIT"], "limitations": ["COUNTERS_DO_NOT_ESTABLISH_ROOT_CAUSE", "SOURCE_FILE_NOT_AUTHENTICATED", "BETWEEN_SAMPLE_ACTIVITY_UNKNOWN", "TID_REUSE_CANNOT_BE_EXCLUDED"], "sources": [{"evidence_ref": "research.sqlite3:evidence:1", "verification_class": "UNVERIFIED_IMPORT"}], "coverage": {"selected_samples": 2, "total_samples": 2, "quality_contract": "PARTIAL_METRIC_FIELDS_OBSERVED", "quality_status_rows_expected": 26, "quality_status_rows_present": 26, "quality_status_ok_rows": 24, "actually_observed_metric_values": 24, "unavailable_metric_values": 2, "outside_selected_interval": 0, "first_sample_ns": 3000000000, "last_sample_ns": 7000000000, "observed_comparable_duration_ns": 0, "spacing_gap_pairs": 1, "counter_resets": 0, "sensor_error_records": 0, "exact_missed_samples": null, "expected_slots_estimate_between_samples": 4, "limitations": ["BETWEEN_SAMPLE_ACTIVITY_UNKNOWN", "SCHEDULE_COVERAGE_IS_AN_ESTIMATE", "BOUNDS_EXCLUDE_PARTIAL_COUNTER_PAIRS"]}, "group": "COVERAGE", "root_cause": "UNKNOWN", "root_cause_proven": false, "source_trust": "UNVERIFIED_IMPORT", "detail": {}}], "findings_total": 2, "analysis_limits": {"derived_triggers_not_emitted": 0, "derived_trigger_limit_reached": false}, "causal_link_proven": false}'
+
+======================================================================
+FAIL: test_interval_events_default_policy_redacts_scalar_paths (test_audit_findings_20261028.FindingsAuditRegressions.test_interval_events_default_policy_redacts_scalar_paths)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/workspace/scratch/c58945ad251a/blackbox-audit-patch-20261028/tests/test_audit_findings_20261028.py", line 163, in test_interval_events_default_policy_redacts_scalar_paths
+    self.assertNotIn('AuditPrivate28',json.dumps(exported))
+AssertionError: 'AuditPrivate28' unexpectedly found in '[{"event_id": 1, "recorded_ns": 5000000000, "observed_ns": 5000000000, "event_type": "user_problem", "source_kind": "USER", "verification_class": "UNVERIFIED_IMPORT", "timestamp_precision": "RECORDED_COMMAND_NS", "correlation_key": "user_problem", "measurement_status": "OK", "event_time_ns": 5000000000, "recorded_verification_class": "USER_DECLARED"}, {"event_id": 2, "recorded_ns": 5000000000, "observed_ns": 5000000000, "event_type": "C:\\\\Users\\\\AuditPrivate28\\\\secret.txt", "source_kind": "APPLICATION_EVENT", "verification_class": "UNVERIFIED_IMPORT", "timestamp_precision": "TEST_ONLY", "correlation_key": "C:\\\\Users\\\\AuditPrivate28\\\\secret.txt", "measurement_status": "OK", "event_time_ns": 5000000000, "recorded_verification_class": "USER_DECLARED"}]'
+
+======================================================================
+FAIL: test_marker_after_last_sample_is_in_full_default_export (test_audit_findings_20261028.FindingsAuditRegressions.test_marker_after_last_sample_is_in_full_default_export)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/workspace/scratch/c58945ad251a/blackbox-audit-patch-20261028/tests/test_audit_findings_20261028.py", line 150, in test_marker_after_last_sample_is_in_full_default_export
+    self.assertEqual({r['finding_id'] for r in ui},{r['finding_id'] for r in data['findings']})
+AssertionError: Items in the first set but not the second:
+'752568933d01d384858af85e538f007a'
+
+======================================================================
+FAIL: test_more_than_one_ui_page_has_complete_action_export (test_audit_findings_20261028.FindingsAuditRegressions.test_more_than_one_ui_page_has_complete_action_export)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/workspace/scratch/c58945ad251a/blackbox-audit-patch-20261028/tests/test_audit_findings_20261028.py", line 106, in test_more_than_one_ui_page_has_complete_action_export
+    self.assertEqual(len(ui),data['findings_total'])
+AssertionError: 67 != 2
+
+======================================================================
+FAIL: test_same_explicit_interval_produces_same_action_ids (test_audit_findings_20261028.FindingsAuditRegressions.test_same_explicit_interval_produces_same_action_ids)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/workspace/scratch/c58945ad251a/blackbox-audit-patch-20261028/tests/test_audit_findings_20261028.py", line 190, in test_same_explicit_interval_produces_same_action_ids
+    self.assertEqual({r['finding_id'] for r in ui},{r['finding_id'] for r in data['findings']})
+AssertionError: Items in the first set but not the second:
+'7da76aeac36010e1740f810f57f7afe8'
+
+======================================================================
+FAIL: test_selected_standard_series_is_used_by_finding_coverage (test_audit_findings_20261028.FindingsAuditRegressions.test_selected_standard_series_is_used_by_finding_coverage)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/workspace/scratch/c58945ad251a/blackbox-audit-patch-20261028/tests/test_audit_findings_20261028.py", line 140, in test_selected_standard_series_is_used_by_finding_coverage
+    for row in data['findings']: self.assertEqual(row['coverage']['selected_samples'],count)
+                                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: 2 != 8
+
+----------------------------------------------------------------------
+Ran 10 tests in 1.830s
+
+FAILED (failures=7)

@@ -1,0 +1,15 @@
+test_dead_guardian_after_starting_or_stopping_is_unconfirmed (test_audit_decoder_20261028.GuardianTerminalAudit.test_dead_guardian_after_starting_or_stopping_is_unconfirmed) ... ok
+test_dead_guardian_cannot_report_recording_and_stop_preserves_result (test_audit_decoder_20261028.GuardianTerminalAudit.test_dead_guardian_cannot_report_recording_and_stop_preserves_result) ... ok
+test_dead_guardian_with_corrupt_or_foreign_journal_keeps_recovery_uncertain (test_audit_decoder_20261028.GuardianTerminalAudit.test_dead_guardian_with_corrupt_or_foreign_journal_keeps_recovery_uncertain) ... ok
+test_forced_owned_child_exit_does_not_claim_capture_stopped (test_audit_decoder_20261028.GuardianTerminalAudit.test_forced_owned_child_exit_does_not_claim_capture_stopped) ... ok
+test_process_exit_is_observed_before_final_journal_is_read (test_audit_decoder_20261028.GuardianTerminalAudit.test_process_exit_is_observed_before_final_journal_is_read) ... ok
+test_terminal_completion_requires_matching_successful_process_exit (test_audit_decoder_20261028.GuardianTerminalAudit.test_terminal_completion_requires_matching_successful_process_exit) ... ok
+test_valid_terminal_result_is_consumed_once_and_cached_for_stop (test_audit_decoder_20261028.GuardianTerminalAudit.test_valid_terminal_result_is_consumed_once_and_cached_for_stop) ... ok
+test_percent_underscore_and_backslash_are_literal_and_keyset_is_stable (test_audit_decoder_20261028.ProfileSearchAudit.test_percent_underscore_and_backslash_are_literal_and_keyset_is_stable) ... ok
+test_previous_profile_schema_is_read_without_migration (test_audit_decoder_20261028.ProfileSearchAudit.test_previous_profile_schema_is_read_without_migration) ... ok
+test_unicode_is_searched_in_decoded_frame_values_only (test_audit_decoder_20261028.ProfileSearchAudit.test_unicode_is_searched_in_decoded_frame_values_only) ... ok
+
+----------------------------------------------------------------------
+Ran 10 tests in 0.392s
+
+OK
