@@ -15,6 +15,8 @@ from blackbox_core.decoder_service import capability, decode_file
 from blackbox_core.decoder_index import read_index
 from blackbox_core.trace_clock_evidence import assess_trace_capture_journal
 from blackbox_core.decoder_pdb import review_local_pe_pdb
+from blackbox_core.decoder_calltree import export_analysis
+from .decoder_analysis import DecoderAnalysisWorker, CallTreeDialog
 
 
 class DecodeWorker(QThread):
@@ -49,6 +51,8 @@ class DecoderPanel(QWidget):
         self.error = ""
         self.clock_review = None  # Manual journal review, scoped to current index.
         self.pdb_review = None  # Independent local file pair, not bound to trace.
+        self.analysis_report = None
+        self._analysis_kind = None
         layout = QVBoxLayout(self)
         layout.setContentsMargins(18, 12, 18, 12)
         self.notice = QLabel()
@@ -70,7 +74,7 @@ class DecoderPanel(QWidget):
         layout.addWidget(self.status)
         filters = QHBoxLayout()
         self.mode = QComboBox()
-        for key in ("events", "stacks", "gc", "cpu_stacks", "gc_summary", "clock"):
+        for key in ("events", "stacks", "gc", "cpu_stacks", "gc_summary", "clock", "modules"):
             self.mode.addItem(key, key)
         self.pid = QSpinBox()
         self.pid.setRange(0, 2147483647)
@@ -85,6 +89,17 @@ class DecoderPanel(QWidget):
         filters.addWidget(self.search, 1)
         filters.addWidget(self.apply_button)
         layout.addLayout(filters)
+        analysis_controls = QHBoxLayout()
+        self.calltree_button = QPushButton()
+        self.resolve_stack_button = QPushButton()
+        self.export_analysis_button = QPushButton()
+        self.calltree_button.clicked.connect(self.start_calltree)
+        self.resolve_stack_button.clicked.connect(self.choose_stack_symbols)
+        self.export_analysis_button.clicked.connect(self.save_analysis)
+        for button in (self.calltree_button, self.resolve_stack_button, self.export_analysis_button):
+            button.setEnabled(False)
+            analysis_controls.addWidget(button)
+        layout.addLayout(analysis_controls)
         split = QSplitter(Qt.Orientation.Vertical)
         self.table = QTableWidget(0, 5)
         self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
@@ -139,7 +154,10 @@ class DecoderPanel(QWidget):
                 (self.prev_button, "PREVIOUS", "НАЗАД"), (self.next_button, "NEXT", "ДАЛЕЕ"),
                 (self.export_button, "SAVE INDEX…", "СОХРАНИТЬ ИНДЕКС…"),
                 (self.review_clock_button, "CHECK CAPTURE CLOCK…", "ПРОВЕРИТЬ ЧАСЫ ЗАПИСИ…"),
-                (self.review_pdb_button, "CHECK LOCAL PDB…", "ПРОВЕРИТЬ ЛОКАЛЬНЫЙ PDB…")):
+                (self.review_pdb_button, "CHECK LOCAL PDB…", "ПРОВЕРИТЬ ЛОКАЛЬНЫЙ PDB…"),
+                (self.calltree_button, "CPU CALL TREE…", "ДЕРЕВО CPU-ВЫБОРОК…"),
+                (self.resolve_stack_button, "RESOLVE SELECTED STACK…", "ИМЕНА ВЫБРАННОГО СТЕКА…"),
+                (self.export_analysis_button, "SAVE ANALYSIS…", "СОХРАНИТЬ АНАЛИЗ…")):
             button.setText(self.tr2(en, ru))
         self.review_pdb_button.setToolTip(self.tr2(
             "Offline GUID/Age check of selected PE and PDB only; imported trace stacks are not symbolized.",
@@ -148,7 +166,8 @@ class DecoderPanel(QWidget):
                                   ("GC / suspension intervals", "GC / интервалы остановки"),
                                   ("CPU profiler samples", "Выборки CPU-профилировщика"),
                                   ("GC statistics by generation", "Статистика GC по поколениям"),
-                                  ("Trace UTC estimates", "Оценки времени UTC"))):
+                                  ("Trace UTC estimates", "Оценки времени UTC"),
+                                   ("Native modules in stacks", "Нативные модули в стеках"))):
             self.mode.setItemText(i, self.tr2(*pair))
         self.search.setPlaceholderText(self.tr2("Find provider or event…", "Поиск источника или события…"))
         self._table_headers()
@@ -157,13 +176,16 @@ class DecoderPanel(QWidget):
     def _table_headers(self):
         mode = self.mode.currentData()
         unit = ("SAMPLES" if mode == "cpu_stacks" else "PAIRS" if mode == "gc_summary"
-                else "UTC" if mode == "clock" else "ms")
+                 else "FRAMES" if mode == "modules" else "UTC" if mode == "clock" else "ms")
         self.table.setHorizontalHeaderLabels(("#", unit, "PID", self.tr2("SOURCE", "ИСТОЧНИК"),
                                                self.tr2("EVENT / INTERVAL", "СОБЫТИЕ / ИНТЕРВАЛ")))
         self.table.setColumnWidth(1, 195 if mode == "clock" else 85)
 
     def render_status(self):
-        if self.state == "decoding":
+        if self.state == "analyzing":
+            text = self.tr2("Offline analysis; cancel is available. Sources are not modified.",
+                            "Офлайн-анализ; можно отменить. Исходные файлы не изменяются.")
+        elif self.state == "decoding":
             text = self.tr2("Decoding in a separate process. Cancel is available.",
                             "Декодирование в отдельном процессе. Можно отменить.")
         elif self.state == "error":
@@ -220,6 +242,11 @@ class DecoderPanel(QWidget):
         self.index, self.summary, self.rows = None, None, []
         self.clock_review = None
         self.pdb_review = None
+        self.analysis_report = None
+        for dialog in self.findChildren(CallTreeDialog):
+            dialog.close()
+        for button in (self.calltree_button, self.resolve_stack_button, self.export_analysis_button):
+            button.setEnabled(False)
         self.cursors, self.next_cursor = [0], 0
         self.table.clearContents()
         self.table.setRowCount(0)
@@ -258,6 +285,7 @@ class DecoderPanel(QWidget):
             self.export_button.setEnabled(True)
             self.review_clock_button.setEnabled(True)
             self.review_pdb_button.setEnabled(True)
+            self.calltree_button.setEnabled(True)
             self.reset_page()
         self.render_status()
 
@@ -268,6 +296,12 @@ class DecoderPanel(QWidget):
         self.open_button.setEnabled(True)
         self.session_button.setEnabled(True)
         self.cancel_button.setEnabled(False)
+        if self.index is not None:
+            self.calltree_button.setEnabled(True)
+            self.review_clock_button.setEnabled(True)
+            self.review_pdb_button.setEnabled(True)
+            self.export_analysis_button.setEnabled(self.analysis_report is not None)
+            self._refresh_stack_action()
         self.idle.emit()
 
     def reset_page(self):
@@ -303,6 +337,10 @@ class DecoderPanel(QWidget):
                     suffix = f" · Gen{gen}" if gen is not None else ""
                     cells = (item["index_id"], row["interval_count"], row["pid"],
                              "CLR", row["kind"] + suffix)
+                elif mode == "modules":
+                    module = row["module"]
+                    cells = (item["index_id"], row["frame_count"], row["pid"],
+                             "TRACE MODULE", module["module_name"])
                 elif mode == "clock":
                     cells = (item["index_id"], row.get("utc_time_iso", "UNKNOWN"), row["pid"],
                              row.get("provider", "TRACE"), row.get("name", ""))
@@ -329,7 +367,15 @@ class DecoderPanel(QWidget):
         self.cursors.append(self.next_cursor)
         self.load_page()
 
+    def _refresh_stack_action(self):
+        index = self.table.currentRow()
+        row = self.rows[index]["event"] if 0 <= index < len(self.rows) else {}
+        self.resolve_stack_button.setEnabled(self.worker is None and
+            bool(self.table.selectionModel().selectedRows()) and
+            row.get("type") == "event" and bool(row.get("frames")))
+
     def show_details(self):
+        self._refresh_stack_action()
         index = self.table.currentRow()
         if 0 <= index < len(self.rows):
             self.details.setPlainText(json.dumps(self.rows[index]["event"], ensure_ascii=False, indent=2))
@@ -401,6 +447,81 @@ class DecoderPanel(QWidget):
         self.pdb_review = report
         self.render_status()
         return report
+
+    def start_calltree(self):
+        if self.index is not None:
+            self.start_analysis("calltree", {"index_path": self.index, "pid": self.pid.value()})
+
+    def choose_stack_symbols(self):
+        if self.worker is not None:
+            return
+        index = self.table.currentRow()
+        row = self.rows[index]["event"] if 0 <= index < len(self.rows) else {}
+        if (not self.table.selectionModel().selectedRows() or
+                row.get("type") != "event" or not row.get("frames")):
+            return
+        binary, _ = QFileDialog.getOpenFileName(self,
+            self.tr2("Select local PE for this stack", "Выберите локальный PE для стека"),
+            "", "PE (*.exe *.dll *.sys);;All files (*)")
+        if not binary:
+            return
+        pdb, _ = QFileDialog.getOpenFileName(self,
+            self.tr2("Select matching local Windows PDB", "Выберите соответствующий Windows PDB"),
+            str(Path(binary).parent), "PDB (*.pdb)")
+        if pdb:
+            self.start_analysis("symbols", {"row": json.loads(json.dumps(row)),
+                "binary_path": Path(binary), "pdb_path": Path(pdb),
+                "source_trace_sha256": self.summary.get("input_sha256")})
+
+    def start_analysis(self, kind, arguments):
+        if self.worker is not None or self.index is None:
+            return
+        if getattr(self.window.probe, "active", False):
+            self.state, self.error = "error", "STOP_RECORDING_BEFORE_OFFLINE_ANALYSIS"
+            self.render_status(); return
+        self.analysis_report = None
+        self._analysis_kind = kind
+        self.state, self.error = "analyzing", ""
+        self.details.clear()
+        for button in (self.open_button, self.session_button, self.calltree_button,
+                       self.resolve_stack_button, self.export_analysis_button,
+                       self.review_pdb_button, self.review_clock_button):
+            button.setEnabled(False)
+        self.cancel_button.setEnabled(True)
+        self.worker = DecoderAnalysisWorker(kind, arguments, self)
+        self.worker.result_ready.connect(self.analysis_received)
+        self.worker.finished.connect(self.finished)
+        self.render_status(); self.worker.start()
+
+    def analysis_received(self, report, error):
+        if error:
+            self.state, self.error = "error", error
+            self.analysis_report = None
+        else:
+            self.state, self.error = "decoded", ""
+            self.analysis_report = report
+            self.details.setPlainText(json.dumps(report, ensure_ascii=False, indent=2))
+            if self._analysis_kind == "calltree":
+                self._calltree_dialog = CallTreeDialog(report, self.window.language, self)
+                self._calltree_dialog.show()
+        self.render_status()
+
+    def save_analysis(self):
+        if self.analysis_report is None or self.worker is not None:
+            return
+        tree = self.analysis_report.get("schema") == "blackbox.cpu-calltree/1"
+        filters = "JSON (*.json);;Offline flame view (*.html)" if tree else "JSON (*.json)"
+        name, chosen = QFileDialog.getSaveFileName(self,
+            self.tr2("Save derived analysis (may contain private data)",
+                     "Сохранить производный анализ (может содержать личные данные)"),
+            "decoder-analysis.json", filters)
+        if not name:
+            return
+        try:
+            export_analysis(self.analysis_report, Path(name), html=tree and chosen.endswith("(*.html)"))
+        except (OSError, ValueError) as exc:
+            self.state, self.error = "error", type(exc).__name__
+            self.render_status()
 
     def export_index(self):
         if not self.index:

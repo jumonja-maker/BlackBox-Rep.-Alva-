@@ -15,6 +15,7 @@ import tempfile
 import time
 from .decoder_profiles import ProfileBuilder, read_profiles
 from .decoder_clock import TraceClockAudit
+from .decoder_modules import ModuleCatalog, read_modules
 
 PROTOCOL = "blackbox.trace-event/1"
 MAX_LINE = 256 * 1024
@@ -245,7 +246,7 @@ def build_index(source, output, *, input_sha256, format_name, cancel=None):
     try:
         db = sqlite3.connect(part)
         db.execute(f"PRAGMA application_id={APP_ID}")
-        db.execute("PRAGMA user_version=3")
+        db.execute("PRAGMA user_version=4")
         db.executescript("""
         CREATE TABLE metadata(key TEXT PRIMARY KEY,value TEXT NOT NULL);
         CREATE TABLE events(id INTEGER PRIMARY KEY,time_ms REAL NOT NULL,pid INTEGER,
@@ -261,6 +262,7 @@ def build_index(source, output, *, input_sha256, format_name, cancel=None):
         adapter = GCAdapter()
         profiler = ProfileBuilder(db)
         clock_audit = TraceClockAudit()
+        modules = ModuleCatalog(db)
         engine_header = None
         footer = None
         rows = 0
@@ -287,6 +289,7 @@ def build_index(source, output, *, input_sha256, format_name, cancel=None):
                 footer = {"status": "TRUNCATED", "rows": rows}
                 break
             validate_event(row, rows + 1)
+            modules.accept(row)
             utc_ns = clock_audit.project(row)
             rows += 1
             data = json.dumps(row, ensure_ascii=True, allow_nan=False, separators=(",", ":"))
@@ -314,8 +317,9 @@ def build_index(source, output, *, input_sha256, format_name, cancel=None):
                 format_name != ".jsonl" and footer.get("protocol") != PROTOCOL):
             raise ValueError("MISSING_OR_INVALID_COMPLETION_FOOTER")
         profile_meta = profiler.finish()
-        meta = {"schema": "blackbox.decoder-index/3", "engine": engine_header,
+        meta = {"schema": "blackbox.decoder-index/4", "engine": engine_header,
                 "profiles": profile_meta, "calendar_clock": clock_audit.summary(),
+                "native_modules": modules.summary(),
                 "input_sha256": input_sha256, "format": format_name, "rows": rows,
                 "status": footer["status"], "bounded_events": bounded, "events_with_errors": errors,
                 "events_without_fields_or_schema": without_fields, "events_with_stacks": stacked,
@@ -349,7 +353,7 @@ def read_index(path, *, after=0, mode="events", pid=0, limit=200, search=""):
     if (not _integer(after) or not _integer(pid) or type(limit) is not int or
             not 1 <= limit <= 200 or type(search) is not str or len(search) > 120):
         raise ValueError("INVALID_INDEX_PAGE")
-    if mode not in ("events", "stacks", "gc", "cpu_stacks", "gc_summary", "clock"):
+    if mode not in ("events", "stacks", "gc", "cpu_stacks", "gc_summary", "clock", "modules"):
         raise ValueError("INVALID_INDEX_MODE")
     path = Path(path)
     if path.is_symlink() or not path.is_file():
@@ -361,8 +365,15 @@ def read_index(path, *, after=0, mode="events", pid=0, limit=200, search=""):
         deadline = time.monotonic() + 1.5
         db.set_progress_handler(lambda: int(time.monotonic() > deadline), 1000)
         version = db.execute("PRAGMA user_version").fetchone()[0]
-        if db.execute("PRAGMA application_id").fetchone()[0] != APP_ID or version not in (1, 2, 3):
+        if db.execute("PRAGMA application_id").fetchone()[0] != APP_ID or version not in (1, 2, 3, 4):
             raise ValueError("INVALID_INDEX_SCHEMA")
+        if mode == "modules":
+            if version < 4:
+                raise ValueError("REDECODE_REQUIRED_FOR_MODULE_IDENTITY")
+            result = read_modules(db, after=after, pid=pid, limit=limit, search=search)
+            result["summary"] = json.loads(db.execute(
+                "SELECT value FROM metadata WHERE key='summary'").fetchone()[0])
+            return result
         if mode == "clock" and version < 3:
             raise ValueError("REDECODE_REQUIRED_FOR_CLOCK_VIEW")
         if mode in ("cpu_stacks", "gc_summary"):

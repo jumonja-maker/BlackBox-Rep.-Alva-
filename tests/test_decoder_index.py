@@ -278,7 +278,7 @@ class DecoderIndexTests(unittest.TestCase):
             row["utc_ticks"] = str(UNIX_EPOCH_DOTNET_TICKS + (base_ns+n*1_000_000)//100)
             row["source_ticks"] = str(100_000_000+n*1_000)
         path, meta = self.build(rows)
-        self.assertEqual(meta["schema"], "blackbox.decoder-index/3")
+        self.assertEqual(meta["schema"], "blackbox.decoder-index/4")
         self.assertEqual(meta["calendar_clock"]["events_with_utc_projection"], 3)
         self.assertEqual(meta["calendar_clock"]["source_counter_events_observed"], 3)
         self.assertEqual(meta["calendar_clock"]["source_counter_events_missing"], 0)
@@ -399,7 +399,7 @@ class DecoderIndexTests(unittest.TestCase):
         with closing(sqlite3.connect(path)) as db:
             # New development index has UTC provenance (v3). Legacy
             # readers still accept previously exported v1/v2 indexes.
-            self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], 3)
+            self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], 4)
             db.execute("PRAGMA user_version=1")
             db.commit()
         self.assertEqual(len(read_index(path, mode="events")["rows"]), 2)

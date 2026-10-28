@@ -40,22 +40,71 @@ jobs:
       - name: Install headless Qt prerequisites and test dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libegl1 libopengl0 libgl1 libxcb-cursor0 libxkbcommon-x11-0
+          sudo apt-get install -y libegl1 libopengl0 libgl1 libxcb-cursor0 libxkbcommon-x11-0 clang lld
           python -m pip install -r requirements.txt
           python -m pip install -e .
       - name: Decoder unit and offscreen GUI tests
         run: |
           python -m unittest discover -s tests -p 'test_decoder*.py' -v
           python -m unittest discover -s tests -p 'test_trace_clock_evidence.py' -v
-      - name: Patch-specific native/public-symbol QA when implemented
-        run: |
-          if [ -f tools/qa_decoder_patch.py ]; then
-            python tools/qa_decoder_patch.py --output patch-evidence/native
-          fi
+      - name: Real native PE/PDB parser and derived-report QA
+        run: python tools/qa_decoder_patch.py --output patch-evidence/native
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: DECODER-PATCH-LINUX-EVIDENCE
           path: patch-evidence/native/
+          retention-days: 14
+          if-no-files-found: warn
+
+  decoder-windows:
+    if: github.ref == 'refs/heads/patch/trace-decoder-phase5'
+    runs-on: windows-latest
+    timeout-minutes: 20
+    env:
+      QT_QPA_PLATFORM: offscreen
+      PYTHONUTF8: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '10.0.x'
+      - name: Install test dependencies and pin owned capture tool
+        shell: pwsh
+        run: |
+          python -m pip install -r requirements.txt
+          if ($LASTEXITCODE -ne 0) { throw 'Dependency installation failed' }
+          python -m pip install -e .
+          if ($LASTEXITCODE -ne 0) { throw 'Core installation failed' }
+          $toolDir = Join-Path $env:RUNNER_TEMP 'blackbox-patch-trace-tools'
+          dotnet tool install dotnet-trace --tool-path $toolDir --version 10.0.750501
+          if ($LASTEXITCODE -ne 0) { throw 'Pinned capture tool installation failed' }
+          Add-Content -Path $env:GITHUB_PATH -Value $toolDir
+          $llvm = Join-Path $env:ProgramFiles 'LLVM\bin'
+          if (Test-Path $llvm) { Add-Content -Path $env:GITHUB_PATH -Value $llvm }
+      - name: Compile TraceEvent helper (not a release build)
+        run: python tools/build_decoder.py --rid win-x64
+      - name: Decoder core and real Qt offscreen tests
+        shell: pwsh
+        run: |
+          python -m unittest discover -s tests -p 'test_decoder*.py' -v
+          if ($LASTEXITCODE -ne 0) { throw 'Decoder tests failed' }
+          python -m unittest discover -s tests -p 'test_trace_clock_evidence.py' -v
+          if ($LASTEXITCODE -ne 0) { throw 'Clock evidence tests failed' }
+      - name: Real EventPipe/ETW regression
+        run: python tools/qa_decoder.py --helper decoder/BLACK.BOX-Decoder.exe --output patch-decoder-qa
+      - name: Real native module to PE/PDB and sample-tree acceptance
+        run: python tools/qa_decoder_patch.py --output patch-native-qa --helper decoder/BLACK.BOX-Decoder.exe --trace-index patch-decoder-qa/eventpipe.sqlite3
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: DECODER-PATCH-WINDOWS-EVIDENCE
+          path: |
+            patch-decoder-qa/
+            patch-native-qa/
+            decoder/decoder-manifest.json
           retention-days: 14
           if-no-files-found: warn

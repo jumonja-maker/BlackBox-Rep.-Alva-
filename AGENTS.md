@@ -1,5 +1,15 @@
 # BLACK.BOX independent engineering rules
 
+## Owner-approved patch workflow (2026-10-28)
+
+- Work in `patch/trace-decoder-phase5`; do not push intermediate feature edits to `main`.
+- Keep source, UI, failure handling, targeted tests and evidence together as a reviewed patch.
+- Run isolated `decoder-patch-qa.yml` for this branch; it never publishes.
+- Main merge and official Release each require separate explicit owner approval.
+- Do not remove the bilingual personal README opening or change the Outlook feedback address.
+
+## Product and evidence contracts
+
 - The public product is an independent Windows desktop process-observation tool. Do not add an external proprietary platform or user-installed runtime requirement.
 - The production shell has six human-facing RU/EN pages: Overview, Processes, Event Log, Reports, Settings and Trace Decoder. Preserve the legacy five-page UniversalWindow embedding API; app.py uses DecoderWindow.
 - Preserve local SQLite/JSON/HTML evidence, process selection, report comparison, updates and maintenance.

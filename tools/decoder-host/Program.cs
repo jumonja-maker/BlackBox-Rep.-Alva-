@@ -64,6 +64,8 @@ internal static class Program
         }
         return null;
     }
+    static readonly ModuleBindings Modules = new();
+
     static object Row(TraceEvent e, long ordinal)
     {
         bool clipped = false;
@@ -88,8 +90,25 @@ internal static class Program
             while (stack != null && frames.Count < 128)
             {
                 var address = stack.CodeAddress;
-                frames.Add(new { address = "0x" + address.Address.ToString("x", CultureInfo.InvariantCulture),
-                    name = Bounded(address.FullMethodName, ref clipped, 512) });
+                var frame = new Dictionary<string, object?> {
+                    ["address"] = "0x" + address.Address.ToString("x", CultureInfo.InvariantCulture),
+                    ["name"] = Bounded(address.FullMethodName, ref clipped, 512) };
+                try
+                {
+                    var association = Modules.Associate(e, address);
+                    frame["module_status"] = association.Status;
+                    if (association.Module != null)
+                    {
+                        frame["module"] = association.Module;
+                        frame["rva"] = association.Rva;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    frame["module_status"] = "MODULE_ASSOCIATION_UNAVAILABLE";
+                    errors.Add("MODULE:" + ex.GetType().Name);
+                }
+                frames.Add(frame);
                 stack = stack.Caller;
             }
             if (stack != null) { stackStatus = "TRUNCATED_128_FRAMES"; clipped = true; }
@@ -151,6 +170,7 @@ internal static class Program
                 calendar_clock = "TRACEEVENT_QPC_TO_UTC_RECONSTRUCTION_NOT_ATTESTED",
                 utc_encoding = "DOTNET_DATETIME_100NS_TICKS_NOT_CAPTURE_ACCURACY",
                 trace_to_blackbox_session_clock_alignment = "NOT_ESTABLISHED",
+                native_module_contract = "blackbox.trace-module/1",
                 capture_loss = (int?)null, symbol_policy = "NO_SYMBOL_SERVER_OR_SOURCE_DOWNLOAD" }, Json));
             long count = 0; bool limited = false;
             foreach (var e in log.Events)
