@@ -1,4 +1,5 @@
 """Portable checks for the real-app QA download boundary, not Windows evidence."""
+from contextlib import closing
 from pathlib import Path
 import json
 import sqlite3
@@ -16,10 +17,11 @@ class ApplicationLifetimeEvidenceTests(unittest.TestCase):
         # not Windows ETW capture or third-party application execution.
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "observations.sqlite3"
-            with sqlite3.connect(path) as db:
+            with closing(sqlite3.connect(path)) as db:
                 db.execute("CREATE TABLE events(data TEXT NOT NULL)")
                 db.executemany("INSERT INTO events VALUES (?)",
                                [(json.dumps(row),) for row in rows])
+                db.commit()
             return etw_observations(path, pids)
 
     def test_absent_or_missing_pid_identity_is_not_lifetime_evidence(self):
