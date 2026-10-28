@@ -1,0 +1,197 @@
+{
+  "source": "da63ea85749e9b484eb4af088de61385eb6c4caf",
+  "sourceTree": "6e219a0a8ff40c5a8ac4bfd779cab79b49a432b3",
+  "scope": "Final-source CI results plus explicitly scoped intermediate/red reproductions; not every experiment ran final source",
+  "artifacts": [
+    {
+      "file": "acceptance.json",
+      "bytes": 730,
+      "sha256": "42659f159b9c3403c779d3c619441fdcd9f05b9df88af78c7ea0f70f1d1c5302"
+    },
+    {
+      "file": "artifacts.json",
+      "bytes": 1968,
+      "sha256": "d66362c1d4ce6006fbf32c635399a07ef3b830755181d01be1834cac45a16118"
+    },
+    {
+      "file": "capture-clock-fixture-final.log",
+      "bytes": 1913,
+      "sha256": "79084c7f91aaee5237fc34f31f9089e95436fed2932bc82809ab0589649f6f2a"
+    },
+    {
+      "file": "capture-final.log",
+      "bytes": 1706,
+      "sha256": "7db004cef3161df0c3c95b161053d69083596ebd126cfd90242c93f7ef12cb99"
+    },
+    {
+      "file": "capture-note.md",
+      "bytes": 6295,
+      "sha256": "47ba237948cc5910eb41ec3922bfd425f8f0c5466fe10a7d62078292fa494c67"
+    },
+    {
+      "file": "capture-red.log",
+      "bytes": 8896,
+      "sha256": "2ce1da50859f1d6283aaba272358bbdbb78ea85efe095b497dcdcfa9f9d66708"
+    },
+    {
+      "file": "decoder-audit-green.log",
+      "bytes": 1952,
+      "sha256": "267a52c848180d08542ee9180b320118427d77d7f15526a0e870747473f84ab5"
+    },
+    {
+      "file": "decoder-note.md",
+      "bytes": 4184,
+      "sha256": "158ec89de6a41d23ec649d4cdbe2be0be7403f4c7473ffe887d0d23133ce6705"
+    },
+    {
+      "file": "decoder-red.log",
+      "bytes": 19889,
+      "sha256": "0f423edf13144abb4a4796125aa51c97589178f3ee2d47f08408d9d39f53b2fa"
+    },
+    {
+      "file": "distribution-inventory-note.md",
+      "bytes": 2897,
+      "sha256": "49502885a7f6946f0162b4b4fc86a55e77fe4d55253e4f107fee342e281e48fb"
+    },
+    {
+      "file": "final-inventory-tests.log",
+      "bytes": 1018,
+      "sha256": "0167cf0bddad19d533554db43000d93e29a6beb989a3f621162c54e74de99390"
+    },
+    {
+      "file": "final-linux-ci.json",
+      "bytes": 6290,
+      "sha256": "7eb98b181d59a37d1ca6b3c912e383ee8f3a708d58b875387317bfd7b65fa743"
+    },
+    {
+      "file": "final-new-tests.log",
+      "bytes": 11242,
+      "sha256": "8cdd12e6f6cf909bbfa7a87c47a4d3a548d9fc9dcef7b39ed579a667db3e20f7"
+    },
+    {
+      "file": "final-portable-independent-verification.json",
+      "bytes": 1408,
+      "sha256": "7997c686413211f6317b3fdc249b0bcb6f59d26cf66aa35e7aeb89639449ac14"
+    },
+    {
+      "file": "final-undefined.json",
+      "bytes": 64,
+      "sha256": "b9ce9a3ba5f9dfcd09b83610b931780d6fdd267cce30da4eefa94d0338e53718"
+    },
+    {
+      "file": "final-windows-ci.json",
+      "bytes": 4008,
+      "sha256": "a7d2e5dd3cfc4713be30e9a86349fceeb3e7edb9072019455b9a6dc8c41e453a"
+    },
+    {
+      "file": "findings-green.log",
+      "bytes": 3044,
+      "sha256": "ea08f5330cc3adc45dbb9d90fc3726afedca02ff98cc846c60e7df813de47adf"
+    },
+    {
+      "file": "findings-note.md",
+      "bytes": 4491,
+      "sha256": "1c6130ab1570957fbf3bf9b7dbed452dda552ab272e5d3897cf413e62ffd0489"
+    },
+    {
+      "file": "findings-red-all.log",
+      "bytes": 11045,
+      "sha256": "3c36b98d2ae0efc2703484892518ae4d0a2b3346221effc9a6a8a0500f6c6c52"
+    },
+    {
+      "file": "independent-privacy-green.json",
+      "bytes": 385,
+      "sha256": "210e59b3dce3d6c90ff0d07bfe45467d361aa631dff3d6359c637288ac0261f7"
+    },
+    {
+      "file": "independent-privacy-review.md",
+      "bytes": 3650,
+      "sha256": "8bc617b76baabea85ef695cb7cf5154f41e61255b067d98f57ae004f5f8965bf"
+    },
+    {
+      "file": "linux-initial-clock-fixture-failure.json",
+      "bytes": 1263,
+      "sha256": "e7033c726fe962601cccf2e8030f56626f0ea144202b5a904d3842a3ad3343a0"
+    },
+    {
+      "file": "local-baseline-outcome.txt",
+      "bytes": 288,
+      "sha256": "aff0fd91084fde13035e6afac751e3fc7b104f08f81cd4c6051c54fbe25b787a"
+    },
+    {
+      "file": "portable-independent-verification.json",
+      "bytes": 3154,
+      "sha256": "d96b0705e3c3580f9c837c13ba6347e870cb14dc1895b39d6b85193cb2db6aa3"
+    },
+    {
+      "file": "privacy-independent-green.log",
+      "bytes": 2305,
+      "sha256": "bbad5f5fcee8600093220ad35c30ca73a62f107beab4f8de97868567bed04097"
+    },
+    {
+      "file": "privacy-red.log",
+      "bytes": 4212,
+      "sha256": "75ad7474767304c43d709ddd7fb496e2099c28caab923f242a00f115c4b845ed"
+    },
+    {
+      "file": "privacy.md",
+      "bytes": 5995,
+      "sha256": "9382b7c0bfa1a2b7b0ea237547bdac55e23c0e740bbf09955af753c3aa9b3f9a"
+    },
+    {
+      "file": "signature-observation.json",
+      "bytes": 521,
+      "sha256": "4e72c8109006f446864d23fdcd7d5b2881a53ef5e2fbfae427d19b377f86c74b"
+    },
+    {
+      "file": "source-manifest.json",
+      "bytes": 4312,
+      "sha256": "89c5cc605d474de0a24fa61d062a1d35d632c6750f7d68b0a70ecb799d1e288d"
+    },
+    {
+      "file": "tooling-green.log",
+      "bytes": 1886,
+      "sha256": "53811f5af68a44ebb7edd3c3c76d2945c9084b844e0dbbe50b8904713c66c7e8"
+    },
+    {
+      "file": "tooling-note.md",
+      "bytes": 7264,
+      "sha256": "f9c79f1c18047c6921188da51985bb44418a3a9745c5a81281b652634f49cdc5"
+    },
+    {
+      "file": "tooling-red.log",
+      "bytes": 3321,
+      "sha256": "be3259974871dd37de57fd96faf5cc621fed651c1c132894cf6b6e9bcc942e23"
+    },
+    {
+      "file": "ui-independent-decoder-review.md",
+      "bytes": 2775,
+      "sha256": "e5a36675810a4b93f4c414d00f7417871f86bde3dd4b1bc46ae718dfcce2c917"
+    },
+    {
+      "file": "ui-language-green.log",
+      "bytes": 272,
+      "sha256": "aa8ddfe1a0cec77d0352a1f3663e8ae4c857c13b2074230c2f8e19f9d69c131d"
+    },
+    {
+      "file": "ui-language-red.log",
+      "bytes": 1049,
+      "sha256": "1f0c1c172c08be452f4af0d19ae377e8756acf6b6edd84fd1403f1f07acf4bf1"
+    },
+    {
+      "file": "ui-note.md",
+      "bytes": 4720,
+      "sha256": "aa1b518babb036c1b809340ebfd129796891a8b6d953f219f7dfb2cfecd989b4"
+    },
+    {
+      "file": "ui-red.log",
+      "bytes": 4223,
+      "sha256": "1f2318e697a99c70a90d552f94e6e25c12f1bf543105e71e6e08411ceed56804"
+    },
+    {
+      "file": "ui-targeted-green.log",
+      "bytes": 2216,
+      "sha256": "eb9ba845d7235bc41bdae2670b83c9077dcc8eba39588a34d4a1d0ddd4084d16"
+    }
+  ]
+}

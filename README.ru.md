@@ -9,9 +9,9 @@
 [**Скачать последний опубликованный релиз Windows x64**](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/releases/latest) · [Все версии](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/releases) · [English README](README.md)
 
 [![Проверка Windows/Linux](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/actions/workflows/shell-qa.yml/badge.svg?branch=main)](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/actions/workflows/shell-qa.yml)
-![Разработка](https://img.shields.io/badge/source-0.5.0-40766c) ![Windows](https://img.shields.io/badge/platform-Windows%20x64-40766c) ![MIT](https://img.shields.io/badge/license-MIT-40766c)
+![Разработка](https://img.shields.io/badge/source-0.5.1-40766c) ![Windows](https://img.shields.io/badge/platform-Windows%20x64-40766c) ![MIT](https://img.shields.io/badge/license-MIT-40766c)
 
-**Версия исходного кода: v0.5.0.** Доступность обновления определяется только [последним официальным GitHub Release](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/releases/latest). Исходная ветка или артефакт CI сами по себе не являются обновлением.
+**Версия исходного кода: v0.5.1.** Доступность обновления определяется только [последним официальным GitHub Release](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/releases/latest). Исходная ветка или артефакт CI сами по себе не являются обновлением.
 
 BLACK.BOX Universal позволяет **выбрать запущенный процесс либо указать файл приложения**. У работающего процесса программа измеряет системные показатели и сохраняет сеансы в SQLite, JSON и HTML; выбор файла сам по себе ничего не запускает. Программа не изменяет наблюдаемый процесс, не внедряется в его код и не требует регистрации, подписки, собственного сервера, фоновой службы или отдельной установки Python.
 
@@ -22,6 +22,8 @@ BLACK.BOX Universal позволяет **выбрать запущенный п�
 **Интерфейс v0.4.2:** Верхняя бирюзовая шапка и логотип компактнее, декоративная строка со звёздочками удалена, меню FILE/HELP стало ниже. График, «Текущий сеанс» и остальные страницы действительно поднялись вверх. Обычные кнопки Windows сохранены. CI проверяет реальную координату начала рабочей области при двух размерах окна и языках RU/EN, а Windows выполняет DPI-снимки при 100–200%. Сбор измерений и доказательств не изменён.
 
 **Интерфейс v0.4.1:** окно открывается развёрнутым с обычными кнопками Windows и возможностью менять размер. Декоративная нижняя полоса START и лишнее меню VIEW удалены; график использует свободную высоту. Пояснения о конфиденциальности остаются в README, а не занимают место в «Настройках».
+
+**Исправления аудита v0.5.1:** независимость записи от индекса, очистка только экспортных копий, Stop и повтор анализа, полнота находок и согласие на заметки, CSV и Unicode-поиск профилей. Включены исправления PR #25 и независимые регрессии встроенных путей/схем. [Состав и ограничения выпуска](docs/RELEASE_v0.5.1.md). Исходная ветка не является опубликованным обновлением до прохождения release gate.
 
 ## Как выглядит BLACK.BOX
 

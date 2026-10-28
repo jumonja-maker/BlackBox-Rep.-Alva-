@@ -1,0 +1,21 @@
+[
+  {
+    "case": "generated_stored",
+    "status": "PASS",
+    "code": "UNSUPPORTED_SHARE_COPY_SCHEMA"
+  },
+  {
+    "case": "generated_default",
+    "status": "PASS",
+    "code": "UNSUPPORTED_SHARE_COPY_SCHEMA"
+  },
+  {
+    "case": "index_schema",
+    "status": "PASS",
+    "code": "UNSUPPORTED_SHARE_COPY_SCHEMA"
+  },
+  {
+    "case": "normal_indexed_copy",
+    "status": "PASS"
+  }
+]

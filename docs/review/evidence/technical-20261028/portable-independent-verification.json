@@ -1,0 +1,120 @@
+{
+  "status": "PASS",
+  "source": {
+    "schema_version": 1,
+    "source_sha": "3d0b58e6c55ba1c116e4d0b8024b5a89df0dd0b7",
+    "source_tree_sha": "dfd7ebb0b05c95907f93d3dc2b42e0fd03b00424",
+    "tracked_worktree_clean": true
+  },
+  "outerArtifactId": 12824434021,
+  "outerSHA256": "e3547df5d0ac8a2b90e4bd8f948caf4c984a73e8460345e95d0a5309218bedbe",
+  "portableSHA256": "295e81dcd4e0c1c3e0f247cfa8797a7a17ec75cb13a9b2a7132ff6b919748fa0",
+  "manifestSHA256": "11efaed7d9b225f9c1d3aa190bb286d65f3bafc4b1ab48356c9377002dcf22dc",
+  "verifiedFiles": 525,
+  "payloadFiles": 526,
+  "mismatches": [],
+  "noticesFiles": 73,
+  "decoderFilesVerified": 217,
+  "noticeProvenance": {
+    "python": {
+      "version": "3.11.9",
+      "licenseSource": "installed_python_license",
+      "licenseFile": "third_party_notices/python-runtime/LICENSE.txt"
+    },
+    "qtNotices": {
+      "source": "repository_vendored",
+      "validatedPySideVersion": "6.11.3",
+      "files": [
+        "third_party_notices/pyside-6.11.3/BSD-3-Clause.txt",
+        "third_party_notices/pyside-6.11.3/GPL-2.0-only.txt",
+        "third_party_notices/pyside-6.11.3/GPL-3.0-only.txt",
+        "third_party_notices/pyside-6.11.3/Qt-GPL-exception-1.0.txt",
+        "third_party_notices/pyside-6.11.3/LGPL-3.0-only.txt"
+      ]
+    }
+  },
+  "licenseCoverageReviewRequired": true,
+  "allNativeDllLicensesCertified": false,
+  "buildEnvironment": [
+    {
+      "name": "altgraph",
+      "version": "0.17.5",
+      "licenseTextStatus": "TEXT_COPIED"
+    },
+    {
+      "name": "blackbox-core",
+      "version": "0.5.0",
+      "licenseTextStatus": "TEXT_COPIED"
+    },
+    {
+      "name": "packaging",
+      "version": "26.3",
+      "licenseTextStatus": "TEXT_COPIED"
+    },
+    {
+      "name": "pefile",
+      "version": "2024.8.26",
+      "licenseTextStatus": "TEXT_COPIED"
+    },
+    {
+      "name": "pillow",
+      "version": "13.0.0",
+      "licenseTextStatus": "TEXT_COPIED"
+    },
+    {
+      "name": "pip",
+      "version": "26.2.2",
+      "licenseTextStatus": "TEXT_COPIED"
+    },
+    {
+      "name": "psutil",
+      "version": "7.2.2",
+      "licenseTextStatus": "TEXT_COPIED"
+    },
+    {
+      "name": "pyflakes",
+      "version": "3.4.0",
+      "licenseTextStatus": "TEXT_COPIED"
+    },
+    {
+      "name": "pyinstaller",
+      "version": "6.22.3",
+      "licenseTextStatus": "TEXT_COPIED"
+    },
+    {
+      "name": "pyinstaller-hooks-contrib",
+      "version": "2026.9",
+      "licenseTextStatus": "TEXT_COPIED"
+    },
+    {
+      "name": "PySide6",
+      "version": "6.11.3",
+      "licenseTextStatus": "TEXT_COPIED"
+    },
+    {
+      "name": "PySide6_Addons",
+      "version": "6.11.3",
+      "licenseTextStatus": "TEXT_COPIED"
+    },
+    {
+      "name": "PySide6_Essentials",
+      "version": "6.11.3",
+      "licenseTextStatus": "TEXT_COPIED"
+    },
+    {
+      "name": "pywin32-ctypes",
+      "version": "0.2.3",
+      "licenseTextStatus": "TEXT_COPIED"
+    },
+    {
+      "name": "setuptools",
+      "version": "84.2.1",
+      "licenseTextStatus": "TEXT_COPIED"
+    },
+    {
+      "name": "shiboken6",
+      "version": "6.11.3",
+      "licenseTextStatus": "TEXT_COPIED"
+    }
+  ]
+}

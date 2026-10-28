@@ -13,6 +13,7 @@ import unittest
 from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+from PySide6.QtCore import QSettings
 from PySide6.QtWidgets import QApplication
 
 from blackbox_core.storage import SessionStore
@@ -139,6 +140,13 @@ class InvestigationQtTests(unittest.TestCase):
         self.root_patcher = patch("blackbox_universal.monitor._default_sessions_root",
                                   return_value=Path(self.temp.name))
         self.root_patcher.start()
+        # Never read/write the operator's language, or inherit another test's
+        # QSettings. A clean app defaults to EN; translations are selected below.
+        self.settings = QSettings(str(Path(self.temp.name) / "preferences.ini"),
+                                  QSettings.Format.IniFormat)
+        self.settings_patcher = patch("blackbox_universal.window.QSettings",
+                                      return_value=self.settings)
+        self.settings_patcher.start()
         self.window = UniversalWindow()
         self.window._timer.stop()
 
@@ -152,6 +160,7 @@ class InvestigationQtTests(unittest.TestCase):
         self.assertIsNone(self.window._report_worker)
         self.window.close()
         self.app.processEvents()
+        self.settings_patcher.stop()
         self.root_patcher.stop()
         self.temp.cleanup()
 
@@ -195,6 +204,7 @@ class InvestigationQtTests(unittest.TestCase):
             "coverage": {"total_samples": 22, "selected_samples": 22,
                          "omitted_samples": 0, "full_session_covered": True},
             "warnings": [], "claims": {"internal_root_cause": "UNKNOWN"}}
+        self.window._set_language("RU")
         self.window._render_investigation_findings()
         self.assertEqual(self.window.investigation_table.rowCount(), 1)
         self.assertEqual(self.window.event_investigation_table.rowCount(), 1)
@@ -208,6 +218,10 @@ class InvestigationQtTests(unittest.TestCase):
         self.assertIn("не установлена", self.window.investigation_summary.text())
         self.window._navigate("events")
         self.assertEqual(self.window.event_investigation_table.rowCount(), 1)
+        self.window._set_language("EN")
+        self.assertIn("High I/O", self.window.investigation_table.item(0, 1).text())
+        self.window.investigation_table.selectRow(0)
+        self.assertIn("not a proven root cause", self.window.investigation_details.toPlainText())
 
 
 if __name__ == "__main__":

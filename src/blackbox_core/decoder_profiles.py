@@ -151,8 +151,13 @@ def read_profiles(db: sqlite3.Connection, *, mode: str, after: int,
             values.append(pid)
         if search.strip():
             escaped = search.strip().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-            sql += " AND frames_json LIKE ? ESCAPE '\\'"
-            values.append("%"+escaped+"%")
+            # Search decoded frame values, not JSON keys or ensure_ascii
+            # escape sequences. JSON1 is already required by profile indexes;
+            # this also reads existing v2/v3/v4 indexes without rewriting them.
+            sql += (" AND EXISTS (SELECT 1 FROM json_each(stack_profiles.frames_json) AS frame "
+                    "WHERE json_extract(frame.value,'$.name') LIKE ? ESCAPE '\\' "
+                    "OR json_extract(frame.value,'$.address') LIKE ? ESCAPE '\\')")
+            values.extend(("%"+escaped+"%", "%"+escaped+"%"))
         values.append(limit+1)
         rows = db.execute(sql+" ORDER BY display_rank LIMIT ?", values).fetchall()
         items = []

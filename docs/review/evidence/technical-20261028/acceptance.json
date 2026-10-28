@@ -1,0 +1,21 @@
+{
+  "source": "da63ea85749e9b484eb4af088de61385eb6c4caf",
+  "tree": "6e219a0a8ff40c5a8ac4bfd779cab79b49a432b3",
+  "ciRun": 40711406662,
+  "ciStatus": "SUCCESS",
+  "uiRun": 40711406642,
+  "uiStatus": "SUCCESS",
+  "mainBase": "765156068a2d2f0171be4d048e74c7676feba143",
+  "mainModifiedByPatch": false,
+  "releasePublishedByPatch": false,
+  "portableInventoryFilesVerified": 525,
+  "decoderFilesVerified": 217,
+  "codeReview": "Confirmed BB01-10 fixes; residual boundaries documented",
+  "runtimeCoverageLimits": [
+    "No real Windows WPR guardian crash recovery test",
+    "No 1h/8h endurance",
+    "No physical user Windows10/11 acceptance",
+    "No complete native/license SCA",
+    "Unsigned EXE; no signing key provided"
+  ]
+}

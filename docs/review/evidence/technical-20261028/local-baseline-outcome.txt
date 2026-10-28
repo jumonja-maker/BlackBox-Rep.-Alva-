@@ -1,0 +1,10 @@
+
+Ran 645 tests in 1036.457s
+
+FAILED (failures=10, errors=6, skipped=20)
+usage: blackbox-rep [-h] {research,list,record,summary,export,compare} ...
+
+positional arguments:
+  {research,list,record,summary,export,compare}
+  
+Host PID/procfs mismatch; not accepted as native process evidence.

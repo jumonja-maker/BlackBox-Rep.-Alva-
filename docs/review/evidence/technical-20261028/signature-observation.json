@@ -1,0 +1,18 @@
+[
+  {
+    "file": "BLACK.BOX-Universal/BLACK.BOX-Maintenance.exe",
+    "certificateTableAddress": 0,
+    "certificateTableBytes": 0,
+    "embeddedAuthenticodePresent": false,
+    "catalogSignature": "NOT_CHECKED",
+    "smartScreenReputation": "NOT_CHECKED"
+  },
+  {
+    "file": "BLACK.BOX-Universal/BLACK.BOX-Universal.exe",
+    "certificateTableAddress": 0,
+    "certificateTableBytes": 0,
+    "embeddedAuthenticodePresent": false,
+    "catalogSignature": "NOT_CHECKED",
+    "smartScreenReputation": "NOT_CHECKED"
+  }
+]

@@ -1,0 +1,34 @@
+test_launch_failure_cleanup_preserves_primary_error_if_temp_cleanup_fails (test_audit_optional_jobs_20261028.OptionalOwnershipAuditTests.test_launch_failure_cleanup_preserves_primary_error_if_temp_cleanup_fails) ... /opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/tempfile.py:940: ResourceWarning: Implicitly cleaning up <TemporaryDirectory '/tmp/tmpuyqfh10c'>
+  _warnings.warn(warn_message, ResourceWarning)
+FAIL
+test_parent_exit_does_not_abandon_owned_descendant_or_signal_other_group (test_audit_optional_jobs_20261028.OptionalOwnershipAuditTests.test_parent_exit_does_not_abandon_owned_descendant_or_signal_other_group) ... FAIL
+test_ready_marker_failure_closes_already_started_owned_process (test_audit_optional_jobs_20261028.OptionalOwnershipAuditTests.test_ready_marker_failure_closes_already_started_owned_process) ... FAIL
+
+======================================================================
+FAIL: test_launch_failure_cleanup_preserves_primary_error_if_temp_cleanup_fails (test_audit_optional_jobs_20261028.OptionalOwnershipAuditTests.test_launch_failure_cleanup_preserves_primary_error_if_temp_cleanup_fails)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/workspace/scratch/c58945ad251a/blackbox-audit-patch-20261028/tests/test_audit_optional_jobs_20261028.py", line 118, in test_launch_failure_cleanup_preserves_primary_error_if_temp_cleanup_fails
+    self.assertIn('primary ready write failure', row['error'])
+AssertionError: 'primary ready write failure' not found in 'OPTIONAL_START_FAILED: secondary temp cleanup failure'
+
+======================================================================
+FAIL: test_parent_exit_does_not_abandon_owned_descendant_or_signal_other_group (test_audit_optional_jobs_20261028.OptionalOwnershipAuditTests.test_parent_exit_does_not_abandon_owned_descendant_or_signal_other_group)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/workspace/scratch/c58945ad251a/blackbox-audit-patch-20261028/tests/test_audit_optional_jobs_20261028.py", line 62, in test_parent_exit_does_not_abandon_owned_descendant_or_signal_other_group
+    self.assertFalse(result['aliveAfterOrdinaryClose'], result)
+AssertionError: True is not false : {'aliveBeforeClose': True, 'aliveAfterOrdinaryClose': True, 'aliveAfterForcedClose': True, 'unrelatedGroupAlive': True, 'reapedOwnedDescendant': True}
+
+======================================================================
+FAIL: test_ready_marker_failure_closes_already_started_owned_process (test_audit_optional_jobs_20261028.OptionalOwnershipAuditTests.test_ready_marker_failure_closes_already_started_owned_process)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/workspace/scratch/c58945ad251a/blackbox-audit-patch-20261028/tests/test_audit_optional_jobs_20261028.py", line 85, in test_ready_marker_failure_closes_already_started_owned_process
+    self.assertIsNotNone(owners[0].process.poll(), 'Startup lost the owner after Popen')
+AssertionError: unexpectedly None : Startup lost the owner after Popen
+
+----------------------------------------------------------------------
+Ran 3 tests in 0.695s
+
+FAILED (failures=3)

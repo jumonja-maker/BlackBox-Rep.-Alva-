@@ -336,7 +336,7 @@ def export_case(folder, destination, *, include_sensitive=False, cancel=None):
         privacy={"policy":"EXPLICIT_SENSITIVE_EXPORT","universal_secret_detection":False}
         if not include_sensitive:
             from .package_privacy import redact_copies
-            privacy=redact_copies(staging)
+            privacy=redact_copies(staging,cancel=cancel)
         meta=context(staging)
         report=tx.reserve("report.json")
         from .experiment_metrics import resource_statistics
@@ -347,6 +347,7 @@ def export_case(folder, destination, *, include_sensitive=False, cancel=None):
         findings=write_findings(staging,tx,'investigation',include_identifiers=include_sensitive,include_notes=include_sensitive,cancel=cancel)
         findings.pop('files')
         import csv
+        from .csv_safety import csv_safe
         with tx.reserve("evidence.csv").open("w",encoding="utf-8-sig",newline="") as stream:
             writer=csv.writer(stream);writer.writerow(("evidence_ref","elapsed_ms","source","quality","kind"))
             cursor=0
@@ -355,7 +356,7 @@ def export_case(folder, destination, *, include_sensitive=False, cancel=None):
                 page=evidence_page(staging,after_id=cursor,limit=500)
                 for r in page["rows"]:
                     values=[r[k] for k in ("evidence_ref","elapsed_ms","source","quality","kind")]
-                    writer.writerow([("'"+v if v[:1] in ("=","+","-","@","\t","\r") else v) if isinstance(v,str) else v for v in values])
+                    writer.writerow([csv_safe(v) for v in values])
                 cursor=page["next_id"]
                 if not page["has_more"]:break
         with report.open("w",encoding="utf-8") as stream:
@@ -421,6 +422,9 @@ def export_case(folder, destination, *, include_sensitive=False, cancel=None):
         for f in sorted(staging.rglob("*")):
             if f.is_file():entries.append({"name":f.relative_to(staging).as_posix(),
                 "size":f.stat().st_size,"sha256":_hash(f,cancel)})
+        if not include_sensitive:
+            from .package_privacy import redact
+            omitted=redact(omitted)
         manifest={"schema_version":1,"kind":"BLACKBOX_RESEARCH_PACKAGE",
             "files":entries,"omitted":omitted,"complete_package":not omitted and include_sensitive,
             "recording_state":meta.get("state"),"capture_health":meta.get("capture_health"),

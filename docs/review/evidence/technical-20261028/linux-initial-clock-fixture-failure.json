@@ -1,0 +1,11 @@
+{
+  "source": "3d0b58e6c55ba1c116e4d0b8024b5a89df0dd0b7",
+  "run": 40708091319,
+  "status": "FAIL",
+  "testSummary": "Ran 704 tests in 734.704s",
+  "outcome": "FAILED (failures=1, skipped=19)",
+  "failure": [
+    "FAIL: test_real_exclusive_index_lock_does_not_stop_or_delay_primary_tick_unboundedly (test_audit_capture_20261028.CaptureIndexFailureTests.test_real_exclusive_index_lock_does_not_stop_or_delay_primary_tick_unboundedly)"
+  ],
+  "tail": "FAIL: test_real_exclusive_index_lock_does_not_stop_or_delay_primary_tick_unboundedly (test_audit_capture_20261028.CaptureIndexFailureTests.test_real_exclusive_index_lock_does_not_stop_or_delay_primary_tick_unboundedly)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/home/runner/work/BlackBox-Rep.-Alva-/BlackBox-Rep.-Alva-/tests/test_audit_capture_20261028.py\", line 130, in test_real_exclusive_index_lock_does_not_stop_or_delay_primary_tick_unboundedly\n    self.assertNotEqual(session._library_budget.get('status'), 'INDEX_UNAVAILABLE')\nAssertionError: 'INDEX_UNAVAILABLE' == 'INDEX_UNAVAILABLE'\n\n----------------------------------------------------------------------\nRan 704 tests in 734.704s\n\nFAILED (failures=1, skipped=19)\n"
+}

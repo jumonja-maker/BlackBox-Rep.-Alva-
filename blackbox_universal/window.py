@@ -1392,7 +1392,7 @@ class UniversalWindow(QMainWindow):
 
     def _stop(self) -> None:
         if self._isolated:
-            if self.probe.active:
+            if self.probe.active and not self.probe.stopping:
                 self.probe.stop()
                 self._set_report_status("saving")
             return
@@ -1871,7 +1871,13 @@ class UniversalWindow(QMainWindow):
         self.overhead_note.setText(('Высокая измеренная нагрузка наблюдателя. Частоту можно снизить в настройках.' if self.language=='RU' else 'High sampled observer usage. Lower sampling frequency in Settings.')+
             (' · '+str(overhead.get('interval_ms'))+' ms' if overhead.get('interval_ms') else ''))
         self.overhead_note.setToolTip('Sampled GUI/helper usage; not a measured OFF/ON effect / Нагрузка GUI/helper, не доказанный прирост против OFF')
-        self.stop_btn.setEnabled(running and not stopping)
+        # Verify/export/process-list commands are pending too, but the helper
+        # deliberately lets Stop cancel optional work. Keep its control usable
+        # until an actual stop/quit/finalization is already in progress.
+        stop_pending = (self._pending_base_stop is not None or
+                        self._report_worker is not None or
+                        (self._isolated and self.probe.stopping))
+        self.stop_btn.setEnabled(running and not stop_pending)
         self.mark_problem_btn.setEnabled(running and not stopping and
                                          self.probe.last_elapsed_ms is not None)
         self.auto_capture_btn.setEnabled(running and not stopping)
@@ -2177,6 +2183,10 @@ class UniversalWindow(QMainWindow):
                     QMessageBox.StandardButton.No) == QMessageBox.StandardButton.Yes:
                 self._investigation_retry = (
                     Path(payload["session"]), (lo, hi))
+                # QMessageBox runs a nested Qt loop: finished may already have
+                # cleared the worker before consent arrives. Both event orders
+                # use the same exactly-once handoff.
+                self._schedule_investigation_retry()
             return
         report = payload.get("result")
         if type(report) is not dict:
@@ -2194,11 +2204,18 @@ class UniversalWindow(QMainWindow):
             self._update_event_table()
 
     def _investigation_finished(self) -> None:
+        worker = self._investigation_worker
         self._investigation_worker = None
         self._investigation_busy = False
+        if worker is not None:
+            worker.deleteLater()
         self._refresh_investigation_info()
         self._update_all()
-        if self._investigation_retry:
+        self._schedule_investigation_retry()
+
+    def _schedule_investigation_retry(self) -> None:
+        if (self._investigation_worker is None and not self._investigation_busy
+                and self._investigation_retry):
             folder, interval = self._investigation_retry
             self._investigation_retry = None
             QTimer.singleShot(0, lambda: self._begin_investigation(

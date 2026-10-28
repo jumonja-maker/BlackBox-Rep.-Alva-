@@ -1,0 +1,58 @@
+{
+  "source": "da63ea85749e9b484eb4af088de61385eb6c4caf",
+  "tree": "6e219a0a8ff40c5a8ac4bfd779cab79b49a432b3",
+  "run": 40711406662,
+  "job": 122897983739,
+  "status": "PASS",
+  "testsRun": 714,
+  "passed": 706,
+  "skippedTestCases": 8,
+  "skippedClassFixtures": 0,
+  "skipRecords": [
+    {
+      "test": "test_parent_exit_does_not_abandon_owned_descendant_or_signal_other_group (test_audit_optional_jobs_20261028.OptionalOwnershipAuditTests.test_parent_exit_does_not_abandon_owned_descendant_or_signal_other_group)",
+      "reason": "'Linux subreaper fixture; not Windows Job Object evidence'"
+    },
+    {
+      "test": "test_raw_omitted_artifact_name_does_not_escape_default_share_policy (test_audit_privacy_20261028.AuditPrivacyTests.test_raw_omitted_artifact_name_does_not_escape_default_share_policy)",
+      "reason": "'Fixture uses a Windows-looking filename only legal on POSIX'"
+    },
+    {
+      "test": "test_linux_does_not_load_or_fabricate_win32 (test_bbdi_windows_observer.WindowContractTests.test_linux_does_not_load_or_fabricate_win32)",
+      "reason": "'Non-Windows compatibility path'"
+    },
+    {
+      "test": "test_unavailable_source_does_not_invent_no_crash_confirmation (test_crash_and_trace_decode.CrashEvidenceTests.test_unavailable_source_does_not_invent_no_crash_confirmation)",
+      "reason": "'portable unavailability case'"
+    },
+    {
+      "test": "test_opaque_file_is_never_called_decoded_on_non_windows (test_crash_and_trace_decode.EtlDecodeContractTests.test_opaque_file_is_never_called_decoded_on_non_windows)",
+      "reason": "'portable unavailability case'"
+    },
+    {
+      "test": "test_real_optin_eventpipe_file_remains_honestly_undecoded (test_managed_runtime_fixture.ManagedRuntimeFixtureTests.test_real_optin_eventpipe_file_remains_honestly_undecoded)",
+      "reason": "'Local dotnet-trace not installed; no invented GC capture'"
+    },
+    {
+      "test": "test_foreign_native_calls_on_linux_are_honest (test_research_product.CaseTests.test_foreign_native_calls_on_linux_are_honest)",
+      "reason": "'Linux capability case'"
+    },
+    {
+      "test": "test_real_guardian_failure_is_journalled_without_affecting_recorder (test_trace_guardian.TraceGuardianTests.test_real_guardian_failure_is_journalled_without_affecting_recorder)",
+      "reason": "'Non-Windows source-unavailable case'"
+    }
+  ],
+  "failures": 0,
+  "errors": 0,
+  "durationSeconds": 955.649,
+  "captureTests": [
+    "test_budget_retry_expiration_is_relative_even_before_one_minute_uptime (test_audit_capture_20261028.CaptureHandlerContractTests.test_budget_retry_expiration_is_relative_even_before_one_minute_uptime) ... ok\r",
+    "test_sqlite_optional_budget_error_reaches_unavailable_and_keeps_recording (test_audit_capture_20261028.CaptureHandlerContractTests.test_sqlite_optional_budget_error_reaches_unavailable_and_keeps_recording) ... ok\r",
+    "test_sqlite_stage_failure_finalizes_as_incomplete_and_releases_primary_owner (test_audit_capture_20261028.CaptureHandlerContractTests.test_sqlite_stage_failure_finalizes_as_incomplete_and_releases_primary_owner) ... ok\r",
+    "test_optional_budget_is_cached_and_does_not_run_per_sample (test_audit_capture_20261028.CaptureIndexFailureTests.test_optional_budget_is_cached_and_does_not_run_per_sample) ... ok\r",
+    "test_real_exclusive_index_lock_does_not_stop_or_delay_primary_tick_unboundedly (test_audit_capture_20261028.CaptureIndexFailureTests.test_real_exclusive_index_lock_does_not_stop_or_delay_primary_tick_unboundedly) ... ok\r",
+    "test_real_helper_keeps_sampling_with_corrupt_optional_index_and_closes_stage (test_audit_capture_20261028.CaptureIndexFailureTests.test_real_helper_keeps_sampling_with_corrupt_optional_index_and_closes_stage) ... ok\r",
+    "test_user_stage_sqlite_finalization_failure_still_closes_primary_stores_honestly (test_audit_capture_20261028.CaptureIndexFailureTests.test_user_stage_sqlite_finalization_failure_still_closes_primary_stores_honestly) ... ok\r"
+  ],
+  "passedLines": 706
+}

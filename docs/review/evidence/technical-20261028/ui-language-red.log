@@ -1,0 +1,14 @@
+test_visual_findings_survive_page_switches_and_translate (original_test.InvestigationQtTests.test_visual_findings_survive_page_switches_and_translate) ... FAIL
+
+======================================================================
+FAIL: test_visual_findings_survive_page_switches_and_translate (original_test.InvestigationQtTests.test_visual_findings_survive_page_switches_and_translate)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/tmp/tmpa9ogoi6z/original_investigation_test.py", line 204, in test_visual_findings_survive_page_switches_and_translate
+    self.assertIn("не доказанная причина",
+AssertionError: 'не доказанная причина' not found in 'High I/O throughput · 1.30 s\nCandidate — not a proven root cause\nRead/s: 2000000\nLimitation: Byte throughput does not reveal operation latency, path or responsible code.'
+
+----------------------------------------------------------------------
+Ran 1 test in 0.246s
+
+FAILED (failures=1)

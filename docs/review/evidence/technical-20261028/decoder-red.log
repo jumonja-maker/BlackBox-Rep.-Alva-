@@ -1,0 +1,209 @@
+test_dead_guardian_after_starting_or_stopping_is_unconfirmed (test_audit_decoder_20261028.GuardianTerminalAudit.test_dead_guardian_after_starting_or_stopping_is_unconfirmed) ... 
+  test_dead_guardian_after_starting_or_stopping_is_unconfirmed (test_audit_decoder_20261028.GuardianTerminalAudit.test_dead_guardian_after_starting_or_stopping_is_unconfirmed) (state='RESERVED') ... FAIL
+  test_dead_guardian_after_starting_or_stopping_is_unconfirmed (test_audit_decoder_20261028.GuardianTerminalAudit.test_dead_guardian_after_starting_or_stopping_is_unconfirmed) (state='STARTING') ... FAIL
+  test_dead_guardian_after_starting_or_stopping_is_unconfirmed (test_audit_decoder_20261028.GuardianTerminalAudit.test_dead_guardian_after_starting_or_stopping_is_unconfirmed) (state='STOPPING') ... FAIL
+test_dead_guardian_cannot_report_recording_and_stop_preserves_result (test_audit_decoder_20261028.GuardianTerminalAudit.test_dead_guardian_cannot_report_recording_and_stop_preserves_result) ... FAIL
+test_dead_guardian_with_corrupt_or_foreign_journal_keeps_recovery_uncertain (test_audit_decoder_20261028.GuardianTerminalAudit.test_dead_guardian_with_corrupt_or_foreign_journal_keeps_recovery_uncertain) ... 
+  test_dead_guardian_with_corrupt_or_foreign_journal_keeps_recovery_uncertain (test_audit_decoder_20261028.GuardianTerminalAudit.test_dead_guardian_with_corrupt_or_foreign_journal_keeps_recovery_uncertain) (data='invalid json') ... FAIL
+  test_dead_guardian_with_corrupt_or_foreign_journal_keeps_recovery_uncertain (test_audit_decoder_20261028.GuardianTerminalAudit.test_dead_guardian_with_corrupt_or_foreign_journal_keeps_recovery_uncertain) (data='[]') ... ERROR
+  test_dead_guardian_with_corrupt_or_foreign_journal_keeps_recovery_uncertain (test_audit_decoder_20261028.GuardianTerminalAudit.test_dead_guardian_with_corrupt_or_foreign_journal_keeps_recovery_uncertain) (data='{"instance":"OTHER","state":"COMPLETED"}') ... FAIL
+test_terminal_completion_requires_matching_successful_process_exit (test_audit_decoder_20261028.GuardianTerminalAudit.test_terminal_completion_requires_matching_successful_process_exit) ... FAIL
+test_valid_terminal_result_is_consumed_once_and_cached_for_stop (test_audit_decoder_20261028.GuardianTerminalAudit.test_valid_terminal_result_is_consumed_once_and_cached_for_stop) ... 
+  test_valid_terminal_result_is_consumed_once_and_cached_for_stop (test_audit_decoder_20261028.GuardianTerminalAudit.test_valid_terminal_result_is_consumed_once_and_cached_for_stop) (state='COMPLETED') ... FAIL
+  test_valid_terminal_result_is_consumed_once_and_cached_for_stop (test_audit_decoder_20261028.GuardianTerminalAudit.test_valid_terminal_result_is_consumed_once_and_cached_for_stop) (state='FAILED') ... FAIL
+  test_valid_terminal_result_is_consumed_once_and_cached_for_stop (test_audit_decoder_20261028.GuardianTerminalAudit.test_valid_terminal_result_is_consumed_once_and_cached_for_stop) (state='CLEANUP_REQUIRED') ... FAIL
+test_percent_underscore_and_backslash_are_literal_and_keyset_is_stable (test_audit_decoder_20261028.ProfileSearchAudit.test_percent_underscore_and_backslash_are_literal_and_keyset_is_stable) ... ok
+test_previous_profile_schema_is_read_without_migration (test_audit_decoder_20261028.ProfileSearchAudit.test_previous_profile_schema_is_read_without_migration) ... FAIL
+test_unicode_is_searched_in_decoded_frame_values_only (test_audit_decoder_20261028.ProfileSearchAudit.test_unicode_is_searched_in_decoded_frame_values_only) ... 
+  test_unicode_is_searched_in_decoded_frame_values_only (test_audit_decoder_20261028.ProfileSearchAudit.test_unicode_is_searched_in_decoded_frame_values_only) (text='Пример') ... FAIL
+  test_unicode_is_searched_in_decoded_frame_values_only (test_audit_decoder_20261028.ProfileSearchAudit.test_unicode_is_searched_in_decoded_frame_values_only) (text='Метод') ... FAIL
+  test_unicode_is_searched_in_decoded_frame_values_only (test_audit_decoder_20261028.ProfileSearchAudit.test_unicode_is_searched_in_decoded_frame_values_only) (text='name') ... FAIL
+  test_unicode_is_searched_in_decoded_frame_values_only (test_audit_decoder_20261028.ProfileSearchAudit.test_unicode_is_searched_in_decoded_frame_values_only) (text='address') ... FAIL
+  test_unicode_is_searched_in_decoded_frame_values_only (test_audit_decoder_20261028.ProfileSearchAudit.test_unicode_is_searched_in_decoded_frame_values_only) (text='\\u041f') ... FAIL
+
+======================================================================
+ERROR: test_dead_guardian_with_corrupt_or_foreign_journal_keeps_recovery_uncertain (test_audit_decoder_20261028.GuardianTerminalAudit.test_dead_guardian_with_corrupt_or_foreign_journal_keeps_recovery_uncertain) (data='[]')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/workspace/scratch/c58945ad251a/blackbox-audit-patch-20261028/tests/test_audit_decoder_20261028.py", line 115, in test_dead_guardian_with_corrupt_or_foreign_journal_keeps_recovery_uncertain
+    result = trace.poll()
+             ^^^^^^^^^^^^
+  File "/workspace/scratch/c58945ad251a/blackbox-audit-patch-20261028/src/blackbox_core/trace_owner.py", line 146, in poll
+    return {'source':'ETW_WPR','status':self.data.get('state','UNKNOWN'),
+                                        ^^^^^^^^^^^^^
+AttributeError: 'list' object has no attribute 'get'
+
+======================================================================
+FAIL: test_dead_guardian_after_starting_or_stopping_is_unconfirmed (test_audit_decoder_20261028.GuardianTerminalAudit.test_dead_guardian_after_starting_or_stopping_is_unconfirmed) (state='RESERVED')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/workspace/scratch/c58945ad251a/blackbox-audit-patch-20261028/tests/test_audit_decoder_20261028.py", line 93, in test_dead_guardian_after_starting_or_stopping_is_unconfirmed
+    self.assertEqual(trace.stop()['status'], 'CLEANUP_REQUIRED')
+AssertionError: 'RESERVED' != 'CLEANUP_REQUIRED'
+- RESERVED
++ CLEANUP_REQUIRED
+
+
+======================================================================
+FAIL: test_dead_guardian_after_starting_or_stopping_is_unconfirmed (test_audit_decoder_20261028.GuardianTerminalAudit.test_dead_guardian_after_starting_or_stopping_is_unconfirmed) (state='STARTING')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/workspace/scratch/c58945ad251a/blackbox-audit-patch-20261028/tests/test_audit_decoder_20261028.py", line 93, in test_dead_guardian_after_starting_or_stopping_is_unconfirmed
+    self.assertEqual(trace.stop()['status'], 'CLEANUP_REQUIRED')
+AssertionError: 'STARTING' != 'CLEANUP_REQUIRED'
+- STARTING
++ CLEANUP_REQUIRED
+
+
+======================================================================
+FAIL: test_dead_guardian_after_starting_or_stopping_is_unconfirmed (test_audit_decoder_20261028.GuardianTerminalAudit.test_dead_guardian_after_starting_or_stopping_is_unconfirmed) (state='STOPPING')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/workspace/scratch/c58945ad251a/blackbox-audit-patch-20261028/tests/test_audit_decoder_20261028.py", line 93, in test_dead_guardian_after_starting_or_stopping_is_unconfirmed
+    self.assertEqual(trace.stop()['status'], 'CLEANUP_REQUIRED')
+AssertionError: 'STOPPING' != 'CLEANUP_REQUIRED'
+- STOPPING
++ CLEANUP_REQUIRED
+
+
+======================================================================
+FAIL: test_dead_guardian_cannot_report_recording_and_stop_preserves_result (test_audit_decoder_20261028.GuardianTerminalAudit.test_dead_guardian_cannot_report_recording_and_stop_preserves_result)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/workspace/scratch/c58945ad251a/blackbox-audit-patch-20261028/tests/test_audit_decoder_20261028.py", line 80, in test_dead_guardian_cannot_report_recording_and_stop_preserves_result
+    self.assertEqual(result['status'], 'CLEANUP_REQUIRED')
+AssertionError: 'RECORDING' != 'CLEANUP_REQUIRED'
+- RECORDING
++ CLEANUP_REQUIRED
+
+
+======================================================================
+FAIL: test_dead_guardian_with_corrupt_or_foreign_journal_keeps_recovery_uncertain (test_audit_decoder_20261028.GuardianTerminalAudit.test_dead_guardian_with_corrupt_or_foreign_journal_keeps_recovery_uncertain) (data='invalid json')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/workspace/scratch/c58945ad251a/blackbox-audit-patch-20261028/tests/test_audit_decoder_20261028.py", line 116, in test_dead_guardian_with_corrupt_or_foreign_journal_keeps_recovery_uncertain
+    self.assertEqual(result['status'], 'CLEANUP_REQUIRED')
+AssertionError: 'JOURNAL_UNAVAILABLE' != 'CLEANUP_REQUIRED'
+- JOURNAL_UNAVAILABLE
++ CLEANUP_REQUIRED
+
+
+======================================================================
+FAIL: test_dead_guardian_with_corrupt_or_foreign_journal_keeps_recovery_uncertain (test_audit_decoder_20261028.GuardianTerminalAudit.test_dead_guardian_with_corrupt_or_foreign_journal_keeps_recovery_uncertain) (data='{"instance":"OTHER","state":"COMPLETED"}')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/workspace/scratch/c58945ad251a/blackbox-audit-patch-20261028/tests/test_audit_decoder_20261028.py", line 116, in test_dead_guardian_with_corrupt_or_foreign_journal_keeps_recovery_uncertain
+    self.assertEqual(result['status'], 'CLEANUP_REQUIRED')
+AssertionError: 'COMPLETED' != 'CLEANUP_REQUIRED'
+- COMPLETED
++ CLEANUP_REQUIRED
+
+
+======================================================================
+FAIL: test_terminal_completion_requires_matching_successful_process_exit (test_audit_decoder_20261028.GuardianTerminalAudit.test_terminal_completion_requires_matching_successful_process_exit)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/workspace/scratch/c58945ad251a/blackbox-audit-patch-20261028/tests/test_audit_decoder_20261028.py", line 99, in test_terminal_completion_requires_matching_successful_process_exit
+    self.assertEqual(result['status'], 'CLEANUP_REQUIRED')
+AssertionError: 'COMPLETED' != 'CLEANUP_REQUIRED'
+- COMPLETED
++ CLEANUP_REQUIRED
+
+
+======================================================================
+FAIL: test_valid_terminal_result_is_consumed_once_and_cached_for_stop (test_audit_decoder_20261028.GuardianTerminalAudit.test_valid_terminal_result_is_consumed_once_and_cached_for_stop) (state='COMPLETED')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/workspace/scratch/c58945ad251a/blackbox-audit-patch-20261028/tests/test_audit_decoder_20261028.py", line 108, in test_valid_terminal_result_is_consumed_once_and_cached_for_stop
+    self.assertEqual(trace.stop(), result)
+AssertionError: {'sou[103 chars]n', 'lost_events': None} != {'sou[103 chars]n', 'instance': 'BLACKBOX_f7d9c37053914697a195[547 chars]None}
+Diff is 1061 characters long. Set self.maxDiff to None to see it.
+
+======================================================================
+FAIL: test_valid_terminal_result_is_consumed_once_and_cached_for_stop (test_audit_decoder_20261028.GuardianTerminalAudit.test_valid_terminal_result_is_consumed_once_and_cached_for_stop) (state='FAILED')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/workspace/scratch/c58945ad251a/blackbox-audit-patch-20261028/tests/test_audit_decoder_20261028.py", line 108, in test_valid_terminal_result_is_consumed_once_and_cached_for_stop
+    self.assertEqual(trace.stop(), result)
+AssertionError: {'sou[100 chars]n', 'lost_events': None} != {'sou[100 chars]n', 'instance': 'BLACKBOX_5537c10e804b41bf83c9[544 chars]None}
+Diff is 1055 characters long. Set self.maxDiff to None to see it.
+
+======================================================================
+FAIL: test_valid_terminal_result_is_consumed_once_and_cached_for_stop (test_audit_decoder_20261028.GuardianTerminalAudit.test_valid_terminal_result_is_consumed_once_and_cached_for_stop) (state='CLEANUP_REQUIRED')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/workspace/scratch/c58945ad251a/blackbox-audit-patch-20261028/tests/test_audit_decoder_20261028.py", line 108, in test_valid_terminal_result_is_consumed_once_and_cached_for_stop
+    self.assertEqual(trace.stop(), result)
+AssertionError: {'sou[110 chars]n', 'lost_events': None} != {'sou[110 chars]n', 'instance': 'BLACKBOX_af19d73f69ac4b8e8e7f[554 chars]None}
+Diff is 1075 characters long. Set self.maxDiff to None to see it.
+
+======================================================================
+FAIL: test_previous_profile_schema_is_read_without_migration (test_audit_decoder_20261028.ProfileSearchAudit.test_previous_profile_schema_is_read_without_migration)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/workspace/scratch/c58945ad251a/blackbox-audit-patch-20261028/tests/test_audit_decoder_20261028.py", line 51, in test_previous_profile_schema_is_read_without_migration
+    self.assertEqual(len(read_index(path, mode='cpu_stacks', search='Метод')['rows']), 1)
+AssertionError: 0 != 1
+
+======================================================================
+FAIL: test_unicode_is_searched_in_decoded_frame_values_only (test_audit_decoder_20261028.ProfileSearchAudit.test_unicode_is_searched_in_decoded_frame_values_only) (text='Пример')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/workspace/scratch/c58945ad251a/blackbox-audit-patch-20261028/tests/test_audit_decoder_20261028.py", line 28, in test_unicode_is_searched_in_decoded_frame_values_only
+    self.assertEqual(len(read_index(path, mode='cpu_stacks', search=text)['rows']), 1)
+AssertionError: 0 != 1
+
+======================================================================
+FAIL: test_unicode_is_searched_in_decoded_frame_values_only (test_audit_decoder_20261028.ProfileSearchAudit.test_unicode_is_searched_in_decoded_frame_values_only) (text='Метод')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/workspace/scratch/c58945ad251a/blackbox-audit-patch-20261028/tests/test_audit_decoder_20261028.py", line 28, in test_unicode_is_searched_in_decoded_frame_values_only
+    self.assertEqual(len(read_index(path, mode='cpu_stacks', search=text)['rows']), 1)
+AssertionError: 0 != 1
+
+======================================================================
+FAIL: test_unicode_is_searched_in_decoded_frame_values_only (test_audit_decoder_20261028.ProfileSearchAudit.test_unicode_is_searched_in_decoded_frame_values_only) (text='name')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/workspace/scratch/c58945ad251a/blackbox-audit-patch-20261028/tests/test_audit_decoder_20261028.py", line 31, in test_unicode_is_searched_in_decoded_frame_values_only
+    self.assertEqual(read_index(path, mode='cpu_stacks', search=text)['rows'], [])
+AssertionError: Lists differ: [{'index_id': 1, 'event': {'type': 'CPU_PR[745 chars]N'}}] != []
+
+First list contains 1 additional elements.
+First extra element 0:
+{'index_id': 1, 'event': {'type': 'CPU_PROFILER_RECORDED_STACK_GROUP', 'pid': 42, 'process_instance': 2, 'identity_quality': 'TRACE_PROCESS_INSTANCE_INDEX', 'provider': 'Microsoft-DotNETCore-SampleProfiler', 'name': 'Thread/Sample', 'time_ms': 1.0, 'first_time_ms': 1.0, 'last_time_ms': 1.0, 'recorded_sample_count': 1, 'first_event_id': 1, 'last_event_id': 1, 'stack_signature_sha256': 'f4e9a735e9a9a61db8425843ac3ed42e0bc272a610279db945c51f38637c7ca2', 'frames': [{'address': '0x1000', 'name': 'Пример.Класс.Метод'}, {'address': '0x2000', 'name': 'parent'}], 'frame_count': 2, 'frames_without_names': 0, 'stack_status': 'RECORDED_ADDRESSES_OFFLINE_NAMES', 'measurement': 'EVENT_OCCURRENCES_NOT_CPU_TIME_OR_CPU_PERCENT', 'verification_class': 'UNVERIFIED_IMPORT', 'root_cause': 'UNKNOWN'}}
+
+Diff is 1095 characters long. Set self.maxDiff to None to see it.
+
+======================================================================
+FAIL: test_unicode_is_searched_in_decoded_frame_values_only (test_audit_decoder_20261028.ProfileSearchAudit.test_unicode_is_searched_in_decoded_frame_values_only) (text='address')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/workspace/scratch/c58945ad251a/blackbox-audit-patch-20261028/tests/test_audit_decoder_20261028.py", line 31, in test_unicode_is_searched_in_decoded_frame_values_only
+    self.assertEqual(read_index(path, mode='cpu_stacks', search=text)['rows'], [])
+AssertionError: Lists differ: [{'index_id': 1, 'event': {'type': 'CPU_PR[745 chars]N'}}] != []
+
+First list contains 1 additional elements.
+First extra element 0:
+{'index_id': 1, 'event': {'type': 'CPU_PROFILER_RECORDED_STACK_GROUP', 'pid': 42, 'process_instance': 2, 'identity_quality': 'TRACE_PROCESS_INSTANCE_INDEX', 'provider': 'Microsoft-DotNETCore-SampleProfiler', 'name': 'Thread/Sample', 'time_ms': 1.0, 'first_time_ms': 1.0, 'last_time_ms': 1.0, 'recorded_sample_count': 1, 'first_event_id': 1, 'last_event_id': 1, 'stack_signature_sha256': 'f4e9a735e9a9a61db8425843ac3ed42e0bc272a610279db945c51f38637c7ca2', 'frames': [{'address': '0x1000', 'name': 'Пример.Класс.Метод'}, {'address': '0x2000', 'name': 'parent'}], 'frame_count': 2, 'frames_without_names': 0, 'stack_status': 'RECORDED_ADDRESSES_OFFLINE_NAMES', 'measurement': 'EVENT_OCCURRENCES_NOT_CPU_TIME_OR_CPU_PERCENT', 'verification_class': 'UNVERIFIED_IMPORT', 'root_cause': 'UNKNOWN'}}
+
+Diff is 1095 characters long. Set self.maxDiff to None to see it.
+
+======================================================================
+FAIL: test_unicode_is_searched_in_decoded_frame_values_only (test_audit_decoder_20261028.ProfileSearchAudit.test_unicode_is_searched_in_decoded_frame_values_only) (text='\\u041f')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/workspace/scratch/c58945ad251a/blackbox-audit-patch-20261028/tests/test_audit_decoder_20261028.py", line 31, in test_unicode_is_searched_in_decoded_frame_values_only
+    self.assertEqual(read_index(path, mode='cpu_stacks', search=text)['rows'], [])
+AssertionError: Lists differ: [{'index_id': 1, 'event': {'type': 'CPU_PR[745 chars]N'}}] != []
+
+First list contains 1 additional elements.
+First extra element 0:
+{'index_id': 1, 'event': {'type': 'CPU_PROFILER_RECORDED_STACK_GROUP', 'pid': 42, 'process_instance': 2, 'identity_quality': 'TRACE_PROCESS_INSTANCE_INDEX', 'provider': 'Microsoft-DotNETCore-SampleProfiler', 'name': 'Thread/Sample', 'time_ms': 1.0, 'first_time_ms': 1.0, 'last_time_ms': 1.0, 'recorded_sample_count': 1, 'first_event_id': 1, 'last_event_id': 1, 'stack_signature_sha256': 'f4e9a735e9a9a61db8425843ac3ed42e0bc272a610279db945c51f38637c7ca2', 'frames': [{'address': '0x1000', 'name': 'Пример.Класс.Метод'}, {'address': '0x2000', 'name': 'parent'}], 'frame_count': 2, 'frames_without_names': 0, 'stack_status': 'RECORDED_ADDRESSES_OFFLINE_NAMES', 'measurement': 'EVENT_OCCURRENCES_NOT_CPU_TIME_OR_CPU_PERCENT', 'verification_class': 'UNVERIFIED_IMPORT', 'root_cause': 'UNKNOWN'}}
+
+Diff is 1095 characters long. Set self.maxDiff to None to see it.
+
+----------------------------------------------------------------------
+Ran 8 tests in 0.907s
+
+FAILED (failures=16, errors=1)

@@ -8,7 +8,7 @@ import re
 import stat
 import zipfile
 
-VERSION = '0.5.0'
+VERSION = '0.5.1'
 PREFIX = 'BLACK.BOX-Universal/'
 MAX_UNCOMPRESSED = 2 * 1024**3
 REQUIRED = (
@@ -61,6 +61,7 @@ def verify_archive(path, source_sha, source_tree):
                 provenance.get('source_sha') == source_sha and
                 provenance.get('source_tree_sha') == source_tree and
                 provenance.get('tracked_worktree_clean') is True, 'FROZEN_SOURCE_MISMATCH')
+        require(provenance.get('version') == VERSION, 'FROZEN_VERSION_MISMATCH')
         manifest = json.loads(contents('decoder/decoder-manifest.json'))
         require(manifest.get('rid') == 'win-x64' and manifest.get('self_contained') is True
                 and manifest.get('traceevent_package') == '4.0.0', 'DECODER_BUILD_NOT_VERIFIED')

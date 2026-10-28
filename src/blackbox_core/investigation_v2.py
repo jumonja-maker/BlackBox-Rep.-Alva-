@@ -76,12 +76,24 @@ def _research_findings(folder,start,end,coverage):
  if not path.is_file():return
  with closing(readonly(path)) as db:
   deadline=time.monotonic()+25;db.set_progress_handler(lambda:int(time.monotonic()>deadline),1000)
-  for r in db.execute("SELECT id,monotonic_ns,kind,source,substr(data,1,8193) AS detail FROM evidence WHERE monotonic_ns BETWEEN ? AND ? AND (source='USER_MARKER' OR kind IN ('application.source_failed','observer.operation_failed')) ORDER BY monotonic_ns,id",(start,end)):
+  for r in db.execute("SELECT id,monotonic_ns,kind,source,substr(data,1,8193) AS detail FROM evidence WHERE monotonic_ns BETWEEN ? AND ? AND (source='USER_MARKER' OR (kind='user_problem' AND source IN ('USER','BLACKBOX_LEGACY')) OR kind IN ('application.source_failed','observer.operation_failed')) ORDER BY monotonic_ns,id",(start,end)):
    try:detail=json.loads(r['detail']) if len(r['detail'])<=8192 else {'status':'IMPORTED_EVENT_SIZE_LIMIT'}
    except ValueError:detail={'status':'INVALID_IMPORTED_EVENT'}
-   user=r['source']=='USER_MARKER'
+   user=r['source']=='USER_MARKER' or (r['kind']=='user_problem' and r['source'] in ('USER','BLACKBOX_LEGACY'))
    yield _finding(r['kind'],r['monotonic_ns'],r['monotonic_ns'],ref='research.sqlite3:evidence:'+str(r['id']),
     facts=[{'code':'USER_STATEMENT' if user else 'SOURCE_STATUS','values':detail}],category='USER_REPORTED' if user else 'UNAVAILABLE',coverage=coverage)
+def finding_streams(view,folder,start,end,*,series,instance_id,coverage,stats):
+ """One finding inventory for paged investigation and complete exports.
+
+ Callers own filtering, ordering and their resource/cancellation budgets. The
+ underlying generators remain streaming; no whole-history list is materialized.
+ """
+ yield from _persisted_findings(view,start,end,coverage)
+ yield from _counter_findings(view,start,end,series,instance_id,coverage,stats)
+ yield from _research_findings(folder,start,end,coverage)
+ if instance_id==1:
+  yield from _action_findings(view,start,end,coverage)
+
 def research_tail(folder):
  path=safe_path(Path(folder)/'research.sqlite3')
  if not path.is_file():return None
@@ -105,12 +117,11 @@ def investigate(folder,*,start_ns=None,end_ns=None,instance_id=1,after=None,limi
   lo,hi=report['selected_interval_ns'];coverage=report['coverage'];total=0
   def rows():
    nonlocal total
-   for stream in (_persisted_findings(view,lo,hi,coverage),_counter_findings(view,lo,hi,series,instance_id,coverage,stats),_research_findings(folder,lo,hi,coverage),_action_findings(view,lo,hi,coverage) if instance_id==1 else ()):
-    for item in stream:
-     if question!='ALL' and item['group']!=question:continue
-     total+=1
-     if total%128==0 and time.monotonic()>stats['deadline']:raise SessionReadError('INVESTIGATION_INTERVAL_BUDGET')
-     if after is None or key(item)>tuple(after):yield item
+   for item in finding_streams(view,folder,lo,hi,series=series,instance_id=instance_id,coverage=coverage,stats=stats):
+    if question!='ALL' and item['group']!=question:continue
+    total+=1
+    if total%128==0 and time.monotonic()>stats['deadline']:raise SessionReadError('INVESTIGATION_INTERVAL_BUDGET')
+    if after is None or key(item)>tuple(after):yield item
   from .capture_policy import recorded_top_threads
   found=heapq.nsmallest(limit+1,rows(),key=key);page=found[:limit];threads=view.thread_summary(lo,hi,instance_id=instance_id,top_n=recorded_top_threads(folder))
   from .instrumentation_analysis import io_latency_statistics

@@ -1,0 +1,11 @@
+test_sqlite_optional_budget_error_reaches_unavailable_and_keeps_recording (test_audit_capture_20261028.CaptureHandlerContractTests.test_sqlite_optional_budget_error_reaches_unavailable_and_keeps_recording) ... ok
+test_sqlite_stage_failure_finalizes_as_incomplete_and_releases_primary_owner (test_audit_capture_20261028.CaptureHandlerContractTests.test_sqlite_stage_failure_finalizes_as_incomplete_and_releases_primary_owner) ... ok
+test_optional_budget_is_cached_and_does_not_run_per_sample (test_audit_capture_20261028.CaptureIndexFailureTests.test_optional_budget_is_cached_and_does_not_run_per_sample) ... skipped 'CONTROLLED_PROCESS_NAMESPACE_UNAVAILABLE: os.getpid and /proc/self differ'
+test_real_exclusive_index_lock_does_not_stop_or_delay_primary_tick_unboundedly (test_audit_capture_20261028.CaptureIndexFailureTests.test_real_exclusive_index_lock_does_not_stop_or_delay_primary_tick_unboundedly) ... skipped 'CONTROLLED_PROCESS_NAMESPACE_UNAVAILABLE: os.getpid and /proc/self differ'
+test_real_helper_keeps_sampling_with_corrupt_optional_index_and_closes_stage (test_audit_capture_20261028.CaptureIndexFailureTests.test_real_helper_keeps_sampling_with_corrupt_optional_index_and_closes_stage) ... skipped 'CONTROLLED_PROCESS_NAMESPACE_UNAVAILABLE: os.getpid and /proc/self differ'
+test_user_stage_sqlite_finalization_failure_still_closes_primary_stores_honestly (test_audit_capture_20261028.CaptureIndexFailureTests.test_user_stage_sqlite_finalization_failure_still_closes_primary_stores_honestly) ... skipped 'CONTROLLED_PROCESS_NAMESPACE_UNAVAILABLE: os.getpid and /proc/self differ'
+
+----------------------------------------------------------------------
+Ran 6 tests in 0.031s
+
+OK (skipped=4)

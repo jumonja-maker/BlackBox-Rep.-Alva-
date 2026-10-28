@@ -1,0 +1,54 @@
+test_completed_investigation_does_not_accumulate_qthread_children (test_audit_ui_20261028.AuditUi.test_completed_investigation_does_not_accumulate_qthread_children) ... FAIL
+test_export_pending_keeps_stop_enabled (test_audit_ui_20261028.AuditUi.test_export_pending_keeps_stop_enabled) ... FAIL
+test_immediate_consent_before_finished_restarts_real_long_session_once (test_audit_ui_20261028.AuditUi.test_immediate_consent_before_finished_restarts_real_long_session_once) ... ok
+test_modal_consent_after_finished_restarts_real_long_session_once (test_audit_ui_20261028.AuditUi.test_modal_consent_after_finished_restarts_real_long_session_once) ... This plugin does not support propagateSizeHints()
+FAIL
+test_modal_decline_does_not_analyze_or_export (test_audit_ui_20261028.AuditUi.test_modal_decline_does_not_analyze_or_export) ... This plugin does not support propagateSizeHints()
+ok
+test_verify_pending_keeps_stop_enabled_and_real_click_stops (test_audit_ui_20261028.AuditUi.test_verify_pending_keeps_stop_enabled_and_real_click_stops) ... FAIL
+
+======================================================================
+FAIL: test_completed_investigation_does_not_accumulate_qthread_children (test_audit_ui_20261028.AuditUi.test_completed_investigation_does_not_accumulate_qthread_children)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/workspace/scratch/c58945ad251a/blackbox-audit-patch-20261028/tests/test_audit_ui_20261028.py", line 155, in test_completed_investigation_does_not_accumulate_qthread_children
+    self.assertEqual(w.findChildren(InvestigationWorker), [],
+AssertionError: Lists differ: [<blackbox_universal.investigation_worker.[46 chars]ec0>] != []
+
+First list contains 1 additional elements.
+First extra element 0:
+<blackbox_universal.investigation_worker.InvestigationWorker(0x1416cbd0) at 0x7f0b247e3ec0>
+
+- [<blackbox_universal.investigation_worker.InvestigationWorker(0x1416cbd0) at 0x7f0b247e3ec0>]
++ [] : Finished worker QObjects must not accumulate until window close
+
+======================================================================
+FAIL: test_export_pending_keeps_stop_enabled (test_audit_ui_20261028.AuditUi.test_export_pending_keeps_stop_enabled)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/workspace/scratch/c58945ad251a/blackbox-audit-patch-20261028/tests/test_audit_ui_20261028.py", line 100, in test_export_pending_keeps_stop_enabled
+    self.assertTrue(w.stop_btn.isEnabled())
+AssertionError: False is not true
+
+======================================================================
+FAIL: test_modal_consent_after_finished_restarts_real_long_session_once (test_audit_ui_20261028.AuditUi.test_modal_consent_after_finished_restarts_real_long_session_once)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/workspace/scratch/c58945ad251a/blackbox-audit-patch-20261028/tests/test_audit_ui_20261028.py", line 140, in test_modal_consent_after_finished_restarts_real_long_session_once
+    self.investigate(modal=True, consent=QMessageBox.StandardButton.Yes)
+  File "/workspace/scratch/c58945ad251a/blackbox-audit-patch-20261028/tests/test_audit_ui_20261028.py", line 125, in investigate
+    self.assertTrue(self.drain(lambda: w._investigation_result is not None and
+AssertionError: False is not true
+
+======================================================================
+FAIL: test_verify_pending_keeps_stop_enabled_and_real_click_stops (test_audit_ui_20261028.AuditUi.test_verify_pending_keeps_stop_enabled_and_real_click_stops)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/workspace/scratch/c58945ad251a/blackbox-audit-patch-20261028/tests/test_audit_ui_20261028.py", line 83, in test_verify_pending_keeps_stop_enabled_and_real_click_stops
+    self.assertTrue(w.stop_btn.isEnabled(), 'Optional verify must not disable Stop')
+AssertionError: False is not true : Optional verify must not disable Stop
+
+----------------------------------------------------------------------
+Ran 6 tests in 23.774s
+
+FAILED (failures=4)

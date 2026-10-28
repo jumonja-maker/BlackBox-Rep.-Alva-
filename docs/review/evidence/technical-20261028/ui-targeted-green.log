@@ -1,0 +1,19 @@
+test_completed_investigation_does_not_accumulate_qthread_children (test_audit_ui_20261028.AuditUi.test_completed_investigation_does_not_accumulate_qthread_children) ... ok
+test_export_pending_keeps_stop_enabled (test_audit_ui_20261028.AuditUi.test_export_pending_keeps_stop_enabled) ... ok
+test_immediate_consent_before_finished_restarts_real_long_session_once (test_audit_ui_20261028.AuditUi.test_immediate_consent_before_finished_restarts_real_long_session_once) ... ok
+test_modal_consent_after_finished_restarts_real_long_session_once (test_audit_ui_20261028.AuditUi.test_modal_consent_after_finished_restarts_real_long_session_once) ... This plugin does not support propagateSizeHints()
+ok
+test_modal_decline_does_not_analyze_or_export (test_audit_ui_20261028.AuditUi.test_modal_decline_does_not_analyze_or_export) ... This plugin does not support propagateSizeHints()
+ok
+test_verify_pending_keeps_stop_enabled_and_real_click_stops (test_audit_ui_20261028.AuditUi.test_verify_pending_keeps_stop_enabled_and_real_click_stops) ... ok
+test_bilingual_evidence_is_never_promoted_to_proven_cause (test_investigation_integration.InvestigationIntegrationTests.test_bilingual_evidence_is_never_promoted_to_proven_cause) ... ok
+test_latest_interval_for_bounded_session (test_investigation_integration.InvestigationIntegrationTests.test_latest_interval_for_bounded_session) ... ok
+test_real_user_marker_and_worker_exports_are_independent (test_investigation_integration.InvestigationIntegrationTests.test_real_user_marker_and_worker_exports_are_independent) ... ok
+test_exactly_five_pages_with_investigation_tables_and_controls (test_investigation_integration.InvestigationQtTests.test_exactly_five_pages_with_investigation_tables_and_controls) ... ok
+test_mark_problem_is_disabled_until_real_sample_and_saved_to_sqlite (test_investigation_integration.InvestigationQtTests.test_mark_problem_is_disabled_until_real_sample_and_saved_to_sqlite) ... ok
+test_visual_findings_survive_page_switches_and_translate (test_investigation_integration.InvestigationQtTests.test_visual_findings_survive_page_switches_and_translate) ... ok
+
+----------------------------------------------------------------------
+Ran 12 tests in 8.609s
+
+OK

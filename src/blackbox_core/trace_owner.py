@@ -113,7 +113,7 @@ class TraceSupervisor:
         if type(seconds) is not int or not 1<=seconds<=60:raise ValueError('INVALID_TRACE_DURATION')
         if type(max_output_bytes) is not int or not 1024**2<=max_output_bytes<=1024**3:raise ValueError('INVALID_TRACE_SIZE_POLICY')
         self.folder=Path(folder);self.instance='BLACKBOX_'+uuid4().hex
-        self.path=self.folder/(self.instance+'.trace.json');self.process=None;self.reported=False
+        self.path=self.folder/(self.instance+'.trace.json');self.process=None;self.reported=False;self._terminal_result=None
         self.data={'schema_version':1,'instance':self.instance,'state':'RESERVED',
             'consent':'EXPLICIT_USER_COMMAND','target':target,
             'scope':'SYSTEM_WIDE_MAY_INCLUDE_OTHER_PROCESSES',
@@ -138,14 +138,44 @@ class TraceSupervisor:
             self.process.stdin.close();self.process.stdin=None
     def poll(self):
         if self.process is None:return None
-        try:self.data=_read(self.path)
-        except (OSError,ValueError):return {'source':'ETW_WPR','status':'JOURNAL_UNAVAILABLE','lost_events':None}
-        if self.process.poll() is None:return None
         if self.reported:return None
-        self.reported=True
-        return {'source':'ETW_WPR','status':self.data.get('state','UNKNOWN'),
-            'journal':self.path.name,'instance':self.instance,'exit_code':self.process.returncode,
+        # Check exit first: a guardian can publish its final journal and exit
+        # between a preceding file read and poll(). Read after observed exit.
+        code=self.process.poll()
+        unavailable=False
+        try:
+            current=_read(self.path)
+            if not isinstance(current,dict) or current.get('instance')!=self.instance:
+                raise ValueError('INVALID_OWNED_TRACE_JOURNAL')
+            self.data=current
+        except (OSError,ValueError):
+            unavailable=True
+        if code is None:
+            return ({'source':'ETW_WPR','status':'JOURNAL_UNAVAILABLE','lost_events':None}
+                    if unavailable else None)
+        # A dead guardian cannot still be recording. Keep the original journal
+        # untouched: only explicit named-instance recovery can confirm cleanup.
+        # Cache the terminal observation because research_worker may consume
+        # poll() before finalization later calls stop().
+        self.request_stop()  # Release the dead child's remaining stdin pipe.
+        state=self.data.get('state','UNKNOWN')
+        reason=None
+        if unavailable:
+            status,reason='CLEANUP_REQUIRED','JOURNAL_UNAVAILABLE'
+        elif state not in ('COMPLETED','FAILED','CLEANUP_REQUIRED'):
+            status,reason='CLEANUP_REQUIRED','GUARDIAN_EXITED_WITHOUT_FINAL_STATE'
+        elif state=='COMPLETED' and code!=0:
+            status,reason='CLEANUP_REQUIRED','GUARDIAN_ABNORMAL_EXIT'
+        else:
+            status=state
+        result={'source':'ETW_WPR','status':status,
+            'journal':self.path.name,'instance':self.instance,'exit_code':code,
             'details':self.data,'lost_events':None}
+        if reason is not None:
+            result.update(reason=reason,last_journal_state=state)
+        self._terminal_result=result
+        self.reported=True
+        return result
     def stop(self):
         self.request_stop()
         if self.process is None:return None
@@ -156,7 +186,7 @@ class TraceSupervisor:
             return {'source':'ETW_WPR','status':'CLEANUP_UNCONFIRMED_GUARDIAN_STILL_RUNNING',
                 'instance':self.instance,'journal':self.path.name,'lost_events':None}
         result=self.poll()
-        return result or {'source':'ETW_WPR','status':self.data.get('state','UNKNOWN'),'journal':self.path.name,'lost_events':None}
+        return result or self._terminal_result
 
 
 if __name__=='__main__':raise SystemExit(run(sys.argv[1]))

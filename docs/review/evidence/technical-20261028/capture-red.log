@@ -1,0 +1,110 @@
+test_optional_budget_is_cached_and_does_not_run_per_sample (test_audit_capture_20261028.CaptureIndexFailureTests.test_optional_budget_is_cached_and_does_not_run_per_sample) ... ERROR
+test_real_exclusive_index_lock_does_not_stop_or_delay_primary_tick_unboundedly (test_audit_capture_20261028.CaptureIndexFailureTests.test_real_exclusive_index_lock_does_not_stop_or_delay_primary_tick_unboundedly) ... ERROR
+test_real_helper_keeps_sampling_with_corrupt_optional_index_and_closes_stage (test_audit_capture_20261028.CaptureIndexFailureTests.test_real_helper_keeps_sampling_with_corrupt_optional_index_and_closes_stage) ... FAIL
+test_user_stage_sqlite_finalization_failure_still_closes_primary_stores_honestly (test_audit_capture_20261028.CaptureIndexFailureTests.test_user_stage_sqlite_finalization_failure_still_closes_primary_stores_honestly) ... ERROR
+
+======================================================================
+ERROR: test_optional_budget_is_cached_and_does_not_run_per_sample (test_audit_capture_20261028.CaptureIndexFailureTests.test_optional_budget_is_cached_and_does_not_run_per_sample)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/workspace/scratch/c58945ad251a/blackbox-audit-patch-20261028/src/blackbox_core/research_worker.py", line 182, in _health
+    try:self._library_budget=LibraryCatalog(self.probe.output_root).storage_budget(exclude_folder=self.probe.session_folder)
+                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/unittest/mock.py", line 1139, in __call__
+    return self._mock_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/unittest/mock.py", line 1143, in _mock_call
+    return self._execute_mock_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/unittest/mock.py", line 1198, in _execute_mock_call
+    raise effect
+sqlite3.DatabaseError: TEST_ONLY_BAD_INDEX
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/workspace/scratch/c58945ad251a/blackbox-audit-patch-20261028/tests/test_audit_capture_20261028.py", line 150, in test_optional_budget_is_cached_and_does_not_run_per_sample
+    session.tick()
+  File "/workspace/scratch/c58945ad251a/blackbox-audit-patch-20261028/src/blackbox_core/research_worker.py", line 269, in tick
+    self.last_health=time.monotonic();self._health()
+                                      ^^^^^^^^^^^^^^
+  File "/workspace/scratch/c58945ad251a/blackbox-audit-patch-20261028/src/blackbox_core/research_worker.py", line 183, in _health
+    except (OSError,ValueError,sqlite3.Error):self._library_budget={'status':'INDEX_UNAVAILABLE'}
+                               ^^^^^^^
+NameError: name 'sqlite3' is not defined. Did you forget to import 'sqlite3'
+
+======================================================================
+ERROR: test_real_exclusive_index_lock_does_not_stop_or_delay_primary_tick_unboundedly (test_audit_capture_20261028.CaptureIndexFailureTests.test_real_exclusive_index_lock_does_not_stop_or_delay_primary_tick_unboundedly)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/workspace/scratch/c58945ad251a/blackbox-audit-patch-20261028/src/blackbox_core/research_worker.py", line 182, in _health
+    try:self._library_budget=LibraryCatalog(self.probe.output_root).storage_budget(exclude_folder=self.probe.session_folder)
+                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspace/scratch/c58945ad251a/blackbox-audit-patch-20261028/src/blackbox_core/library_catalog.py", line 466, in storage_budget
+    policy=self.policy()
+           ^^^^^^^^^^^^^
+  File "/workspace/scratch/c58945ad251a/blackbox-audit-patch-20261028/src/blackbox_core/library_catalog.py", line 317, in policy
+    with closing(self._connect()) as db:row=db.execute("SELECT value FROM library_meta WHERE key='policy'").fetchone()
+                 ^^^^^^^^^^^^^^^
+  File "/workspace/scratch/c58945ad251a/blackbox-audit-patch-20261028/src/blackbox_core/library_catalog.py", line 121, in _connect
+    db.setlimit(sqlite3.SQLITE_LIMIT_LENGTH,1024*1024);db.execute('PRAGMA cache_size=-2048')
+                                                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+sqlite3.OperationalError: database is locked
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/workspace/scratch/c58945ad251a/blackbox-audit-patch-20261028/tests/test_audit_capture_20261028.py", line 111, in test_real_exclusive_index_lock_does_not_stop_or_delay_primary_tick_unboundedly
+    tick = time.monotonic(); session.tick()
+                             ^^^^^^^^^^^^^^
+  File "/workspace/scratch/c58945ad251a/blackbox-audit-patch-20261028/src/blackbox_core/research_worker.py", line 269, in tick
+    self.last_health=time.monotonic();self._health()
+                                      ^^^^^^^^^^^^^^
+  File "/workspace/scratch/c58945ad251a/blackbox-audit-patch-20261028/src/blackbox_core/research_worker.py", line 183, in _health
+    except (OSError,ValueError,sqlite3.Error):self._library_budget={'status':'INDEX_UNAVAILABLE'}
+                               ^^^^^^^
+NameError: name 'sqlite3' is not defined. Did you forget to import 'sqlite3'
+
+======================================================================
+ERROR: test_user_stage_sqlite_finalization_failure_still_closes_primary_stores_honestly (test_audit_capture_20261028.CaptureIndexFailureTests.test_user_stage_sqlite_finalization_failure_still_closes_primary_stores_honestly)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/workspace/scratch/c58945ad251a/blackbox-audit-patch-20261028/src/blackbox_core/research_worker.py", line 465, in stop
+    try:self.markers.close(self.book,reason=reason)
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/unittest/mock.py", line 1139, in __call__
+    return self._mock_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/unittest/mock.py", line 1143, in _mock_call
+    return self._execute_mock_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/unittest/mock.py", line 1198, in _execute_mock_call
+    raise effect
+sqlite3.OperationalError: TEST_ONLY_STAGE_STORAGE_ERROR
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/workspace/scratch/c58945ad251a/blackbox-audit-patch-20261028/tests/test_audit_capture_20261028.py", line 131, in test_user_stage_sqlite_finalization_failure_still_closes_primary_stores_honestly
+    result = session.stop()
+             ^^^^^^^^^^^^^^
+  File "/workspace/scratch/c58945ad251a/blackbox-audit-patch-20261028/src/blackbox_core/research_worker.py", line 466, in stop
+    except (OSError,ValueError,sqlite3.Error,ObserverError) as exc:errors.append('USER_STAGES_FINALIZATION_UNCONFIRMED: '+str(exc)[:100])
+                               ^^^^^^^
+NameError: name 'sqlite3' is not defined. Did you forget to import 'sqlite3'
+
+======================================================================
+FAIL: test_real_helper_keeps_sampling_with_corrupt_optional_index_and_closes_stage (test_audit_capture_20261028.CaptureIndexFailureTests.test_real_helper_keeps_sampling_with_corrupt_optional_index_and_closes_stage)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/workspace/scratch/c58945ad251a/blackbox-audit-patch-20261028/tests/test_audit_capture_20261028.py", line 75, in test_real_helper_keeps_sampling_with_corrupt_optional_index_and_closes_stage
+    helper.call('user_marker', {'kind':'STAGE_BEGIN','name':'Capture index fault'})
+  File "/workspace/scratch/c58945ad251a/blackbox-audit-patch-20261028/tests/test_audit_capture_20261028.py", line 51, in call
+    if reply.get('error'): raise AssertionError(reply)
+                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: {'type': 'result', 'id': '4', 'op': 'user_marker', 'result': None, 'error': 'ValueError: START_RECORDING_FIRST'}
+
+----------------------------------------------------------------------
+Ran 4 tests in 0.971s
+
+FAILED (failures=1, errors=3)

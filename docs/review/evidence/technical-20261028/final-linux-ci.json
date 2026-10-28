@@ -1,0 +1,102 @@
+{
+  "source": "da63ea85749e9b484eb4af088de61385eb6c4caf",
+  "tree": "6e219a0a8ff40c5a8ac4bfd779cab79b49a432b3",
+  "run": 40711406662,
+  "job": 122897983771,
+  "status": "PASS",
+  "testsRun": 705,
+  "passed": 688,
+  "skippedTestCases": 17,
+  "skippedClassFixtures": 2,
+  "skipRecords": [
+    {
+      "test": "test_actual_windows_reader_can_overlap_atomic_status_update (test_atomic_status.AtomicStatusTests.test_actual_windows_reader_can_overlap_atomic_status_update)",
+      "reason": "'actual Windows delete-sharing semantics'"
+    },
+    {
+      "test": "test_real_mutex_cycle_or_exact_permission_failure (test_bbdi_windows_observer.RealWindowsFixtureTests.test_real_mutex_cycle_or_exact_permission_failure)",
+      "reason": "'Real Win32 fixtures require Windows x64'"
+    },
+    {
+      "test": "test_real_non_gui_fixture_has_no_windows_not_a_no_hang_claim (test_bbdi_windows_observer.RealWindowsFixtureTests.test_real_non_gui_fixture_has_no_windows_not_a_no_hang_claim)",
+      "reason": "'Real Win32 fixtures require Windows x64'"
+    },
+    {
+      "test": "test_real_ui_block_timeout_then_recovery_and_native_wct_status (test_bbdi_windows_observer.RealWindowsFixtureTests.test_real_ui_block_timeout_then_recovery_and_native_wct_status)",
+      "reason": "'Real Win32 fixtures require Windows x64'"
+    },
+    {
+      "test": "test_actual_bounded_local_eventlog_query_has_honest_status (test_crash_and_trace_decode.CrashEvidenceTests.test_actual_bounded_local_eventlog_query_has_honest_status)",
+      "reason": "'Actual Windows Event Log API'"
+    },
+    {
+      "test": "test_real_owned_etl_is_independently_decoded_to_actual_target_header_events (test_crash_and_trace_decode.EtlDecodeContractTests.test_real_owned_etl_is_independently_decoded_to_actual_target_header_events)",
+      "reason": "'Actual Windows ETW/tracerpt integration'"
+    },
+    {
+      "test": "setUpClass (test_decoder_native_symbols.NativeSymbolTests)",
+      "reason": "'Native QA requires local Clang and lld-link'"
+    },
+    {
+      "test": "setUpClass (test_decoder_symbol_tree.SymbolTreeTests)",
+      "reason": "'Native QA requires local Clang and lld-link'"
+    },
+    {
+      "test": "test_changed_file_is_rejected_before_launch (test_file_targets.FileTargetGuiTests.test_changed_file_is_rejected_before_launch)",
+      "reason": "'EXE launch is Windows-specific'"
+    },
+    {
+      "test": "test_launch_requires_confirmation_and_never_uses_shell (test_file_targets.FileTargetGuiTests.test_launch_requires_confirmation_and_never_uses_shell)",
+      "reason": "'EXE launch is Windows-specific'"
+    },
+    {
+      "test": "test_real_optin_eventpipe_file_remains_honestly_undecoded (test_managed_runtime_fixture.ManagedRuntimeFixtureTests.test_real_optin_eventpipe_file_remains_honestly_undecoded)",
+      "reason": "'Local dotnet-trace not installed; no invented GC capture'"
+    },
+    {
+      "test": "test_real_windows_exclusive_handle_is_retried_until_released (test_qa_fixture_status.FixtureStatusTests.test_real_windows_exclusive_handle_is_retried_until_released)",
+      "reason": "'Actual Windows share-denial fixture'"
+    },
+    {
+      "test": "test_generated_client_compiles_and_emits_offline (test_research_native.DotnetClientTests.test_generated_client_compiles_and_emits_offline)",
+      "reason": "'Windows .NET SDK required'"
+    },
+    {
+      "test": "test_generated_cpp_client_compiles_and_emits (test_research_native.NativeClientTests.test_generated_cpp_client_compiles_and_emits)",
+      "reason": "'Windows C++ compiler client acceptance'"
+    },
+    {
+      "test": "test_known_mutex_wait_has_native_chain (test_research_native.NativeFixtureTests.test_known_mutex_wait_has_native_chain)",
+      "reason": "'Windows native fixture acceptance'"
+    },
+    {
+      "test": "test_known_window_block_is_observed (test_research_native.NativeFixtureTests.test_known_window_block_is_observed)",
+      "reason": "'Windows native fixture acceptance'"
+    },
+    {
+      "test": "test_real_named_wpr_roundtrip (test_research_native.NativeFixtureTests.test_real_named_wpr_roundtrip)",
+      "reason": "'Windows native fixture acceptance'"
+    },
+    {
+      "test": "test_real_minidump_of_owned_child (test_research_product.WindowsResearchTests.test_real_minidump_of_owned_child)",
+      "reason": "'Windows native APIs'"
+    },
+    {
+      "test": "test_real_wct_current_thread_has_source_and_status (test_research_product.WindowsResearchTests.test_real_wct_current_thread_has_source_and_status)",
+      "reason": "'Windows native APIs'"
+    }
+  ],
+  "failures": 0,
+  "errors": 0,
+  "durationSeconds": 735.966,
+  "captureTests": [
+    "test_budget_retry_expiration_is_relative_even_before_one_minute_uptime (test_audit_capture_20261028.CaptureHandlerContractTests.test_budget_retry_expiration_is_relative_even_before_one_minute_uptime) ... ok",
+    "test_sqlite_optional_budget_error_reaches_unavailable_and_keeps_recording (test_audit_capture_20261028.CaptureHandlerContractTests.test_sqlite_optional_budget_error_reaches_unavailable_and_keeps_recording) ... ok",
+    "test_sqlite_stage_failure_finalizes_as_incomplete_and_releases_primary_owner (test_audit_capture_20261028.CaptureHandlerContractTests.test_sqlite_stage_failure_finalizes_as_incomplete_and_releases_primary_owner) ... ok",
+    "test_optional_budget_is_cached_and_does_not_run_per_sample (test_audit_capture_20261028.CaptureIndexFailureTests.test_optional_budget_is_cached_and_does_not_run_per_sample) ... ok",
+    "test_real_exclusive_index_lock_does_not_stop_or_delay_primary_tick_unboundedly (test_audit_capture_20261028.CaptureIndexFailureTests.test_real_exclusive_index_lock_does_not_stop_or_delay_primary_tick_unboundedly) ... ok",
+    "test_real_helper_keeps_sampling_with_corrupt_optional_index_and_closes_stage (test_audit_capture_20261028.CaptureIndexFailureTests.test_real_helper_keeps_sampling_with_corrupt_optional_index_and_closes_stage) ... ok",
+    "test_user_stage_sqlite_finalization_failure_still_closes_primary_stores_honestly (test_audit_capture_20261028.CaptureIndexFailureTests.test_user_stage_sqlite_finalization_failure_still_closes_primary_stores_honestly) ... ok"
+  ],
+  "limitations": "Class-level skip records are reported separately and are not subtracted twice from unittest.testsRun."
+}
