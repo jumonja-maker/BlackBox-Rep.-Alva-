@@ -94,11 +94,12 @@ class RecoveryGuardian:
         self.pid = self.process.pid
         threading.Thread(target=_reader, args=(self.process.stdout, self._messages, 8192),
                          daemon=True, name="blackbox-guardian-replies").start()
-        api = _WinAPI(identity)
+        api = None
         child_handle = None
         local_parent = None
         duplicated = ctypes.c_void_p()
         try:
+            api = _WinAPI(identity)
             from ctypes import wintypes as w
             api.k.DuplicateHandle.argtypes = [w.HANDLE, w.HANDLE, w.HANDLE,
                                               ctypes.POINTER(w.HANDLE), w.DWORD, w.BOOL, w.DWORD]
@@ -123,11 +124,12 @@ class RecoveryGuardian:
             self.process.wait(timeout=5)
             raise
         finally:
-            if local_parent:
+            if api and local_parent:
                 api.k.CloseHandle(local_parent)
-            if child_handle:
+            if api and child_handle:
                 api.k.CloseHandle(child_handle)
-            api.close()
+            if api:
+                api.close()
 
     def _send(self, message: dict[str, Any]) -> dict[str, Any]:
         with self._lock:
@@ -176,6 +178,18 @@ class RecoveryGuardian:
             self.process.stdout.close()
         if reply.get("recovery_status") == "RECOVERY_UNCONFIRMED":
             raise DebugError("RECOVERY_UNCONFIRMED", "GUARDIAN_RECOVERY_UNCONFIRMED")
+
+    def abandon(self) -> None:
+        """Stop only this owned guardian before parent performs otherwise-duplicate cleanup."""
+        self._closed = True
+        if self.process.poll() is None:
+            self.process.terminate()
+        self.process.wait(timeout=3)
+        if self.process.stdin:
+            self.process.stdin.close()
+        # The reader may be returning EOF concurrently; closing is idempotent.
+        if self.process.stdout:
+            self.process.stdout.close()
 
 
 def validate_plan(plan: Any) -> None:
@@ -316,10 +330,24 @@ def _write_report(handle: int | None, result: dict[str, Any]) -> None:
     descriptor = msvcrt.open_osfhandle(handle, os.O_WRONLY | os.O_BINARY)
     with os.fdopen(descriptor, "wb", closefd=True) as stream:
         stream.seek(0)
-        stream.write(json.dumps(result, ensure_ascii=True, sort_keys=True).encode("ascii")[:32768])
+        stream.write(encode_report(result))
         stream.truncate()
         stream.flush()
         os.fsync(stream.fileno())
+
+
+def encode_report(result: dict[str, Any]) -> bytes:
+    """Never truncate encoded JSON into a malformed or falsely successful report."""
+    encoded = json.dumps(result, ensure_ascii=True, sort_keys=True).encode("ascii")
+    if len(encoded) <= 32768:
+        return encoded
+    identity = result.get("target_identity", {})
+    reduced = {"status": "RECOVERY_UNCONFIRMED", "reason": result.get("reason", "UNKNOWN"),
+               "error": "RECOVERY_REPORT_DETAILS_EXCEEDED_BUDGET",
+               "target_identity": {"pid": identity.get("pid"),
+                                   "created_100ns": identity.get("created_100ns")},
+               "restored": result.get("restored", {}), "details_truncated": True}
+    return json.dumps(reduced, ensure_ascii=True, sort_keys=True).encode("ascii")
 
 
 def main() -> int:

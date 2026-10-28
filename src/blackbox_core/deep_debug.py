@@ -296,7 +296,8 @@ class _WinAPI:
             if count.value != len(value):
                 raise DebugError("RECOVERY_UNCONFIRMED", "SHORT_MEMORY_WRITE")
             if not self.k.FlushInstructionCache(self.handle, address, len(value)):
-                self.fail("FLUSH_INSTRUCTION_CACHE")
+                raise DebugError("RECOVERY_UNCONFIRMED", "MEMORY_CHANGED_BUT_INSTRUCTION_CACHE_FLUSH_FAILED",
+                                 ctypes.get_last_error())
             if self.read(address, len(value)) != value:
                 raise DebugError("RECOVERY_UNCONFIRMED", "MEMORY_WRITE_READBACK_MISMATCH")
         finally:
@@ -593,6 +594,11 @@ class DebugSession:
             if error in (0, 121):
                 return
             self._api.fail("WAIT_FOR_DEBUG_EVENT")
+        # From this instant Windows has stopped the event thread/process. Save
+        # ownership before touching memory/context so every failure path can
+        # continue or detach this actual pending event instead of losing it.
+        self._event = event
+        self._event_continue = DBG_EXCEPTION_NOT_HANDLED if event.code == 1 else DBG_CONTINUE
         raw = event.raw()
         if event.code in (2, 3, 6):
             # Debug API ownership: close thread/process/load-image handles supplied by Windows.
@@ -613,6 +619,7 @@ class DebugSession:
             code = DBG_EXCEPTION_NOT_HANDLED if event.code == 1 else DBG_CONTINUE
             if not self._api.k.ContinueDebugEvent(event.pid, event.tid, code):
                 self._api.fail("CONTINUE_NON_TARGET_DEBUG_EVENT")
+            self._event = None
             return
         if event.code == 5:
             self._api.k.ContinueDebugEvent(event.pid, event.tid, DBG_CONTINUE)
@@ -623,6 +630,7 @@ class DebugSession:
         if event.code != 1:
             if not self._api.k.ContinueDebugEvent(event.pid, event.tid, DBG_CONTINUE):
                 self._api.fail("CONTINUE_DEBUG_EVENT")
+            self._event = None
             return
         exception = struct.unpack_from("<I", raw, 0)[0]
         address = struct.unpack_from("<Q", raw, 16)[0]
@@ -630,7 +638,10 @@ class DebugSession:
         matching = next(((key, item) for key, item in self._breakpoints.items()
                          if item["address"] == address and item["installed"]), None)
         if exception == EXCEPTION_BREAKPOINT and matching:
+            self._event_continue = DBG_CONTINUE
+            self.state = "PAUSED"
             key, item = matching
+            self._paused_breakpoint = key
             handle, created = self._api.thread(event.tid)
             try:
                 context = self._api.context(handle)
@@ -646,13 +657,14 @@ class DebugSession:
                 item["hit_context"]["phase"] = "rewind_verified"
             finally:
                 self._api.k.CloseHandle(handle)
-            self._paused_breakpoint = key
             self._event = event
             self._event_continue = DBG_CONTINUE
             self.state = "PAUSED"
             self._sync_guard()
             return
         if exception == EXCEPTION_SINGLE_STEP and self._stepping and event.tid == self._stepping["tid"]:
+            self._event_continue = DBG_CONTINUE
+            self.state = "PAUSED"
             step = self._stepping
             handle, _ = self._api.thread(event.tid, step["created_100ns"])
             try:
@@ -677,6 +689,7 @@ class DebugSession:
                 return
             if not self._api.k.ContinueDebugEvent(event.pid, event.tid, DBG_CONTINUE):
                 self._api.fail("CONTINUE_AFTER_OWN_STEP")
+            self._event = None
             self.state = "RUNNING"
             return
         if exception == EXCEPTION_BREAKPOINT and self._pause_requested:
@@ -691,12 +704,17 @@ class DebugSession:
             return
         if not self._api.k.ContinueDebugEvent(event.pid, event.tid, DBG_EXCEPTION_NOT_HANDLED):
             self._api.fail("CONTINUE_UNOWNED_EXCEPTION")
+        self._event = None
 
     def _continue(self, command: _Command, *, step: bool) -> None:
         self._require_attached()
         if self._event is None:
             raise DebugError("OPERATION_FAILED", "NO_STOPPED_DEBUG_EVENT")
         event = self._event
+        if self._paused_breakpoint:
+            breakpoint = self._breakpoints.get(self._paused_breakpoint)
+            if breakpoint and breakpoint.get("hit_context", {}).get("phase") != "rewind_verified":
+                raise DebugError("RECOVERY_UNCONFIRMED", "BREAKPOINT_INSTRUCTION_POINTER_NOT_VERIFIED")
         if step or self._paused_breakpoint:
             handle, created = self._api.thread(event.tid)
             try:
@@ -771,6 +789,7 @@ class DebugSession:
         item = self._breakpoints.get(identifier)
         if item is None:
             raise DebugError("OPERATION_FAILED", "UNKNOWN_BREAKPOINT")
+        self._restore_breakpoint_context(item)
         if item["installed"]:
             self._api.replace(item["address"], b"\xcc", bytes.fromhex(item["original_hex"]), executable=True)
         item["installed"] = item["enabled"] = False
@@ -781,6 +800,27 @@ class DebugSession:
         self._sync_guard()
         return _result(data={"breakpoint_id": identifier, "enabled": False, "removed": remove,
                              "original_byte_verified": True})
+
+    def _restore_breakpoint_context(self, item: dict[str, Any]) -> None:
+        hit = item.get("hit_context")
+        if not hit or hit["phase"] == "rewind_verified":
+            return
+        if self._event is None or self._event.tid != hit["tid"]:
+            raise DebugError("RECOVERY_UNCONFIRMED", "BREAKPOINT_STOP_CONTEXT_NO_LONGER_HELD")
+        handle, _ = self._api.thread(hit["tid"], hit["created_100ns"])
+        try:
+            context = self._api.context(handle)
+            rip = context.get64(248)
+            if rip == hit["rip_before"] == item["address"] + 1:
+                context.set64(248, item["address"])
+                self._api.set_context(handle, context)
+            elif rip != item["address"]:
+                raise DebugError("RECOVERY_UNCONFIRMED", "BREAKPOINT_INSTRUCTION_POINTER_CHANGED")
+            if self._api.context(handle).get64(248) != item["address"]:
+                raise DebugError("RECOVERY_UNCONFIRMED", "BREAKPOINT_RIP_RESTORE_READBACK_FAILED")
+            hit["phase"] = "rewind_verified"
+        finally:
+            self._api.k.CloseHandle(handle)
 
     def _suspend(self, p: dict[str, Any]) -> dict[str, Any]:
         tid = _positive(p.get("tid"), "tid", 0xFFFFFFFF)
@@ -836,6 +876,8 @@ class DebugSession:
         original, value = _hex(p.get("expected_hex"), "expected_hex"), _hex(p.get("value_hex"), "value_hex")
         if len(original) != len(value):
             raise DebugError("OPERATION_FAILED", "MEMORY_WRITE_SIZE_MISMATCH")
+        if len(self._changes) >= 64:
+            raise DebugError("LIMIT_REACHED", "PRIVATE_MEMORY_CHANGE_COUNT_BUDGET")
         if sum(len(bytes.fromhex(item["original_hex"])) for item in self._changes.values()) + len(value) > MAX_PRIVATE_BYTES:
             raise DebugError("LIMIT_REACHED", "PRIVATE_MEMORY_RECOVERY_BUDGET")
         if any(address < item["address"] + len(bytes.fromhex(item["value_hex"])) and
@@ -874,6 +916,19 @@ class DebugSession:
     def _cleanup(self) -> dict[str, Any]:
         errors: list[str] = []
         self.state = "DETACHING"
+        if self._guard:
+            try:
+                self._sync_guard()
+            except BaseException as exc:
+                # Do not resume against a stale live guardian plan: it could
+                # decrement the same suspension again. First establish that
+                # the owned guardian has exited, then perform local cleanup.
+                try:
+                    self._guard.abandon()
+                    self._guard = None
+                    errors.append(f"GUARDIAN_UNAVAILABLE_LOCAL_RECOVERY: {exc}")
+                except BaseException as stop_error:
+                    errors.append(f"GUARDIAN_SHUTDOWN_UNCONFIRMED: {stop_error}")
         # If running, an owned debug-break provides a consistent context for RIP/TF cleanup.
         if self._attached and self._event is None:
             try:
@@ -902,6 +957,7 @@ class DebugSession:
                 errors.append(f"TRAP_FLAG: {exc}")
         for identifier, item in list(self._breakpoints.items()):
             try:
+                self._restore_breakpoint_context(item)
                 current = self._api.read(item["address"], 1)
                 original = bytes.fromhex(item["original_hex"])
                 if current == b"\xcc":

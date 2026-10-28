@@ -11,15 +11,18 @@ from blackbox_core.deep_contracts import ProcessIdentity
 from blackbox_core.deep_debug import (
     DebugError, DebugSession, _Command, _Context, _DebugEvent, _hex, _positive,
 )
-from blackbox_core.deep_debug_guardian import recover, validate_plan
+from blackbox_core.deep_debug_guardian import encode_report, recover, validate_plan
 
 
 class FakeKernel:
     def __init__(self):
         self.counts = {100: 2}
         self.closed = []
+        self.before_suspend = None
 
     def SuspendThread(self, handle):
+        if self.before_suspend:
+            self.before_suspend()
         before = self.counts[handle]
         self.counts[handle] += 1
         return before
@@ -42,6 +45,7 @@ class FakeAPI:
         self.k = FakeKernel()
         self.replacements = []
         self.alive = True
+        self.before_replace = None
 
     def verify(self):
         if not self.alive:
@@ -61,6 +65,8 @@ class FakeAPI:
         self.verify()
         if self.memory[address] != expected:
             raise DebugError("OPERATION_FAILED", "EXPECTED_BYTES_MISMATCH")
+        if self.before_replace:
+            self.before_replace()
         self.memory[address] = value
         self.replacements.append((address, expected, value, executable))
 
@@ -141,13 +147,17 @@ class DeepDebugContracts(unittest.TestCase):
 
     def test_memory_originals_never_enter_result_and_rollback_is_readback_verified(self):
         item = session()
+        item._api.before_replace = lambda: self.assertEqual(
+            item._guard.plans[-1]["changes"][0]["original_hex"], b"original".hex())
         output = item._write_memory({"address": 0x1000, "expected_hex": b"original".hex(),
                                      "value_hex": b"modified".hex()})
         self.assertEqual(output["status"], "COMPLETED")
         self.assertNotIn("original_hex", str(output))
         self.assertNotIn(b"original".hex(), str(output))
         identifier = output["data"]["change_id"]
-        self.assertEqual(item._guard.plans[0]["changes"][0]["original_hex"], b"original".hex())
+        prepared = next(p for p in item._guard.plans if p["changes"])
+        self.assertEqual(prepared["changes"][0]["original_hex"], b"original".hex())
+        item._api.before_replace = None
         restored = item._rollback_memory({"change_id": identifier})
         self.assertTrue(restored["data"]["original_bytes_verified"])
         self.assertEqual(item._api.memory[0x1000], b"original")
@@ -165,10 +175,12 @@ class DeepDebugContracts(unittest.TestCase):
 
     def test_owned_suspend_resume_preserves_preexisting_suspend_counts(self):
         item = session()
+        item._api.k.before_suspend = lambda: self.assertEqual(
+            item._guard.plans[-1]["suspensions"][0]["phase"], "pending")
         output = item._suspend({"tid": 7, "thread_created_100ns": 45678})
         self.assertEqual(item._api.k.counts[100], 3)
-        self.assertEqual(item._guard.plans[0]["suspensions"][0]["phase"], "pending")
-        self.assertEqual(item._guard.plans[1]["suspensions"][0]["phase"], "active")
+        phases = [p["suspensions"][0]["phase"] for p in item._guard.plans if p["suspensions"]]
+        self.assertEqual(phases, ["pending", "active"])
         restored = item._resume({"suspension_id": output["data"]["suspension_id"]})
         self.assertEqual(item._api.k.counts[100], 2)
         self.assertEqual(restored["data"]["owned_decrement"], 1)
@@ -196,6 +208,17 @@ class DeepDebugContracts(unittest.TestCase):
 
 
 class DeepRecoveryContracts(unittest.TestCase):
+    def test_oversize_recovery_report_stays_valid_json_and_never_claims_success(self):
+        import json
+        original = {"status": "COMPLETED", "reason": "HELPER_EXITED",
+                    "target_identity": {"pid": 88, "created_100ns": 12345,
+                                        "image_path": "Ж" * 32768}, "restored": {"memory_changes": 1}}
+        encoded = encode_report(original)
+        self.assertLessEqual(len(encoded), 32768)
+        parsed = json.loads(encoded)
+        self.assertEqual(parsed["status"], "RECOVERY_UNCONFIRMED")
+        self.assertTrue(parsed["details_truncated"])
+
     def test_immutable_identity_refuses_recovery_against_replaced_target(self):
         api = FakeAPI()
         api.alive = False
