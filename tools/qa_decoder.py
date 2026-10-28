@@ -77,7 +77,7 @@ def real_owned_eventpipe_qa(helper, output):
     state = work / "state"
     state.mkdir()
     process = subprocess.Popen(
-        ["dotnet", str(managed / "out/Probe.dll"), str(state), "30"],
+        ["dotnet", str(managed / "out/Probe.dll"), str(state), "50"],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     trace = None
     try:
@@ -94,14 +94,19 @@ def real_owned_eventpipe_qa(helper, output):
         captures.mkdir()
         trace = DotnetTrace(captures, process.pid, seconds=2, profile="gc-collect")
         trace.start()
-        deadline = time.monotonic() + 25
+        deadline = time.monotonic() + 40
         captured = None
         while captured is None and time.monotonic() < deadline:
             captured = trace.poll()
             if captured is None:
                 time.sleep(.05)
-        require(captured is not None and captured.get("status") == "COMPLETED",
-                "REAL_EVENTPIPE_GUARDIAN_DID_NOT_COMPLETE: " + repr(captured))
+        if captured is None or captured.get("status") != "COMPLETED":
+            # Fail closed. Show bounded collector diagnostics only on failure.
+            log_path = next(captures.glob("eventpipe-*.log"), None)
+            tail = (log_path.read_text(encoding="utf-8", errors="replace")[-1600:]
+                    if log_path and log_path.is_file() else "COLLECTOR_LOG_UNAVAILABLE")
+            raise AssertionError("REAL_EVENTPIPE_GUARDIAN_DID_NOT_COMPLETE: " +
+                                 repr(captured) + "; tool_log_tail=" + repr(tail))
         require(process.poll() is None, "REAL_EVENTPIPE_QA_TARGET_EXITED_DURING_CAPTURE")
         journal = captures / captured["journal"]
         details = captured["details"]
@@ -111,6 +116,8 @@ def real_owned_eventpipe_qa(helper, output):
         digest = file_hash(trace_file)
         require(details["result"]["sha256"] == digest,
                 "REAL_EVENTPIPE_QA_JOURNAL_DIGEST_MISMATCH")
+        require(details["result"].get("stop_completion_status") == "TOOL_EXIT_OBSERVED",
+                "REAL_EVENTPIPE_QA_TOOL_EXIT_NOT_CONFIRMED")
         index = work / "eventpipe-index.sqlite3"
         with patch("blackbox_core.decoder_service.helper_path", return_value=helper):
             meta = decode_file(trace_file, index)

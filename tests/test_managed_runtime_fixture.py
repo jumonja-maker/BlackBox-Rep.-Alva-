@@ -16,9 +16,9 @@ class ManagedRuntimeFixtureTests(unittest.TestCase):
   env={**os.environ,'DOTNET_CLI_TELEMETRY_OPTOUT':'1','DOTNET_SKIP_FIRST_TIME_EXPERIENCE':'1'}
   done=subprocess.run(['dotnet','build','Probe.csproj','-c','Release','-o','out','--verbosity','quiet'],cwd=root,env=env,capture_output=True,text=True,timeout=90)
   self.assertEqual(done.returncode,0,(done.stdout+done.stderr)[-4000:]);return root/'out'/'Probe.dll'
- def launch(self,root):
+ def launch(self,root,seconds=30):
   dll=self.build(root);state=root/'run';state.mkdir()
-  process=subprocess.Popen(['dotnet',str(dll),str(state),'30'],stdout=subprocess.DEVNULL,stderr=subprocess.PIPE)
+  process=subprocess.Popen(['dotnet',str(dll),str(state),str(seconds)],stdout=subprocess.DEVNULL,stderr=subprocess.PIPE)
   deadline=time.monotonic()+8
   while not (state/'ready.json').is_file() and process.poll() is None and time.monotonic()<deadline:time.sleep(.02)
   self.assertTrue((state/'ready.json').is_file(),'Managed fixture failed to initialize')
@@ -39,9 +39,9 @@ class ManagedRuntimeFixtureTests(unittest.TestCase):
  @unittest.skipUnless(shutil.which('dotnet-trace'),'Local dotnet-trace not installed; no invented GC capture')
  def test_real_optin_eventpipe_file_remains_honestly_undecoded(self):
   with tempfile.TemporaryDirectory() as temp:
-   root=Path(temp);process,state,info=self.launch(root);artifacts=root/'artifacts';artifacts.mkdir();trace=DotnetTrace(artifacts,info['pid'],seconds=2)
+   root=Path(temp);process,state,info=self.launch(root,seconds=50);artifacts=root/'artifacts';artifacts.mkdir();trace=DotnetTrace(artifacts,info['pid'],seconds=2)
    try:
-    trace.start();deadline=time.monotonic()+15;result=None
+    trace.start();deadline=time.monotonic()+40;result=None
     while result is None and time.monotonic()<deadline:result=trace.poll();time.sleep(.05)
     self.assertIsNotNone(result);self.assertEqual(result['status'],'COMPLETED',result)
     self.assertFalse(result['decoded']);self.assertIsNone(result['lost_events']);self.assertIsNone(process.poll())
@@ -51,6 +51,7 @@ class ManagedRuntimeFixtureTests(unittest.TestCase):
     expected=hashlib.sha256(captured.read_bytes()).hexdigest()
     recorded=result['details']['result']
     self.assertEqual(recorded['sha256'],expected)
+    self.assertEqual(recorded['stop_completion_status'],'TOOL_EXIT_OBSERVED')
     anchors=result['details']['clock_anchors']
     for name in ('before_tool_spawn','after_tool_spawn','after_tool_exit',
                  'guardian_finally'):

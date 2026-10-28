@@ -91,6 +91,21 @@ service, automatic investigation, or change to the ordinary sampling cadence.
   original hash to the guardian journal and checks all four QPC stages.
   Unsupported WPR is marked `NOT_AVAILABLE_NO_WPR_OR_ADMIN`, not success.
   The independent Windows shell raw-capture TTL test remains unchanged.
+- EventPipe's owner now allows a **finite 12-second tool-startup allowance**
+  and up to **8 seconds for graceful stop and trace rundown**. With the
+  maximum 60-second requested duration, collection monitoring plus final
+  stop wait is bounded to 80 seconds (excluding setup and local verification).
+  The target is not terminated. If the owned collector must be killed after
+  that deadline, the result is **FAILED** with
+  `FORCED_TERMINATION_AFTER_BOUNDED_GRACE`; the presence of a partial
+  file cannot override failed tool completion. A normal collector exit
+  is still not proof of event coverage, and decoder validation is separate.
+- A busy Windows runner once produced an incomplete 4096-byte EventPipe
+  file with collector exit code 1 after the previous 2-second stop grace.
+  CI now retains collector log context on failure rather than silently
+  retrying or considering an incomplete trace successful. The revised
+  limits do not guarantee every large .NET application will finish rundown;
+  they preserve fail-closed results if the bounded stop still expires.
 - `tests/test_decoder_gui.py`: RU/EN manual journal review and
   disabled review when a replacement trace fails.
 - `tests/test_decoder_index.py`: reject malformed signed QPC strings

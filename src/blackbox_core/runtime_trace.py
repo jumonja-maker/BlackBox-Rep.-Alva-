@@ -7,6 +7,23 @@ from .trace_owner import _read,_write
 from .session_v2 import safe_path
 from .trace_clock_evidence import capture_trace_clock_bracket
 PROFILES=('gc-collect','gc-verbose')
+# dotnet-trace may need extra time to attach and to write its rundown.
+# Finite tool budgets, NOT a change to user-selected capture duration.
+EVENTPIPE_STARTUP_GRACE_S=12
+EVENTPIPE_FINALIZE_GRACE_S=8
+
+
+def eventpipe_collection_deadline_seconds(seconds):
+ if type(seconds) is not int or not 1 <= seconds <= 60:
+  raise ValueError('INVALID_EVENTPIPE_POLICY')
+ return seconds + EVENTPIPE_STARTUP_GRACE_S
+
+
+def eventpipe_capture_confirmed(rc, size, forced_termination):
+ """Never certify a forced or incomplete trace as successfully collected."""
+ return rc == 0 and size > 0 and not forced_termination
+
+
 def runtime_capability(pid):
  from .preparation import inspect_target
  data=inspect_target(pid);runtime='dotnet' in data['runtime_candidates'];tool=shutil.which('dotnet-trace')
@@ -54,7 +71,7 @@ def run(journal):
    owner=OwnedProcess(args,stdin=subprocess.PIPE,stdout=stream,stderr=stream,env={**os.environ,'DOTNET_CLI_TELEMETRY_OPTOUT':'1'})
    data['clock_anchors']['after_tool_spawn']=capture_trace_clock_bracket()
    data.update(state='RECORDING',collector_pid=owner.process.pid,collector_created=psutil.Process(owner.process.pid).create_time());_write(path,data)
-   deadline=time.monotonic()+policy['seconds']+5;reason=None
+   deadline=time.monotonic()+eventpipe_collection_deadline_seconds(policy['seconds']);reason=None;forced_termination=False
    while owner.process.poll() is None:
     if lease.wait(.1):reason='LEASE_EOF_OR_EXPLICIT_STOP';break
     if time.monotonic()>=deadline:reason='TTL_EXPIRED';break
@@ -63,12 +80,14 @@ def run(journal):
    if reason and owner.process.poll() is None:
     try:owner.process.stdin.write(b'\n');owner.process.stdin.flush()
     except (OSError,ValueError):pass
-    try:owner.process.wait(timeout=2)
-    except subprocess.TimeoutExpired:owner.close(kill=True)
+    try:owner.process.wait(timeout=EVENTPIPE_FINALIZE_GRACE_S)
+    except subprocess.TimeoutExpired:
+     forced_termination=True
+     owner.close(kill=True)
    rc=owner.process.poll();size=capture.stat().st_size if capture.is_file() else 0
    data['clock_anchors']['after_tool_exit']=capture_trace_clock_bracket()
    if owner.process.stdin:owner.process.stdin.close()
-  success=rc==0 and size>0
+  success=eventpipe_capture_confirmed(rc,size,forced_termination)
   # An independently computed local trace digest can later be compared to
   # decoder-index.input_sha256. The journal itself is NOT authenticated.
   captured_sha256=None
@@ -81,6 +100,7 @@ def run(journal):
    result={'source':'EVENTPIPE_DOTNET_TRACE','status':'TOOL_CAPTURED_UNDECODED' if success else 'INCOMPLETE_OR_UNSUPPORTED',
     'exit_code':rc,'bytes':size,'path':capture.name,'sha256':captured_sha256,
     'profile':policy['profile'],'decoded':False,'lost_events':None,
+    'stop_completion_status':'FORCED_TERMINATION_AFTER_BOUNDED_GRACE' if forced_termination else 'TOOL_EXIT_OBSERVED',
     'handshake_status':'TOOL_SUCCESS_NONEMPTY_OUTPUT_NOT_INDEPENDENTLY_ATTESTED' if success else 'NOT_CONFIRMED',
     'size_policy':'POLLED_SOFT_LIMIT_NOT_FILESYSTEM_QUOTA'})
  except BaseException as exc:data.update(state='FAILED',error=(type(exc).__name__+': '+str(exc))[:512])

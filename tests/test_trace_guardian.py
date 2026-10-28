@@ -8,6 +8,25 @@ from unittest.mock import patch
 from blackbox_core.trace_owner import TraceSupervisor,run,_read
 
 class TraceGuardianTests(unittest.TestCase):
+    def test_eventpipe_deadline_is_bounded_and_forced_exit_never_succeeds(self):
+        from blackbox_core.runtime_trace import (
+            eventpipe_collection_deadline_seconds, eventpipe_capture_confirmed,
+            EVENTPIPE_FINALIZE_GRACE_S,
+        )
+        self.assertEqual(eventpipe_collection_deadline_seconds(2), 14)
+        self.assertLessEqual(
+            eventpipe_collection_deadline_seconds(60) + EVENTPIPE_FINALIZE_GRACE_S, 80)
+        for invalid in (0, 61, True, "2"):
+            with self.subTest(seconds=invalid):
+                with self.assertRaisesRegex(ValueError, "INVALID_EVENTPIPE_POLICY"):
+                    eventpipe_collection_deadline_seconds(invalid)
+        self.assertTrue(eventpipe_capture_confirmed(0, 4096, False))
+        self.assertFalse(eventpipe_capture_confirmed(0, 4096, True))
+        self.assertFalse(eventpipe_capture_confirmed(1, 4096, False))
+        self.assertFalse(eventpipe_capture_confirmed(0, 0, False))
+        self.assertFalse(eventpipe_capture_confirmed(None, 4096, False))
+
+
     def test_real_guardian_failure_is_journalled_without_affecting_recorder(self):
         if os.name=='nt':self.skipTest('Non-Windows source-unavailable case')
         with tempfile.TemporaryDirectory() as tmp:
