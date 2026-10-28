@@ -8,6 +8,31 @@ from unittest.mock import patch
 from blackbox_core.trace_owner import TraceSupervisor,run,_read
 
 class TraceGuardianTests(unittest.TestCase):
+    def test_native_stack_profile_is_explicit_allowlisted_and_default_is_unchanged(self):
+        from blackbox_core.windows_research import WprCapture
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual(TraceSupervisor(tmp).data['policy']['profile'], 'GeneralProfile.Light')
+            for profile in ('GeneralProfile.Light', 'CPU.Verbose'):
+                with patch('blackbox_core.windows_research.wpr_tool', return_value='wpr.exe'):
+                    capture = WprCapture(tmp, profile=profile)
+                with patch.object(capture, '_run') as command:
+                    result = capture.start()
+                    command.assert_called_once_with(['-start', profile])
+                    self.assertEqual(result['profile'], profile)
+                    capture.active = False
+            for invalid in ('OtherProfile', '../untrusted.wprp!X', 'CPU -filemode', True, None):
+                with self.subTest(profile=invalid):
+                    with self.assertRaisesRegex(ValueError, 'INVALID_WPR_PROFILE'):
+                        TraceSupervisor(tmp, profile=invalid)
+                    with self.assertRaisesRegex(ValueError, 'INVALID_WPR_PROFILE'):
+                        WprCapture(tmp, profile=invalid)
+            trace = TraceSupervisor(tmp)
+            trace.data['policy']['profile'] = 'untrusted.wprp!X'
+            trace.path.write_text(json.dumps(trace.data))
+            with patch('blackbox_core.research_worker._streams', return_value=(io.StringIO(''), io.StringIO())):
+                with self.assertRaisesRegex(ValueError, 'INVALID_WPR_PROFILE'):
+                    run(trace.path)
+
     def test_eventpipe_deadline_is_bounded_and_forced_exit_never_succeeds(self):
         from blackbox_core.runtime_trace import (
             eventpipe_collection_deadline_seconds, eventpipe_capture_confirmed,
@@ -37,18 +62,19 @@ class TraceGuardianTests(unittest.TestCase):
     def test_guardian_stops_its_named_capture_after_eof_and_records_hash(self):
         captures=[]
         class FakeCapture:
-            def __init__(self,folder):self.folder=Path(folder);self.active=False;self.tool=None;captures.append(self)
+            def __init__(self,folder,*,profile="GeneralProfile.Light"):self.folder=Path(folder);self.profile=profile;self.active=False;self.tool=None;captures.append(self)
             def start(self):self.active=True;return {'status':'RECORDING'}
             def stop(self):
                 self.active=False;p=self.folder/'fixture.etl';p.write_bytes(b'explicit synthetic trace fixture')
                 return {'status':'CAPTURED','path':p.name,'bytes':p.stat().st_size}
             def cancel(self):self.active=False
         with tempfile.TemporaryDirectory() as tmp:
-            trace=TraceSupervisor(tmp,seconds=1)
+            trace=TraceSupervisor(tmp,seconds=1,profile='CPU.Verbose')
             trace.path.write_text(json.dumps(trace.data))
             with patch('blackbox_core.windows_research.WprCapture',FakeCapture),patch('blackbox_core.research_worker._streams',return_value=(io.StringIO(''),io.StringIO())):
                 self.assertEqual(run(trace.path),0)
             data=_read(trace.path);self.assertEqual(data['state'],'COMPLETED')
+            self.assertEqual(captures[0].profile,'CPU.Verbose')
             self.assertEqual(data['stop_reason'],'LEASE_EOF_OR_EXPLICIT_STOP');self.assertFalse(captures[0].active)
             self.assertEqual(len(data['result']['sha256']),64)
             # The journal carries brackets from the owning capture guardian,

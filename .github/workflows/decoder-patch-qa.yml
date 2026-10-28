@@ -47,6 +47,7 @@ jobs:
         run: |
           python -m unittest discover -s tests -p 'test_decoder*.py' -v
           python -m unittest discover -s tests -p 'test_trace_clock_evidence.py' -v
+          python -m unittest discover -s tests -p 'test_trace_guardian.py' -v
       - name: Real native PE/PDB parser and derived-report QA
         run: python tools/qa_decoder_patch.py --output patch-evidence/native
       - uses: actions/upload-artifact@v4
@@ -94,6 +95,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Decoder tests failed' }
           python -m unittest discover -s tests -p 'test_trace_clock_evidence.py' -v
           if ($LASTEXITCODE -ne 0) { throw 'Clock evidence tests failed' }
+          python -m unittest discover -s tests -p 'test_trace_guardian.py' -v
+          if ($LASTEXITCODE -ne 0) { throw 'Capture ownership tests failed' }
       - name: Real EventPipe/ETW regression
         run: python tools/qa_decoder.py --helper decoder/BLACK.BOX-Decoder.exe --output patch-decoder-qa
       - name: Real native module to PE/PDB and sample-tree acceptance

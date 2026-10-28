@@ -81,7 +81,7 @@ def native_wpr(output,binary,pdb,helper):
             'NATIVE_ETW_ACCEPTANCE_ONLY_ON_DISPOSABLE_WINDOWS_CI')
     require(privilege()['mode']=='ADMINISTRATOR' and wpr_tool(), 'REAL_WPR_REQUIRED_FOR_ACCEPTANCE')
     capture=output/'wpr';capture.mkdir()
-    trace=TraceSupervisor(capture,seconds=5,max_output_bytes=256*1024**2)
+    trace=TraceSupervisor(capture,seconds=5,max_output_bytes=256*1024**2,profile="CPU.Verbose")
     owned=None
     try:
         trace.start();deadline=time.monotonic()+25
@@ -93,6 +93,8 @@ def native_wpr(output,binary,pdb,helper):
         trace.process.wait(timeout=85)
         result=trace.poll();journal=_read(trace.path)
         require(result and result['status']=='COMPLETED', 'NATIVE_WPR_CAPTURE_FAILED')
+        require(journal['policy']['profile']=='CPU.Verbose' and
+                journal['start_result'].get('profile')=='CPU.Verbose', 'NATIVE_STACK_PROFILE_NOT_APPLIED')
         require(owned.process.poll() is None, 'OWNED_NATIVE_QA_TARGET_EXITED_EARLY')
     finally:
         if trace.active:trace.stop()
@@ -117,7 +119,8 @@ def native_wpr(output,binary,pdb,helper):
                     resolved=proof['resolved_frames'];example=proof
     evidence={'pid':pid,'stack_events':rows_seen,'bound_fixture_frames':bound_frames,
               'resolved_frames_in_example':resolved,'example':example,
-              'source_trace_sha256':digest,'native_modules':meta.get('native_modules')}
+              'source_trace_sha256':digest,'native_modules':meta.get('native_modules'),
+              'capture_profile':journal['policy']['profile']}
     (output/'real-native-etw.json').write_text(json.dumps(evidence,indent=2),encoding='utf-8')
     require(file_hash(source)==digest,'REAL_NATIVE_TRACE_MODIFIED')
     require(example is not None,'REAL_NATIVE_TRACE_PE_PDB_END_TO_END_NOT_CONFIRMED')

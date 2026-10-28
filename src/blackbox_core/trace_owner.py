@@ -16,6 +16,7 @@ import time
 from uuid import uuid4
 from .library_files import replace_owned_status
 from .trace_clock_evidence import capture_trace_clock_bracket
+from .windows_research import WPR_PROFILES
 
 MAX_JOURNAL_BYTES=65536
 
@@ -45,6 +46,9 @@ def run(journal):
     from .windows_research import WprCapture
     inp,_=_streams();path=Path(journal);data=_read(path)
     seconds=data['policy']['duration_s'];max_bytes=data['policy']['max_output_bytes']
+    profile=data['policy'].get('profile','GeneralProfile.Light')
+    if type(profile) is not str or profile not in WPR_PROFILES:
+        raise ValueError('INVALID_WPR_PROFILE')
     if type(seconds) is not int or not 1<=seconds<=60 or type(max_bytes) is not int or not 1024**2<=max_bytes<=1024**3:
         raise ValueError('INVALID_TRACE_POLICY')
     lease_lost=Event()
@@ -52,7 +56,7 @@ def run(journal):
         # Any command or EOF means finish; there is no arbitrary instruction.
         inp.readline(64);lease_lost.set()
     Thread(target=lease,name='blackbox-trace-lease',daemon=True).start()
-    capture=WprCapture(path.parent);capture.instance=data['instance']
+    capture=WprCapture(path.parent,profile=profile);capture.instance=data['instance']
     if capture.tool:
         tool=Path(capture.tool);digest=hashlib.sha256()
         with tool.open('rb') as stream:
@@ -103,7 +107,9 @@ def run(journal):
 
 
 class TraceSupervisor:
-    def __init__(self,folder,*,seconds=30,max_output_bytes=256*1024**2,target=None):
+    def __init__(self,folder,*,seconds=30,max_output_bytes=256*1024**2,target=None,profile="GeneralProfile.Light"):
+        if type(profile) is not str or profile not in WPR_PROFILES:
+            raise ValueError("INVALID_WPR_PROFILE")
         if type(seconds) is not int or not 1<=seconds<=60:raise ValueError('INVALID_TRACE_DURATION')
         if type(max_output_bytes) is not int or not 1024**2<=max_output_bytes<=1024**3:raise ValueError('INVALID_TRACE_SIZE_POLICY')
         self.folder=Path(folder);self.instance='BLACKBOX_'+uuid4().hex
@@ -111,7 +117,7 @@ class TraceSupervisor:
         self.data={'schema_version':1,'instance':self.instance,'state':'RESERVED',
             'consent':'EXPLICIT_USER_COMMAND','target':target,
             'scope':'SYSTEM_WIDE_MAY_INCLUDE_OTHER_PROCESSES',
-            'policy':{'duration_s':seconds,'max_output_bytes':max_output_bytes,
+            'policy':{'duration_s':seconds,'max_output_bytes':max_output_bytes,'profile':profile,
                 'mode':'WPR_CIRCULAR_MEMORY','disk_quota':'NOT_HARD_LIMIT'},
             'recovery':'ONLY_THIS_NAMED_INSTANCE_MAY_BE_CANCELLED'}
         import psutil

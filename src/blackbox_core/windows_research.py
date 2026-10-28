@@ -15,6 +15,8 @@ import time
 from uuid import uuid4
 
 
+WPR_PROFILES = ("GeneralProfile.Light", "CPU.Verbose")
+
 def _status(error):
     return "ACCESS_DENIED" if error==5 else "TIMEOUT" if error in (1460,258) else "NOT_OBSERVED"
 
@@ -206,7 +208,10 @@ def minidump(pid, destination, *, full=False):
 
 class WprCapture:
     """An explicitly named, private WPR instance; never stop the global one."""
-    def __init__(self, folder):
+    def __init__(self, folder, *, profile="GeneralProfile.Light"):
+        if type(profile) is not str or profile not in WPR_PROFILES:
+            raise ValueError("INVALID_WPR_PROFILE")
+        self.profile=profile
         self.folder=Path(folder);self.instance="BLACKBOX_"+uuid4().hex
         self.tool=wpr_tool()
         self.active=False
@@ -230,14 +235,14 @@ class WprCapture:
         if not self.tool:raise OSError("WPR_TOOL_UNAVAILABLE")
         self.active=True
         try:
-            self._run(["-start","GeneralProfile.Light"])
+            self._run(["-start",self.profile])
         except BaseException:
             # A start timeout leaves ownership uncertain. Cancel only this
             # random named instance, never another profiler's recording.
             try:self.cancel()
             except OSError:pass
             raise
-        return {"source":"ETW_WPR","status":"RECORDING","instance":self.instance,
+        return {"source":"ETW_WPR","status":"RECORDING","instance":self.instance,"profile":self.profile,
             "scope":"SYSTEM_WIDE_TRACE_MAY_INCLUDE_OTHER_PROCESSES",
             "retention":"WPR_MEMORY_MODE_CIRCULAR","lost_events":None}
 

@@ -87,7 +87,14 @@ RU/EN GUI worker lifecycle and stale-result clearing.
 
 `tools/qa_decoder_patch.py` distinguishes real PE/PDB with **synthetic trace
 metadata** from a **real native Windows process + WPR + decoder + PDB** run.
-The latter is mandatory in the branch's Windows job: unavailable capture or
+The latter explicitly requests the allowlisted `CPU.Verbose` WPR profile
+for its five-second owned fixture. Default production capture stays
+`GeneralProfile.Light`. The first end-to-end attempt recorded zero stacks
+with the light profile and therefore correctly failed acceptance. Profile
+selection is journaled, arbitrary/custom WPR profiles are refused, and the
+same named-session guardian owns TTL and cleanup.
+
+This end-to-end test is mandatory in the branch's Windows job: unavailable capture or
 missing named fixture frames fails that acceptance gate, not a false success.
 Windows compilation and end-to-end results must be read from the exact branch
 CI run. Local Linux parser tests alone do not certify Windows/TraceEvent or UI.
@@ -106,3 +113,6 @@ No complete feature acceptance or merge authorization is implied by this file.
 
 The helper remains pinned to TraceEvent 4.0.0. These references guide parsing;
 tests against the pinned build are necessary to validate its actual behavior.
+
+- Microsoft WPR profiles and verbose stack capture:
+  https://devblogs.microsoft.com/performance-diagnostics/wpr-start-and-stop-commands/
