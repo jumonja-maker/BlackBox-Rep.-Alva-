@@ -57,13 +57,16 @@ class OwnedProcess:
 
     def close(self, *, kill=False):
         if self._closed:return
-        if kill or self.process.poll() is None:
-            if os.name == 'nt': self.kernel.TerminateJobObject(self.job, 1)
-            else:
-                try: os.killpg(self.process.pid, signal.SIGKILL)
-                except ProcessLookupError: pass
-            try: self.process.wait(timeout=2)
-            except subprocess.TimeoutExpired: pass
+        if os.name != 'nt':
+            # Popen owns a fresh session/process group. A normal exit of its
+            # leader does not mean its descendants have exited: finish the
+            # owned group before relinquishing this cleanup capability.
+            try: os.killpg(self.process.pid, signal.SIGKILL)
+            except ProcessLookupError: pass
+        elif kill or self.process.poll() is None:
+            self.kernel.TerminateJobObject(self.job, 1)
+        try: self.process.wait(timeout=2)
+        except subprocess.TimeoutExpired: pass
         if self.job:
             self.kernel.TerminateJobObject(self.job,1)
             self.kernel.CloseHandle(self.job); self.job=None
@@ -89,13 +92,25 @@ class OptionalJobs:
     def _launch(self):
         item = self.queue.popleft(); self._launch_command=item['command']; temp = tempfile.TemporaryDirectory(prefix='blackbox-operation-')
         root = Path(temp.name); spec=root/'request.json'; output=root/'result.json'
+        owner = None
         try:
             spec.write_text(json.dumps(item['packet'], allow_nan=False), encoding='utf-8')
             if getattr(sys, 'frozen', False): args=[sys.executable, '--research-operation', str(spec), str(output)]
             else: args=[sys.executable, '-m', 'blackbox_core.operation_worker', str(spec), str(output)]
             owner=self.launcher(args)
             (root/'ready').touch(exist_ok=False)
-        except BaseException: temp.cleanup(); raise
+        except BaseException as error:
+            # The ready-marker write can fail after Popen succeeds. Keep the
+            # owner until its bounded cleanup has run; a temp failure must not
+            # replace the diagnostic for the original startup failure.
+            if owner is not None:
+                try: owner.close(kill=True)
+                except Exception as cleanup_error:
+                    error.add_note('Owned operation cleanup failed: '+str(cleanup_error)[:200])
+            try: temp.cleanup()
+            except Exception as cleanup_error:
+                error.add_note('Operation temp cleanup failed: '+str(cleanup_error)[:200])
+            raise
         item.update(temp=temp, output=output, owner=owner, deadline=self.clock()+item['seconds'], started_at=self.clock())
         self.current=item
 

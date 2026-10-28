@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 from collections import deque
 import queue
+import sqlite3
 import sys
 from threading import Thread,Event
 import time

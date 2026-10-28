@@ -18,6 +18,7 @@ import zipfile
 
 from .session_v2 import FILENAME, UNITS, safe_path
 from .session_view import SessionView, SessionReadError
+from .package_privacy import redact
 
 
 def digest(path):
@@ -161,6 +162,9 @@ def export_interval(folder: Path,output: Path,*,interval=None,series=None,instan
             series=series or ("DETAILED" if view.is_v2 and view.bounds("DETAILED",instance_id)[2]
                               else "STANDARD" if instance_id==1 else "CHILD")
             start,end=interval or (None,None)
+            if end is None:
+                from .investigation_v2 import research_tail
+                end=max(view._range(start,None,series,instance_id)[1],research_tail(folder) or 0)
             report=view.interval(start,end,series=series,instance_id=instance_id)
             threads=view.thread_summary(start,end,instance_id=instance_id)
             report["thread_cpu_analysis"]=threads
@@ -230,6 +234,9 @@ def export_interval(folder: Path,output: Path,*,interval=None,series=None,instan
                                 return value
                             if "detail" in event:
                                 event["detail"]=strip_ids(event["detail"])
+                        # The scalar event type/correlation key can contain a
+                        # recognizable path too; never sanitize JSON detail alone.
+                        event=redact(event,include_notes=include_notes)
                         stream.write(json.dumps(event,ensure_ascii=False,allow_nan=False)+"\n")
                         event_count+=1
                     if not page["has_more"]:
@@ -238,7 +245,7 @@ def export_interval(folder: Path,output: Path,*,interval=None,series=None,instan
             report["event_export"]={"count":event_count,"file":prefix+".events.jsonl",
                                     "sha256":digest(event_path)}
             from .findings_export import write_findings
-            findings=write_findings(folder,tx,prefix,interval=(lo,hi),instance_id=instance_id,
+            findings=write_findings(folder,tx,prefix,interval=(lo,hi),series=series,instance_id=instance_id,
                 include_identifiers=include_identifiers,include_notes=include_notes,cancel=cancel)
             stage.update(findings.pop('files'));report['findings_export']=findings
             stage_file(".html").write_text(human_html(report,threads),encoding="utf-8")

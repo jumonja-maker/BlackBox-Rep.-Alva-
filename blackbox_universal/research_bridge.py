@@ -59,6 +59,11 @@ class ResearchBridge(QObject):
     def pending(self):return bool(self._pending)
 
     @property
+    def stopping(self):
+        """Optional work can be cancelled by Stop; only finalization blocks it."""
+        return self.closing or any(op in ("stop", "quit") for op in self._pending.values())
+
+    @property
     def alive(self):return self.process.state()!=QProcess.ProcessState.NotRunning
 
     def send(self,op,**args):
