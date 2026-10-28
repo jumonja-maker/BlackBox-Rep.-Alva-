@@ -5,7 +5,7 @@ from pathlib import Path
 import tempfile
 import unittest
 import zipfile
-from tools.release_gate import verify_archive, PREFIX, REQUIRED
+from tools.release_gate import verify_archive, PREFIX, REQUIRED, VERSION
 
 class ReleaseGateTests(unittest.TestCase):
     def setUp(self):
@@ -17,7 +17,7 @@ class ReleaseGateTests(unittest.TestCase):
             self.files[PREFIX+n] = b'> Feedback: DonJeoJesky@outlook.com\n'
         self.files[PREFIX+'_internal/blackbox-build.json'] = json.dumps({
             'schema_version': 1, 'source_sha': 'a'*40, 'source_tree_sha': 'b'*40,
-            'tracked_worktree_clean': True}).encode()
+            'tracked_worktree_clean': True, 'version': VERSION}).encode()
         decoder = {n[len(PREFIX+'decoder/'):]: hashlib.sha256(b).hexdigest()
                    for n,b in self.files.items() if n.startswith(PREFIX+'decoder/')
                    and not n.endswith('decoder-manifest.json')}
@@ -34,6 +34,11 @@ class ReleaseGateTests(unittest.TestCase):
         result=self.check()
         self.assertEqual(result['status'],'VERIFIED_RELEASE_ARCHIVE')
         self.assertFalse(result['release_published'])
+    def test_wrong_embedded_version_is_refused(self):
+        key=PREFIX+'_internal/blackbox-build.json'
+        data=json.loads(self.files[key]);data['version']='0.5.0'
+        self.files[key]=json.dumps(data).encode()
+        with self.assertRaisesRegex(ValueError,'FROZEN_VERSION_MISMATCH'):self.check()
     def test_wrong_source_is_refused(self):
         self.write()
         with self.assertRaisesRegex(ValueError,'FROZEN_SOURCE_MISMATCH'):

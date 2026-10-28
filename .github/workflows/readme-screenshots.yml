@@ -1,85 +1,80 @@
-name: Publish authentic README screenshots from Windows UI CI
+name: Stage authentic README screenshots (manual, no source writes)
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - .github/workflows/readme-screenshots.yml
   workflow_dispatch:
+    inputs:
+      qa_run_id:
+        description: "Successful same-repository QA run containing BLACKBOX-OFFSCREEN-DPI-QA"
+        required: true
+        type: string
 
 permissions:
-  contents: write
+  contents: read
   actions: read
 
-concurrency:
-  group: readme-screenshots-main
-  cancel-in-progress: false
-
 jobs:
-  sync-screenshots:
-    name: Save genuine CI screenshots to docs/screenshots
+  stage-screenshots:
     runs-on: ubuntu-latest
     timeout-minutes: 8
     steps:
-      - name: Checkout exact main
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-        with:
-          ref: main
-          persist-credentials: true
-      - name: Download successful Windows screenshot QA artifact
-        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+      - name: Validate explicit source run
+        id: source
+        shell: python
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED_RUN: ${{ inputs.qa_run_id }}
+        run: |
+          import json, os, re, subprocess
+          value = os.environ['REQUESTED_RUN']
+          if not re.fullmatch('[1-9][0-9]{0,19}', value):
+              raise ValueError('INVALID_QA_RUN')
+          repo = os.environ['GITHUB_REPOSITORY']
+          raw = subprocess.check_output(['gh', 'api', f'repos/{repo}/actions/runs/{value}'], text=True)
+          run = json.loads(raw)
+          if (run.get('status') != 'completed' or run.get('conclusion') != 'success'
+                  or run.get('head_repository', {}).get('full_name') != repo
+                  or not re.fullmatch('[0-9a-f]{40}', run.get('head_sha', ''))):
+              raise ValueError('SOURCE_QA_NOT_VERIFIED')
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as out:
+              out.write('run_id='+value+'\n')
+          with open('screenshot-source.json', 'x') as out:
+              json.dump({'run_id':int(value), 'source_sha':run['head_sha'],
+                         'artifact':'BLACKBOX-OFFSCREEN-DPI-QA'}, out)
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131
         with:
           name: BLACKBOX-OFFSCREEN-DPI-QA
-          run-id: 40564970140
+          run-id: ${{ steps.source.outputs.run_id }}
           github-token: ${{ github.token }}
           path: ${{ runner.temp }}/blackbox-readme-qa
-      - name: Check PNG signatures and store only named genuine screenshots
+      - name: Validate and stage images only
         shell: python
         run: |
           from pathlib import Path
           import os, shutil, struct
-          original = Path(os.environ["RUNNER_TEMP"]) / "blackbox-readme-qa"
-          output = Path("docs/screenshots")
-          output.mkdir(parents=True, exist_ok=True)
-          sources = {
-              "overview": "dashboard",
-              "processes": "processes",
-              "settings": "settings",
-              "reports": "reports",
-              "decoder": "decoder",
-              "investigation": "research",
-          }
-          manifest = []
-          for lang in ("EN", "RU"):
+          original = Path(os.environ['RUNNER_TEMP'])/'blackbox-readme-qa'
+          output = Path('reviewed-screenshots'); output.mkdir()
+          sources = {'overview':'dashboard', 'processes':'processes',
+                     'settings':'settings', 'reports':'reports',
+                     'decoder':'decoder', 'investigation':'research'}
+          for lang in ('EN','RU'):
               for title, source in sources.items():
-                  original_name = (
-                      f"expanded-1.25-{lang}-research-16.png"
-                      if title == "investigation"
-                      else f"dpi-1.25-{lang}-{source}.png"
-                  )
-                  src = original / original_name
-                  if not src.is_file():
-                      raise RuntimeError(f"MISSING_AUTHENTIC_CI_SCREENSHOT: {original_name}")
-                  with src.open("rb") as handle:
+                  name = (f'expanded-1.25-{lang}-research-16.png' if title == 'investigation'
+                          else f'dpi-1.25-{lang}-{source}.png')
+                  src = original/name
+                  if src.is_symlink() or not src.is_file():
+                      raise ValueError('MISSING_OR_LINKED_SCREENSHOT:'+name)
+                  with src.open('rb') as handle:
                       header = handle.read(24)
-                  if header[:8] != bytes.fromhex("89504e470d0a1a0a") or header[12:16] != b"IHDR":
-                      raise RuntimeError(f"NOT_A_PNG: {original_name}")
-                  width, height = struct.unpack(">II", header[16:24])
+                  if header[:8] != bytes.fromhex('89504e470d0a1a0a') or header[12:16] != b'IHDR':
+                      raise ValueError('INVALID_PNG:'+name)
+                  width,height = struct.unpack('>II',header[16:24])
                   if not 640 <= width <= 4096 or not 400 <= height <= 4096:
-                      raise RuntimeError(f"UNEXPECTED_CAPTURE_GEOMETRY: {original_name}")
-                  dest = output / f"{lang.lower()}-{title}.png"
-                  shutil.copyfile(src, dest)
-                  manifest.append(f"{dest}: {width}x{height}, {src.stat().st_size} bytes")
-          print("\n".join(manifest))
-      - name: Commit screenshots only (do not publish a Release)
-        shell: bash
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add docs/screenshots/*.png
-          if git diff --cached --quiet; then
-            echo "Screenshots already present; nothing to change."
-            exit 0
-          fi
-          git commit -m "docs: add authentic bilingual Windows UI screenshots [skip ci]"
-          git push origin HEAD:main
+                      raise ValueError('INVALID_GEOMETRY:'+name)
+                  shutil.copyfile(src, output/f'{lang.lower()}-{title}.png')
+          shutil.copyfile('screenshot-source.json', output/'screenshot-source.json')
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        with:
+          name: README-SCREENSHOTS-FOR-REVIEW
+          path: reviewed-screenshots/
+          retention-days: 14
+          if-no-files-found: error

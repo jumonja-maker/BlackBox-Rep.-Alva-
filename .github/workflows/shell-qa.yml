@@ -9,8 +9,8 @@ on:
       - main
   workflow_dispatch:
     inputs:
-      publish_v050:
-        description: "Publish tested v0.5.0 from the exact accepted main SHA"
+      publish_v051:
+        description: "Publish tested v0.5.1 from the exact accepted main SHA"
         required: true
         type: boolean
         default: false
@@ -312,7 +312,7 @@ jobs:
           if (-not (Test-Path "$output\INVESTIGATION-LICENSE.txt")) { throw 'Investigation license missing' }
           if (-not (Test-Path "$output\LICENSE")) { throw "Missing public application license" }
           if (-not (Test-Path "$output\README.ru.md")) { throw "Russian README missing from Windows release" }
-          Copy-Item -LiteralPath "docs\RELEASE_v0.5.0.md" -Destination "$output\RELEASE-NOTES.md" -Force
+          Copy-Item -LiteralPath "docs\RELEASE_v0.5.1.md" -Destination "$output\RELEASE-NOTES.md" -Force
       - name: Inventory exact packaged binaries and include runtime license texts
         run: python tools/build_distribution_inventory.py --payload "dist/BLACK.BOX-Universal"
       - name: Package portable folder without installing anything
@@ -320,7 +320,7 @@ jobs:
         run: |
           Compress-Archive -LiteralPath "dist\BLACK.BOX-Universal" -DestinationPath "BLACK.BOX-Universal-Windows.zip" -Force
           if (-not (Test-Path "BLACK.BOX-Universal-Windows.zip")) { throw "ZIP missing" }
-      - name: Native official v0.4.2 to v0.5.0 update and full portable uninstall
+      - name: Native official v0.5.0 to v0.5.1 update and full portable uninstall
         shell: pwsh
         timeout-minutes: 16
         run: |
@@ -344,12 +344,12 @@ jobs:
 # Publication still requires an explicit owner-authorized workflow_dispatch.
 # No push, branch build or pull request can publish a release.
   publish-updater-test:
-    name: Publish verified BLACK.BOX v0.5.0 (exact approved main SHA)
+    name: Publish verified BLACK.BOX v0.5.1 (exact approved main SHA)
     needs: [shell-tests, linux-tests, windows-portable]
     if: >-
       github.event_name == 'workflow_dispatch' &&
       github.ref == 'refs/heads/main' &&
-      inputs.publish_v050 == true &&
+      inputs.publish_v051 == true &&
       needs.shell-tests.result == 'success' &&
       needs.linux-tests.result == 'success' &&
       needs.windows-portable.result == 'success'
@@ -382,49 +382,33 @@ jobs:
           [[ "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq '.object.sha')" == "$GITHUB_SHA" ]]
           VERSION="$(python -c 'from blackbox_universal import __version__; print(__version__)')"
           PACKAGE_VERSION="$(python -c 'import tomllib; print(tomllib.load(open("pyproject.toml","rb"))["project"]["version"])')"
-          [[ "$VERSION" == "0.5.0" && "$PACKAGE_VERSION" == "$VERSION" ]]
+          [[ "$VERSION" == "0.5.1" && "$PACKAGE_VERSION" == "$VERSION" ]]
           ZIP="verified-portable/BLACK.BOX-Universal-Windows.zip"
           python tools/release_gate.py --archive "$ZIP" --source-sha "$GITHUB_SHA" --source-tree "$(git rev-parse HEAD^{tree})" --report release-verification.json
           (cd verified-portable && sha256sum -c BLACK.BOX-Universal-Windows.zip.sha256)
-          # Fail closed on network/auth errors. Neither an old release nor tag may be replaced.
-          for resource in "releases/tags/v0.5.0" "git/ref/tags/v0.5.0"; do
-            HTTP="$(gh api -i "repos/$GITHUB_REPOSITORY/$resource" 2>/dev/null | head -n 1 || true)"
-            [[ "$HTTP" == *"404"* ]] || { echo "::error::Existing or unverifiable release/tag: $resource"; exit 1; }
-          done
+          python tools/publish_verified_draft.py --preflight --archive "$ZIP"
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: BLACKBOX-RELEASE-VERIFICATION
           path: release-verification.json
           if-no-files-found: error
           retention-days: 90
-      - name: Upload to draft, verify server digests, then publish
+      - name: Upload and publish by verified numeric draft ID
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          ACCEPTED_SHA: ${{ inputs.accepted_source_sha }}
         run: |
           set -euo pipefail
           ZIP="verified-portable/BLACK.BOX-Universal-Windows.zip"
-          gh release create "v0.5.0" "$ZIP" "$ZIP.sha256" --draft \
-            --target "$GITHUB_SHA" --title "BLACK.BOX Universal v0.5.0 — offline trace decoder" \
-            --notes-file docs/RELEASE_v0.5.0.md
-          gh api "repos/$GITHUB_REPOSITORY/releases/tags/v0.5.0" > draft-release.json
-          python - <<'VERIFY'
-          import hashlib, json, os
-          from pathlib import Path
-          release = json.loads(Path('draft-release.json').read_text())
-          assert release['draft'] is True and release['tag_name'] == 'v0.5.0'
-          assert release['target_commitish'] == os.environ['GITHUB_SHA']
-          assets = release['assets']
-          expected = ['BLACK.BOX-Universal-Windows.zip', 'BLACK.BOX-Universal-Windows.zip.sha256']
-          assert len(assets) == 2 and {a['name'] for a in assets} == set(expected)
-          for asset in assets:
-              path = Path('verified-portable') / asset['name']
-              with path.open('rb') as stream:
-                  checksum = hashlib.file_digest(stream, 'sha256').hexdigest()
-              assert asset['state'] == 'uploaded' and asset['size'] == path.stat().st_size
-              assert asset['digest'] == 'sha256:' + checksum, 'Uploaded asset differs from verified archive'
-          VERIFY
-          [[ "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq '.object.sha')" == "$GITHUB_SHA" ]]
-          gh release edit "v0.5.0" --draft=false --latest
-          [[ "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/v0.5.0" --jq '.object.sha')" == "$GITHUB_SHA" ]]
-          gh release view "v0.5.0" --json url,tagName,isDraft,targetCommitish
+          python tools/publish_verified_draft.py --preflight --archive "$ZIP"
+          gh release create "v0.5.1" "$ZIP" "$ZIP.sha256" --draft \
+            --target "$GITHUB_SHA" --title "BLACK.BOX Universal v0.5.1 — audit fixes" \
+            --notes-file docs/RELEASE_v0.5.1.md
+          python tools/publish_verified_draft.py --archive "$ZIP" --report publication-proof.json
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        with:
+          name: BLACKBOX-PUBLICATION-PROOF
+          path: publication-proof.json
+          retention-days: 90
+          if-no-files-found: error

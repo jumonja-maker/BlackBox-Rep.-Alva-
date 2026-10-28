@@ -15,22 +15,18 @@ import sqlite3
 
 _PRIVATE={'note','comment','application_event_path','command_line','cmdline','environment_variables','environ',
     'window_title','title_text','url','full_path','pdb_path','dump_path','source_folder','preview'}
-_PATH=re.compile(r'(?:[A-Za-z]:[\\/]|\\\\[^\\\s]+\\|[A-Za-z][A-Za-z0-9+.-]*://|/(?:home|workspace|Users|tmp|var|opt|etc|root|mnt|media|Volumes|run|srv|data|private|usr)/)[^\s\"<>]*',re.IGNORECASE)
+_PATH=re.compile(r'(?:[A-Za-z]:[\\/]|\\\\[^\\\s]+\\|(?<![A-Za-z0-9+.-])[A-Za-z][A-Za-z0-9+.-]*://|/(?:home|workspace|Users|tmp|var|opt|etc|root|mnt|media|Volumes|run|srv|data|private|usr)/)[^\s\"<>]*',re.IGNORECASE)
 
 
 def _text(value, salt):
-    # Distinct IDs that happen to contain paths must not collapse into the same
-    # SQL primary key or JSON key. The export-local nonce is never persisted;
-    # matching references share a token only inside this one exported copy.
-    def token(match):
-        digest=hashlib.sha256(salt+match[0].encode('utf-8',errors='surrogatepass')).hexdigest()[:24]
-        return '[PATH_OR_URL_OMITTED:'+digest+']'
-    # A field that begins with an absolute path may itself be a full filename
-    # containing spaces. Do not leave its basename after the first whitespace.
-    if _PATH.match(value.lstrip()):
+    # A path inside prose has no reliable end delimiter: spaces, quotes and
+    # punctuation can all belong to a filename. Fail closed for the entire
+    # textual value instead of leaking its suffix. Equal full values keep the
+    # same export-local token, including primary/reference keys.
+    if _PATH.search(value):
         digest=hashlib.sha256(salt+value.encode('utf-8',errors='surrogatepass')).hexdigest()[:24]
         return '[PATH_OR_URL_OMITTED:'+digest+']'
-    return _PATH.sub(token,value)
+    return value
 
 
 def _redact(value, key, include_notes, salt):
@@ -67,7 +63,9 @@ def redact_copies(folder,*,cancel=None):
             db.execute('PRAGMA trusted_schema=OFF');db.execute('PRAGMA secure_delete=ON')
             db.execute('PRAGMA journal_mode=DELETE')
             db.setlimit(sqlite3.SQLITE_LIMIT_LENGTH,1024*1024)
-            objects=db.execute("SELECT type,name,sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%'").fetchall()
+            # LIKE 'sqlite_%' treats '_' as a wildcard and skips user tables
+            # such as sqliteXextra. Exclude only the literal reserved prefix.
+            objects=db.execute("SELECT type,name,sql FROM sqlite_schema WHERE lower(substr(name,1,7)) != 'sqlite_'").fetchall()
             # Native product DBs have ordinary rowid tables and indexes. Never
             # execute imported triggers/virtual-table modules during redaction.
             if any(kind not in ('table','index') or _PATH.search(name) or _PATH.search(sql or '')
@@ -123,4 +121,6 @@ def redact_copies(folder,*,cancel=None):
     return {'policy':'SHARE_COPY_DEFAULT_V2','json_rows_rewritten':json_rows,
         'text_cells_rewritten':text_cells,'tables_checked':tables_checked,
         'original_modified':False,'raw_application_attributes':'OMITTED',
-        'known_paths_urls':'REDACTED','universal_secret_detection':False}
+        'known_paths_urls':'REDACTED',
+        'path_text_policy':'WHOLE_VALUE_WHEN_RECOGNIZABLE_PATH_OR_URL',
+        'universal_secret_detection':False}
