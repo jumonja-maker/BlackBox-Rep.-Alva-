@@ -1,0 +1,54 @@
+name: Dispatch owner-approved exact-main v0.5.1 release QA
+on:
+  push:
+    branches: [release/dispatch-v0.5.1-20261028]
+permissions:
+  contents: read
+  actions: write
+  pull-requests: read
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Verify independent PR acceptance and dispatch exact merged source
+        shell: python
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          import json, os, subprocess
+          REPO = 'jumonja-maker/BlackBox-Rep.-Alva-'
+          MAIN_SHA = '206b907dd83764d4cc67eee8142349c220cb139d'
+          REVIEWED_HEAD = 'de87019dce94828f5901b4aae8fb04cf8a207aba'
+          TREE = 'c763380401bc85bba9b5cc64c6de2c3b86cda7fa'
+          assert os.environ['GITHUB_REPOSITORY'] == REPO
+          def api(endpoint):
+              result = subprocess.run(['gh','api',f'repos/{REPO}/{endpoint}'], capture_output=True, text=True, timeout=45, check=True)
+              return json.loads(result.stdout)
+          assert api('git/ref/heads/main')['object']['sha'] == MAIN_SHA
+          assert api(f'git/commits/{MAIN_SHA}')['tree']['sha'] == TREE
+          pr = api('pulls/25')
+          assert pr['merged'] is True and pr['merge_commit_sha'] == MAIN_SHA
+          assert pr['head']['sha'] == REVIEWED_HEAD
+          for number in (40722827973, 40722828189):
+              run = api(f'actions/runs/{number}')
+              assert run['conclusion'] == 'success' and run['head_sha'] == REVIEWED_HEAD
+          jobs = api('actions/runs/40722827973/jobs?per_page=100')['jobs']
+          needed = {'Windows shell / read-only observer','Linux compatibility check (independent of Windows release)','Windows portable exe'}
+          assert {j['name'] for j in jobs if j['conclusion']=='success'} >= needed
+          assert not [r for r in api('git/matching-refs/tags/v0.5.1') if r['ref']=='refs/tags/v0.5.1']
+          for page in range(1,21):
+              releases = api(f'releases?per_page=100&page={page}')
+              assert not any(r['tag_name']=='v0.5.1' for r in releases), 'Existing release or draft'
+              if len(releases)<100:
+                  break
+          else:
+              raise RuntimeError('Release list budget exceeded')
+          previous = api(f'actions/workflows/shell-qa.yml/runs?head_sha={MAIN_SHA}&event=workflow_dispatch&per_page=100')
+          assert not previous['workflow_runs'], 'Already dispatched; inspect existing run rather than duplicate'
+          assert api('git/ref/heads/main')['object']['sha'] == MAIN_SHA
+          payload = {'ref':'main','inputs':{'publish_v051':True,'accepted_source_sha':MAIN_SHA}}
+          subprocess.run(['gh','api',f'repos/{REPO}/actions/workflows/shell-qa.yml/dispatches','--method','POST','--input','-'],input=json.dumps(payload),text=True,check=True,timeout=45)
+          print('DISPATCHED_EXPLICIT_OWNER_APPROVED_RELEASE',MAIN_SHA)
+          with open(os.environ['GITHUB_STEP_SUMMARY'],'a',encoding='utf8') as out:
+              out.write('Full release CI dispatched on exact main: '+MAIN_SHA+'\n')
