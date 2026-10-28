@@ -9,7 +9,7 @@ import unittest
 from unittest.mock import patch
 
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
-from PySide6.QtWidgets import QApplication, QTableWidget
+from PySide6.QtWidgets import QApplication, QTableWidget, QLabel
 from blackbox_core.decoder_index import build_index, PROTOCOL, read_index
 from blackbox_universal.decoder_window import DecoderWindow
 from blackbox_universal.decoder_analysis import DiagnosticReportDialog
@@ -107,6 +107,26 @@ class DecoderCompletionGuiTests(unittest.TestCase):
         self.assertTrue(self.panel.open_button.isEnabled())
         self.assertTrue(self.panel.waits_button.isEnabled())
         self.assertFalse(self.panel.export_analysis_button.isEnabled())
+
+    def test_gettickcount_alignment_exposes_coarse_uncertainty_in_summary(self):
+        from test_decoder_alignment import fixture, use_gettickcount_clock
+        from blackbox_core.decoder_alignment import ORDER_MODEL
+        index, journal, session, data = fixture(self.root)
+        use_gettickcount_clock(journal, session, data)
+        self.window._set_language('RU')
+        self.panel.received({'path': str(index), 'summary': read_index(index)['summary']}, '')
+        self.panel.start_analysis('alignment', {'index_path': index,
+            'journal_path': journal, 'session_path': session})
+        self.wait_idle()
+        self.assertEqual(self.panel.alignment_report['clock_model'], ORDER_MODEL)
+        dialog, = self.panel.findChildren(DiagnosticReportDialog)
+        text = dialog.findChild(QLabel, 'diagnosticEvidenceSummary').text()
+        self.assertIn('без интерполяции', text)
+        self.assertIn('у каждого события свои границы', text)
+        self.panel.table.selectRow(0); self.app.processEvents()
+        projection = json.loads(self.panel.details.toPlainText())['session_time_projection']
+        self.assertEqual(projection['clock_model'], ORDER_MODEL)
+        self.assertGreater(projection['uncertainty_width_ns'], 500_000_000)
 
     def test_cancelled_import_offers_retry_without_stale_evidence(self):
         def blocked(*args, cancel, **kwargs):

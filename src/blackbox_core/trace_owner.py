@@ -15,7 +15,8 @@ from threading import Event, Thread
 import time
 from uuid import uuid4
 from .library_files import replace_owned_status
-from .trace_clock_evidence import capture_trace_clock_bracket
+from .trace_clock_evidence import (capture_trace_clock_bracket,
+                                   new_clock_order_samples, append_clock_order_sample)
 from .windows_research import WPR_PROFILES
 
 MAX_JOURNAL_BYTES=65536
@@ -77,8 +78,13 @@ def run(journal):
         data['clock_anchors']={'before_tool_start':capture_trace_clock_bracket()}
         data['start_result']=capture.start();data['state']='RECORDING'
         data['clock_anchors']['after_tool_start']=capture_trace_clock_bracket()
+        data['clock_order_samples']=new_clock_order_samples(data['clock_anchors']['after_tool_start'])
         deadline=time.monotonic()+seconds;_write(path,data)
-        while not lease_lost.wait(min(.1,max(0,deadline-time.monotonic()))) and time.monotonic()<deadline:pass
+        next_clock_sample=time.monotonic()+.2
+        while not lease_lost.wait(min(.1,max(0,deadline-time.monotonic()))) and time.monotonic()<deadline:
+            if time.monotonic()>=next_clock_sample:
+                append_clock_order_sample(data['clock_order_samples'],capture_trace_clock_bracket())
+                next_clock_sample=time.monotonic()+.2
         data['stop_reason']='LEASE_EOF_OR_EXPLICIT_STOP' if lease_lost.is_set() else 'TTL_EXPIRED'
         data['state']='STOPPING'
         data['clock_anchors']['before_tool_stop']=capture_trace_clock_bracket()

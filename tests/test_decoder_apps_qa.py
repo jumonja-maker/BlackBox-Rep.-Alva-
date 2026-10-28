@@ -4,11 +4,67 @@ from pathlib import Path
 import json
 import sqlite3
 import stat
+import struct
 import tempfile
 import unittest
+from unittest.mock import patch
 import zipfile
 
-from tools.qa_decoder_apps import etw_observations, safe_extract
+from tools.qa_decoder_apps import (etw_observations, installed, native_pe_identity,
+                                   observed_process_image, safe_extract)
+
+
+class ApplicationImageIdentityTests(unittest.TestCase):
+    def test_explicit_application_precedes_path_shim_and_owns_observed_image(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            native = root / "program-files-7z.exe"
+            shim = root / "chocolatey-7z.exe"
+            native.write_bytes(b"native-file-identity-fixture")
+            shim.write_bytes(b"launcher-file-identity-fixture")
+            with patch("tools.qa_decoder_apps.shutil.which", return_value=str(shim)):
+                self.assertEqual(installed("7z", [native]), native.resolve())
+            with self.assertRaisesRegex(AssertionError, "OWNED_PROCESS_IMAGE_MISMATCH"):
+                observed_process_image(shim, native)
+            self.assertEqual(observed_process_image(native, native), str(native.resolve()))
+
+    def pe_header_fixture(self, *, magic=0x20B, managed=False, dll=False):
+        # Explicit binary-format fixture only; never executed and never
+        # presented as acceptance of an actual Windows application.
+        directory_at = 112 if magic == 0x20B else 96
+        optional_size = directory_at + 16 * 8
+        data = bytearray(128 + 24 + optional_size)
+        data[:2] = b"MZ"; struct.pack_into("<I", data, 60, 128)
+        data[128:132] = b"PE\0\0"
+        struct.pack_into("<H", data, 132, 0x8664 if magic == 0x20B else 0x14C)
+        struct.pack_into("<HH", data, 148, optional_size, 0x2002 if dll else 0x2)
+        struct.pack_into("<H", data, 152, magic)
+        struct.pack_into("<I", data, 152 + directory_at - 4, 16)
+        if managed:
+            struct.pack_into("<II", data, 152 + directory_at + 14 * 8, 0x2000, 72)
+        return data
+
+    def test_clr_launcher_cannot_certify_native_application_for_either_pe_layout(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            binary = Path(tmp) / "image.exe"
+            for magic in (0x10B, 0x20B):
+                with self.subTest(magic=magic):
+                    binary.write_bytes(self.pe_header_fixture(magic=magic, managed=True))
+                    with self.assertRaisesRegex(AssertionError, "CLR_LAUNCHER_OR_MANAGED_IMAGE_REJECTED"):
+                        native_pe_identity(binary)
+                    binary.write_bytes(self.pe_header_fixture(magic=magic))
+                    proof = native_pe_identity(binary)
+                    self.assertEqual(proof["code_kind"], "NATIVE_PE_NO_CLR_COM_DESCRIPTOR")
+                    self.assertEqual(proof["clr_com_descriptor_bytes"], 0)
+
+    def test_truncated_header_and_dll_do_not_count_as_native_executable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            binary = Path(tmp) / "image.exe"
+            for data in (b"MZ", self.pe_header_fixture()[:-1], self.pe_header_fixture(dll=True)):
+                with self.subTest(length=len(data)):
+                    binary.write_bytes(data)
+                    with self.assertRaises(AssertionError):
+                        native_pe_identity(binary)
 
 
 class ApplicationLifetimeEvidenceTests(unittest.TestCase):

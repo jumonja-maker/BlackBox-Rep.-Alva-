@@ -13,12 +13,15 @@ from uuid import uuid4
 
 import psutil
 
-from blackbox_core.decoder_alignment import (ALIGNED, SESSION_CLOCK_SCHEMA,
+from blackbox_core.decoder_alignment import (ALIGNED, ORDER_MODEL, SESSION_CLOCK_SCHEMA,
     assess_session_alignment, capture_session_binding, project_event_time,
     read_session_clock)
 from blackbox_core.decoder_index import PROTOCOL, build_index
 from blackbox_core.session_v2 import SessionV2Writer
 from blackbox_core.trace_clock_evidence import bracket, CLOCK_IDENTITY_SCHEMA
+from blackbox_core.trace_clock_evidence import (new_clock_order_samples,
+                                               append_clock_order_sample,
+                                               MAX_ORDER_SAMPLES)
 
 SHA = "a" * 64
 BOOT = "9acbf34a-750b-4dfb-a451-ef8a3056782d"
@@ -84,7 +87,160 @@ def fixture(folder, fmt=".etl"):
     return index,jp,sp,data
 
 
+def use_gettickcount_clock(journal, session_path, data):
+    """Explicit quantized numerical fixture, not simulated Windows acceptance."""
+    resolution = 15_625_000
+
+    def convert(point):
+        point["clock_identity"].update(monotonic_implementation="GetTickCount64()",
+                                       monotonic_resolution_ns=resolution)
+        for key in ("monotonic_before_ns", "monotonic_after_ns"):
+            point[key] = point[key] // resolution * resolution
+        point["monotonic_bracket_width_ns"] = (point["monotonic_after_ns"] -
+                                               point["monotonic_before_ns"])
+
+    for point in data["clock_anchors"].values():
+        convert(point)
+    with closing(sqlite3.connect(session_path)) as db:
+        record=json.loads(db.execute("SELECT evidence_json FROM clock_evidence").fetchone()[0])
+        convert(record["clock_bracket"])
+        db.execute("UPDATE clock_evidence SET evidence_json=?", (json.dumps(record),))
+        db.commit()
+    data["session_clock_binding"] = capture_session_binding(session_path)
+    journal.write_text(json.dumps(data), encoding="utf-8")
+
+
 class DecoderAlignmentTests(unittest.TestCase):
+    def test_dense_order_samples_tighten_bounds_and_bad_samples_fail_closed(self):
+        with tempfile.TemporaryDirectory() as td:
+            idx,jp,sp,data=fixture(Path(td))
+            use_gettickcount_clock(jp,sp,data)
+            series=new_clock_order_samples(data["clock_anchors"]["before_tool_start"])
+            for qpc in (13_000_000,14_000_000,16_000_000,17_000_000):
+                point=anchor(qpc,pid=1234)
+                point["clock_identity"]=copy.deepcopy(series["clock_identity"])
+                for key in ("monotonic_before_ns","monotonic_after_ns"):
+                    point[key]=point[key]//15_625_000*15_625_000
+                point["monotonic_bracket_width_ns"]=point["monotonic_after_ns"]-point["monotonic_before_ns"]
+                append_clock_order_sample(series,point)
+            data["clock_order_samples"]=series
+            jp.write_text(json.dumps(data),encoding="utf-8")
+            model=assess_session_alignment(idx,jp,sp)
+            self.assertEqual(model["status"],ALIGNED,model)
+            self.assertEqual(model["additional_observations"],4)
+            projected=project_event_time(model,{"source_ticks":"15000000"})
+            self.assertLess(projected["uncertainty_width_ns"],250_000_000)
+            self.assertLessEqual(projected["session_relative_lower_ns"],1_100_000_000)
+            self.assertGreaterEqual(projected["session_relative_upper_ns"],1_100_000_000)
+            invalid=[]
+            changed=copy.deepcopy(series);changed["clock_identity"]["boot_id"]=str(uuid4());invalid.append(changed)
+            changed=copy.deepcopy(series);changed["owner_pid"]=True;invalid.append(changed)
+            changed=copy.deepcopy(series);changed["qpc_frequency_hz"]*=2;invalid.append(changed)
+            changed=copy.deepcopy(series);changed["points"].reverse();invalid.append(changed)
+            changed=copy.deepcopy(series);changed["points"][0][0]=True;invalid.append(changed)
+            changed=copy.deepcopy(series);changed["points"][0]=changed["points"][0][:3];invalid.append(changed)
+            changed=copy.deepcopy(series);changed["status"]="INVALID_OBSERVATION";invalid.append(changed)
+            for changed in invalid:
+                data["clock_order_samples"]=changed
+                jp.write_text(json.dumps(data),encoding="utf-8")
+                self.assertEqual(assess_session_alignment(idx,jp,sp)["status"],"NOT_ESTABLISHED")
+            data["clock_order_samples"]={**series,"status":"SATURATED"}
+            jp.write_text(json.dumps(data),encoding="utf-8")
+            self.assertEqual(assess_session_alignment(idx,jp,sp)["status"],ALIGNED)
+
+    def test_compact_sample_cap_keeps_maximal_integer_journal_within_budget(self):
+        from blackbox_core.trace_owner import _write,MAX_JOURNAL_BYTES
+        with tempfile.TemporaryDirectory() as td:
+            _,jp,_,data=fixture(Path(td))
+            reference=bracket(2**63-2000,2**63-2000,10_000_000,
+                              2**63-2000,2**63-2000,1_800_000_000_000_000_000,
+                              pid=1234,clock_identity=IDENTITY)
+            series=new_clock_order_samples(reference)
+            for i in range(MAX_ORDER_SAMPLES+3):
+                point=bracket(2**63-2000+i,2**63-2000+i,10_000_000,
+                              2**63-2000+i,2**63-2000+i,1_800_000_000_000_000_000,
+                              pid=1234,clock_identity=IDENTITY)
+                append_clock_order_sample(series,point)
+            self.assertEqual(len(series["points"]),512)
+            self.assertEqual(series["status"],"SATURATED")
+            data["clock_order_samples"]=series
+            _write(jp,data)
+            self.assertLess(jp.stat().st_size,MAX_JOURNAL_BYTES-8000)
+            changed=new_clock_order_samples(reference)
+            point=copy.deepcopy(reference);point["clock_identity"]["boot_id"]=str(uuid4())
+            append_clock_order_sample(changed,point)
+            self.assertEqual(changed["status"],"INVALID_OBSERVATION")
+            self.assertEqual(changed["points"],[])
+
+    def test_gettickcount_uses_honest_wide_order_bounds_without_offset_interpolation(self):
+        for fmt in (".etl", ".nettrace"):
+            with self.subTest(fmt=fmt), tempfile.TemporaryDirectory() as td:
+                idx,jp,sp,data=fixture(Path(td),fmt)
+                use_gettickcount_clock(jp,sp,data)
+                result=assess_session_alignment(idx,jp,sp)
+                self.assertEqual(result["status"],ALIGNED,result)
+                self.assertEqual(result["clock_model"],ORDER_MODEL)
+                self.assertEqual(result["monotonic_implementation"],"GetTickCount64()")
+                self.assertNotIn("offset_lower_ns",result)
+                self.assertGreater(result["uncertainty_width_ns"],500_000_000)
+                projected=project_event_time(result,{"source_ticks":"15000000"})
+                self.assertEqual(projected["status"],ALIGNED)
+                self.assertLessEqual(projected["session_relative_lower_ns"],1_100_000_000)
+                self.assertGreaterEqual(projected["session_relative_upper_ns"],1_100_000_000)
+                self.assertGreater(projected["uncertainty_width_ns"],500_000_000)
+                self.assertIn("NO_INTERPOLATION",projected["precision_quality"])
+                self.assertEqual(projected["monotonic_resolution_ns"],15_625_000)
+                for ticks in (9_999_999,20_000_011):
+                    self.assertEqual(project_event_time(result,{"source_ticks":str(ticks)})["reason"],
+                                     "EVENT_OUTSIDE_CAPTURE_WINDOW")
+
+    def test_order_projection_encloses_non_linear_monotone_clock_at_every_counter(self):
+        # This non-linear, quantized clock has no constant QPC offset/rate.
+        # Only observed ordering is needed to enclose its reading.
+        def reading(ticks):
+            return (ticks*ticks//7)*1000
+        points=[{"qpc_before_ticks":q,"qpc_after_ticks":q+2,
+                 "monotonic_before_ns":reading(q-1),
+                 "monotonic_after_ns":reading(q+3)} for q in (10,40,70,100)]
+        model={"status":ALIGNED,"clock_model":ORDER_MODEL,
+               "monotonic_implementation":"GetTickCount64()","frequency_hz":10_000_000,
+               "session_origin_ns":0,"clock_order_brackets":points,
+               "valid_qpc_min_ticks":12,"valid_qpc_max_ticks":100,
+               "qpc_ordering_margin_ticks":1,
+               "session_uuid":str(uuid4()),"source_trace_sha256":SHA}
+        for ticks in range(12,101):
+            projected=project_event_time(model,{"source_ticks":str(ticks)})
+            self.assertEqual(projected["status"],ALIGNED)
+            self.assertLessEqual(projected["session_relative_lower_ns"],reading(ticks))
+            self.assertGreaterEqual(projected["session_relative_upper_ns"],reading(ticks))
+        for changed in (list(reversed(points)),points[:1]):
+            invalid={**model,"clock_order_brackets":changed}
+            self.assertEqual(project_event_time(invalid,{"source_ticks":"50"})["reason"],
+                             "INVALID_ALIGNMENT_MODEL")
+        wrong_model={**model,"monotonic_implementation":"QueryPerformanceCounter()"}
+        self.assertEqual(project_event_time(wrong_model,{"source_ticks":"50"})["status"],
+                         "NOT_ESTABLISHED")
+
+    def test_equal_qpc_readings_never_imply_order_in_a_different_clock(self):
+        from blackbox_core.decoder_alignment import _order_max_width
+        points=[{"qpc_before_ticks":q,"qpc_after_ticks":q,
+                 "monotonic_before_ns":m,"monotonic_after_ns":m}
+                for q,m in ((1,0),(10,100),(10,200),(10,300),(20,400))]
+        model={"status":ALIGNED,"clock_model":ORDER_MODEL,
+               "monotonic_implementation":"GetTickCount64()","frequency_hz":10_000_000,
+               "session_origin_ns":0,"clock_order_brackets":points,
+               "valid_qpc_min_ticks":3,"valid_qpc_max_ticks":18,
+               "qpc_ordering_margin_ticks":1,
+               "session_uuid":str(uuid4()),"source_trace_sha256":SHA}
+        for ticks in (9,10,11):
+            projected=project_event_time(model,{"source_ticks":str(ticks)})
+            self.assertEqual(projected["session_relative_lower_ns"],0)
+            self.assertEqual(projected["session_relative_upper_ns"],400)
+            self.assertEqual(projected["uncertainty_width_ns"],400)
+        self.assertEqual(_order_max_width(points,3,18),400)
+        self.assertEqual(project_event_time(model,{"source_ticks":"1"})["status"],
+                         "NOT_ESTABLISHED")
+
     def test_same_boot_bound_model_and_outward_rounded_event_interval(self):
         for fmt in (".etl", ".nettrace"):
             with self.subTest(fmt=fmt),tempfile.TemporaryDirectory() as td:

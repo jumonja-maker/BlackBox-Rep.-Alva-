@@ -5,7 +5,8 @@ from threading import Thread,Event
 from uuid import uuid4
 from .trace_owner import _read,_write
 from .session_v2 import safe_path
-from .trace_clock_evidence import capture_trace_clock_bracket
+from .trace_clock_evidence import (capture_trace_clock_bracket,
+ new_clock_order_samples,append_clock_order_sample)
 PROFILES=('gc-collect','gc-verbose')
 # dotnet-trace may need extra time to attach and to write its rundown.
 # Finite tool budgets, NOT a change to user-selected capture duration.
@@ -70,10 +71,15 @@ def run(journal):
    data['clock_anchors']={'before_tool_spawn':capture_trace_clock_bracket()}
    owner=OwnedProcess(args,stdin=subprocess.PIPE,stdout=stream,stderr=stream,env={**os.environ,'DOTNET_CLI_TELEMETRY_OPTOUT':'1'})
    data['clock_anchors']['after_tool_spawn']=capture_trace_clock_bracket()
+   data['clock_order_samples']=new_clock_order_samples(data['clock_anchors']['after_tool_spawn'])
    data.update(state='RECORDING',collector_pid=owner.process.pid,collector_created=psutil.Process(owner.process.pid).create_time());_write(path,data)
    deadline=time.monotonic()+eventpipe_collection_deadline_seconds(policy['seconds']);reason=None;forced_termination=False
+   next_clock_sample=time.monotonic()+.2
    while owner.process.poll() is None:
     if lease.wait(.1):reason='LEASE_EOF_OR_EXPLICIT_STOP';break
+    if time.monotonic()>=next_clock_sample:
+     append_clock_order_sample(data['clock_order_samples'],capture_trace_clock_bracket())
+     next_clock_sample=time.monotonic()+.2
     if time.monotonic()>=deadline:reason='TTL_EXPIRED';break
     if not same_target(data):reason='TARGET_INSTANCE_ENDED';break
     if (capture.exists() and capture.stat().st_size>=policy['max_bytes']) or log.stat().st_size>=1024**2:reason='OUTPUT_BUDGET';break

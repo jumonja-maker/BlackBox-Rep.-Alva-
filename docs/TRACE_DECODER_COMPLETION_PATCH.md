@@ -26,9 +26,21 @@ Original traces are never edited.
 The explicit GUI action selects a capture journal and a BLACK.BOX session-v2
 database. A result is `BOUNDED_LOCAL_CLOCK_CORRELATION` only when source hashes,
 session identity, recorder identity, exact boot identity, counter frequency,
-source counters and immutable session clock metadata agree. Bracketed local
-counter readings yield a bounded offset and an uncertainty interval. Event
-projection uses outward rounding and only the validated counter range.
+source counters and immutable session clock metadata agree. When Python's
+monotonic clock is QPC, bracketed readings yield a bounded offset with outward
+rounding. Packaged Python 3.11 instead uses GetTickCount64: a separate model
+bounds session clock readings by the order of observed clock brackets, without
+assuming a shared oscillator, interpolating between clocks or claiming a fixed
+offset. Each event retains its own uncertainty interval; startup/stop gaps can
+make this interval wide. The GUI explicitly shows this coarse model and its
+maximum interval width. No projection extrapolates beyond validated evidence.
+
+Owned capture guardians additionally record compact clock observations at up
+to 5 Hz, capped at 512 observations within the existing 64 KiB journal budget.
+These observations tighten bounds only where they exist. Saturation and gaps
+around tool startup/stop remain explicit; the model does not interpolate over
+them. QPC order comparisons account for equal ticks and the documented
+cross-thread one-tick ambiguity.
 
 This is a hash-linked local assertion, not authenticated evidence. UTC labels
 are not used as proof of alignment. Old sessions, missing metadata, clock

@@ -7,6 +7,7 @@ Legacy captures and arbitrary imported traces remain NOT_ESTABLISHED.
 from __future__ import annotations
 
 from contextlib import closing
+from bisect import bisect_left, bisect_right
 import hashlib
 import json
 import math
@@ -16,7 +17,8 @@ import sqlite3
 import time
 from uuid import UUID
 
-from .trace_clock_evidence import (CLOCK_IDENTITY_SCHEMA, SCHEMA, bracket,
+from .trace_clock_evidence import (CLOCK_IDENTITY_SCHEMA, SCHEMA, ORDER_SAMPLES_SCHEMA,
+                                   MAX_ORDER_SAMPLES, bracket,
                                    capture_trace_clock_bracket)
 
 SESSION_CLOCK_SCHEMA = "blackbox.session-clock/1"
@@ -24,6 +26,38 @@ ALIGNMENT_SCHEMA = "blackbox.trace-session-alignment/1"
 ALIGNED = "BOUNDED_LOCAL_CLOCK_CORRELATION"
 NANO = 1_000_000_000
 MAX_UNCERTAINTY_NS = 10_000_000
+QPC_MODEL = "WINDOWS_QPC_PLUS_CONSTANT_OFFSET_WITH_OUTWARD_ROUNDING"
+ORDER_MODEL = "MONOTONE_CROSS_CLOCK_OBSERVATION_BRACKETS_NO_INTERPOLATION"
+_ORDER_FIELDS = ("qpc_before_ticks", "qpc_after_ticks", "monotonic_before_ns",
+                 "monotonic_after_ns")
+MAX_ORDER_POINTS = 520
+QPC_ORDER_MARGIN_TICKS = 1
+
+
+def _order_bounds(points, ticks):
+    # Equal readings of a discrete QPC do NOT prove temporal order: another
+    # clock may change while QPC still returns the same tick. Require strict
+    # inequalities and enclose ties using earlier/later observations.
+    # Microsoft additionally documents +/-1 QPC tick ordering ambiguity
+    # across threads: the capture guardian and trace producer are distinct.
+    lower = bisect_left([p["qpc_before_ticks"] for p in points],
+                        ticks-QPC_ORDER_MARGIN_TICKS) - 1
+    upper = bisect_right([p["qpc_after_ticks"] for p in points],
+                         ticks+QPC_ORDER_MARGIN_TICKS)
+    if lower < 0 or upper >= len(points):
+        raise ValueError("EVENT_NOT_STRICTLY_ENCLOSED_BY_CLOCK_PROBES")
+    return points[lower]["monotonic_before_ns"], points[upper]["monotonic_after_ns"]
+
+
+def _order_max_width(points, minimum, maximum):
+    # Bounds change only at integer probe-counter boundaries. Checking those
+    # boundaries and their neighbors includes repeated/zero-width QPC probes.
+    candidates = {minimum, maximum}
+    for point in points:
+        for key in ("qpc_before_ticks", "qpc_after_ticks"):
+            candidates.update(point[key] + delta for delta in (-2, -1, 0, 1, 2)
+                              if minimum <= point[key] + delta <= maximum)
+    return max(high-low for low, high in (_order_bounds(points, q) for q in candidates))
 _SESSION_COLUMNS = ("session_uuid", "monotonic_origin_ns", "anchor_monotonic_ns",
                     "anchor_utc_ns", "anchor_uncertainty_ns", "clock_source")
 
@@ -141,14 +175,49 @@ def _checked_bracket(item):
             not _uuid(identity.get("boot_id")) or
             identity.get("boot_id_source") != "NT_SYSTEM_BOOT_ENVIRONMENT_INFORMATION" or
             identity.get("evidence_class") != "LOCAL_OS_OBSERVATION_NOT_AUTHENTICATED" or
-            identity.get("monotonic_implementation") != "QueryPerformanceCounter()" or
-            not _integer(identity.get("monotonic_resolution_ns"), 1, 1_000_000)):
+            identity.get("monotonic_implementation") not in
+                ("QueryPerformanceCounter()", "GetTickCount64()") or
+            not _integer(identity.get("monotonic_resolution_ns"), 1,
+                1_000_000 if identity.get("monotonic_implementation") ==
+                "QueryPerformanceCounter()" else 250_000_000)):
         raise ValueError("BOOT_OR_MONOTONIC_CLOCK_IDENTITY_UNAVAILABLE")
     return item
 
 
+def _checked_order_samples(series, capture):
+    """Expand bounded compact records only after validating shared identity."""
+    if series is None:
+        return []
+    reference = capture[0]
+    if (not isinstance(series, dict) or series.get("schema") != ORDER_SAMPLES_SCHEMA or
+            series.get("status") not in ("RECORDED", "SATURATED") or
+            type(series.get("qpc_frequency_hz")) is not int or
+            type(series.get("owner_pid")) is not int or
+            any(series.get(key) != reference.get(key) for key in
+                ("qpc_frequency_hz", "owner_pid", "clock_identity")) or
+            not isinstance(series.get("points"), list) or
+            len(series["points"]) > MAX_ORDER_SAMPLES):
+        raise ValueError("INVALID_COMPACT_CLOCK_OBSERVATIONS")
+    result = []
+    for point in series["points"]:
+        if not isinstance(point, list) or len(point) != 4:
+            raise ValueError("INVALID_COMPACT_CLOCK_OBSERVATION")
+        qb,qa,mb,ma = point
+        checked = bracket(qb,qa,reference["qpc_frequency_hz"],mb,ma,
+                          reference["sampled_utc_ns"],pid=reference["owner_pid"],
+                          clock_identity=reference["clock_identity"])
+        if (checked["status"] != "BRACKET_OBSERVED_UNVERIFIED" or
+                qb < capture[0]["qpc_before_ticks"] or qa > capture[-1]["qpc_after_ticks"] or
+                mb < capture[0]["monotonic_before_ns"] or ma > capture[-1]["monotonic_after_ns"] or
+                result and (result[-1]["qpc_after_ticks"] > qb or
+                            result[-1]["monotonic_after_ns"] > mb)):
+            raise ValueError("COMPACT_CLOCK_OBSERVATION_OUTSIDE_ORDERED_CAPTURE")
+        result.append(checked)
+    return result
+
+
 def assess_session_alignment(index_path, journal_path, session_path, *, cancel=None):
-    """Check independent file identities, then intersect QPC/monotonic bounds.
+    """Check file identities, then derive implementation-specific clock bounds.
 
     Successful output is conditional on the recorded local OS assertions.
     It never upgrades import authenticity, capture completeness or causality.
@@ -191,10 +260,16 @@ def assess_session_alignment(index_path, journal_path, session_path, *, cancel=N
             return refused("RECORDER_PROCESS_INSTANCE_MISMATCH")
         stages = review["checked_clock_stages"]
         capture = [_checked_bracket(data["clock_anchors"][key]) for key in stages]
+        samples = _checked_order_samples(data.get("clock_order_samples"), capture)
+        ordered_capture = sorted([*capture,*samples], key=lambda p:p["qpc_before_ticks"])
+        if any(before["qpc_after_ticks"] > after["qpc_before_ticks"] or
+               before["monotonic_after_ns"] > after["monotonic_before_ns"]
+               for before,after in zip(ordered_capture,ordered_capture[1:])):
+            return refused("CLOCK_OBSERVATION_ORDER_INCONSISTENT")
         initial = _checked_bracket(record.get("clock_bracket"))
         if initial["owner_pid"] != record["recorder_pid"]:
             return refused("SESSION_CLOCK_RECORDER_PID_MISMATCH")
-        all_anchors = [initial, *capture]
+        all_anchors = [initial, *ordered_capture]
         boot_ids = {x["clock_identity"]["boot_id"] for x in all_anchors}
         if len(boot_ids) != 1:
             return refused("BOOT_ID_MISMATCH")
@@ -202,6 +277,11 @@ def assess_session_alignment(index_path, journal_path, session_path, *, cancel=N
         if len(frequencies) != 1:
             return refused("CLOCK_FREQUENCY_MISMATCH")
         frequency = next(iter(frequencies))
+        implementations = {x["clock_identity"]["monotonic_implementation"]
+                           for x in all_anchors}
+        if len(implementations) != 1:
+            return refused("MONOTONIC_CLOCK_IMPLEMENTATION_MISMATCH")
+        implementation = next(iter(implementations))
         engine = meta.get("engine", {})
         if (not isinstance(engine, dict) or
                 engine.get("trace_counter_kind") != "TRACEEVENT_SOURCE_COUNTER" or
@@ -219,12 +299,61 @@ def assess_session_alignment(index_path, journal_path, session_path, *, cancel=N
             return refused("TRACE_CLOCK_DISCONTINUITY")
         # Never align a session whose origin or end cannot bracket capture.
         if (initial["monotonic_after_ns"] > capture[0]["monotonic_before_ns"] or
+                initial["qpc_after_ticks"] > capture[0]["qpc_before_ticks"] or
                 session["monotonic_origin_ns"] > initial["monotonic_after_ns"] or
                 session["ended_monotonic_ns"] is not None and
                 (not _integer(session["ended_monotonic_ns"]) or
                  session["ended_monotonic_ns"] < capture[-1]["monotonic_after_ns"])):
             return refused("CAPTURE_OUTSIDE_SESSION_LIFETIME")
-        # QPC and CPython's Windows monotonic share the oscillator. The offset
+        accepted = {**common, "status": ALIGNED,
+                    "trace_to_blackbox_session_clock_alignment": ALIGNED,
+                    "source_trace_sha256": meta["input_sha256"],
+                    "session_uuid": session["session_uuid"],
+                    "session_record_sha256": session_data["binding"]["record_sha256"],
+                    "journal_snapshot_sha256": _digest(data),
+                    "index_summary_snapshot_sha256": _digest(meta),
+                    "boot_id": next(iter(boot_ids)), "frequency_hz": frequency,
+                    "session_origin_ns": session["monotonic_origin_ns"],
+                    "valid_qpc_min_ticks": capture[0]["qpc_before_ticks"],
+                    "valid_qpc_max_ticks": capture[-1]["qpc_after_ticks"],
+                    "anchors_checked": len(all_anchors),
+                    "additional_observations": len(samples),
+                    "observation_sampling_status": (data["clock_order_samples"]["status"]
+                                                    if data.get("clock_order_samples") is not None
+                                                    else "NOT_RECORDED"),
+                    "monotonic_implementation": implementation,
+                    "monotonic_resolution_ns": max(x["clock_identity"]["monotonic_resolution_ns"]
+                                                   for x in all_anchors),
+                    "utc_used_for_mapping": False}
+        if implementation == "GetTickCount64()":
+            # CPython 3.11 on Windows uses GetTickCount64, not QPC, for
+            # monotonic_ns. Their rates/offsets are not assumed identical.
+            # Each probe samples M_before, Q_before, Q_after, M_after in that
+            # order. An event Q > Q_before implies M(event) >= M_before;
+            # Q < Q_after implies M(event) <= M_after. Neighboring probes
+            # therefore enclose the session-clock reading without a drift,
+            # interpolation or sub-tick precision claim. A long gap remains
+            # a long uncertainty interval and is reported as such.
+            points = [{key: point[key] for key in _ORDER_FIELDS} for point in ordered_capture]
+            minimum = points[0]["qpc_before_ticks"] + QPC_ORDER_MARGIN_TICKS + 1
+            maximum = points[-1]["qpc_after_ticks"] - QPC_ORDER_MARGIN_TICKS - 1
+            if minimum > maximum:
+                return refused("CLOCK_WINDOW_NOT_STRICTLY_ENCLOSED")
+            _cancel(cancel)
+            return {**accepted,
+                    "reason": "SAME_BOOT_MONOTONE_OBSERVATION_ORDER_BOUNDS_ONLY",
+                    "clock_model": ORDER_MODEL, "clock_order_brackets": points,
+                    "qpc_ordering_margin_ticks": QPC_ORDER_MARGIN_TICKS,
+                    "valid_qpc_min_ticks": minimum, "valid_qpc_max_ticks": maximum,
+                    "uncertainty_width_ns": _order_max_width(points, minimum, maximum),
+                    "uncertainty_scope": "MAXIMUM_EVENT_BRACKET_WIDTH_NOT_CONSTANT_OFFSET_ERROR",
+                    "precision_quality": "COARSE_OBSERVATION_INTERVAL_NO_INTERPOLATION",
+                    "limitations": ["EDITABLE_LOCAL_EVIDENCE_NOT_AUTHENTICATED",
+                                    "NO_CAUSALITY_OR_CAPTURE_COMPLETENESS_CLAIM",
+                                    "NO_COMMON_OSCILLATOR_OR_DRIFT_RATE_ASSUMPTION",
+                                    "EVENT_UNCERTAINTY_MAY_SPAN_SECONDS_BETWEEN_PROBES",
+                                    "BOUNDS_SESSION_CLOCK_READINGS_NOT_PHYSICAL_TIME_ACCURACY"]}
+        # Proven QPC-backed CPython monotonic shares the oscillator. The offset
         # at every sampled bracket must have a nonempty intersection. Include
         # one QPC tick and the recorded Python resolution, rounding outward.
         lows, highs = [], []
@@ -243,23 +372,13 @@ def assess_session_alignment(index_path, journal_path, session_path, *, cancel=N
         if high - low > MAX_UNCERTAINTY_NS:
             return refused("CLOCK_CORRELATION_UNCERTAINTY_TOO_WIDE")
         _cancel(cancel)
-        return {**common, "status": ALIGNED,
-                "trace_to_blackbox_session_clock_alignment": ALIGNED,
+        return {**accepted,
                 "reason": "SAME_BOOT_QPC_CONTRACT_AND_INTERSECTING_OBSERVATION_BOUNDS",
-                "source_trace_sha256": meta["input_sha256"],
-                "session_uuid": session["session_uuid"],
-                "session_record_sha256": session_data["binding"]["record_sha256"],
-                "journal_snapshot_sha256": _digest(data),
-                "index_summary_snapshot_sha256": _digest(meta),
-                "boot_id": next(iter(boot_ids)), "frequency_hz": frequency,
                 "offset_lower_ns": low, "offset_upper_ns": high,
                 "uncertainty_width_ns": high - low,
-                "session_origin_ns": session["monotonic_origin_ns"],
-                "valid_qpc_min_ticks": capture[0]["qpc_before_ticks"],
-                "valid_qpc_max_ticks": capture[-1]["qpc_after_ticks"],
-                "anchors_checked": len(all_anchors),
-                "clock_model": "WINDOWS_QPC_PLUS_CONSTANT_OFFSET_WITH_OUTWARD_ROUNDING",
-                "utc_used_for_mapping": False,
+                "uncertainty_scope": "COMMON_OSCILLATOR_OFFSET_INTERVAL",
+                "precision_quality": "OUTWARD_ROUNDED_QPC_OFFSET_BOUNDS",
+                "clock_model": QPC_MODEL,
                 "limitations": ["EDITABLE_LOCAL_EVIDENCE_NOT_AUTHENTICATED",
                                 "NO_CAUSALITY_OR_CAPTURE_COMPLETENESS_CLAIM",
                                 "ONLY_RECORDED_CLOCK_RESOLUTION_AND_BRACKET_BOUNDS"]}
@@ -281,22 +400,58 @@ def project_event_time(alignment, row):
     ticks = int(raw)
     try:
         frequency = alignment["frequency_hz"]
-        low, high = alignment["offset_lower_ns"], alignment["offset_upper_ns"]
         origin = alignment["session_origin_ns"]
         minimum, maximum = alignment["valid_qpc_min_ticks"], alignment["valid_qpc_max_ticks"]
         if (not _integer(frequency, 1, 10**12) or not _integer(origin) or
-                not all(_integer(x, -(2**63)) for x in (low, high, minimum, maximum)) or
-                low > high or high-low > MAX_UNCERTAINTY_NS or minimum > maximum):
+                not all(_integer(x, -(2**63)) for x in (minimum, maximum)) or
+                minimum > maximum):
             raise ValueError("INVALID_ALIGNMENT_MODEL")
         if not minimum <= ticks <= maximum:
             return {"status": "NOT_ESTABLISHED", "reason": "EVENT_OUTSIDE_CAPTURE_WINDOW"}
-        lower = ticks * NANO // frequency + low - origin
-        upper = (ticks * NANO + frequency-1) // frequency + high - origin
-        if not all(_integer(value, -(2**63)) for value in (lower, upper)):
+        model = alignment.get("clock_model", QPC_MODEL)
+        if model == ORDER_MODEL:
+            if (alignment.get("monotonic_implementation") != "GetTickCount64()" or
+                    type(alignment.get("qpc_ordering_margin_ticks")) is not int or
+                    alignment["qpc_ordering_margin_ticks"] != QPC_ORDER_MARGIN_TICKS):
+                raise ValueError("INVALID_ALIGNMENT_MODEL")
+            points = alignment["clock_order_brackets"]
+            if not isinstance(points, list) or not 2 <= len(points) <= MAX_ORDER_POINTS:
+                raise ValueError("INVALID_ALIGNMENT_MODEL")
+            previous = None
+            for point in points:
+                if (not isinstance(point, dict) or
+                        not all(_integer(point[key], -(2**63) if key.startswith("qpc_") else 0)
+                                for key in _ORDER_FIELDS) or
+                        point["qpc_before_ticks"] > point["qpc_after_ticks"] or
+                        point["monotonic_before_ns"] > point["monotonic_after_ns"] or
+                        previous is not None and
+                        (previous["qpc_after_ticks"] > point["qpc_before_ticks"] or
+                         previous["monotonic_after_ns"] > point["monotonic_before_ns"])):
+                    raise ValueError("INVALID_ALIGNMENT_MODEL")
+                previous = point
+            if (points[0]["qpc_before_ticks"] + QPC_ORDER_MARGIN_TICKS + 1 != minimum or
+                    points[-1]["qpc_after_ticks"] - QPC_ORDER_MARGIN_TICKS - 1 != maximum):
+                raise ValueError("INVALID_ALIGNMENT_MODEL")
+            lower, upper = _order_bounds(points, ticks)
+            lower, upper = lower-origin, upper-origin
+        elif model == QPC_MODEL:
+            low, high = alignment["offset_lower_ns"], alignment["offset_upper_ns"]
+            if (not all(_integer(x, -(2**63)) for x in (low, high)) or
+                    low > high or high-low > MAX_UNCERTAINTY_NS):
+                raise ValueError("INVALID_ALIGNMENT_MODEL")
+            lower = ticks * NANO // frequency + low - origin
+            upper = (ticks * NANO + frequency-1) // frequency + high - origin
+        else:
+            raise ValueError("INVALID_ALIGNMENT_MODEL")
+        if lower > upper or not all(_integer(value, -(2**63)) for value in (lower, upper)):
             return {"status": "NOT_ESTABLISHED", "reason": "EVENT_TIME_RANGE_UNSUPPORTED"}
         return {"status": ALIGNED, "session_relative_lower_ns": lower,
                 "session_relative_upper_ns": upper,
                 "uncertainty_width_ns": upper - lower,
+                "clock_model": model,
+                "precision_quality": alignment.get("precision_quality"),
+                "monotonic_resolution_ns": alignment.get("monotonic_resolution_ns"),
+                "uncertainty_represents": "SESSION_CLOCK_READING_BOUNDS_NOT_PHYSICAL_TIME_ACCURACY",
                 "session_uuid": alignment["session_uuid"],
                 "source_trace_sha256": alignment["source_trace_sha256"],
                 "verification_class": "LOCAL_EVIDENCE_NOT_AUTHENTICATED"}

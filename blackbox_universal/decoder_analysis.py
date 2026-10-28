@@ -64,7 +64,18 @@ class DiagnosticReportDialog(QDialog):
             'Correlation applies only under the checked conditions. Uncertainty bounds apply to '
             'the selected clocks and files, not causality. Local evidence does not authenticate an imported trace.'
         ))
+        width = report.get('uncertainty_width_ns')
+        if not waits and report.get('status') == 'BOUNDED_LOCAL_CLOCK_CORRELATION' and type(width) is int and width >= 0:
+            if report.get('precision_quality') == 'COARSE_OBSERVATION_INTERVAL_NO_INTERPOLATION':
+                text += (f'\nСвязь по порядку измерений, без интерполяции. Ширина интервала события — до {width / 1e6:,.3f} мс; '
+                         'у каждого события свои границы. Это не оценка точности физических часов.' if ru else
+                         f'\nCorrelation uses observation order without interpolation. An event interval can span up to {width / 1e6:,.3f} ms; '
+                         'each event has its own bounds. This does not measure physical clock accuracy.')
+            else:
+                text += (f'\nШирина интервала смещения QPC: {width / 1e6:,.6f} мс.' if ru else
+                         f'\nQPC offset interval width: {width / 1e6:,.6f} ms.')
         notice = QLabel(text + '\n' + str(report.get('status', 'UNKNOWN')))
+        notice.setObjectName('diagnosticEvidenceSummary')
         notice.setTextFormat(Qt.TextFormat.PlainText)
         notice.setWordWrap(True)
         layout.addWidget(notice)

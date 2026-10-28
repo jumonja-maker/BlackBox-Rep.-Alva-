@@ -60,7 +60,8 @@ def start_clock_session(folder, pid):
 
 def require_real_session_alignment(index, journal, session_path, output):
     """Real same-session correlation plus deliberately invalid evidence copies."""
-    from blackbox_core.decoder_alignment import ALIGNED, assess_session_alignment, project_event_time
+    from blackbox_core.decoder_alignment import (ALIGNED, ORDER_MODEL, QPC_MODEL,
+                                                 assess_session_alignment, project_event_time)
     result = assess_session_alignment(index, journal, session_path)
     require(result.get("status") == ALIGNED,
             "REAL_SESSION_CLOCK_NOT_CORRELATED: " + repr(result))
@@ -68,8 +69,36 @@ def require_real_session_alignment(index, journal, session_path, output):
     projection = project_event_time(result, first)
     require(projection.get("status") == ALIGNED and
             projection["session_relative_lower_ns"] <= projection["session_relative_upper_ns"] and
-            projection["uncertainty_width_ns"] <= 10_000_000 and
             not result["utc_used_for_mapping"], "REAL_EVENT_CLOCK_INTERVAL_INVALID")
+    implementation = time.get_clock_info("monotonic").implementation
+    require(result.get("monotonic_implementation") == implementation,
+            "REAL_CLOCK_MODEL_DOES_NOT_MATCH_THIS_RECORDER_RUNTIME")
+    if implementation == "GetTickCount64()":
+        require(result.get("clock_model") == ORDER_MODEL and
+                result.get("precision_quality") == "COARSE_OBSERVATION_INTERVAL_NO_INTERPOLATION" and
+                result.get("qpc_ordering_margin_ticks") == 1 and
+                projection["uncertainty_width_ns"] <= result["uncertainty_width_ns"] and
+                "offset_lower_ns" not in result and "offset_upper_ns" not in result,
+                "GETTICKCOUNT_MUST_USE_HONEST_ORDER_BOUNDS_NOT_A_QPC_OFFSET")
+        # Independently check that the event interval is exactly enclosed by
+        # observed probes, including Microsoft's cross-thread +/-1 QPC tick
+        # ambiguity. No maximum precision is invented for startup/stop gaps.
+        ticks = int(first["source_ticks"])
+        lower = max(p["monotonic_before_ns"] for p in result["clock_order_brackets"]
+                    if ticks-p["qpc_before_ticks"] > 1) - result["session_origin_ns"]
+        upper = min(p["monotonic_after_ns"] for p in result["clock_order_brackets"]
+                    if p["qpc_after_ticks"]-ticks > 1) - result["session_origin_ns"]
+        require(projection["session_relative_lower_ns"] == lower and
+                projection["session_relative_upper_ns"] == upper,
+                "REAL_GETTICKCOUNT_EVENT_NOT_ENCLOSED_BY_OBSERVED_PROBES")
+    else:
+        require(implementation == "QueryPerformanceCounter()" and
+                result.get("clock_model") == QPC_MODEL and
+                projection["uncertainty_width_ns"] <= 10_000_000,
+                "REAL_QPC_COMMON_OSCILLATOR_MODEL_INVALID")
+    require(result.get("additional_observations", 0) > 0 and
+            result.get("observation_sampling_status") == "RECORDED",
+            "REAL_CAPTURE_HAS_NO_ADDITIONAL_CLOCK_OBSERVATIONS")
     original = json.loads(journal.read_text(encoding="utf-8"))
     changed = copy.deepcopy(original)
     for anchor in changed["clock_anchors"].values():

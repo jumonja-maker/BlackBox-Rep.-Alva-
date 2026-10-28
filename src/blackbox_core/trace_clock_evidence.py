@@ -16,6 +16,43 @@ from uuid import UUID
 SCHEMA = "blackbox.trace-clock-bracket/1"
 MAX_BRACKET_NS = 250_000_000  # warn when bracket is wider than 250ms
 CLOCK_IDENTITY_SCHEMA = "blackbox.windows-clock-identity/1"
+ORDER_SAMPLES_SCHEMA = "blackbox.clock-order-samples/1"
+MAX_ORDER_SAMPLES = 512
+
+
+def new_clock_order_samples(reference):
+    """Compact optional observations; at most ~40 KiB of the 64 KiB journal."""
+    return {"schema": ORDER_SAMPLES_SCHEMA, "status": "RECORDED",
+            "qpc_frequency_hz": reference.get("qpc_frequency_hz"),
+            "owner_pid": reference.get("owner_pid"),
+            "clock_identity": reference.get("clock_identity"), "points": []}
+
+
+def append_clock_order_sample(series, sample):
+    """Fail closed on a changed clock; saturation never invents observations."""
+    if series["status"] != "RECORDED":
+        return
+    if len(series["points"]) >= MAX_ORDER_SAMPLES:
+        series["status"] = "SATURATED"
+        return
+    try:
+        check = bracket(sample["qpc_before_ticks"], sample["qpc_after_ticks"],
+                        sample["qpc_frequency_hz"], sample["monotonic_before_ns"],
+                        sample["monotonic_after_ns"], sample["sampled_utc_ns"],
+                        pid=sample["owner_pid"], clock_identity=sample.get("clock_identity"))
+        if (check != sample or sample["status"] != "BRACKET_OBSERVED_UNVERIFIED" or
+                any(sample.get(key) != series.get(key) for key in
+                    ("qpc_frequency_hz", "owner_pid", "clock_identity"))):
+            raise ValueError("CLOCK_IDENTITY_CHANGED_OR_PROBE_UNAVAILABLE")
+        point = [sample[key] for key in ("qpc_before_ticks", "qpc_after_ticks",
+                                        "monotonic_before_ns", "monotonic_after_ns")]
+        if series["points"]:
+            previous = series["points"][-1]
+            if previous[1] > point[0] or previous[3] > point[2]:
+                raise ValueError("CLOCK_OBSERVATION_ORDER_CHANGED")
+        series["points"].append(point)
+    except (ValueError, KeyError, TypeError) as exc:
+        series.update(status="INVALID_OBSERVATION", reason=str(exc)[:100])
 
 
 def _windows_clock_identity():

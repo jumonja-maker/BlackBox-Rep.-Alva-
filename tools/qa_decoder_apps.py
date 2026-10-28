@@ -18,6 +18,7 @@ import random
 import shutil
 import sqlite3
 import stat
+import struct
 import subprocess
 import sys
 import time
@@ -108,17 +109,86 @@ def pinned_notepad(output):
     require(binary.is_file(), "PINNED_NOTEPAD_BINARY_MISSING")
     return binary, {"version": NPP_VERSION, "source_url": NPP_URL,
                     "archive_sha256": NPP_SHA256,
+                    "provenance": "PINNED_OFFICIAL_PORTABLE_DOWNLOAD_SHA256_VERIFIED",
                     "checksum_source": NPP_URL.rsplit("/", 1)[0] +
                     f"/npp.{NPP_VERSION}.checksums.sha256",
                     "isolation": "OWNED_PORTABLE_NO_PLUGINS_OR_UPDATER"}
 
 
 def installed(name, candidates):
-    choices = [shutil.which(name), *candidates]
+    # Package-manager PATH entries can be launcher shims whose CPU, stacks and
+    # files belong to the launcher, while the application runs as its child.
+    choices = [*candidates, shutil.which(name)]
     for item in choices:
         if item and Path(item).is_file() and not Path(item).is_symlink():
             return Path(item).resolve()
     raise NotExecuted("APPLICATION_NOT_INSTALLED: " + name)
+
+
+def native_pe_identity(binary):
+    """Require a native executable, not a CLR-based package-manager launcher."""
+    size = Path(binary).stat().st_size
+    with Path(binary).open("rb") as stream:
+        dos = stream.read(64)
+        require(len(dos) == 64 and dos[:2] == b"MZ", "NATIVE_APP_DOS_HEADER_MISSING")
+        pe_offset = struct.unpack_from("<I", dos, 60)[0]
+        require(64 <= pe_offset <= min(size - 24, 1024**2), "NATIVE_APP_PE_HEADER_OUTSIDE_FILE")
+        stream.seek(pe_offset)
+        coff = stream.read(24)
+        require(len(coff) == 24 and coff[:4] == b"PE\0\0", "NATIVE_APP_PE_HEADER_MISSING")
+        machine, = struct.unpack_from("<H", coff, 4)
+        optional_size, characteristics = struct.unpack_from("<HH", coff, 20)
+        require(characteristics & 0x2 and not characteristics & 0x2000 and
+                96 <= optional_size <= 4096, "NATIVE_APP_NOT_EXECUTABLE_IMAGE")
+        optional = stream.read(optional_size)
+        require(len(optional) == optional_size, "NATIVE_APP_OPTIONAL_HEADER_TRUNCATED")
+        magic, = struct.unpack_from("<H", optional)
+        require(magic in (0x10B, 0x20B), "NATIVE_APP_PE_MAGIC_UNSUPPORTED")
+        directory_at = 96 if magic == 0x10B else 112
+        require(optional_size >= directory_at, "NATIVE_APP_OPTIONAL_HEADER_TRUNCATED")
+        count, = struct.unpack_from("<I", optional, directory_at - 4)
+        require(count <= (optional_size - directory_at) // 8, "NATIVE_APP_DIRECTORY_TRUNCATED")
+        clr = struct.unpack_from("<II", optional, directory_at + 14 * 8) if count > 14 else (0, 0)
+        require(clr == (0, 0), "NATIVE_APP_CLR_LAUNCHER_OR_MANAGED_IMAGE_REJECTED")
+    return {"format": "PE32" if magic == 0x10B else "PE32_PLUS",
+            "machine": hex(machine), "clr_com_descriptor_rva": clr[0],
+            "clr_com_descriptor_bytes": clr[1],
+            "code_kind": "NATIVE_PE_NO_CLR_COM_DESCRIPTOR"}
+
+
+def observed_process_image(image_path, binary):
+    """Bind counters to the requested image before accepting its observations."""
+    observed = Path(image_path).resolve(strict=True)
+    require(os.path.samefile(observed, binary), "APP_OWNED_PROCESS_IMAGE_MISMATCH")
+    return str(observed)
+
+
+def owned_process_identity(process, binary):
+    """Retain identity even when a fast extraction exits before psutil attaches.
+
+    Popen owns this Windows process handle until cleanup. Its image and creation
+    time are queried directly, without reopening an exited or reused PID.
+    """
+    require(os.name == "nt", "OWNED_WINDOWS_PROCESS_IDENTITY_REQUIRED")
+    kernel = C.WinDLL("kernel32", use_last_error=True)
+    kernel.QueryFullProcessImageNameW.argtypes = [W.HANDLE, W.DWORD, W.LPWSTR, C.POINTER(W.DWORD)]
+    kernel.QueryFullProcessImageNameW.restype = W.BOOL
+    kernel.GetProcessTimes.argtypes = [W.HANDLE, *([C.POINTER(W.FILETIME)] * 4)]
+    kernel.GetProcessTimes.restype = W.BOOL
+    handle = W.HANDLE(int(process._handle))
+    name = C.create_unicode_buffer(32768); length = W.DWORD(len(name))
+    if not kernel.QueryFullProcessImageNameW(handle, 0, name, C.byref(length)):
+        raise OSError(C.get_last_error(), "APP_OWNED_HANDLE_IMAGE_UNAVAILABLE")
+    observed = observed_process_image(name.value, binary)
+    created = W.FILETIME(); exited = W.FILETIME(); kernel_time = W.FILETIME(); user_time = W.FILETIME()
+    if not kernel.GetProcessTimes(handle, C.byref(created), C.byref(exited),
+                                  C.byref(kernel_time), C.byref(user_time)):
+        raise OSError(C.get_last_error(), "APP_OWNED_HANDLE_CREATION_TIME_UNAVAILABLE")
+    ticks = (created.dwHighDateTime << 32) | created.dwLowDateTime
+    return {"observed_image": str(observed), "owned_image_matches_requested": True,
+            "image_identity_source": "OWNED_WINDOWS_PROCESS_HANDLE",
+            "created": (ticks - 116444736000000000) / 10000000,
+            "creation_time_filetime_ticks": str(ticks)}
 
 
 def binary_identity(binary, *, version_args=None):
@@ -142,12 +212,17 @@ def monitored_run(args, log, *, env=None, timeout=30):
                  "max_threads_observed": 0, "write_bytes_observed": 0,
                  "read_bytes_observed": 0}
         try:
-            sensor = psutil.Process(p.pid)
-            proof["created"] = sensor.create_time()
+            proof.update(owned_process_identity(p, args[0]))
+            try:
+                sensor = psutil.Process(p.pid)
+            except psutil.NoSuchProcess:
+                sensor = None
             deadline = time.monotonic() + timeout
             while p.poll() is None:
                 require(time.monotonic() < deadline, "APP_WORKLOAD_DEADLINE")
                 try:
+                    if sensor is None:
+                        sensor = psutil.Process(p.pid)
                     with sensor.oneshot():
                         cpu = sensor.cpu_times()
                         proof["cpu_seconds_observed"] = max(proof["cpu_seconds_observed"], cpu.user + cpu.system)
@@ -252,7 +327,8 @@ def finish_schedule(capture, output, helper, pids, *, waits=False):
 
 def seven_zip(output, helper):
     binary = installed("7z", [Path(os.environ.get("ProgramFiles", "C:/Program Files")) / "7-Zip/7z.exe"])
-    identity = binary_identity(binary, version_args=["i"])
+    native = native_pe_identity(binary)
+    identity = {**binary_identity(binary, version_args=["i"]), "native_image": native}
     source = output / "input.bin"
     rng = random.Random(20261028)
     source.write_bytes(rng.randbytes(8 * 1024**2))
@@ -278,6 +354,7 @@ def seven_zip(output, helper):
             capture.cancel()
     observed = trace["observations"]
     checks = {"compression_extraction_hash_roundtrip": True,
+              "owned_native_image_identity": all(x["owned_image_matches_requested"] for x in proofs),
               "cpu_counters": any(x["cpu_seconds_observed"] > 0 for x in proofs),
               "etw_cpu_samples": observed["cpu_samples"] > 0,
               "etw_cpu_stacks": observed["cpu_samples_with_stacks"] > 0,
