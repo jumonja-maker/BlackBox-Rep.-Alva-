@@ -1,0 +1,55 @@
+name: Prepare exact independently reviewed PR25 candidate
+on:
+  push:
+    branches: [review/pr25-prepare-v051-20261028]
+permissions:
+  contents: write
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          path: payload
+          persist-credentials: false
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: 7dfe33f448391093f7fa6424b354d6fffe6e7d64
+          path: candidate
+          persist-credentials: true
+      - name: Apply checked patch to exact PR source; create scratch ref only
+        working-directory: candidate
+        shell: python
+        run: |
+          import hashlib, lzma, os, subprocess
+          from pathlib import Path
+          def git(*args):
+              return subprocess.check_output(['git', *args], text=True).strip()
+          expected = '7dfe33f448391093f7fa6424b354d6fffe6e7d64'
+          assert git('rev-parse', 'HEAD') == expected
+          parts = Path('../payload/.review')
+          packed = (parts/'pr25-part0.xz').read_bytes() + (parts/'pr25-part1.xz').read_bytes()
+          assert hashlib.sha256(packed).hexdigest() == 'c387aa73ea128574ac9940aca081ac531b8aae892c752b7609173910275d6753'
+          patch = lzma.decompress(packed)
+          assert len(patch) == 51137
+          assert hashlib.sha256(patch).hexdigest() == 'f0dbbe9908c12856f3ee4e70f49a3326f1c30164b01b88dfd68283a9eb09306f'
+          file = Path(os.environ['RUNNER_TEMP'])/'reviewed-pr25.patch'
+          file.write_bytes(patch)
+          git('apply', '--unidiff-zero', '--check', str(file))
+          git('apply', '--unidiff-zero', str(file))
+          git('add', '-A')
+          git('diff', '--cached', '--check')
+          tree = git('write-tree')
+          assert tree == 'c763380401bc85bba9b5cc64c6de2c3b86cda7fa', tree
+          git('config', 'user.name', 'github-actions[bot]')
+          git('config', 'user.email', '41898282+github-actions[bot]@users.noreply.github.com')
+          git('commit', '-m', 'PR25: close privacy review gaps and prepare safely gated v0.5.1')
+          sha = git('rev-parse', 'HEAD')
+          assert git('rev-parse', 'HEAD^') == expected
+          destination = 'refs/heads/review/pr25-prepared-v051-20261028'
+          assert not git('ls-remote', '--heads', 'origin', destination), 'Scratch ref already exists'
+          git('push', 'origin', 'HEAD:'+destination)
+          print('REVIEWED_CANDIDATE', sha, tree)
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as report:
+              report.write('Prepared candidate: '+sha+'\n\nTree: '+tree+'\n\nPR/main/release unchanged.\n')
