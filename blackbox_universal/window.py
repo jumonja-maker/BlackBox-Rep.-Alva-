@@ -315,7 +315,7 @@ class UniversalWindow(QMainWindow):
         rule.setStyleSheet("background: #837789;")
         side.addWidget(rule)
         side.addWidget(_label("    NO CLOUD · NO INJECTION", "caption"))
-        side.addWidget(_label("    READ-ONLY · OFFLINE", "caption"))
+        side.addWidget(_label("    OBSERVE · INSPECT · INTERVENE", "caption"))
         body_layout.addWidget(sidebar)
 
         self.stack = QStackedWidget()
@@ -469,6 +469,18 @@ class UniversalWindow(QMainWindow):
         status.content.addWidget(self.action_state_label)
         middle.addWidget(status, 4)
         content.addLayout(middle, 1)
+
+        from .deep_inspector_panel import OverviewInspectorPanel
+        self.deep_inspector_panel = OverviewInspectorPanel(self)
+        self.deep_inspector_toggle = _button("DEEP INSPECTION")
+        self.deep_inspector_toggle.setObjectName("deepInspectionToggle")
+        self.deep_inspector_toggle.setCheckable(True)
+        self.deep_inspector_toggle.toggled.connect(self.deep_inspector_panel.setVisible)
+        self.deep_inspector_panel.setVisible(False)
+        self.deep_inspector_panel.closed.connect(self._deep_inspector_closed)
+        self._deep_close_complete = False
+        content.addWidget(self.deep_inspector_toggle)
+        content.addWidget(self.deep_inspector_panel)
 
         notes = WindowPanel("System messages", "LATEST ACTIVITY")
         self.recent_messages = QPlainTextEdit()
@@ -979,6 +991,9 @@ class UniversalWindow(QMainWindow):
         if hasattr(self,'marker_panel'):self.marker_panel.retranslate()
         if hasattr(self,'analysis_panel'):self.analysis_panel.retranslate()
         if hasattr(self,'events_panel'):self.events_panel.retranslate()
+        if hasattr(self, 'deep_inspector_panel'):
+            self.deep_inspector_panel.retranslate()
+            self.deep_inspector_toggle.setText("ГЛУБОКОЕ ИССЛЕДОВАНИЕ" if language == "RU" else "DEEP INSPECTION")
         if self.stack.currentIndex() == self._page_ids["reports"]:
             self._update_report_preview()
 
@@ -1858,6 +1873,11 @@ class UniversalWindow(QMainWindow):
     
     def _update_all(self) -> None:
         selected = self.probe.pid is not None
+        if hasattr(self, 'deep_inspector_panel'):
+            cached = getattr(self.probe, 'data', {})
+            core = getattr(self.probe, '_core', None)
+            created = cached.get('pid_creation_time', getattr(core, 'created', None))
+            self.deep_inspector_panel.set_target(self.probe.pid, created, self.probe.name)
         running = self.probe.active
         stopping = (self._pending_base_stop is not None or
                     self._report_worker is not None or
@@ -2390,7 +2410,24 @@ class UniversalWindow(QMainWindow):
             "Source capabilities and access restrictions are reported per session.\n\n"
             "No background cloud upload or hidden process injection.")
 
+    def _deep_inspector_closed(self, result) -> None:
+        self._deep_close_complete = True
+        if result.get('status') == 'RECOVERY_UNCONFIRMED':
+            message = ("Завершение диагностических действий не подтверждено. "
+                       "Проверьте исследуемый процесс. Сведения сохранены в журнале." if self.language == "RU" else
+                       "Diagnostic cleanup is not confirmed. Check the inspected process. Evidence is retained in the journal.")
+            QMessageBox.warning(self, "BLACK.BOX — RECOVERY_UNCONFIRMED", message)
+        if self._pending_close:
+            QTimer.singleShot(0, self.close)
+
     def closeEvent(self, event) -> None:
+        if (hasattr(self, 'deep_inspector_panel') and not self._deep_close_complete
+                and self.deep_inspector_panel.bridge.has_session):
+            self._pending_close = True
+            self._timer.stop()
+            self.deep_inspector_panel.shutdown()
+            event.ignore()
+            return
         if self._isolated and self.probe.alive:
             self._pending_close = True
             self._timer.stop()

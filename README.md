@@ -4,7 +4,7 @@
 
 > **Antivirus / Windows SmartScreen notice:** Antivirus software or Microsoft Defender SmartScreen may warn about BLACK.BOX because its portable executable is unsigned and can inspect processes. **If the project interests you, you may add a narrowly scoped antivirus exception only after independently verifying and trusting the file.** Download from the [official repository Releases](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/releases), check the published ZIP SHA-256, and scan/review the download first. A warning is **not proof of a false positive**, and an exception reduces protection. Do **not** disable antivirus globally.
 
-**A portable Windows process and application-file inspector.**
+**A portable Windows tool for process observation, deep inspection and controlled diagnostic actions.**
 
 [**Download latest published Windows x64 release**](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/releases/latest) · [Releases](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/releases) · [Русская версия](README.ru.md)
 
@@ -13,9 +13,11 @@
 
 **Source version: v0.5.2.** Only the [official latest GitHub Release](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/releases/latest) determines what can be downloaded or installed by the updater. A source branch or CI artifact does not automatically become an update.
 
-BLACK.BOX Universal lets you **select a running process or choose an application file**. It records operating-system measurements from a running process and saves sessions as local SQLite, JSON, and HTML files. File selection itself only reads file metadata. It does not inject code, modify the target program, or require a service, account, cloud server, subscription, or separately installed Python.
+BLACK.BOX Universal lets you **select a running process or choose an application file**. OBSERVE records operating-system measurements and saves local SQLite, JSON and HTML sessions without changing the target. File selection itself only reads metadata. In the separate BB-DEEP-001 patch, explicit INSPECT and INTERVENE actions can snapshot, pause, debug and modify selected memory after confirmation. They are not started by ordinary sampling. The portable application requires no service, account, cloud server, subscription or separately installed Python.
 
 > **Important:** BLACK.BOX provides observational evidence, not proof of an application's internal root cause. High CPU, rising memory, or a process exiting do not, on their own, establish why it failed.
+
+**BB-DEEP-001 — separate unpublished patch:** The expandable **Deep Inspection** block stays inside Overview and provides Processes, Modules, Threads, Handles, Memory, Network, Disk, Debug and Timeline panels. Operation-specific access checks can offer a standard Windows UAC prompt for a scoped diagnostic helper; the GUI remains unelevated. Sensitive memory and dumps are excluded from ordinary sharing. Historical trace instance IDs are not silently equated with current process creation times. See the [English guide and supported boundaries](docs/BB_DEEP_001.md), [Russian guide](docs/BB_DEEP_001_RU.md) and [original specification](docs/specifications/BB-DEEP-001.md). A patch branch is not a published release; acceptance is established by its exact-commit GitHub-hosted checks.
 
 **Decoder completion in v0.5.2 source:** Offline trace/session clock correlation (with explicit uncertainty), ETW off-CPU/ready-delay analysis, native PDB source lines/inline sites/OMAP and bounded import recovery. Clock evidence is not trace authentication, scheduler events do not prove a lock owner, and unsupported symbols remain unknown. See [completion scope and acceptance limits](docs/TRACE_DECODER_COMPLETION_PATCH.md) and [v0.5.2 release notes](docs/RELEASE_v0.5.2.md). The installed version is determined only by the published GitHub Release, not a source commit.
 
@@ -61,7 +63,7 @@ Keep the entire `_internal` folder and the other extracted files. The main EXE i
 
 | Tab | Capabilities |
 | --- | --- |
-| **Overview** | CPU/RSS metrics, graphs, Start/Stop and a live confirmation of the selected process/PID (attached, recording or stopped). |
+| **Overview** | CPU/RSS metrics, graphs, Start/Stop and live target identity. The BB-DEEP-001 patch adds a collapsed Deep Inspection block with explicit diagnostic actions. |
 | **Processes** | Select by name/PID **or choose an application file**. Match a running EXE by its full path, or launch a selected EXE only after explicit confirmation. |
 | **Event Log** | Local observation messages; session start/stop events are persisted in SQLite. |
 | **Reports** | Current snapshot, `report.json`, readable offline `report.html`, manual export and session comparison. |
@@ -144,7 +146,7 @@ This offline analysis uses recorded CPU, RSS, I/O and other available counters t
 
 ## Scope and current quality status
 
-BLACK.BOX is **not** a PC cleaner, antivirus, automatic repair utility, crash-dump analyzer, or debugger of arbitrary third-party code. The published v0.3.6 baseline does not collect Windows ETW traces or internal call stacks. OS counters cannot prove internal program faults.
+BLACK.BOX is **not** a PC cleaner, antivirus or automatic repair utility. The BB-DEEP-001 patch adds Windows Debug API actions and a bounded local minidump metadata/memory reader; it does not claim complete dump unwinding, managed-heap analysis, protection bypass or guaranteed rollback after a crash. Access is decided by Windows. OS counters, wait reasons and successful diagnostic actions do not by themselves prove an application's internal fault.
 
 **Baseline QA for v0.3.2:** [GitHub Actions run #39872624116](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/actions/runs/39872624116) passed **new file-selection and existing process tests on Windows and Linux**, built the Windows executable, and passed frozen-EXE startup/smoke checks for commit [`6c8d9478`](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/commit/6c8d94785492e4373a80720b7812871b94856241). The newer v0.3.6 source, PE file picker, and packaged executable are subject to [current main CI](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/actions?query=branch%3Amain). Manual clean-Windows, update/rollback, antivirus and code-signing acceptance are **not established by these tests**. Distributed EXEs are currently unsigned; third-party package license notices also require final review.
 
@@ -160,12 +162,7 @@ python -m pip install -e .
 python app.py
 ```
 
-To run tests and the GUI smoke check:
-
-```powershell
-python -m unittest discover -s tests -v
-python app.py --smoke
-```
+For BB-DEEP-001, all automated tests, native controlled workloads, portable-EXE checks and the endurance job run exclusively on GitHub-hosted runners. Follow the [patch validation guide](docs/BB_DEEP_001.md); no mandatory acceptance test is to run on a user's computer. A hosted job does not establish real interactive UAC Secure Desktop behavior or physical Windows 10/11 acceptance.
 
 An optional CLI is available for advanced users. The `record --output` directory must already exist:
 

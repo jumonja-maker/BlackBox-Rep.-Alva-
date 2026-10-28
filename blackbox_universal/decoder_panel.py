@@ -66,12 +66,15 @@ class DecoderPanel(QWidget):
         controls = QHBoxLayout()
         self.open_button = QPushButton()
         self.session_button = QPushButton()
+        self.dump_button = QPushButton()
+        self.dump_button.setObjectName("decoderOpenMinidump")
         self.cancel_button = QPushButton()
         self.cancel_button.setEnabled(False)
         self.open_button.clicked.connect(lambda: self.choose(False))
         self.session_button.clicked.connect(lambda: self.choose(True))
+        self.dump_button.clicked.connect(self.choose_minidump)
         self.cancel_button.clicked.connect(self.cancel)
-        for button in (self.open_button, self.session_button, self.cancel_button):
+        for button in (self.open_button, self.session_button, self.dump_button, self.cancel_button):
             controls.addWidget(button)
         layout.addLayout(controls)
         self.status = QLabel()
@@ -178,14 +181,15 @@ class DecoderPanel(QWidget):
 
     def retranslate(self):
         self.notice.setText(self.tr2(
-            "OFFLINE TRACE DECODER · ETL / EventPipe / BLACK.BOX JSONL. No recording or symbol downloads. "
+            "OFFLINE TRACE DECODER · ETL / EventPipe / BLACK.BOX JSONL; saved minidump metadata. No recording or symbol downloads. "
             "Session time requires checked clock evidence; UTC alone does not establish synchronization. "
             "GC elapsed time is NOT a pause. Imported data is unverified.",
-            "ДЕКОДЕР ТРАСС · ETL / EventPipe / JSONL BLACK.BOX. Без записи и загрузки символов. "
+            "ДЕКОДЕР ТРАСС · ETL / EventPipe / JSONL BLACK.BOX; метаданные сохранённых дампов. Без записи и загрузки символов. "
             "Связь с сеансом требует проверки часов; одного UTC недостаточно для синхронизации. "
             "Длительность GC — НЕ пауза. Импорт не удостоверяет источник."))
         for button, en, ru in ((self.open_button, "OPEN TRACE…", "ОТКРЫТЬ ТРАССУ…"),
                 (self.session_button, "FROM SESSION…", "ИЗ СЕАНСА…"),
+                (self.dump_button, "OPEN DUMP…", "ОТКРЫТЬ ДАМП…"),
                 (self.cancel_button, "CANCEL", "ОТМЕНА"),
                 (self.apply_button, "APPLY FILTER", "ПРИМЕНИТЬ ФИЛЬТР"),
                 (self.prev_button, "PREVIOUS", "НАЗАД"), (self.next_button, "NEXT", "ДАЛЕЕ"),
@@ -261,6 +265,11 @@ class DecoderPanel(QWidget):
             if self.import_failure:
                 text += self.tr2(" Open the original again to retry. No partial result was published.",
                                  " Для повтора откройте исходный файл заново. Частичный результат не опубликован.")
+        elif self._analysis_kind == "minidump" and self.analysis_report is not None:
+            text = self.tr2("Saved minidump metadata: ", "Метаданные сохранённого дампа: ")
+            text += str(self.analysis_report.get("status", "INCOMPLETE_EVIDENCE"))
+            text += self.tr2(" · historical state; live process binding NOT_ESTABLISHED",
+                             " · прошлое состояние; связь с живым процессом НЕ УСТАНОВЛЕНА")
         elif self.summary:
             s = self.summary
             text = self.tr2("Result", "Результат") + f": {s['status']} · {s['rows']} events · {s['events_with_stacks']} stacks · "
@@ -341,6 +350,7 @@ class DecoderPanel(QWidget):
         self.state = "decoding"
         self.open_button.setEnabled(False)
         self.session_button.setEnabled(False)
+        self.dump_button.setEnabled(False)
         self.cancel_button.setEnabled(True)
         self.worker = DecodeWorker(source, output, self)
         self.worker.result_ready.connect(self.received)
@@ -383,7 +393,9 @@ class DecoderPanel(QWidget):
             worker.deleteLater()
         self.open_button.setEnabled(True)
         self.session_button.setEnabled(True)
+        self.dump_button.setEnabled(True)
         self.cancel_button.setEnabled(False)
+        self.export_analysis_button.setEnabled(self.analysis_report is not None)
         if self.index is not None:
             self.calltree_button.setEnabled(True)
             self.resolve_tree_button.setEnabled(True)
@@ -662,8 +674,17 @@ class DecoderPanel(QWidget):
                 "binary_path": Path(binary), "pdb_path": Path(pdb),
                 "source_trace_sha256": self.summary.get("input_sha256")})
 
+    def choose_minidump(self):
+        if self.worker is not None:
+            return
+        selected, _ = QFileDialog.getOpenFileName(
+            self, self.tr2("Open saved minidump", "Открыть сохранённый дамп"),
+            "", "Windows minidump (*.dmp *.mdmp);;All files (*)")
+        if selected:
+            self.start_analysis("minidump", {"path": Path(selected)})
+
     def start_analysis(self, kind, arguments):
-        if self.worker is not None or self.index is None:
+        if self.worker is not None or (self.index is None and kind != "minidump"):
             return
         if getattr(self.window.probe, "active", False):
             self.state, self.error = "error", "STOP_RECORDING_BEFORE_OFFLINE_ANALYSIS"
@@ -676,7 +697,7 @@ class DecoderPanel(QWidget):
         self.state, self.error = "analyzing", ""
         self.import_failure = None
         self.details.clear()
-        for button in (self.open_button, self.session_button, self.calltree_button, self.resolve_tree_button,
+        for button in (self.open_button, self.session_button, self.dump_button, self.calltree_button, self.resolve_tree_button,
                        self.resolve_stack_button, self.export_analysis_button,
                        self.review_pdb_button, self.review_clock_button, self.waits_button,
                        self.align_session_button):
@@ -699,7 +720,7 @@ class DecoderPanel(QWidget):
             if self._analysis_kind == "calltree":
                 self._calltree_dialog = CallTreeDialog(report, self.window.language, self)
                 self._calltree_dialog.show()
-            elif self._analysis_kind in ("alignment", "waits"):
+            elif self._analysis_kind in ("alignment", "waits", "minidump"):
                 if self._analysis_kind == "alignment":
                     self.alignment_report = report
                     self.clock_review = None

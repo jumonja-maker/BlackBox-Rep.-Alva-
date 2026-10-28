@@ -228,17 +228,22 @@ jobs:
         run: python tools/write_build_provenance.py "${{ github.event.pull_request.head.sha || github.sha }}"
       - name: Build separate Windows maintenance EXE
         run: python -m PyInstaller --noconfirm --clean --paths src --paths . --onefile --windowed --icon assets/blackbox.ico --name BLACK.BOX-Maintenance maintenance_entry.py
+      - name: Build separate asInvoker diagnostic helper for explicit UAC sessions
+        run: python -m PyInstaller --noconfirm --clean --paths src --paths . --onedir --windowed --collect-submodules blackbox_core --exclude-module PySide6 --exclude-module blackbox_universal --icon assets/blackbox.ico --add-data ".qa-build/blackbox-build.json;." --name BLACK.BOX-Diagnostic diagnostic_entry.py
       - name: Build BLACK.BOX Universal desktop with original icon
         shell: pwsh
         run: |
           python -m PyInstaller --noconfirm --clean --paths src --paths . --onedir --windowed --collect-submodules blackbox_core --collect-submodules blackbox_investigation --collect-submodules blackbox_universal --icon assets/blackbox.ico --add-data "assets/blackbox.png;assets" --add-data "src/blackbox_core/instrumentation.py;blackbox_core" --add-data ".qa-build/blackbox-build.json;." --name BLACK.BOX-Universal app.py
           if ($LASTEXITCODE -ne 0) { throw 'GUI build failed' }
           Copy-Item "dist/BLACK.BOX-Maintenance.exe" "dist/BLACK.BOX-Universal/BLACK.BOX-Maintenance.exe"
+          Copy-Item "dist/BLACK.BOX-Diagnostic" "dist/BLACK.BOX-Universal/diagnostic" -Recurse
           Copy-Item ".blackbox-portable.json" "dist/BLACK.BOX-Universal/.blackbox-portable.json"
           Copy-Item "decoder" "dist/BLACK.BOX-Universal/decoder" -Recurse
           if (-not (Test-Path "dist/BLACK.BOX-Universal/decoder/BLACK.BOX-Decoder.exe")) { throw 'Decoder helper missing' }
           if (-not (Test-Path "dist/BLACK.BOX-Universal/BLACK.BOX-Maintenance.exe")) { throw 'Maintenance helper missing' }
           if (-not (Test-Path "dist/BLACK.BOX-Universal/_internal/assets/blackbox.png")) { throw 'App icon missing' }
+      - name: Verify explicit privilege boundaries in the packaged GUI and diagnostic helper
+        run: python tools/verify_diagnostic_package.py dist/BLACK.BOX-Universal
       - name: Verify real embedded research modules before startup
         run: python tools/verify_frozen_research.py "dist/BLACK.BOX-Universal/BLACK.BOX-Universal.exe"
       - name: Verify Explorer icon is the same as the taskbar icon for both EXEs

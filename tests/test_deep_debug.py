@@ -1,0 +1,259 @@
+"""Contract/ownership regression tests; executed only by GitHub-hosted CI."""
+from __future__ import annotations
+
+import ctypes
+import threading
+import time
+import unittest
+from unittest.mock import Mock
+
+from blackbox_core.deep_contracts import ProcessIdentity
+from blackbox_core.deep_debug import (
+    DebugError, DebugSession, _Command, _Context, _DebugEvent, _hex, _positive,
+)
+from blackbox_core.deep_debug_guardian import recover, validate_plan
+
+
+class FakeKernel:
+    def __init__(self):
+        self.counts = {100: 2}
+        self.closed = []
+
+    def SuspendThread(self, handle):
+        before = self.counts[handle]
+        self.counts[handle] += 1
+        return before
+
+    def ResumeThread(self, handle):
+        before = self.counts[handle]
+        if before:
+            self.counts[handle] -= 1
+        return before
+
+    def CloseHandle(self, handle):
+        self.closed.append(handle)
+        return True
+
+
+class FakeAPI:
+    def __init__(self):
+        self.identity = ProcessIdentity(88, 12345, "fixture.exe")
+        self.memory = {0x1000: b"original", 0x2000: b"\x90"}
+        self.k = FakeKernel()
+        self.replacements = []
+        self.alive = True
+
+    def verify(self):
+        if not self.alive:
+            raise DebugError("PROCESS_CHANGED", "FIXTURE_EXITED")
+
+    def read(self, address, size):
+        self.verify()
+        value = self.memory[address]
+        if len(value) != size:
+            raise DebugError("INCOMPLETE_EVIDENCE", "SHORT_READ")
+        return value
+
+    def executable_address(self, address):
+        return address == 0x2000
+
+    def replace(self, address, expected, value, *, executable=False):
+        self.verify()
+        if self.memory[address] != expected:
+            raise DebugError("OPERATION_FAILED", "EXPECTED_BYTES_MISMATCH")
+        self.memory[address] = value
+        self.replacements.append((address, expected, value, executable))
+
+    def thread(self, tid, created=None, *, rights=0x0018):
+        self.verify()
+        if tid != 7 or created not in (None, 45678):
+            raise DebugError("PROCESS_CHANGED", "THREAD_INSTANCE_CHANGED")
+        return 100, 45678
+
+
+class FakeGuardian:
+    def __init__(self):
+        self.pid = 999
+        self.plans = []
+
+    def update(self, plan):
+        import copy
+        validate_plan(plan)
+        self.plans.append(copy.deepcopy(plan))
+
+    def finish(self, *, clean):
+        self.clean = clean
+
+
+def session():
+    result = DebugSession(ProcessIdentity(88, 12345, "fixture.exe"))
+    result._api = FakeAPI()
+    result._guard = FakeGuardian()
+    return result
+
+
+def plan(**updates):
+    value = {"breakpoints": [], "changes": [], "suspensions": [], "stepping": None}
+    value.update(updates)
+    return value
+
+
+class DeepDebugContracts(unittest.TestCase):
+    def test_native_structures_have_x64_windows_layout_and_alignment(self):
+        self.assertEqual(ctypes.sizeof(_DebugEvent), 176)
+        context = _Context()
+        self.assertEqual(context.address % 16, 0)
+        context.set64(248, 0x123456789ABC)
+        context.set32(68, 0x202)
+        self.assertEqual(context.public()["rip"], 0x123456789ABC)
+        self.assertEqual(context.public()["eflags"], 0x202)
+
+    def test_memory_hex_parser_rejects_spaces_bools_and_oversized_input(self):
+        for value in (None, True, "", "a", "aa bb", "GG", "aa" * 4097):
+            with self.subTest(value=str(value)[:20]), self.assertRaises(DebugError):
+                _hex(value, "expected")
+        for value in (True, 0, -1, 1.1, "123"):
+            with self.assertRaises(DebugError):
+                _positive(value, "address")
+
+    def test_mutation_requires_internal_confirmed_capability(self):
+        item = session()
+        command = _Command("memory.write", {"address": 0x1000, "expected_hex": b"original".hex(),
+                                            "value_hex": b"modified".hex(), "confirmed": True},
+                           time.monotonic() + 5, None, threading.Event())
+        with self.assertRaisesRegex(DebugError, "EXPLICIT_CONFIRMATION_REQUIRED"):
+            item._dispatch(command)
+        self.assertEqual(item._api.memory[0x1000], b"original")
+        self.assertFalse(item._changes)
+
+    def test_cancellation_and_identity_are_checked_before_native_action(self):
+        item = session()
+        cancelled = threading.Event()
+        cancelled.set()
+        command = _Command("memory.write", {}, time.monotonic() + 5, cancelled, threading.Event())
+        with self.assertRaisesRegex(DebugError, "CANCELLED_BEFORE"):
+            item._check(command)
+        command.cancel = None
+        item._api.alive = False
+        with self.assertRaisesRegex(DebugError, "FIXTURE_EXITED"):
+            item._check(command)
+        self.assertFalse(item._api.replacements)
+
+    def test_memory_originals_never_enter_result_and_rollback_is_readback_verified(self):
+        item = session()
+        output = item._write_memory({"address": 0x1000, "expected_hex": b"original".hex(),
+                                     "value_hex": b"modified".hex()})
+        self.assertEqual(output["status"], "COMPLETED")
+        self.assertNotIn("original_hex", str(output))
+        self.assertNotIn(b"original".hex(), str(output))
+        identifier = output["data"]["change_id"]
+        self.assertEqual(item._guard.plans[0]["changes"][0]["original_hex"], b"original".hex())
+        restored = item._rollback_memory({"change_id": identifier})
+        self.assertTrue(restored["data"]["original_bytes_verified"])
+        self.assertEqual(item._api.memory[0x1000], b"original")
+        self.assertFalse(item._changes)
+
+    def test_external_memory_mutation_refuses_restore_without_overwrite(self):
+        item = session()
+        output = item._write_memory({"address": 0x1000, "expected_hex": b"original".hex(),
+                                     "value_hex": b"modified".hex()})
+        item._api.memory[0x1000] = b"external"
+        with self.assertRaisesRegex(DebugError, "EXPECTED_BYTES_MISMATCH"):
+            item._rollback_memory({"change_id": output["data"]["change_id"]})
+        self.assertEqual(item._api.memory[0x1000], b"external")
+        self.assertEqual(len(item._changes), 1)
+
+    def test_owned_suspend_resume_preserves_preexisting_suspend_counts(self):
+        item = session()
+        output = item._suspend({"tid": 7, "thread_created_100ns": 45678})
+        self.assertEqual(item._api.k.counts[100], 3)
+        self.assertEqual(item._guard.plans[0]["suspensions"][0]["phase"], "pending")
+        self.assertEqual(item._guard.plans[1]["suspensions"][0]["phase"], "active")
+        restored = item._resume({"suspension_id": output["data"]["suspension_id"]})
+        self.assertEqual(item._api.k.counts[100], 2)
+        self.assertEqual(restored["data"]["owned_decrement"], 1)
+        self.assertEqual(item._guard.plans[-2]["suspensions"][0]["phase"], "resuming")
+        self.assertFalse(item._suspensions)
+        with self.assertRaisesRegex(DebugError, "NO_OWNED_SUSPENSION"):
+            item._resume({"tid": 7, "thread_created_100ns": 45678})
+        self.assertEqual(item._api.k.counts[100], 2)
+
+    def test_wrong_thread_lifetime_never_suspends_reused_tid(self):
+        item = session()
+        with self.assertRaisesRegex(DebugError, "THREAD_INSTANCE_CHANGED"):
+            item._suspend({"tid": 7, "thread_created_100ns": 45679})
+        self.assertEqual(item._api.k.counts[100], 2)
+        self.assertFalse(item._suspensions)
+
+    def test_original_int3_is_never_adopted_as_owned_breakpoint(self):
+        item = session()
+        item._attached = True
+        item._event = Mock()
+        item._api.memory[0x2000] = b"\xcc"
+        with self.assertRaisesRegex(DebugError, "EXISTING_INT3_IS_NOT_OWNED"):
+            item._add_breakpoint({"address": 0x2000})
+        self.assertFalse(item._breakpoints)
+
+
+class DeepRecoveryContracts(unittest.TestCase):
+    def test_immutable_identity_refuses_recovery_against_replaced_target(self):
+        api = FakeAPI()
+        api.alive = False
+        result = recover(api, plan(), reason="HELPER_EXITED")
+        self.assertEqual(result["status"], "RECOVERY_UNCONFIRMED")
+        self.assertFalse(api.replacements)
+
+    def test_prepared_memory_plan_without_effect_does_not_write(self):
+        api = FakeAPI()
+        result = recover(api, plan(changes=[{"address": 0x1000, "original_hex": b"original".hex(),
+                                            "value_hex": b"modified".hex()}]), reason="HELPER_EXITED")
+        self.assertEqual(result["status"], "COMPLETED")
+        self.assertFalse(api.replacements)
+
+    def test_applied_memory_restores_only_exact_matching_replacement(self):
+        api = FakeAPI()
+        api.memory[0x1000] = b"modified"
+        result = recover(api, plan(changes=[{"address": 0x1000, "original_hex": b"original".hex(),
+                                            "value_hex": b"modified".hex()}]), reason="HELPER_EXITED")
+        self.assertEqual(result["status"], "COMPLETED")
+        self.assertEqual(api.memory[0x1000], b"original")
+        self.assertEqual(result["restored"]["memory_changes"], 1)
+        self.assertNotIn("original_hex", str(result))
+
+    def test_unknown_suspend_transition_never_decrements_someone_elses_count(self):
+        for phase in ("pending", "resuming"):
+            api = FakeAPI()
+            result = recover(api, plan(suspensions=[{"tid": 7, "created_100ns": 45678,
+                                                    "phase": phase}]), reason="HELPER_EXITED")
+            self.assertEqual(result["status"], "RECOVERY_UNCONFIRMED")
+            self.assertEqual(api.k.counts[100], 2)
+
+    def test_active_owned_suspend_recovery_decrements_exactly_once(self):
+        api = FakeAPI()
+        api.k.counts[100] = 3
+        result = recover(api, plan(suspensions=[{"tid": 7, "created_100ns": 45678,
+                                                "phase": "active", "previous_count": 2}]), reason="HELPER_EXITED")
+        self.assertEqual(result["status"], "COMPLETED")
+        self.assertEqual(api.k.counts[100], 2)
+
+    def test_breakpoint_byte_recovery_does_not_claim_instruction_pointer_recovery(self):
+        api = FakeAPI()
+        api.memory[0x2000] = b"\xcc"
+        result = recover(api, plan(breakpoints=[{"address": 0x2000, "original_hex": "90"}]),
+                         reason="HELPER_EXITED")
+        self.assertEqual(api.memory[0x2000], b"\x90")
+        self.assertEqual(result["restored"]["breakpoints"], 1)
+        self.assertEqual(result["status"], "RECOVERY_UNCONFIRMED")
+        self.assertIn("BREAKPOINT_EXECUTION_CONTEXT_RECOVERY_NOT_ESTABLISHED", result["errors"])
+
+    def test_guardian_rejects_unbounded_or_extra_commands(self):
+        with self.assertRaises(ValueError):
+            validate_plan({**plan(), "shell": "anything"})
+        with self.assertRaises(ValueError):
+            validate_plan(plan(suspensions=[{}] * 129))
+        with self.assertRaises((ValueError, DebugError)):
+            validate_plan(plan(changes=[{"address": True, "original_hex": "00", "value_hex": "11"}]))
+
+
+if __name__ == "__main__":
+    unittest.main()

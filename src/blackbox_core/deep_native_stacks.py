@@ -1,0 +1,195 @@
+"""Live x64 stacks from PSS contexts and a copy-on-write VA clone.
+
+The inspector never increments a target thread's suspension count. Windows
+owns transient snapshot capture; all unwinding reads the resulting VA clone.
+"""
+from __future__ import annotations
+
+import ctypes as C
+import time
+
+from . import deep_native_win as W
+
+
+class PSS_THREAD_ENTRY(C.Structure):
+    _fields_ = [("exit_status", W.U32), ("teb", W.PTR), ("pid", W.U32),
+                ("tid", W.U32), ("affinity", W.SIZE), ("priority", W.I32),
+                ("base_priority", W.I32), ("syscall_argument", W.PTR),
+                ("syscall_number", W.U16), ("created", W.FILETIME),
+                ("exited", W.FILETIME), ("kernel_time", W.FILETIME),
+                ("user_time", W.FILETIME), ("start_address", W.PTR),
+                ("captured", W.FILETIME), ("flags", W.U32),
+                ("suspend_count", W.U16), ("context_size", W.U16), ("context", W.PTR)]
+
+
+def collect_stacks(inspector, params, deadline, cancel):
+    from .deep_native import NativeError, _check, _integer, _os_error, _DBGHELP_LOCK
+    limit = _integer(params.get("limit", 16), "limit", 1, 64)
+    frame_limit = _integer(params.get("max_frames", 64), "max_frames", 1, 128)
+    requested_tid = params.get("tid")
+    if requested_tid is not None:
+        _integer(requested_tid, "tid", 1, 0xFFFFFFFF)
+    requested_created = params.get("thread_created_100ns", params.get("created_100ns"))
+    if requested_created is not None:
+        _integer(requested_created, "created_100ns", 1)
+    modules = inspector._modules({"limit": 1024}, deadline, cancel)["rows"]
+    symbols, symbol_module = None, None
+    if params.get("pdb_path"):
+        from .decoder_native_symbols import load_native_symbols
+        module_base = _integer(params.get("module_base"), "module_base", 1)
+        symbol_module = next((m for m in modules if m["base"] == module_base), None)
+        if symbol_module is None:
+            raise ValueError("SYMBOL_MODULE_NOT_LOADED")
+        symbols = load_native_symbols(symbol_module["path"], params["pdb_path"], cancel=cancel)
+        loaded = symbol_module.get("loaded_pe") or {}
+        if not loaded.get("guid") or any(loaded.get(key) != symbols.pe.get(key)
+                                         for key in ("guid", "age", "image_size", "image_timestamp")):
+            raise ValueError("LOADED_MODULE_PE_PDB_IDENTITY_MISMATCH")
+    rows, omitted, cleanup_error = [], 0, None
+    with inspector._open(0x4D0) as (kernel, process):
+        process_machine, native_machine = W.U16(), W.U16()
+        if not kernel.wow64(process, C.byref(process_machine), C.byref(native_machine)):
+            raise _os_error("IS_WOW64_PROCESS2_FAILED")
+        if process_machine.value or native_machine.value != 0x8664:
+            raise NativeError("INCOMPLETE_EVIDENCE", "LIVE_STACK_REQUIRES_NATIVE_WINDOWS_X64_TARGET")
+        capture = W.bind(kernel.dll, "PssCaptureSnapshot", W.U32, W.HANDLE, W.U32, W.U32, C.POINTER(W.HANDLE))
+        free = W.bind(kernel.dll, "PssFreeSnapshot", W.U32, W.HANDLE, W.HANDLE)
+        query = W.bind(kernel.dll, "PssQuerySnapshot", W.U32, W.HANDLE, W.U32, W.PTR, W.U32)
+        marker_create = W.bind(kernel.dll, "PssWalkMarkerCreate", W.U32, W.PTR, C.POINTER(W.HANDLE))
+        marker_free = W.bind(kernel.dll, "PssWalkMarkerFree", W.U32, W.HANDLE)
+        walk_snapshot = W.bind(kernel.dll, "PssWalkSnapshot", W.U32, W.HANDLE, W.U32, W.HANDLE, W.PTR, W.U32)
+        snapshot, marker, clone = W.HANDLE(), W.HANDLE(), W.HANDLE()
+        error = capture(process, 0x1 | 0x80 | 0x100, 0x00100003, C.byref(snapshot))
+        if error:
+            raise _os_error("PSS_CAPTURE_SNAPSHOT_FAILED", error)
+        try:
+            _check(deadline, cancel)
+            error = query(snapshot, 1, C.byref(clone), C.sizeof(clone))
+            if error or not clone:
+                raise _os_error("PSS_QUERY_VA_CLONE_FAILED", error)
+            # Toolhelp enumerated live modules before capture. A DLL may have
+            # been replaced at the same address in that interval. Bind a frame
+            # only after reading the captured clone's own PE identity/layout.
+            coherent_modules = []
+            module_mismatches = 0
+            for module in modules:
+                _check(deadline, cancel)
+                captured_pe = inspector._loaded_pe(kernel, clone, module["base"])
+                if (captured_pe and captured_pe == module.get("loaded_pe") and
+                        captured_pe.get("image_size") == module["size"]):
+                    coherent_modules.append({**module, "snapshot_pe": captured_pe,
+                                             "snapshot_binding": "PSS_CLONE_PE_IDENTITY_AND_LAYOUT_MATCH"})
+                else:
+                    module_mismatches += 1
+            modules = coherent_modules
+            if symbols is not None and not any(m["base"] == symbol_module["base"] for m in modules):
+                raise NativeError("INCOMPLETE_EVIDENCE", "SYMBOL_MODULE_CHANGED_BEFORE_PSS_CAPTURE")
+            error = marker_create(None, C.byref(marker))
+            if error:
+                raise _os_error("PSS_WALK_MARKER_CREATE_FAILED", error)
+            remaining = max(.001, deadline - time.monotonic()) if deadline else 15
+            if not _DBGHELP_LOCK.acquire(timeout=remaining):
+                raise NativeError("TIMED_OUT", "DBGHELP_BUSY")
+            try:
+                dbg = W.library("dbghelp")
+                initialize = W.bind(dbg, "SymInitializeW", W.BOOL, W.HANDLE, C.c_wchar_p, W.BOOL)
+                cleanup = W.bind(dbg, "SymCleanup", W.BOOL, W.HANDLE)
+                set_options = W.bind(dbg, "SymSetOptions", W.U32, W.U32)
+                get_options = W.bind(dbg, "SymGetOptions", W.U32)
+                load_module = W.bind(dbg, "SymLoadModuleExW", W.U64, W.HANDLE, W.HANDLE,
+                                     C.c_wchar_p, C.c_wchar_p, W.U64, W.U32, W.PTR, W.U32)
+                stack_walk = W.bind(dbg, "StackWalk64", W.BOOL, W.U32, W.HANDLE, W.HANDLE,
+                                    C.POINTER(W.STACKFRAME64), W.PTR, W.PTR, W.PTR, W.PTR, W.PTR)
+                function_table = W.bind(dbg, "SymFunctionTableAccess64", W.PTR, W.HANDLE, W.U64)
+                module_base_api = W.bind(dbg, "SymGetModuleBase64", W.U64, W.HANDLE, W.U64)
+                previous_options = get_options()
+                # Ignore environment symbol paths, disable image search/prompts.
+                set_options(0x4 | 0x200 | 0x400 | 0x1000 | 0x20000 | 0x80000)
+                initialized = False
+                try:
+                    if not initialize(clone, "", False):
+                        raise _os_error("SYM_INITIALIZE_FAILED")
+                    initialized = True
+                    for module in modules:
+                        _check(deadline, cancel)
+                        if module["path"] and not module["path"].startswith(("\\\\", "//")):
+                            load_module(clone, None, module["path"], None, module["base"], module["size"], None, 0)
+                    while True:
+                        _check(deadline, cancel)
+                        entry = PSS_THREAD_ENTRY()
+                        error = walk_snapshot(snapshot, 3, marker, C.byref(entry), C.sizeof(entry))
+                        if error == 259:
+                            break
+                        if error:
+                            raise _os_error("PSS_WALK_THREAD_FAILED", error)
+                        if entry.pid != inspector.identity.pid:
+                            raise NativeError("PROCESS_CHANGED", "SNAPSHOT_THREAD_PROCESS_MISMATCH")
+                        if requested_tid is not None and entry.tid != requested_tid:
+                            continue
+                        if len(rows) >= limit:
+                            omitted += 1
+                            continue
+                        if requested_created is not None and entry.created.value != requested_created:
+                            raise NativeError("PROCESS_CHANGED", "SNAPSHOT_THREAD_INSTANCE_MISMATCH")
+                        row = {"tid": int(entry.tid), "created_100ns": entry.created.value,
+                               "captured_100ns": entry.captured.value, "kind": "LIVE_PSS_THREAD_CONTEXT",
+                               "frames": [], "historical_etw_stack": False,
+                               "observed_suspend_count": int(entry.suspend_count), "owned_suspension_count": 0}
+                        if not entry.context or entry.context_size < C.sizeof(W.CONTEXT64):
+                            row.update(status="INCOMPLETE_EVIDENCE", reason="PSS_CONTEXT_NOT_CAPTURED")
+                            rows.append(row)
+                            continue
+                        storage, context = W.aligned_context()
+                        C.memmove(C.byref(context), entry.context, C.sizeof(context))
+                        row["context"] = {n: int(getattr(context, n)) for n in
+                                          ("rip", "rsp", "rbp", "rax", "rcx", "rdx", "rbx", "rsi", "rdi", "eflags")}
+                        frame = W.STACKFRAME64()
+                        frame.pc.offset, frame.frame.offset, frame.stack.offset = context.rip, context.rbp, context.rsp
+                        frame.pc.mode = frame.frame.mode = frame.stack.mode = 3
+                        seen = set()
+                        for _ in range(frame_limit):
+                            _check(deadline, cancel)
+                            pc, sp = int(frame.pc.offset), int(frame.stack.offset)
+                            if not pc or (pc, sp) in seen:
+                                break
+                            seen.add((pc, sp))
+                            found = next((m for m in modules if m["base"] <= pc < m["base"] + m["size"]), None)
+                            record = {"address": pc, "stack_pointer": sp,
+                                      "module": found["name"] if found else None,
+                                      "module_base": found["base"] if found else None,
+                                      "rva": pc - found["base"] if found else None}
+                            if symbols is not None and found and found["base"] == symbol_module["base"]:
+                                record["symbol"] = symbols.lookup(pc - found["base"])
+                                record["symbol_binding"] = "PSS_CLONE_CODEVIEW_AND_LOCAL_PE_PDB_MATCH"
+                            row["frames"].append(record)
+                            C.set_last_error(0)
+                            if not stack_walk(0x8664, clone, None, C.byref(frame), C.byref(context), None,
+                                              C.cast(function_table, W.PTR), C.cast(module_base_api, W.PTR), None):
+                                row["unwind_winerror"] = C.get_last_error()
+                                break
+                        del storage
+                        row.update(status="COMPLETED" if row["frames"] else "INCOMPLETE_EVIDENCE",
+                                   truncated=len(row["frames"]) >= frame_limit, unwind_completeness="NOT_PROVEN")
+                        rows.append(row)
+                finally:
+                    if initialized:
+                        cleanup(clone)
+                    set_options(previous_options)
+            finally:
+                _DBGHELP_LOCK.release()
+        finally:
+            if marker:
+                marker_free(marker)
+            cleanup_error = free(kernel.current_process(), snapshot)
+    if requested_tid is not None and not rows:
+        raise NativeError("PROCESS_CHANGED", "REQUESTED_THREAD_NOT_CAPTURED")
+    incomplete = not rows or omitted or module_mismatches or any(r["status"] != "COMPLETED" or r.get("truncated") for r in rows)
+    return {"rows": rows, "omitted": omitted, "owned_suspension_count": 0,
+            "snapshot_cleanup_winerror": cleanup_error,
+            "module_bindings_withheld": module_mismatches,
+            "local_pdb": symbols.summary() if symbols is not None else None,
+            "_source": "LIVE_PSS_THREAD_CONTEXT_AND_DBGHELP_STACKWALK64",
+            "_status": "RECOVERY_UNCONFIRMED" if cleanup_error else "INCOMPLETE_EVIDENCE" if incomplete else "COMPLETED",
+            "_limitations": ["PSS_CAPTURE_MAY_BRIEFLY_PAUSE_TARGET", "COPY_ON_WRITE_VA_CLONE_NOT_HISTORICAL_ETW",
+                              "STACK_UNWIND_COMPLETENESS_NOT_PROVEN", "NO_SYMBOL_SERVER_OR_SOURCE_NETWORK_ACCESS"]}
+

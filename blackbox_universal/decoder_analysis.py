@@ -31,6 +31,12 @@ class DecoderAnalysisWorker(QThread):
             elif self.kind == 'alignment':
                 from blackbox_core.decoder_alignment import assess_session_alignment
                 result = assess_session_alignment(**self.arguments, cancel=self.cancel_event)
+            elif self.kind == 'minidump':
+                from blackbox_core.deep_dump import inspect_dump
+                packet = inspect_dump(**self.arguments, cancel_event=self.cancel_event)
+                result = {**packet['data'], 'status': packet['status'],
+                          'limitations': packet.get('limitations', []),
+                          'next_action': packet.get('next_action')}
             else:
                 raise ValueError('UNKNOWN_DECODER_ANALYSIS')
             self.result_ready.emit(result, '')
@@ -46,8 +52,10 @@ class DiagnosticReportDialog(QDialog):
         super().__init__(parent)
         ru = language == 'RU'
         waits = report.get('schema') == 'blackbox.thread-waits/1'
+        dump = report.get('schema') == 'blackbox.deep-minidump/1'
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
-        self.setWindowTitle(('Ожидания потоков' if ru else 'Thread waits') if waits else
+        self.setWindowTitle(('Сохранённый дамп' if ru else 'Saved minidump') if dump else
+                            ('Ожидания потоков' if ru else 'Thread waits') if waits else
                             ('Временная связь с сеансом' if ru else 'Session time correlation'))
         self.resize(1000, 640)
         layout = QVBoxLayout(self)
@@ -64,6 +72,13 @@ class DiagnosticReportDialog(QDialog):
             'Correlation applies only under the checked conditions. Uncertainty bounds apply to '
             'the selected clocks and files, not causality. Local evidence does not authenticate an imported trace.'
         ))
+        if dump:
+            text = ('Модули, сохранённые контексты потоков и области памяти прочитаны из дампа. '
+                    'Это прошлое состояние, а не состояние живого процесса. Полный анализ кучи '
+                    'и раскрутка сохранённых стеков не выполняются; содержимое памяти в отчёт не входит.' if ru else
+                    'Modules, saved thread contexts and memory ranges were read from the dump. '
+                    'This is historical state, not a live process. Heap analysis and saved-stack '
+                    'unwinding are not performed; memory contents are excluded from this report.')
         width = report.get('uncertainty_width_ns')
         if not waits and report.get('status') == 'BOUNDED_LOCAL_CLOCK_CORRELATION' and type(width) is int and width >= 0:
             if report.get('precision_quality') == 'COARSE_OBSERVATION_INTERVAL_NO_INTERPOLATION':
