@@ -280,6 +280,14 @@ def load_native_symbols(binary_path, pdb_path, *, cancel=None):
         return NativeSymbolTable(pe, pdb, functions, publics, hashes)
 
 
+def resolve_bound_frame(row, frame, table):
+    """Shared derived overlay; never changes the raw frame or trusts its name."""
+    verdict = binding_verdict(row, frame, table.pe, table.pdb)
+    symbol = (table.lookup(frame["rva"]) if verdict == "TRACE_PE_PDB_CONSISTENT_UNVERIFIED"
+              else {"status": verdict, "name": None})
+    return {"binding": verdict, "symbol": symbol}
+
+
 def resolve_event_stack(row, binary_path, pdb_path, *, source_trace_sha256=None, cancel=None):
     """New derived report; raw trace/index and the supplied row are unchanged."""
     _require(type(row) is dict and type(row.get("frames")) is list and
@@ -294,11 +302,9 @@ def resolve_event_stack(row, binary_path, pdb_path, *, source_trace_sha256=None,
     for i, frame in enumerate(row["frames"]):
         if cancel is not None and cancel.is_set():
             raise InterruptedError("SYMBOL_REVIEW_CANCELLED")
-        verdict = binding_verdict(row, frame, table.pe, table.pdb)
-        resolved = (table.lookup(frame["rva"]) if verdict == "TRACE_PE_PDB_CONSISTENT_UNVERIFIED"
-                    else {"status": verdict, "name": None})
+        overlay = resolve_bound_frame(row, frame, table)
         frames.append({"frame_index": i, "address": frame["address"],
-                       "recorded_name": frame["name"], "binding": verdict, "symbol": resolved})
+                       "recorded_name": frame["name"], **overlay})
     return {"schema": "blackbox.native-symbol-report/1", "status": "REVIEWED",
             "source_trace_sha256": source_trace_sha256,
             "source_event_id": row.get("ordinal"), "process_instance": row.get("process_instance"),

@@ -9,17 +9,15 @@
 [**Download latest published Windows x64 release**](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/releases/latest) · [Releases](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/releases) · [Русская версия](README.ru.md)
 
 [![Windows/Linux QA](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/actions/workflows/shell-qa.yml/badge.svg?branch=main)](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/actions/workflows/shell-qa.yml)
-![Development version](https://img.shields.io/badge/source-0.4.2-40766c) ![Windows](https://img.shields.io/badge/platform-Windows%20x64-40766c) ![MIT](https://img.shields.io/badge/license-MIT-40766c)
+![Development version](https://img.shields.io/badge/source-0.5.0-40766c) ![Windows](https://img.shields.io/badge/platform-Windows%20x64-40766c) ![MIT](https://img.shields.io/badge/license-MIT-40766c)
 
-**Source version: v0.4.2.** Only the [official latest GitHub Release](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/releases/latest) determines what can be downloaded or installed by the updater. A source branch or CI artifact does not automatically become an update.
+**Source version: v0.5.0.** Only the [official latest GitHub Release](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/releases/latest) determines what can be downloaded or installed by the updater. A source branch or CI artifact does not automatically become an update.
 
 BLACK.BOX Universal lets you **select a running process or choose an application file**. It records operating-system measurements from a running process and saves sessions as local SQLite, JSON, and HTML files. File selection itself only reads file metadata. It does not inject code, modify the target program, or require a service, account, cloud server, subscription, or separately installed Python.
 
 > **Important:** BLACK.BOX provides observational evidence, not proof of an application's internal root cause. High CPU, rising memory, or a process exiting do not, on their own, establish why it failed.
 
-**MAIN-only Trace Decoder (not in the published v0.4.2 Release):** The sixth page decodes offline ETL, EventPipe and BLACK.BOX JSONL using Microsoft TraceEvent plus a local SQLite adapter. Phase 2 adds **actual CPU profiler Thread/Sample stack groups** and **GC pair statistics by CLR instance/generation**, strictly separated from arbitrary event-associated stacks. Sample counts are not CPU%, GC elapsed is not an application pause, and trace clocks are not aligned to saved sessions. [Phase 2 engineering contract](docs/TRACE_DECODER_PHASE2.md). [Phase 3 clock provenance](docs/TRACE_DECODER_PHASE3.md) exposes TraceEvent-reconstructed UTC estimates and detects suspicious timestamp offsets. [Phase 4 capture evidence](docs/TRACE_DECODER_PHASE4.md) records Windows QPC/monotonic/UTC brackets only around explicitly requested ETW/EventPipe capture, saves the captured trace SHA-256, and offers a **manual** clock-journal review. Even a matching journal and trace hash **do not establish session clock synchronization**. Download a green main CI Windows portable artifact to test; the Release ZIP remains v0.4.2 without this development feature.
-
-**MAIN-only local PDB preflight (not in published v0.4.2):** The sixth page now offers an explicitly requested, offline PE/PDB GUID-and-Age check for a local Windows PDB. Matching files are **not** proof that the module was loaded in the trace and do **not** resolve stack symbols. No symbol server or network requests are made. [Phase 5A contract](docs/TRACE_DECODER_PHASE5.md).
+**v0.5.0 Trace Decoder:** The sixth page imports ETL, EventPipe and BLACK.BOX JSONL offline using the bundled self-contained Microsoft TraceEvent helper. It provides events, GC intervals, capture-clock evidence, module observations, local native PE/PDB checks and derived symbol names, and separate .NET/native ETW CPU sample trees. Select PID, process instance, thread and the time interval explicitly; export JSON or script-free HTML/SVG flame views. The decoder does not record automatically or download symbols. Counts are not CPU%, GC elapsed is not a pause, and trace/session clock alignment remains **NOT_ESTABLISHED**. See [release scope and limits](docs/RELEASE_v0.5.0.md), [module/PDB contract](docs/TRACE_DECODER_PHASE5_PATCH.md) and [native CPU/filter contract](docs/TRACE_DECODER_PHASE5_PACKET2.md). Publication is gated on the exact commit's Windows/Linux/portable and real trace acceptance; a source branch is not itself a published update.
 
 **v0.4.2 desktop:** The turquoise banner and monitor icon are compact, the decorative sparkle row is gone, and the FILE/HELP toolbar uses less height. The chart, Current Session and other pages begin higher on screen; normal Windows window controls remain. CI measures the actual workspace start at full and minimum window sizes in RU/EN, with Windows offscreen DPI captures at 100–200%. This is layout-only: evidence collection and recording behavior are unchanged.
 
@@ -29,7 +27,7 @@ BLACK.BOX Universal lets you **select a running process or choose an application
 
 ![Real Windows CI capture of BLACK.BOX Universal Overview with telemetry chart and recording controls](docs/screenshots/en-overview.png)
 
-*Overview — actual Windows CI/offscreen screenshot of the current `main` development build. The dashboard is waiting for a target; no measurement is fabricated. The published v0.4.2 release does not yet include the sixth Trace Decoder page.*
+*Overview — actual Windows CI/offscreen screenshot of the earlier `main` development build. The dashboard is waiting for a target; no measurement is fabricated. The older v0.4.2 release lacks the decoder; v0.5.0 adds it. These screenshots predate the complete v0.5.0 decoder controls.*
 
 ## Download and first run
 
@@ -45,13 +43,13 @@ BLACK.BOX Universal lets you **select a running process or choose an application
 
 *Processes — search by process name or PID, or choose an EXE file. Attaching does not start recording; use **Start** in Overview when you are ready.*
 
-**Which EXE files are in the current MAIN development build?**
+**Which EXE files are included in v0.5.0?**
 
 | File | Purpose |
 | --- | --- |
 | `BLACK.BOX-Universal.exe` | Main application. **Launch this one.** |
 | `BLACK.BOX-Maintenance.exe` | Helps update or remove the portable application after the main EXE closes. Usually runs automatically. |
-| `decoder/BLACK.BOX-Decoder.exe` | Optional offline ETW/EventPipe decoder, packaged with its .NET runtime in MAIN CI artifacts. The app launches it when needed; **do not launch manually**. This file is not part of the published v0.4.2 ZIP. |
+| `decoder/BLACK.BOX-Decoder.exe` | Optional offline ETW/EventPipe decoder, packaged with its own .NET runtime. The app launches it when needed; **do not launch manually**. Included from v0.5.0; not part of the older v0.4.2 ZIP. |
 
 Keep the entire `_internal` folder and the other extracted files. The main EXE is **not** a standalone file you can copy out of the portable folder.
 

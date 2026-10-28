@@ -124,7 +124,44 @@ def native_wpr(output,binary,pdb,helper):
     (output/'real-native-etw.json').write_text(json.dumps(evidence,indent=2),encoding='utf-8')
     require(file_hash(source)==digest,'REAL_NATIVE_TRACE_MODIFIED')
     require(example is not None,'REAL_NATIVE_TRACE_PE_PDB_END_TO_END_NOT_CONFIRMED')
-    return {'status':'PASS','scope':'REAL_NATIVE_EXE_WPR_TRACE_PE_PDB',**evidence}
+    # New acceptance is source-separated and uses genuine typed SampledProfile
+    # records from this exact helper, never labels reconstructed by the test.
+    before_index = file_hash(index)
+    tree = build_calltree(index, source='etw', pid=pid, binary_path=binary, pdb_path=pdb)
+    counts = tree['coverage']
+    require(counts['samples_selected'] > 0 and
+            counts['samples_missing_typed_classification'] == 0,
+            'REAL_NATIVE_TYPED_CPU_SAMPLES_REQUIRED')
+    require(counts['samples_represented'] + counts['samples_omitted_node_budget'] ==
+            counts['samples_selected'], 'NATIVE_CPU_COUNT_NOT_CONSERVED')
+    require(sum(n['self_samples'] for n in tree['nodes']) == counts['samples_represented'],
+            'NATIVE_CPU_SELF_COUNT_NOT_CONSERVED')
+    require(tree['symbolization']['frame_occurrences_resolved'] > 0,
+            'REAL_NATIVE_CPU_TREE_SYMBOLS_NOT_CONFIRMED')
+    require(any(n.get('derived_symbol') and n['derived_symbol']['symbol']['name'] in
+                {'blackbox_leaf', 'blackbox_parent', 'entry'} for n in tree['nodes']),
+            'REAL_NATIVE_CPU_TREE_FIXTURE_FUNCTION_MISSING')
+    export_analysis(tree, output/'native-cpu-calltree.json')
+    export_analysis(tree, output/'native-cpu-flame-view.html', html=True)
+    with closing(sqlite3.connect(index.resolve().as_uri()+'?mode=ro',uri=True)) as db:
+        first = None
+        for data, in db.execute("SELECT data FROM events WHERE pid=? AND provider=? AND name=? ORDER BY id",
+                                (pid, 'Windows Kernel', 'PerfInfo/Sample')):
+            item = json.loads(data); sample = item.get('cpu_sample') or {}
+            if sample.get('executing_dpc') is False and sample.get('executing_isr') is False:
+                first = item; break
+    require(first is not None and first['process_instance'] is not None,
+            'REAL_NATIVE_FILTER_ANCHOR_REQUIRED')
+    filtered = build_calltree(index, source='etw', pid=pid,
+        process_instance=first['process_instance'], tid=first['tid'],
+        start_ms=first['time_ms'], end_ms=first['time_ms']+1)
+    require(filtered['coverage']['samples_selected'] > 0,
+            'REAL_NATIVE_THREAD_INTERVAL_FILTER_FAILED')
+    export_analysis(filtered, output/'native-filtered-calltree.json')
+    require(file_hash(index) == before_index, 'NATIVE_CPU_ANALYSIS_CHANGED_INDEX')
+    evidence.update(native_cpu_tree=counts, native_cpu_symbols=tree['symbolization'],
+                    native_filter=filtered['filters'], native_filter_coverage=filtered['coverage'])
+    return {'status':'PASS','scope':'REAL_NATIVE_EXE_WPR_TRACE_PE_PDB_CPU_TREE',**evidence}
 
 
 def main():

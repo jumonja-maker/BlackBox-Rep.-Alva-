@@ -836,7 +836,8 @@ class UniversalWindow(QMainWindow):
             lambda value: self._prefs.setValue("check_updates_at_start", value))
         setting.content.addWidget(self.auto_check)
         content.addWidget(setting)
-        about = WindowPanel("About BLACK.BOX", "v0.4.2")
+        from . import __version__
+        about = WindowPanel("About BLACK.BOX", "v" + __version__)
         about.content.addWidget(_label(
             "A public-domain-independent desktop shell built from original "
             "PySide6 widgets. Inspired by classic desktop window geometry "

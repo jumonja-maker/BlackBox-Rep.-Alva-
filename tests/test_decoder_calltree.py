@@ -80,4 +80,25 @@ class DecoderCalltreeTests(unittest.TestCase):
         with self.assertRaises(InterruptedError):build_calltree(path,cancel=event)
         self.assertEqual(before,path.read_bytes())
 
+    def test_sqlite_progress_interrupt_preserves_cancellation_reason(self):
+        import sqlite3
+        from unittest.mock import patch
+        stopped = Event()
+        original = sqlite3.connect
+        class CancelConnection(sqlite3.Connection):
+            def set_progress_handler(self, callback, steps):
+                def cancel_during_query():
+                    stopped.set()
+                    return callback()
+                return super().set_progress_handler(cancel_during_query, steps)
+        path, _ = write_index(self.root, [stack_row(i) for i in range(1, 501)])
+        before = path.read_bytes()
+        def connect(*args, **kwargs):
+            return original(*args, **kwargs, factory=CancelConnection)
+        with patch('blackbox_core.decoder_calltree.sqlite3.connect', side_effect=connect):
+            with self.assertRaisesRegex(InterruptedError, 'CALLTREE_CANCELLED'):
+                build_calltree(path, cancel=stopped)
+        self.assertTrue(stopped.is_set())
+        self.assertEqual(before, path.read_bytes())
+
 if __name__=='__main__':unittest.main()

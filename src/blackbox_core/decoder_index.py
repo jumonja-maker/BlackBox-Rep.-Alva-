@@ -15,6 +15,7 @@ import tempfile
 import time
 from .decoder_profiles import ProfileBuilder, read_profiles
 from .decoder_clock import TraceClockAudit
+from .decoder_cpu import validate_cpu_sample, CpuSampleAudit
 from .decoder_modules import ModuleCatalog, read_modules
 
 PROTOCOL = "blackbox.trace-event/1"
@@ -88,6 +89,7 @@ def validate_event(row, expected):
                 len(frame["name"]) > 2048 or type(frame.get("address")) is not str or
                 len(frame["address"]) > 128):
             raise ValueError("INVALID_FRAME")
+    validate_cpu_sample(row)
 
 
 class GCAdapter:
@@ -262,6 +264,7 @@ def build_index(source, output, *, input_sha256, format_name, cancel=None):
         adapter = GCAdapter()
         profiler = ProfileBuilder(db)
         clock_audit = TraceClockAudit()
+        cpu_audit = CpuSampleAudit()
         modules = ModuleCatalog(db)
         engine_header = None
         footer = None
@@ -291,6 +294,7 @@ def build_index(source, output, *, input_sha256, format_name, cancel=None):
             validate_event(row, rows + 1)
             modules.accept(row)
             utc_ns = clock_audit.project(row)
+            cpu_audit.accept(row)
             rows += 1
             data = json.dumps(row, ensure_ascii=True, allow_nan=False, separators=(",", ":"))
             if len(data) > MAX_LINE * 6:
@@ -319,6 +323,7 @@ def build_index(source, output, *, input_sha256, format_name, cancel=None):
         profile_meta = profiler.finish()
         meta = {"schema": "blackbox.decoder-index/4", "engine": engine_header,
                 "profiles": profile_meta, "calendar_clock": clock_audit.summary(),
+                "cpu_samples": cpu_audit.summary(),
                 "native_modules": modules.summary(),
                 "input_sha256": input_sha256, "format": format_name, "rows": rows,
                 "status": footer["status"], "bounded_events": bounded, "events_with_errors": errors,

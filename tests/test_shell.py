@@ -124,7 +124,8 @@ class QtShellTests(unittest.TestCase):
                         "No administrator privileges requested by this shell",
                         "PREVIEW / v0.3"):
             self.assertNotIn(removed, labels)
-        self.assertIn("v0.4.2", labels)
+        from blackbox_universal import __version__
+        self.assertIn("v" + __version__, labels)
 
     def test_top_chrome_reclaims_real_workspace_at_both_window_sizes(self):
         from PySide6.QtCore import QPoint

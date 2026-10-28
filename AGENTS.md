@@ -8,6 +8,14 @@
 - Main merge and official Release each require separate explicit owner approval.
 - Do not remove the bilingual personal README opening or change the Outlook feedback address.
 
+## Explicit release authorization (2026-10-28)
+
+The owner explicitly requested both completed decoder packets be moved to main
+and released. Prepare v0.5.0 as one integrated candidate. Preserve v0.4.2 and
+its tag/assets. The one-shot promotion workflow dispatches the exact-SHA release gate
+only for this authorized candidate; all Windows/Linux/portable and native-decoder
+checks remain mandatory. Future work returns to the patch workflow above.
+
 ## Product and evidence contracts
 
 - The public product is an independent Windows desktop process-observation tool. Do not add an external proprietary platform or user-installed runtime requirement.
