@@ -65,6 +65,110 @@ class DecoderReliabilityTests(unittest.TestCase):
         self.assert_clean()
         self.assertEqual(decode_file(source, self.output)["rows"], 10)
 
+    def test_consumer_deadline_and_cancel_close_input_before_private_cleanup(self):
+        # Retain the exception/traceback and file objects: cleanup must not
+        # depend on refcounting or a later garbage collection. On Windows an
+        # open snapshot otherwise turns the intended outcome into WinError32.
+        source = self.app_trace()
+        real_open, real_check = Path.open, DecodeBudget.check
+        for outcome in ("deadline", "cancel"):
+            readers, held_errors = [], []
+            cancel = Event()
+            index_checks = 0
+
+            def record_reader(path, *args, **kwargs):
+                stream = real_open(path, *args, **kwargs)
+                if path.name == "input.jsonl" and args and args[0] == "rb":
+                    readers.append(stream)
+                return stream
+
+            def interrupt_after_yield(budget, phase=None):
+                nonlocal index_checks
+                if phase == "INDEX":
+                    index_checks += 1
+                    if index_checks == 2:
+                        if outcome == "deadline":
+                            budget.deadline = 0
+                        else:
+                            cancel.set()
+                return real_check(budget, phase)
+
+            with self.subTest(outcome=outcome), patch.object(Path, "open", record_reader), \
+                    patch.object(DecodeBudget, "check", interrupt_after_yield):
+                try:
+                    decode_file(source, self.output, cancel=cancel)
+                except Exception as error:
+                    held_errors.append(error)
+                self.assertEqual(len(held_errors), 1)
+                self.assertIsInstance(held_errors[0], TimeoutError if outcome == "deadline" else InterruptedError)
+                self.assertTrue(readers)
+                self.assertTrue(all(stream.closed for stream in readers),
+                                "Input handle outlived its terminal import outcome")
+                self.assert_clean()
+            cancel.clear()
+            self.assertEqual(decode_file(source, self.output, cancel=cancel)["rows"], 10)
+            self.output.unlink()
+
+    def test_rejected_records_close_native_and_nested_application_readers(self):
+        real_open, real_lines = Path.open, index.lines
+        cases = [(".jsonl", {"schema_version": 999}, "INVALID_BLACKBOX_EVENT_SCHEMA"),
+                 (".etl", {"type": "header", "protocol": "wrong"}, "INVALID_DECODER_HEADER")]
+        for format_name, row, reason in cases:
+            source = self.root / "rejected.jsonl"
+            source.write_text(json.dumps(row) + "\n", encoding="utf-8")
+            readers, held_errors, iterators = [], [], []
+
+            def record_reader(path, *args, **kwargs):
+                stream = real_open(path, *args, **kwargs)
+                if path == source and args and args[0] == "rb":
+                    readers.append(stream)
+                return stream
+
+            def retain_parser(*args, **kwargs):
+                result = real_lines(*args, **kwargs)
+                iterators.append(result)
+                return result
+
+            with self.subTest(format_name=format_name), patch.object(Path, "open", record_reader), \
+                    patch.object(index, "lines", retain_parser):
+                try:
+                    index.build_index(source, self.output, input_sha256=SHA, format_name=format_name)
+                except Exception as error:
+                    held_errors.append(error)
+                self.assertEqual(len(held_errors), 1)
+                self.assertIsInstance(held_errors[0], ValueError)
+                self.assertIn(reason, str(held_errors[0]))
+                self.assertTrue(readers)
+                self.assertEqual(len(iterators), 1)
+                self.assertTrue(all(stream.closed for stream in readers))
+                self.assert_clean()
+
+    def test_truncated_application_prefix_explicitly_closes_retained_iterator(self):
+        source = self.app_trace(3)
+        readers, iterators = [], []
+        real_open, real_events = Path.open, index.own_events
+
+        def record_reader(path, *args, **kwargs):
+            stream = real_open(path, *args, **kwargs)
+            if path == source and args and args[0] == "rb":
+                readers.append(stream)
+            return stream
+
+        def retain_events(*args, **kwargs):
+            result = real_events(*args, **kwargs)
+            iterators.append(result)
+            return result
+
+        with patch.object(Path, "open", record_reader), patch.object(index, "own_events", retain_events), \
+                patch.object(index, "MAX_EVENTS", 2):
+            result = index.build_index(source, self.output, input_sha256=SHA, format_name=".jsonl",
+                before_publish=lambda: self.assertTrue(all(stream.closed for stream in readers)))
+            self.assertEqual(result["status"], "TRUNCATED")
+            self.assertEqual(result["rows"], 2)
+            self.assertEqual(len(iterators), 1)
+            self.assertTrue(readers)
+            self.assertTrue(all(stream.closed for stream in readers))
+
     def test_original_changed_during_index_is_rejected_before_publication(self):
         source = self.app_trace()
         finish = index.ProfileBuilder.finish

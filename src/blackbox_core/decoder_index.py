@@ -224,47 +224,50 @@ class GCAdapter:
 def own_events(path, cancel=None, *, budget=None):
     """Our schema-1 JSONL is not an ETW format. Never trust its token or source label."""
     origins, sequences, producers = {}, {}, {}
-    for ordinal, raw in enumerate(lines(path, cancel, budget=budget), 1):
-        if (type(raw.get("schema_version")) is not int or raw["schema_version"] != 1 or
-                not _integer(raw.get("pid"), minimum=1) or
-                not _integer(raw.get("tid")) or not _integer(raw.get("source_ns")) or
-                not _integer(raw.get("seq"), minimum=1) or
-                type(raw.get("source_clock")) is not str or not 1 <= len(raw["source_clock"]) <= 80 or
-                type(raw.get("kind")) is not str or not 1 <= len(raw["kind"]) <= 80):
-            raise ValueError("INVALID_BLACKBOX_EVENT_SCHEMA")
-        tid_kind = raw.get("tid_kind", "OS_NATIVE")
-        if tid_kind not in ("OS_NATIVE", "RUNTIME_THREAD_ID"):
-            raise ValueError("INVALID_APP_THREAD_KIND")
-        # An application token identifies a writer, NOT an authenticated
-        # source. Its opaque value must never enter a saved index. Without
-        # one, distinct writers using the same PID/clock remain ambiguous.
-        token = raw.get("token")
-        if token is not None and (type(token) is not str or not 1 <= len(token) <= 128):
-            raise ValueError("INVALID_APP_WRITER_TOKEN")
-        producer_key = (raw["pid"], raw["source_clock"], token)
-        if producer_key not in producers:
-            if len(producers) >= 4096:
-                raise ValueError("APPLICATION_PRODUCER_BUDGET")
-            producers[producer_key] = len(producers) + 1
-        producer = producers[producer_key]
-        identity = (raw["pid"], raw["source_clock"], producer)
-        sequence_key = (*identity, tid_kind, raw["tid"])
-        if raw["seq"] <= sequences.get(sequence_key, -1):
-            raise ValueError("REPLAYED_APPLICATION_EVENT")
-        sequences[sequence_key] = raw["seq"]
-        if len(origins) > 4096 or len(sequences) > 100000:
-            raise ValueError("APPLICATION_IDENTITY_BUDGET")
-        origin = origins.setdefault(identity, raw["source_ns"])
-        raw = dict(raw)
-        raw.pop("token", None)
-        yield {"type": "event", "ordinal": ordinal, "time_ms": (raw["source_ns"] - origin) / 1e6,
-               "pid": raw["pid"], "tid": raw["tid"], "process_instance": None,
-               "provider": "BLACKBOX_APPLICATION_JSONL", "name": raw["kind"],
-               "clock_scope": list(identity), "clock_alignment": "SEPARATE_PER_PRODUCER_NOT_ALIGNED",
-               "producer_identity_quality": "TOKEN_PARTITIONED_NOT_VERIFIED" if token is not None
-                                            else "NO_TOKEN_WRITER_AMBIGUOUS",
-               "payload": raw, "payload_status": "UNVERIFIED_APPLICATION_STATEMENT",
-               "frames": [], "stack_status": "NOT_RECORDED", "semantic": None}
+    # The consumer can fail while this generator is suspended at a yield.
+    # Close the nested parser explicitly instead of relying on frame disposal.
+    with closing(lines(path, cancel, budget=budget)) as records:
+        for ordinal, raw in enumerate(records, 1):
+            if (type(raw.get("schema_version")) is not int or raw["schema_version"] != 1 or
+                    not _integer(raw.get("pid"), minimum=1) or
+                    not _integer(raw.get("tid")) or not _integer(raw.get("source_ns")) or
+                    not _integer(raw.get("seq"), minimum=1) or
+                    type(raw.get("source_clock")) is not str or not 1 <= len(raw["source_clock"]) <= 80 or
+                    type(raw.get("kind")) is not str or not 1 <= len(raw["kind"]) <= 80):
+                raise ValueError("INVALID_BLACKBOX_EVENT_SCHEMA")
+            tid_kind = raw.get("tid_kind", "OS_NATIVE")
+            if tid_kind not in ("OS_NATIVE", "RUNTIME_THREAD_ID"):
+                raise ValueError("INVALID_APP_THREAD_KIND")
+            # An application token identifies a writer, NOT an authenticated
+            # source. Its opaque value must never enter a saved index. Without
+            # one, distinct writers using the same PID/clock remain ambiguous.
+            token = raw.get("token")
+            if token is not None and (type(token) is not str or not 1 <= len(token) <= 128):
+                raise ValueError("INVALID_APP_WRITER_TOKEN")
+            producer_key = (raw["pid"], raw["source_clock"], token)
+            if producer_key not in producers:
+                if len(producers) >= 4096:
+                    raise ValueError("APPLICATION_PRODUCER_BUDGET")
+                producers[producer_key] = len(producers) + 1
+            producer = producers[producer_key]
+            identity = (raw["pid"], raw["source_clock"], producer)
+            sequence_key = (*identity, tid_kind, raw["tid"])
+            if raw["seq"] <= sequences.get(sequence_key, -1):
+                raise ValueError("REPLAYED_APPLICATION_EVENT")
+            sequences[sequence_key] = raw["seq"]
+            if len(origins) > 4096 or len(sequences) > 100000:
+                raise ValueError("APPLICATION_IDENTITY_BUDGET")
+            origin = origins.setdefault(identity, raw["source_ns"])
+            raw = dict(raw)
+            raw.pop("token", None)
+            yield {"type": "event", "ordinal": ordinal, "time_ms": (raw["source_ns"] - origin) / 1e6,
+                   "pid": raw["pid"], "tid": raw["tid"], "process_instance": None,
+                   "provider": "BLACKBOX_APPLICATION_JSONL", "name": raw["kind"],
+                   "clock_scope": list(identity), "clock_alignment": "SEPARATE_PER_PRODUCER_NOT_ALIGNED",
+                   "producer_identity_quality": "TOKEN_PARTITIONED_NOT_VERIFIED" if token is not None
+                                                else "NO_TOKEN_WRITER_AMBIGUOUS",
+                   "payload": raw, "payload_status": "UNVERIFIED_APPLICATION_STATEMENT",
+                   "frames": [], "stack_status": "NOT_RECORDED", "semantic": None}
 
 
 def build_index(source, output, *, input_sha256, format_name, cancel=None,
@@ -283,6 +286,7 @@ def build_index(source, output, *, input_sha256, format_name, cancel=None,
     os.close(fd)
     part = Path(part_name)
     db = None
+    records = None
     try:
         db = sqlite3.connect(part, timeout=1)
         db.execute("PRAGMA page_size=4096")
@@ -361,6 +365,10 @@ def build_index(source, output, *, input_sha256, format_name, cancel=None,
                 transaction_bytes = 0
                 if part.stat().st_size > MAX_INDEX_BYTES:
                     raise ValueError("INDEX_DISK_BUDGET")
+        # Truncated application prefixes stop before the parser reaches EOF.
+        # Release the input before aggregation and any publication callback.
+        records.close()
+        records = None
         if format_name == ".jsonl" and footer is None:
             footer = {"status": "DECODED", "rows": rows}
         if (not footer or not _integer(footer.get("rows")) or footer.get("rows") != rows or
@@ -414,9 +422,16 @@ def build_index(source, output, *, input_sha256, format_name, cancel=None,
             raise ValueError("INDEX_DISK_BUDGET") from exc
         raise
     finally:
-        if db is not None:
-            db.close()
-        part.unlink(missing_ok=True)
+        try:
+            # A consumer-side timeout/cancellation retains this frame in its
+            # traceback. Close the suspended reader before TemporaryDirectory
+            # cleanup, which cannot unlink an open input on Windows.
+            if records is not None:
+                records.close()
+        finally:
+            if db is not None:
+                db.close()
+            part.unlink(missing_ok=True)
 
 
 def _saved_json(raw, *, summary=False):

@@ -74,7 +74,8 @@ def decode_file(path, destination, *, cancel=None, timeout=180):
             owner = None
             with (root / "decoder.log").open("xb") as log:
                 try:
-                    owner = OwnedProcess([str(tool), str(snapshot), str(decoded)], stdout=log, stderr=log, env=env)
+                    owner = OwnedProcess([str(tool), str(snapshot), str(decoded)], stdout=log, stderr=log,
+                                         env=env, detach_console=True)
                     process = psutil.Process(owner.process.pid)
                     try: process.nice(psutil.BELOW_NORMAL_PRIORITY_CLASS if os.name == "nt" else 5)
                     except psutil.Error: pass

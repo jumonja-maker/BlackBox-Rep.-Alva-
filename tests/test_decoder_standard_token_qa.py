@@ -44,7 +44,8 @@ class RestrictedProofTests(unittest.TestCase):
         self.proof = {"pid": 10, "status": "PASS", "captures_started": False,
                       "privilege": {"mode": "STANDARD", "windows": True},
                       "traces": [{**item, "status": "PASS", "helper_pid": 11 + n,
-                                  "helper_exit_code": 0, "index_readable": True}
+                                  "helper_exit_code": 0, "helper_windows_creation_flags": 0x8,
+                                  "index_readable": True}
                                  for n, item in enumerate(self.plan)]}
 
     def test_admin_or_nonwindows_proof_cannot_certify_standard_token(self):
@@ -56,7 +57,8 @@ class RestrictedProofTests(unittest.TestCase):
 
     def test_success_text_does_not_hide_wrong_trace_or_helper_failure(self):
         for field, value in (("input_sha256", "foreign"), ("helper_exit_code", 7),
-                             ("rows", 0), ("helper_pid", 10), ("index_readable", False)):
+                             ("rows", 0), ("helper_pid", 10), ("index_readable", False),
+                             ("helper_windows_creation_flags", 0x08000000)):
             with self.subTest(field=field):
                 proof = deepcopy(self.proof); proof["traces"][0][field] = value
                 with self.assertRaisesRegex(AssertionError, "STANDARD_TRACE_RESULT"):

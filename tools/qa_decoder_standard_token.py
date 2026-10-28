@@ -104,7 +104,7 @@ def worker(helper, trace_root, output):
     output = Path(output).resolve(strict=True)
     proof = {"status": "RUNNING", "pid": os.getpid(), "privilege": privilege(),
              "source_sha": os.environ.get("GITHUB_SHA"), "captures_started": False,
-             "decoder_helper_sha256": file_hash(helper), "traces": [],
+             "decoder_helper_sha256": file_hash(helper), "traces": [], "helper_attempts": [],
              "python_executable": str(Path(sys.executable).resolve(strict=True)),
              "python_executable_sha256": file_hash(Path(sys.executable)),
              "python_version": sys.version}
@@ -121,9 +121,17 @@ def worker(helper, trace_root, output):
             index = output / (item["format"].lower() + ".sqlite3")
             with patch("blackbox_core.decoder_service.helper_path", return_value=helper), \
                     patch("blackbox_core.optional_jobs.OwnedProcess", side_effect=start_owned):
-                meta = decode_file(Path(item["source"]), index, timeout=90)
+                try:
+                    meta = decode_file(Path(item["source"]), index, timeout=90)
+                finally:
+                    proof["helper_attempts"].extend({"format": item["format"],
+                        "pid": owner.process.pid, "exit_code": owner.process.poll(),
+                        "windows_creation_flags": owner.windows_creation_flags}
+                        for owner in owners)
             require(len(owners) == 1 and owners[0].process.returncode == 0,
                     "STANDARD_NATIVE_HELPER_SUCCESS_NOT_CONFIRMED")
+            require(owners[0].windows_creation_flags == 0x8,
+                    "STANDARD_NATIVE_HELPER_DETACHED_LAUNCH_NOT_CONFIRMED")
             page = read_index(index, limit=1)
             require(page["rows"] and page["summary"] == meta,
                     "STANDARD_INDEX_NOT_READABLE")
@@ -137,6 +145,7 @@ def worker(helper, trace_root, output):
             proof["traces"].append({**item, "status": "PASS", "index": str(index),
                                     "helper_pid": owners[0].process.pid,
                                     "helper_exit_code": owners[0].process.returncode,
+                                    "helper_windows_creation_flags": owners[0].windows_creation_flags,
                                     "index_readable": True, "summary": meta})
         proof["status"] = "PASS"
         code = 0
@@ -256,6 +265,7 @@ def validate_worker(proof, child, plan):
         require(result.get("format") == expected["format"] and result.get("status") == "PASS" and
                 result.get("input_sha256") == expected["input_sha256"] and
                 result.get("rows") == expected["rows"] and result.get("helper_exit_code") == 0 and
+                result.get("helper_windows_creation_flags") == 0x8 and
                 result.get("helper_pid") != proof["pid"] and result.get("index_readable") is True,
                 "STANDARD_TRACE_RESULT_NOT_CONFIRMED")
 
