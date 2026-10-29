@@ -12,6 +12,7 @@ import threading
 import time
 import unittest
 from unittest.mock import patch
+import xml.etree.ElementTree as ET
 
 from blackbox_core import deep_profiling as profiling
 from blackbox_core import deep_native_win as W
@@ -77,20 +78,38 @@ class ProfilingPolicyTests(unittest.TestCase):
             with self.subTest(extra=extra), self.assertRaises(ValueError):
                 profiling.validate_policy({"systemwide_confirmed": True, **extra})
 
-    def test_fixed_file_io_policy_is_one_owned_capture_with_allowlisted_components(self):
+    def test_reserved_policy_cannot_use_generic_unprotected_owner(self):
         from blackbox_core.trace_owner import TraceSupervisor
         from blackbox_core.windows_research import WprCapture
         with tempfile.TemporaryDirectory() as directory, \
                 patch("blackbox_core.windows_research.wpr_tool", return_value="system-wpr.exe"):
             owner = TraceSupervisor(directory, profile=profiling.PROFILE)
-            capture = WprCapture(directory, profile=profiling.PROFILE)
-            with patch.object(capture, "_run") as command:
-                started = capture.start()
-            command.assert_called_once_with(["-start", "GeneralProfile.Light", "-start", "FileIO.Light"])
-            self.assertEqual(started["profile_components"], ["GeneralProfile.Light", "FileIO.Light"])
+            with self.assertRaisesRegex(ValueError, "INVALID_WPR_PROFILE"):
+                WprCapture(directory, profile=profiling.PROFILE)
+            with self.assertRaisesRegex(ValueError, "REQUIRES_PROTECTED_OWNER"):
+                owner.start()
+            self.assertFalse(owner.path.exists())
             self.assertEqual(owner.data["policy"]["profile"], profiling.PROFILE)
             self.assertEqual(TraceSupervisor(directory).data["policy"]["profile"], "GeneralProfile.Light")
             self.assertEqual(WprCapture(directory).profiles, ("GeneralProfile.Light",))
+
+    def test_embedded_policy_explicitly_collects_classic_network_and_bounded_file_io(self):
+        root = ET.fromstring(profiling.PROFILE_XML)
+        self.assertEqual(hashlib.sha256(profiling.PROFILE_XML).hexdigest(), profiling.PROFILE_SHA256)
+        self.assertEqual(profiling.PROFILE, "BLACKBOX.Deep.Light")
+        keywords = {item.attrib["Value"] for item in root.findall("./Profiles/SystemProvider/Keywords/Keyword")}
+        self.assertTrue({"FileIO", "FileIOInit", "DiskIO", "DiskIOInit", "ProcessThread",
+                         "Loader", "CSwitch", "ReadyThread", "SampledProfile"} <= keywords)
+        custom = root.findall("./Profiles/SystemProvider/Keywords/CustomKeyword")
+        self.assertEqual([int(item.attrib["Value"], 16) for item in custom], [0x10000])
+        collector = root.find("./Profiles/SystemCollector")
+        self.assertEqual(int(collector.find("BufferSize").attrib["Value"]) *
+                         int(collector.find("Buffers").attrib["Value"]), 64 * 1024)
+        self.assertEqual(root.find("./Profiles/Profile").attrib["LoggingMode"], "Memory")
+        self.assertEqual([item.attrib["Value"] for item in root.findall("./Profiles/SystemProvider/Stacks/Stack")],
+                         ["SampledProfile"])
+        self.assertIsNotNone(profiling._FILE_NAME.fullmatch(profiling.PROFILE_FILENAME))
+        self.assertIsNone(profiling._FILE_NAME.fullmatch("caller-profile.wprp"))
 
     def _copy(self, data, output, *, budget=None, cancel=None):
         with tempfile.TemporaryDirectory() as directory:
@@ -188,6 +207,37 @@ class ProtectedStagingTests(unittest.TestCase):
             if moved.exists() and not first.path.exists():
                 moved.rename(first.path)
             first.cleanup()
+
+    def test_fixed_profile_materialized_only_in_protected_staging_and_hash_reported(self):
+        stage = profiling.ProtectedStaging()
+        try:
+            capture = profiling._capture_factory(stage.path, profile=profiling.PROFILE)
+            definition = stage.path / profiling.PROFILE_FILENAME
+            self.assertEqual(definition.read_bytes(), profiling.PROFILE_XML)
+            with patch.object(capture, "_run") as command:
+                metadata = capture.start()
+            capture.active = False  # _run was mocked; no native recording occurred.
+            command.assert_called_once_with(["-start", str(definition) + "!" + profiling.PROFILE_SELECTOR])
+            self.assertEqual(metadata["profile_sha256"], profiling.PROFILE_SHA256)
+            self.assertEqual(metadata["profile_components"], [profiling.PROFILE])
+            self.assertEqual(metadata["collector_buffer_bytes"], 64 * 1024**2)
+        finally:
+            self.assertEqual(stage.cleanup(), [])
+
+    def test_profile_definition_cannot_be_replaced_or_loaded_from_foreign_folder(self):
+        stage = profiling.ProtectedStaging()
+        try:
+            capture = profiling._capture_factory(stage.path, profile=profiling.PROFILE)
+            with self.assertRaises(FileExistsError):
+                profiling._capture_factory(stage.path, profile=profiling.PROFILE)
+            (stage.path / profiling.PROFILE_FILENAME).write_bytes(b"caller changed XML")
+            with patch.object(capture, "_run") as command, self.assertRaises(NativeError):
+                capture.start()
+            command.assert_not_called()
+            with tempfile.TemporaryDirectory() as directory, self.assertRaises(ValueError):
+                profiling._capture_factory(directory, profile=profiling.PROFILE)
+        finally:
+            self.assertEqual(stage.cleanup(), [])
 
     def test_unpinned_directory_replacement_must_revalidate_acl(self):
         original = profiling.ProtectedStaging()

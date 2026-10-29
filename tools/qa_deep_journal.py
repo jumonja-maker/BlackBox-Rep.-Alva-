@@ -69,8 +69,16 @@ def verify_action_journal(database: Path, exported: Path, expected_actions: list
             _require(not forbidden or (forbidden not in raw and forbidden not in json.dumps(exported_row)),
                      "QA_JOURNAL_RAW_MEMORY_LEAK")
         by_id[identifier] = (sequence, record, digest)
-        if record.get("source") == "BLACKBOX_DIAGNOSTIC_ACTION_ENGINE":
-            action_records.setdefault(record.get("action_id"), []).append(identifier)
+        # REQUESTED is authored by the action engine; RESULT retains the
+        # actual provider source (e.g. WINDOWS_LIVE_INSPECTION). The durable
+        # action_id links them. Requiring the engine source on RESULT would
+        # reject genuine successful native actions.
+        if (record.get("operation") != "journal.export" and
+                (record.get("action_id") is not None or record.get("phase") in ("REQUESTED", "RESULT") or
+                 record.get("source") == "BLACKBOX_DIAGNOSTIC_ACTION_ENGINE")):
+            action_id = record.get("action_id")
+            _require(type(action_id) is str and action_id, "QA_JOURNAL_ACTION_ID_MISSING")
+            action_records.setdefault(action_id, []).append(identifier)
         elif record.get("source") == "DIAGNOSTIC_SESSION_CLEANUP":
             cleanup_count += 1
     if export_result is not None:
@@ -109,10 +117,14 @@ def verify_action_journal(database: Path, exported: Path, expected_actions: list
         _require(action_records[identifier] == [requested_id, result_id],
                  "QA_JOURNAL_INTENT_RESULT_PAIR_MISSING_OR_REORDERED")
         requested, result = by_id[requested_id][1], by_id[result_id][1]
+        _require(requested.get("source") == "BLACKBOX_DIAGNOSTIC_ACTION_ENGINE",
+                 "QA_JOURNAL_INTENT_ENGINE_SOURCE_MISMATCH")
         for record, phase in ((requested, "REQUESTED"), (result, "RESULT")):
             _require(record.get("phase") == phase and record.get("operation") == action.get("operation") and
                      record.get("target") == action.get("target"), "QA_JOURNAL_ACTION_TARGET_OR_PHASE_MISMATCH")
         _require(result.get("status") == action.get("status"), "QA_JOURNAL_OBSERVED_STATUS_MISMATCH")
+        if "source" in action:
+            _require(result.get("source") == action["source"], "QA_JOURNAL_OBSERVED_PROVIDER_SOURCE_MISMATCH")
         acknowledged_hash = action.get("journal", {}).get("record_sha256")
         if acknowledged_hash is not None:
             _require(acknowledged_hash == by_id[result_id][2], "QA_JOURNAL_ACKNOWLEDGED_HASH_MISMATCH")

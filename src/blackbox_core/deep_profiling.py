@@ -22,12 +22,54 @@ from . import deep_native_win as W
 from .deep_contracts import ProcessIdentity, result
 from .deep_native import NativeError, _check, _integer, _os_error, verify_identity
 
-PROFILE = "GeneralProfile.Light+FileIO.Light"
+PROFILE = "BLACKBOX.Deep.Light"
+PROFILE_FILENAME = "BLACKBOX.Deep.wprp"
+PROFILE_SELECTOR = "BLACKBOXDeep.Light"
+# This immutable policy is packaged as code in both source and frozen helpers.
+# 0x10000 is EVENT_TRACE_FLAG_NETWORK_TCPIP, exposed by WPR's documented
+# SystemProvider/Keywords/CustomKeyword element. No caller XML is accepted.
+PROFILE_XML = b'''<WindowsPerformanceRecorder Version="1.0">
+  <Profiles>
+    <SystemCollector Id="BBDeepCollector" Name="BLACKBOX Deep System Collector">
+      <BufferSize Value="1024" />
+      <Buffers Value="64" />
+    </SystemCollector>
+    <SystemProvider Id="BBDeepProvider">
+      <Keywords>
+        <Keyword Value="CpuConfig" />
+        <Keyword Value="ProcessThread" />
+        <Keyword Value="Loader" />
+        <Keyword Value="CSwitch" />
+        <Keyword Value="ReadyThread" />
+        <Keyword Value="SampledProfile" />
+        <Keyword Value="FileIO" />
+        <Keyword Value="FileIOInit" />
+        <Keyword Value="DiskIO" />
+        <Keyword Value="DiskIOInit" />
+        <CustomKeyword Value="0x00010000" />
+      </Keywords>
+      <Stacks>
+        <Stack Value="SampledProfile" />
+      </Stacks>
+    </SystemProvider>
+    <Profile Id="BLACKBOXDeep.Light.Memory" Name="BLACKBOXDeep"
+             Description="BLACK.BOX bounded CPU, scheduling, file, disk and TCP/UDP evidence"
+             LoggingMode="Memory" DetailLevel="Light">
+      <Collectors>
+        <SystemCollectorId Value="BBDeepCollector">
+          <SystemProviderId Value="BBDeepProvider" />
+        </SystemCollectorId>
+      </Collectors>
+    </Profile>
+  </Profiles>
+</WindowsPerformanceRecorder>
+'''
+PROFILE_SHA256 = hashlib.sha256(PROFILE_XML).hexdigest()
 MAX_TRACE_BYTES = 256 * 1024**2
 STAGING_SDDL = "O:BAG:BAD:P(A;OICI;FA;;;BA)(A;OICI;FA;;;SY)"
 _STAGE_NAME = re.compile(r"BLACKBOX-Deep-[0-9a-f]{32}\Z")
 _JOURNAL_NAME = re.compile(r"BLACKBOX_[0-9a-f]{32}\.trace\.json\Z")
-_FILE_NAME = re.compile(r"(?:BLACKBOX_[0-9a-f]{32}\.trace\.json(?:\.[0-9a-f]{32}\.tmp)?|trace-[0-9a-f]{32}\.etl)\Z")
+_FILE_NAME = re.compile(r"(?:BLACKBOX_[0-9a-f]{32}\.trace\.json(?:\.[0-9a-f]{32}\.tmp)?|trace-[0-9a-f]{32}\.etl|BLACKBOX\.Deep\.wprp)\Z")
 
 
 def validate_policy(parameters):
@@ -236,9 +278,43 @@ class ProtectedStaging:
 
 def _capture_factory(folder, *, profile):
     from .windows_research import WprCapture
-    capture = WprCapture(folder, profile=profile)
-    capture.tool = _trusted_wpr()
-    return capture
+    if profile != PROFILE:
+        raise ValueError("INVALID_PROTECTED_WPR_PROFILE")
+    # Revalidate even when called outside owner_main (hosted preflight). The
+    # caller keeps its own directory pin for the entire capture lifetime.
+    pinned = ProtectedStaging(folder)
+    try:
+        definition = pinned.path / PROFILE_FILENAME
+        with definition.open("xb") as output:
+            output.write(PROFILE_XML)
+            output.flush()
+            os.fsync(output.fileno())
+        if _read_profile(definition) != PROFILE_XML:
+            raise NativeError("INCOMPLETE_EVIDENCE", "WPR_PROFILE_READBACK_MISMATCH")
+
+        class FixedCapture(WprCapture):
+            def start(self):
+                if _read_profile(definition) != PROFILE_XML:
+                    raise NativeError("INCOMPLETE_EVIDENCE", "WPR_PROFILE_CHANGED")
+                metadata = super().start()
+                metadata.update(profile_components=[PROFILE], profile_sha256=PROFILE_SHA256,
+                                collector_buffer_bytes=64 * 1024**2,
+                                kernel_network_keyword="0x00010000")
+                return metadata
+
+        capture = FixedCapture(pinned.path)
+        capture.profile = PROFILE
+        capture.profiles = (str(definition) + "!" + PROFILE_SELECTOR,)
+        capture.tool = _trusted_wpr()
+        return capture
+    finally:
+        pinned.close()
+
+
+def _read_profile(path):
+    # Unexpected privileged mutation must not become an unbounded allocation.
+    with path.open("rb") as source:
+        return source.read(len(PROFILE_XML) + 1)
 
 
 def _native_lease(event):
@@ -411,6 +487,8 @@ def capture_etw(target, parameters, *, file_handle, deadline, cancel_event=None)
                               data={"instance": supervisor.instance, "cleanup": current.get("cleanup")})
         else:
             captured = current.get("result", {})
+            if current.get("start_result", {}).get("profile_sha256") != PROFILE_SHA256:
+                raise NativeError("INCOMPLETE_EVIDENCE", "TRACE_OWNER_PROFILE_HASH_MISMATCH")
             name = captured.get("path", "")
             if not isinstance(name, str) or not re.fullmatch(r"trace-[0-9a-f]{32}\.etl", name):
                 raise NativeError("INCOMPLETE_EVIDENCE", "UNTRUSTED_TRACE_OUTPUT_NAME")
@@ -418,6 +496,8 @@ def capture_etw(target, parameters, *, file_handle, deadline, cancel_event=None)
             if copied["sha256"] != captured.get("sha256"):
                 raise NativeError("INCOMPLETE_EVIDENCE", "TRACE_OWNER_COPY_HASH_MISMATCH")
             copied.update(instance=supervisor.instance, duration_seconds=seconds, profile=PROFILE,
+                          profile_sha256=PROFILE_SHA256, collector_buffer_bytes=64 * 1024**2,
+                          kernel_network_keyword="0x00010000",
                           scope="SYSTEM_WIDE_MAY_INCLUDE_OTHER_PROCESSES", target=target.to_dict(),
                           target_relation="CAPTURE_SELECTION_ONLY_NOT_PID_EVENT_CORRELATION_PROOF",
                           lost_events=None, automatic_share_allowed=False)

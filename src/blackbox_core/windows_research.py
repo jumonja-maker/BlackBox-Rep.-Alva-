@@ -18,12 +18,11 @@ from uuid import uuid4
 WPR_PROFILE_COMPONENTS = {
     "GeneralProfile.Light": ("GeneralProfile.Light",),
     "CPU.Verbose": ("CPU.Verbose",),
-    # A fixed policy key, not a caller-supplied profile expression. General
-    # alone omits detailed FileIO Read/Write; the built-in FileIO profile
-    # supplies FileIO, FileIOInit and Filename collection without stack cost.
-    "GeneralProfile.Light+FileIO.Light": ("GeneralProfile.Light", "FileIO.Light"),
 }
 WPR_PROFILES = tuple(WPR_PROFILE_COMPONENTS)
+# Reserved for the diagnostic owner's protected immutable WPRP factory.
+# Generic WprCapture and TraceSupervisor.start() must reject this policy.
+SCOPED_WPR_PROFILE = "BLACKBOX.Deep.Light"
 
 def _status(error):
     return "ACCESS_DENIED" if error==5 else "TIMEOUT" if error in (1460,258) else "NOT_OBSERVED"

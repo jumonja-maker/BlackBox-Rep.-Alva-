@@ -503,7 +503,7 @@ class DeepInspectorGuiTests(unittest.TestCase):
             self.panel._action_buttons["profile.etw"].click()
         operation, parameters, options = self.bridge.calls[-1]
         self.assertEqual(operation, "profile.etw")
-        self.assertEqual(parameters, {"duration_seconds": 3, "profile": "GeneralProfile.Light+FileIO.Light",
+        self.assertEqual(parameters, {"duration_seconds": 3, "profile": "BLACKBOX.Deep.Light",
                                       "destination": "selected.etl", "systemwide_confirmed": True})
         self.assertTrue(options["confirmed"])
         self.assertEqual(options["timeout_seconds"], 120)

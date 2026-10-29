@@ -547,7 +547,7 @@ class Acceptance:
         """Capture real fixture activity; lack of privilege is not a trace result."""
         destination = self.output / "profile-controlled.etl"
         parameters = {"destination": str(destination), "duration_seconds": 5,
-                      "profile": "GeneralProfile.Light+FileIO.Light", "systemwide_confirmed": True}
+                      "profile": "BLACKBOX.Deep.Light", "systemwide_confirmed": True}
         before = self.probe.state()
         result = self.perform("profile.etw", parameters, confirmed=True, timeout=120,
                               statuses=("COMPLETED",) if permission == "ADMINISTRATOR" else ("ADMIN_REQUIRED",))
@@ -558,10 +558,17 @@ class Acceptance:
                     "native_capture_executed": False, "interactive_uac": "NOT_TESTED"}
         require(destination.is_file() and 0 < destination.stat().st_size <= 256 * 1024 * 1024,
                 "REAL_ETW_PROFILE_OUTPUT_MISSING_OR_UNBOUNDED")
+        from blackbox_core.deep_profiling import PROFILE, PROFILE_SHA256
+        require(result["data"].get("profile") == PROFILE and
+                result["data"].get("profile_sha256") == PROFILE_SHA256 and
+                result["data"].get("saved_verified") is True and
+                result["data"].get("sha256") == file_hash(destination),
+                "ACTUAL_PROFILE_POLICY_AND_VERIFIED_OUTPUT_HASH_REQUIRED")
         require(after["created_100ns"] == before["created_100ns"] == self.identity.created_100ns,
                 "PROFILE_FIXTURE_INSTANCE_CHANGED")
         return {"status": "PASS", "capture_status": "COMPLETED", "operation": result,
                 "native_capture_executed": True, "requested_duration_seconds": 5,
+                "profile": PROFILE, "profile_sha256": PROFILE_SHA256,
                 "trace": destination.name, "bytes": destination.stat().st_size,
                 "sha256": file_hash(destination), "target_instance": self.identity.to_dict(),
                 "fixture_oracle": "probe/oracle.json",

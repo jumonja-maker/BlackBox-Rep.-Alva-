@@ -156,7 +156,7 @@ def _scenario_contract(name: str, mode: str) -> dict[str, Any]:
         contract["cleanup"] = "Close the borrowed output duplicate and process handles; retain any partial file with its incomplete status, excluded from automatic sharing."
         contract["output"] = "Explicit destination, verified minidump signature/size/completeness flags and operation_id; no automatic share inclusion."
     elif name == "profile.etw":
-        extra = ("Verified administrator helper token; fixed GeneralProfile.Light+FileIO.Light policy, duration_seconds 1–30 and explicit systemwide_confirmed consent.",
+        extra = ("Verified administrator helper token; fixed BLACKBOX.Deep.Light policy, duration_seconds 1–30 and explicit systemwide_confirmed consent.",
                  "Empty ordinary-GUI-created output HANDLE and protected administrator-owned staging directory.")
         contract["stop_method"] = "Set cancel_event or close the owner lease; the finite guardian stops only its named WPR session, never global capture."
         contract["cleanup"] = "Wait for named capture stop and protected staging removal; retain RECOVERY_UNCONFIRMED for unresolved owner or staging cleanup."
@@ -270,7 +270,7 @@ def validate_profile_parameters(parameters: dict[str, Any], *, allow_destination
     duration = parameters.get("duration_seconds")
     if type(duration) is not int or not 1 <= duration <= 30:
         raise ValueError("INVALID_PROFILE_DURATION")
-    if parameters.get("profile") != "GeneralProfile.Light+FileIO.Light":
+    if parameters.get("profile") != "BLACKBOX.Deep.Light":
         raise ValueError("PROFILE_NOT_ALLOWED")
     if parameters.get("systemwide_confirmed") is not True:
         raise ValueError("EXPLICIT_SYSTEMWIDE_PROFILE_CONSENT_REQUIRED")

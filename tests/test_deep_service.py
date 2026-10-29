@@ -59,7 +59,7 @@ class DeepContractsTests(unittest.TestCase):
 
     def test_profile_command_accepts_only_bounded_explicit_systemwide_policy(self):
         identity = ProcessIdentity(42, 133000000000000001)
-        valid = {"duration_seconds": 2, "profile": "GeneralProfile.Light+FileIO.Light", "systemwide_confirmed": True}
+        valid = {"duration_seconds": 2, "profile": "BLACKBOX.Deep.Light", "systemwide_confirmed": True}
         self.assertEqual(ActionRequest("profile.etw", identity, valid, True).operation, "profile.etw")
         invalid = [dict(valid, duration_seconds=value) for value in (0, 31, True, 1.5)]
         invalid += [dict(valid, profile="custom.wprp"), dict(valid, systemwide_confirmed=False),
@@ -199,7 +199,7 @@ class DeepEngineBoundaryTests(unittest.TestCase):
 
     def test_profile_refuses_standard_token_even_with_an_attached_file_handle(self):
         request = ActionRequest("profile.etw", self.identity, {
-            "duration_seconds": 1, "profile": "GeneralProfile.Light+FileIO.Light", "systemwide_confirmed": True}, True, 120)
+            "duration_seconds": 1, "profile": "BLACKBOX.Deep.Light", "systemwide_confirmed": True}, True, 120)
         with patch("blackbox_core.deep_native.verify_identity", return_value=self.identity), \
                 patch("blackbox_core.deep_helper.token_is_elevated", return_value=False), \
                 patch("blackbox_core.deep_profiling.capture_etw") as capture:
@@ -209,7 +209,7 @@ class DeepEngineBoundaryTests(unittest.TestCase):
 
     def test_unconfirmed_profile_cleanup_cannot_be_hidden_by_session_close(self):
         request = ActionRequest("profile.etw", self.identity, {
-            "duration_seconds": 1, "profile": "GeneralProfile.Light+FileIO.Light", "systemwide_confirmed": True}, True, 120)
+            "duration_seconds": 1, "profile": "BLACKBOX.Deep.Light", "systemwide_confirmed": True}, True, 120)
         unconfirmed = {"status": "RECOVERY_UNCONFIRMED", "error": "OWNED_ETW_STOP_UNCONFIRMED"}
         with patch("blackbox_core.deep_native.verify_identity", return_value=self.identity), \
                 patch("blackbox_core.deep_helper.token_is_elevated", return_value=True), \
@@ -493,7 +493,7 @@ class DeepServiceIntentTests(unittest.TestCase):
 
     def test_profile_uac_retry_does_not_collide_with_own_unwritten_destination(self):
         destination = Path(self.temporary.name) / "explicit.etl"
-        parameters = {"duration_seconds": 2, "profile": "GeneralProfile.Light+FileIO.Light",
+        parameters = {"duration_seconds": 2, "profile": "BLACKBOX.Deep.Light",
                       "systemwide_confirmed": True, "destination": str(destination)}
         fake_os = types.SimpleNamespace(name="nt", path=os.path, getpid=os.getpid)
         sent = []

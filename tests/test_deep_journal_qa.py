@@ -20,13 +20,16 @@ class DeepJournalEvidenceContracts(unittest.TestCase):
                        "status": "COMPLETED", "target": self.target}
 
     def evidence(self, *, omit_result=False, wrong_target=False, leaked=None, bad_hash=False,
-                 export_wrong=False, extra_action=False):
+                 export_wrong=False, extra_action=False, result_source=None, orphan_provider_result=False,
+                 orphan_without_action_id=False):
         base = {"source": "BLACKBOX_DIAGNOSTIC_ACTION_ENGINE", "action_id": "fixture-action",
                 "target": self.target, "operation": "memory.write"}
         records = [{**base, "operation_id": "fixture-action:requested", "phase": "REQUESTED"}]
         if not omit_result:
             records.append({**base, "operation_id": "fixture-action:result", "phase": "RESULT",
                             "status": "COMPLETED"})
+            if result_source is not None:
+                records[-1]["source"] = result_source
         if wrong_target:
             records[0]["target"] = {**self.target, "created_100ns": 457}
         if leaked:
@@ -34,6 +37,11 @@ class DeepJournalEvidenceContracts(unittest.TestCase):
         if extra_action:
             records.append({**base, "action_id": "unobserved", "operation_id": "unobserved:requested",
                             "phase": "REQUESTED"})
+        if orphan_provider_result:
+            records.append({**base, "action_id": "unobserved", "operation_id": "unobserved:result",
+                            "phase": "RESULT", "status": "COMPLETED", "source": "WINDOWS_LIVE_INSPECTION"})
+            if orphan_without_action_id:
+                records[-1].pop("action_id")
         path, export = self.root / "format-fixture.sqlite3", self.root / "format-fixture.jsonl"
         previous = "0" * 64
         lines = []
@@ -89,6 +97,24 @@ class DeepJournalEvidenceContracts(unittest.TestCase):
     def test_saved_success_does_not_override_observed_failure(self):
         with self.assertRaisesRegex(AssertionError, "OBSERVED_STATUS"):
             verify_action_journal(*self.evidence(), [{**self.action, "status": "RECOVERY_UNCONFIRMED"}])
+
+    def test_native_provider_result_is_paired_with_engine_intent_by_action_id(self):
+        result = verify_action_journal(*self.evidence(result_source="WINDOWS_LIVE_INSPECTION"),
+            [{**self.action, "source": "WINDOWS_LIVE_INSPECTION"}])
+        self.assertEqual(result["observed_actions"], 1)
+
+    def test_result_provider_cannot_differ_from_actual_observed_response(self):
+        with self.assertRaisesRegex(AssertionError, "OBSERVED_PROVIDER_SOURCE_MISMATCH"):
+            verify_action_journal(*self.evidence(result_source="WINDOWS_LIVE_INSPECTION"),
+                [{**self.action, "source": "ANOTHER_PROVIDER"}])
+
+    def test_orphan_native_provider_result_is_not_ignored(self):
+        with self.assertRaisesRegex(AssertionError, "UNEXPECTED_OR_MISSING_ACTION"):
+            verify_action_journal(*self.evidence(orphan_provider_result=True), [self.action])
+
+    def test_native_result_without_durable_action_id_is_rejected(self):
+        with self.assertRaisesRegex(AssertionError, "ACTION_ID_MISSING"):
+            verify_action_journal(*self.evidence(orphan_provider_result=True, orphan_without_action_id=True), [self.action])
 
     def service_export_evidence(self, *, wrong_prefix_head=False):
         database, exported = self.evidence()

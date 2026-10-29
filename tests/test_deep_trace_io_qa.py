@@ -105,8 +105,19 @@ class DeepTraceIoAcceptanceContracts(unittest.TestCase):
             self.analyze(rows)
 
     def test_unrecorded_network_families_are_not_synthetic_passes(self):
-        result = self.analyze(fixture(network=False))
-        for endpoint in result["network"].values():
+        with self.assertRaisesRegex(AssertionError, "ACTUAL_TYPED_TCP_ENDPOINT_POSITIVE_CASE_REQUIRED"):
+            self.analyze(fixture(network=False))
+
+    def test_one_protocol_positive_does_not_replace_other_protocol(self):
+        rows = fixture()[:6]  # TCP v4/v6 only, no UDP.
+        with self.assertRaisesRegex(AssertionError, "ACTUAL_TYPED_UDP_ENDPOINT_POSITIVE_CASE_REQUIRED"):
+            self.analyze(rows)
+
+    def test_individual_missing_families_remain_explicit(self):
+        rows = fixture()
+        result = self.analyze(rows[:4] + [rows[4], rows[6]])  # TCP/UDP IPv4 only.
+        for key in ("tcp6_port", "udp6_port"):
+            endpoint = result["network"][key]
             self.assertEqual(endpoint["status"], "NOT_COLLECTED")
             self.assertEqual(endpoint["matched_events"], 0)
             self.assertEqual(endpoint["latency"], "NOT_ESTABLISHED_BY_NETWORK_METADATA")
@@ -118,7 +129,8 @@ class DeepTraceIoAcceptanceContracts(unittest.TestCase):
             self.analyze(rows)
 
     def test_unconfirmed_ipv6_layout_is_not_a_supported_positive_case(self):
-        rows = fixture(network=False)
+        rows = fixture()
+        rows = rows[:4] + [rows[4], rows[6]]
         row = event("UdpIp/SendIPV6", payload={"size": 1})
         row.update(opcode=26, version=1)
         rows.append(row)

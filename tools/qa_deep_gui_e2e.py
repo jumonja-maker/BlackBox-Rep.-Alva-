@@ -50,6 +50,9 @@ def run(args):
     closed, results, services = [], [], []
     dialog_plan = {"operation": None, "decision": None, "answered": False}
     pulse_state = {"ticks": 0, "last": None, "max_gap_seconds": 0.0}
+    # Retain measured postconditions even if a later independent evidence
+    # check fails. The overall verdict remains FAIL until every gate passes.
+    proof["event_loop"] = pulse_state
 
     def pump_until(predicate, *, timeout=40):
         deadline = time.monotonic() + timeout
@@ -254,16 +257,20 @@ def run(args):
         proof["phase"] = "GUI_CLOSE_AND_NATIVE_RECOVERY"
         window.close()
         pump_until(lambda: bool(closed) and not bridge.has_session and not window.isVisible(), timeout=50)
+        proof["diagnostic_close"] = journal_metadata(closed[-1])
         require(closed[-1].get("status") == "COMPLETED" and not proof["unexpected_dialogs"],
                 "GUI_CLOSE_DID_NOT_CONFIRM_DIAGNOSTIC_CLEANUP")
-        require(not helper_process.is_running(), "GUI_CLOSE_LEFT_DIAGNOSTIC_HELPER_RUNNING")
+        proof["helper_exit_verified"] = not helper_process.is_running()
+        require(proof["helper_exit_verified"], "GUI_CLOSE_LEFT_DIAGNOSTIC_HELPER_RUNNING")
         require(not window.probe.alive and window.probe.process.exitCode() == 0 and
                 window.probe.process.exitStatus() == QProcess.ExitStatus.NormalExit,
                 "GUI_CLOSE_OBSERVER_HELPER_NORMAL_EXIT_NOT_CONFIRMED")
         proof["observer_helper_cleanup"] = {"exit_code": window.probe.process.exitCode(),
                                              "normal_exit": True}
         require(oracle_call(probe.state)["buffer_hex"] == oracle["buffer_hex"], "GUI_CLOSE_DID_NOT_RESTORE_OWNED_BYTES")
+        proof["own_memory_restored_on_close_verified"] = True
         oracle_call(probe.progress, before_close)
+        proof["target_survival_verified"] = True
         require(pulse_state["ticks"] >= 2 and pulse_state["max_gap_seconds"] < 2,
                 "GUI_EVENT_LOOP_PROGRESS_NOT_CONFIRMED")
         pulse.stop()

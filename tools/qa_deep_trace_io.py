@@ -147,6 +147,10 @@ def analyze_events(row_source, oracle, engine, *, target_image, known_file):
         endpoint["status"] = "OBSERVED" if endpoint["matched_events"] else "NOT_COLLECTED"
         endpoint["latency"] = "NOT_ESTABLISHED_BY_NETWORK_METADATA"
         endpoint["byte_count_scope"] = "SUM_OF_MATCHED_RECORDED_EVENTS_NOT_UNIQUE_LINK_BYTES"
+    for protocol in ("tcp", "udp"):
+        require(sum(endpoints[protocol + family + "_port"]["matched_events"]
+                    for family in ("4", "6")) > 0,
+                "ACTUAL_TYPED_" + protocol.upper() + "_ENDPOINT_POSITIVE_CASE_REQUIRED")
     disk["fixture_thread_status"] = "OBSERVED" if disk["fixture_thread_events"] else "NOT_COLLECTED"
     disk["known_file_status"] = "OBSERVED" if disk["known_file_events"] else "NOT_COLLECTED"
     return {"status": "PASS", "trace_process_instance": instance, "pid": pid, "io_tid": io_tid,
@@ -154,7 +158,7 @@ def analyze_events(row_source, oracle, engine, *, target_image, known_file):
             "identity_basis": "OWNED_LIVE_FIXTURE_CONTINUITY_PLUS_TRACE_LIFECYCLE_IMAGE_THREAD_AND_FILE",
             "generic_live_creation_time_from_trace": "NOT_ESTABLISHED",
             "capture_completeness": "NOT_ESTABLISHED", "physical_device_busy_time": "NOT_ESTABLISHED",
-            "network_policy_limit": "UNOBSERVED_PROTOCOL_FAMILIES_REMAIN_NOT_COLLECTED",
+            "network_policy_limit": "TCP_AND_UDP_POSITIVE_REQUIRED_OTHER_FAMILIES_REMAIN_NOT_COLLECTED",
             "packet_contents": "NOT_COLLECTED", "root_cause": "NOT_ESTABLISHED"}
 
 
@@ -172,6 +176,9 @@ def run(args):
         acceptance = json.loads((qa / "acceptance.json").read_text(encoding="utf-8"))
         oracle = json.loads((qa / "probe/oracle.json").read_text(encoding="utf-8"))
         profile = acceptance["profiling"]
+        from blackbox_core.deep_profiling import PROFILE, PROFILE_SHA256
+        require(profile.get("profile") == PROFILE and profile.get("profile_sha256") == PROFILE_SHA256,
+                "EXACT_IMMUTABLE_CAPTURE_POLICY_HASH_REQUIRED")
         require(acceptance["source_sha"] == report["source_sha"] and acceptance["status"] == "PASS" and
                 profile["capture_status"] == "COMPLETED" and profile["native_capture_executed"] is True,
                 "EXACT_SOURCE_SUCCESSFUL_NATIVE_PROFILE_REQUIRED")

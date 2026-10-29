@@ -542,7 +542,7 @@ class OverviewInspectorPanel(QWidget):
             seconds_label = self._translated(_plain_label(), "ETW duration, seconds", "Длительность ETW, секунд")
             fields.addRow(seconds_label, self.profile_seconds)
             self.profile_kind = QComboBox()
-            self.profile_kind.addItem("GeneralProfile.Light + FileIO.Light", "GeneralProfile.Light+FileIO.Light")
+            self.profile_kind.addItem("BLACKBOX Deep: CPU / File / Disk / TCP / UDP", "BLACKBOX.Deep.Light")
             profile_label = self._translated(_plain_label(), "Recording profile", "Профиль записи")
             fields.addRow(profile_label, self.profile_kind)
             layout.addLayout(fields)
