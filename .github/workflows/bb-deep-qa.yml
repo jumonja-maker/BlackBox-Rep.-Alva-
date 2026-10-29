@@ -112,8 +112,11 @@ jobs:
           & $wpr -exportprofile $profile "$PWD/deep-profile-policy/installed-profile.wprp" 2>&1 | Out-File deep-profile-policy/profile-export.txt -Encoding utf8
           if ($LASTEXITCODE -ne 0) { throw "Installed fixed WPR profile export failed" }
           [xml]$definition = Get-Content deep-profile-policy/installed-profile.wprp -Raw
-          foreach ($keyword in @('FileIO', 'FileIOInit', 'Filename', 'DiskIO', 'ProcessThread')) {
-            if ($definition.SelectNodes("//*[local-name()='Keyword' and @Value='$keyword']").Count -eq 0) {
+          # Installed WPR 10.0.26100 exports FileIO/FileIOInit rather than a
+          # separate Filename alias. Actual known-file Read/Write and issuing
+          # thread evidence remain mandatory in qa_deep_trace_io.py.
+          foreach ($keyword in @('FileIO', 'FileIOInit', 'DiskIO', 'DiskIOInit', 'ProcessThread')) {
+            if ($definition.SelectNodes("//*[local-name()='SystemProvider']/*[local-name()='Keywords']/*[local-name()='Keyword' and @Value='$keyword']").Count -eq 0) {
               throw "Installed WPR policy lacks required keyword: $keyword"
             }
           }

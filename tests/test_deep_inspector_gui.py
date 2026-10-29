@@ -625,6 +625,7 @@ class _FakeService:
         self.closed = False
         self.identities = []
         self.executed = []
+        self.exported = []
 
     def identity(self, pid):
         self.identities.append(pid)
@@ -638,6 +639,15 @@ class _FakeService:
                 raise TimeoutError("TEST_CANCEL_NOT_RECEIVED")
             return {"status": "CANCELLED", "operation": request.operation, "data": {}}
         return {"status": "COMPLETED", "operation": request.operation, "data": {"pid": request.target.pid}}
+
+    def export_journal(self, destination, *, cancel_event=None):
+        self.exported.append((destination, cancel_event))
+        self.started.set()
+        if self.block:
+            if cancel_event is None or not cancel_event.wait(4):
+                raise TimeoutError("TEST_EXPORT_CANCEL_NOT_RECEIVED")
+            return {"status": "CANCELLED", "operation": "journal.export", "data": {"export_published": False}}
+        return {"status": "COMPLETED", "operation": "journal.export", "data": {"path": destination}}
 
     def close(self):
         self.closed = True
@@ -692,6 +702,30 @@ class DeepInspectorBridgeTests(unittest.TestCase):
         self.assertEqual(service.executed, [])
         bridge.shutdown()
         self.wait(lambda: bridge.worker is None)
+
+    def test_export_receives_worker_cancellation_and_returns_typed_refusal(self):
+        service = _FakeService(block=True)
+        bridge = DeepInspectorBridge(service_factory=lambda: service)
+        bridge.set_target(123, 1000.)
+        results = []
+        bridge.result_ready.connect(results.append)
+        try:
+            with patch("psutil.Process") as process:
+                process.return_value.create_time.return_value = 1000.
+                self.assertTrue(bridge.export("explicit-metadata.jsonl"))
+                worker = bridge.worker
+                self.wait(service.started.is_set)
+                self.assertEqual(service.exported[0][0], "explicit-metadata.jsonl")
+                self.assertIs(service.exported[0][1], worker.cancel_event)
+                bridge.cancel()
+                self.wait(lambda: bridge.worker is None)
+            self.assertEqual(results[0]["status"], "CANCELLED")
+            self.assertFalse(results[0]["data"]["export_published"])
+            self.assertEqual(service.executed, [])
+        finally:
+            bridge.cancel()
+            bridge.shutdown()
+            self.wait(lambda: bridge.worker is None)
 
     def test_switch_cancels_old_work_and_drops_stale_evidence_then_closes(self):
         service = _FakeService(block=True)

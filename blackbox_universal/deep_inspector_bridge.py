@@ -80,7 +80,7 @@ class _DeepTask(QThread):
                 elif command["kind"] == "end_admin":
                     result = self.service.end_admin_session()
                 elif command["kind"] == "export":
-                    result = self.service.export_journal(command["destination"])
+                    result = self.service.export_journal(command["destination"], cancel_event=self.cancel_event)
                 else:
                     from blackbox_core.deep_contracts import ActionRequest
                     request = ActionRequest(

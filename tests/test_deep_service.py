@@ -427,6 +427,40 @@ class DeepServiceIntentTests(unittest.TestCase):
         self.assertEqual(self.service.journal.timeline()[0]["phase"], "REQUESTED")
         self.assertNotIn("private-output", json.dumps(self.service.journal.timeline()))
 
+    def test_export_cancel_during_fsync_prevents_publication_and_is_audited(self):
+        destination = Path(self.temporary.name) / "cancelled-before-link.jsonl"
+        cancelled = threading.Event()
+        fsync = os.fsync
+        def flush_then_cancel(descriptor):
+            fsync(descriptor)
+            cancelled.set()
+        with patch("blackbox_core.deep_journal.os.fsync", side_effect=flush_then_cancel), \
+                patch("blackbox_core.deep_journal.os.link") as publish:
+            answer = self.service.export_journal(destination, cancel_event=cancelled)
+        publish.assert_not_called()
+        self.assertEqual(answer["status"], "CANCELLED")
+        self.assertFalse(answer["data"]["export_published"])
+        self.assertFalse(destination.exists())
+        self.assertFalse(list(destination.parent.glob(".blackbox-deep-export-*")))
+        self.assertEqual(self.service.journal.timeline()[0]["status"], "CANCELLED")
+
+    def test_export_cancel_after_atomic_publication_preserves_completed_file_and_receipt(self):
+        destination = Path(self.temporary.name) / "already-published.jsonl"
+        cancelled = threading.Event()
+        link = os.link
+        def publish_then_cancel(source, target):
+            link(source, target)
+            cancelled.set()
+        with patch("blackbox_core.deep_journal.os.link", side_effect=publish_then_cancel):
+            answer = self.service.export_journal(destination, cancel_event=cancelled)
+        self.assertTrue(cancelled.is_set())
+        self.assertEqual(answer["status"], "COMPLETED")
+        self.assertTrue(answer["data"]["export_published"])
+        self.assertTrue(destination.is_file())
+        self.assertEqual(self.service.journal.timeline()[0]["status"], "COMPLETED")
+        self.assertEqual(answer["journal"]["record_sha256"], self.service.journal.timeline()[0]["record_sha256"])
+        self.assertFalse(list(destination.parent.glob(".blackbox-deep-export-*")))
+
     def test_export_hash_failure_is_audited_without_repairing_or_publishing_corrupt_history(self):
         self.service.journal.append({"operation_id": "original", "status": "COMPLETED"})
         db = sqlite3.connect(self.service.journal.path)

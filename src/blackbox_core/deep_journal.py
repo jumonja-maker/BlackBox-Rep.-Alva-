@@ -194,6 +194,11 @@ class EvidenceJournal:
                 stream.flush()
                 os.fsync(stream.fileno())
             # Atomic, create-new publication: an existing destination is never replaced.
+            # Honour cancellation during flush/fsync as well as row copying.
+            # Once link succeeds, publication is complete and must not be
+            # undone or reported as cancelled by a later event.
+            if cancel_event is not None and cancel_event.is_set():
+                raise InterruptedError("JOURNAL_EXPORT_CANCELLED")
             os.link(temporary, target)
             published = True
         finally:
