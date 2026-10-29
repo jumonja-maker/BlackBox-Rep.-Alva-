@@ -22,6 +22,30 @@ def opened(kernel=None, handle=7):
     yield kernel, handle
 
 
+def memory_map_fixture(regions, names):
+    """Model VirtualQueryEx and independent observed file-name results."""
+    kernel, error = Mock(), {"value": 0}
+    def query(handle, address, pointer, size):
+        values = next((region for region in regions if region["base"] == address), None)
+        if values is None:
+            error["value"] = 87
+            return 0
+        info = C.cast(pointer, C.POINTER(W.MEMORY_BASIC_INFORMATION)).contents
+        info.base, info.region_size = address, values.get("size", 4096)
+        info.allocation_base, info.state, info.type = address, values.get("state", 0x1000), values["type"]
+        return C.sizeof(info)
+    def filename(handle, address, buffer, length):
+        value = names[address]
+        if type(value) is int:
+            error["value"] = value
+            return 0
+        buffer.value = value
+        return len(value)
+    kernel.virtual_query.side_effect = query
+    kernel.mapped_file_name.side_effect = filename
+    return kernel, error
+
+
 class NativePolicyTests(unittest.TestCase):
     def setUp(self):
         self.identity = ProcessIdentity(123, 456, "C:\\fixture.exe")
@@ -236,6 +260,131 @@ class NativePolicyTests(unittest.TestCase):
         self.assertEqual(result["next_address"], 8192)
         self.assertEqual(result["_status"], "INCOMPLETE_EVIDENCE")
         self.assertFalse(result["complete_address_space"])
+
+    def test_memory_map_associates_actual_image_and_mapped_file_but_not_private_owner(self):
+        regions = [{"base": 0x1000, "type": 0x1000000},
+                   {"base": 0x2000, "type": 0x40000},
+                   {"base": 0x3000, "type": 0x20000},
+                   {"base": 0x4000, "type": 0, "state": 0x10000}]
+        image = r"\Device\HarddiskVolume4\fixture.exe"
+        data = r"\Device\HarddiskVolume4\fixture-data.bin"
+        kernel, error = memory_map_fixture(regions, {0x1000: image, 0x2000: data})
+        handles = []
+        @contextmanager
+        def open_target(rights):
+            handles.append(("opened", rights))
+            try:
+                yield kernel, 8 if rights == 0x410 else 7
+            finally:
+                handles.append(("closed", rights))
+        with patch.object(self.inspector, "_open", side_effect=open_target), \
+                patch.object(C, "get_last_error", side_effect=lambda: error["value"], create=True), \
+                patch.object(C, "set_last_error", side_effect=lambda value: error.update(value=value), create=True):
+            result = self.inspector._memory_map({"start_address": 0x1000}, None, None)
+        self.assertEqual(result["_status"], "COMPLETED")
+        self.assertEqual(result["rows"][0]["mapped_file_path"], image)
+        self.assertEqual(result["rows"][0]["image_name"], "fixture.exe")
+        self.assertEqual(result["rows"][1]["mapped_file_path"], data)
+        self.assertIsNone(result["rows"][1]["image_name"])
+        self.assertEqual(result["rows"][2]["association_kind"], "PRIVATE_ALLOCATION_OWNER_NOT_ESTABLISHED")
+        self.assertIsNone(result["rows"][2]["mapped_file_path"])
+        self.assertEqual(result["rows"][3]["mapped_file_status"], "NOT_APPLICABLE")
+        self.assertEqual(kernel.mapped_file_name.call_count, 2)
+        self.assertTrue(all(call.args[0] == 8 for call in kernel.mapped_file_name.call_args_list))
+        self.assertEqual(handles, [("opened", 0x400), ("opened", 0x410), ("closed", 0x410), ("closed", 0x400)])
+
+    def test_memory_map_keeps_basic_regions_when_name_handle_is_denied(self):
+        kernel, error = memory_map_fixture([{"base": 0x1000, "type": 0x1000000}], {})
+        @contextmanager
+        def open_target(rights):
+            if rights == 0x410:
+                raise native.NativeError("ACCESS_DENIED", "OPEN_PROCESS_FOR_INSPECTION_FAILED", 5)
+            yield kernel, 7
+        with patch.object(self.inspector, "_open", side_effect=open_target), \
+                patch.object(C, "get_last_error", side_effect=lambda: error["value"], create=True):
+            result = self.inspector._memory_map({"start_address": 0x1000}, None, None)
+        self.assertTrue(result["complete_address_space"])
+        self.assertEqual(result["_status"], "INCOMPLETE_EVIDENCE")
+        self.assertEqual(result["rows"][0]["mapped_file_status"], "ACCESS_DENIED")
+        self.assertEqual(result["rows"][0]["mapped_file_winerror"], 5)
+        self.assertIsNone(result["rows"][0]["image_name"])
+        kernel.mapped_file_name.assert_not_called()
+
+    def test_memory_map_name_api_absence_is_explicit_without_extra_access(self):
+        kernel, error = memory_map_fixture([{"base": 0x1000, "type": 0x40000}], {})
+        kernel.mapped_file_name = None
+        with patch.object(self.inspector, "_open", side_effect=lambda rights: opened(kernel)) as opening, \
+                patch.object(C, "get_last_error", side_effect=lambda: error["value"], create=True):
+            result = self.inspector._memory_map({"start_address": 0x1000}, None, None)
+        opening.assert_called_once_with(0x400)
+        self.assertEqual(result["rows"][0]["mapped_file_status"], "API_UNAVAILABLE")
+        self.assertEqual(result["_status"], "INCOMPLETE_EVIDENCE")
+
+    def test_memory_map_unobserved_and_truncated_names_are_never_complete_paths(self):
+        for value, expected in ((5, "ACCESS_DENIED"), (0, "NAME_NOT_OBSERVED"),
+                                ("X" * 32767, "NAME_TRUNCATED")):
+            kernel, error = memory_map_fixture([{"base": 0x1000, "type": 0x40000}], {0x1000: value})
+            with self.subTest(expected=expected), \
+                    patch.object(self.inspector, "_open", side_effect=lambda rights: opened(kernel)), \
+                    patch.object(C, "get_last_error", side_effect=lambda: error["value"], create=True), \
+                    patch.object(C, "set_last_error", side_effect=lambda number: error.update(value=number), create=True):
+                result = self.inspector._memory_map({"start_address": 0x1000}, None, None)
+            self.assertEqual(result["rows"][0]["mapped_file_status"], expected)
+            self.assertIsNone(result["rows"][0]["mapped_file_path"])
+            self.assertEqual(result["unidentified_file_regions"], 1)
+            self.assertEqual(result["_status"], "INCOMPLETE_EVIDENCE")
+
+    def test_memory_map_ownership_query_and_output_budgets_remain_explicit(self):
+        regions = [{"base": 0x1000, "type": 0x40000}, {"base": 0x2000, "type": 0x40000}]
+        for parameters, byte_budget, expected in (({"mapped_file_limit": 1}, 262144, "QUERY_BUDGET_EXCEEDED"),
+                                                  ({}, 8, "RESULT_BYTE_BUDGET_EXCEEDED")):
+            kernel, error = memory_map_fixture(regions, {0x1000: "12345", 0x2000: "67890"})
+            with self.subTest(expected=expected), \
+                    patch.object(self.inspector, "_open", side_effect=lambda rights: opened(kernel)), \
+                    patch.object(C, "get_last_error", side_effect=lambda: error["value"], create=True), \
+                    patch.object(C, "set_last_error", side_effect=lambda value: error.update(value=value), create=True), \
+                    patch.object(native, "MAX_MAPPING_NAME_BYTES", byte_budget):
+                result = self.inspector._memory_map({"start_address": 0x1000, **parameters}, None, None)
+            self.assertEqual(result["rows"][0]["mapped_file_status"], "OBSERVED")
+            self.assertEqual(result["rows"][1]["mapped_file_status"], expected)
+            self.assertIsNone(result["rows"][1]["mapped_file_path"])
+            self.assertLessEqual(result["mapped_file_name_bytes"], byte_budget)
+            self.assertFalse(result["file_backing_complete_for_returned_regions"])
+
+    def test_memory_map_name_handle_identity_change_is_not_downgraded_to_missing_name(self):
+        kernel, _ = memory_map_fixture([{"base": 0x1000, "type": 0x1000000}], {})
+        @contextmanager
+        def open_target(rights):
+            if rights == 0x410:
+                raise native.NativeError("PROCESS_CHANGED", "PROCESS_INSTANCE_CHANGED")
+            yield kernel, 7
+        with patch.object(self.inspector, "_open", side_effect=open_target):
+            with self.assertRaises(native.NativeError) as caught:
+                self.inspector._memory_map({"start_address": 0x1000}, None, None)
+        self.assertEqual(caught.exception.status, "PROCESS_CHANGED")
+        kernel.mapped_file_name.assert_not_called()
+
+    def test_cancelled_mapping_name_query_releases_both_owned_handles(self):
+        kernel, error = memory_map_fixture([{"base": 0x1000, "type": 0x1000000}], {})
+        cancelled, closed = threading.Event(), []
+        @contextmanager
+        def open_target(rights):
+            try:
+                yield kernel, 8 if rights == 0x410 else 7
+            finally:
+                closed.append(rights)
+        def filename(handle, address, buffer, capacity):
+            buffer.value = r"\Device\HarddiskVolume4\fixture.exe"
+            cancelled.set()
+            return len(buffer.value)
+        kernel.mapped_file_name.side_effect = filename
+        with patch.object(self.inspector, "_open", side_effect=open_target), \
+                patch.object(C, "get_last_error", side_effect=lambda: error["value"], create=True), \
+                patch.object(C, "set_last_error", side_effect=lambda value: error.update(value=value), create=True):
+            with self.assertRaises(native.NativeError) as caught:
+                self.inspector._memory_map({"start_address": 0x1000}, None, cancelled)
+        self.assertEqual(caught.exception.status, "CANCELLED")
+        self.assertEqual(closed, [0x410, 0x400])
 
     def test_loaded_pe_debug_identity_read_from_target_bytes(self):
         base = 0x100000

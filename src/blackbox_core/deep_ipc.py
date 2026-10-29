@@ -82,25 +82,81 @@ def current_user_sid() -> str:
         kernel.CloseHandle(token)
 
 
-def token_is_elevated() -> bool:
+def token_authority() -> dict:
+    """Observe effective process-token authority, without enabling privileges.
+
+    CreateRestrictedToken can retain TokenElevation while making the
+    Administrators SID deny-only and lowering integrity. That flag alone is
+    therefore not proof that this helper has administrator authority.
+    """
     if os.name != "nt":
-        return False
+        return {"source": "UNSUPPORTED_PLATFORM", "elevated": False}
     kernel = _kernel()
     adv = C.WinDLL("advapi32", use_last_error=True, winmode=0x800)
     adv.OpenProcessToken.argtypes = [W.HANDLE, W.DWORD, C.POINTER(W.HANDLE)]
     adv.OpenProcessToken.restype = W.BOOL
     adv.GetTokenInformation.argtypes = [W.HANDLE, C.c_int, C.c_void_p, W.DWORD, C.POINTER(W.DWORD)]
     adv.GetTokenInformation.restype = W.BOOL
+    adv.DuplicateToken.argtypes = [W.HANDLE, C.c_int, C.POINTER(W.HANDLE)]
+    adv.DuplicateToken.restype = W.BOOL
+    adv.CreateWellKnownSid.argtypes = [C.c_int, C.c_void_p, C.c_void_p, C.POINTER(W.DWORD)]
+    adv.CreateWellKnownSid.restype = W.BOOL
+    adv.CheckTokenMembership.argtypes = [W.HANDLE, C.c_void_p, C.POINTER(W.BOOL)]
+    adv.CheckTokenMembership.restype = W.BOOL
     kernel.GetCurrentProcess.restype = W.HANDLE
     token, elevated, size = W.HANDLE(), W.DWORD(), W.DWORD()
-    if not adv.OpenProcessToken(kernel.GetCurrentProcess(), 0x8, C.byref(token)):
+    membership_token = W.HANDLE()
+    # Query + duplicate only. No SeDebugPrivilege or token adjustment occurs.
+    if not adv.OpenProcessToken(kernel.GetCurrentProcess(), 0x8 | 0x2, C.byref(token)):
         raise IPCError(C.get_last_error(), "OPEN_HELPER_TOKEN_FAILED")
     try:
         if not adv.GetTokenInformation(token, 20, C.byref(elevated), C.sizeof(elevated), C.byref(size)):
             raise IPCError(C.get_last_error(), "TOKEN_ELEVATION_QUERY_FAILED")
-        return bool(elevated.value)
+        if size.value != C.sizeof(elevated):
+            raise IPCError("INVALID_TOKEN_ELEVATION_SIZE")
+        # Explicit process-token duplication avoids accidentally classifying
+        # an ambient impersonation token. CheckTokenMembership ignores disabled
+        # and deny-only Administrators SIDs and honors restricted-token checks.
+        if not adv.DuplicateToken(token, 1, C.byref(membership_token)):  # SecurityIdentification
+            raise IPCError(C.get_last_error(), "DUPLICATE_MEMBERSHIP_TOKEN_FAILED")
+        admin_sid, sid_size = C.create_string_buffer(68), W.DWORD(68)
+        if not adv.CreateWellKnownSid(26, None, admin_sid, C.byref(sid_size)):  # Builtin Administrators
+            raise IPCError(C.get_last_error(), "CREATE_ADMINISTRATORS_SID_FAILED")
+        member = W.BOOL()
+        if not adv.CheckTokenMembership(membership_token, admin_sid, C.byref(member)):
+            raise IPCError(C.get_last_error(), "ADMINISTRATORS_MEMBERSHIP_QUERY_FAILED")
+        needed = W.DWORD()
+        adv.GetTokenInformation(token, 25, None, 0, C.byref(needed))  # TokenIntegrityLevel
+        if not C.sizeof(C.c_void_p) <= needed.value <= 65536:
+            raise IPCError("INVALID_TOKEN_INTEGRITY_SIZE")
+        buffer = C.create_string_buffer(needed.value)
+        capacity = len(buffer)
+        if not adv.GetTokenInformation(token, 25, buffer, capacity, C.byref(needed)):
+            raise IPCError(C.get_last_error(), "TOKEN_INTEGRITY_QUERY_FAILED")
+        if not C.sizeof(C.c_void_p) <= needed.value <= capacity:
+            raise IPCError("INVALID_TOKEN_INTEGRITY_READBACK_SIZE")
+        sid = C.c_void_p.from_buffer(buffer).value
+        # A mandatory integrity SID is exactly S-1-16-RID (12 bytes). Read
+        # only that fixed size, after proving the pointer is inside this blob.
+        if (sid is None or not C.addressof(buffer) + 2 * C.sizeof(C.c_void_p)
+                <= sid <= C.addressof(buffer) + needed.value - 12):
+            raise IPCError("INVALID_TOKEN_INTEGRITY_SID")
+        revision, count, authority, integrity_rid = struct.unpack("<BB6sI", C.string_at(sid, 12))
+        if revision != 1 or count != 1 or authority != b"\x00\x00\x00\x00\x00\x10":
+            raise IPCError("INVALID_TOKEN_INTEGRITY_AUTHORITY")
+        integrity_sid = f"S-1-16-{integrity_rid}"
+        return {"source": "WINDOWS_PROCESS_TOKEN", "elevation_flag": bool(elevated.value),
+                "enabled_administrators": bool(member.value), "integrity_sid": integrity_sid,
+                "integrity_rid": integrity_rid,
+                "elevated": bool(elevated.value and member.value and integrity_rid >= 0x3000)}
     finally:
+        if membership_token.value:
+            kernel.CloseHandle(membership_token)
         kernel.CloseHandle(token)
+
+
+def token_is_elevated() -> bool:
+    return token_authority()["elevated"]
 
 
 class PipeChannel:

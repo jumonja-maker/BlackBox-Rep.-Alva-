@@ -23,7 +23,7 @@ def _digest(path):
 
 
 def verify_action_journal(database: Path, exported: Path, expected_actions: list[dict],
-                          *, forbidden_payloads=()) -> dict:
+                          *, forbidden_payloads=(), export_result=None) -> dict:
     """Require every observed action's durable intent/result and exact target.
 
     Run only after the service has closed, with a freshly exported metadata
@@ -45,11 +45,15 @@ def verify_action_journal(database: Path, exported: Path, expected_actions: list
             _require(len(export_rows) < 10000 and len(line.encode("utf-8")) <= 1024 * 1024,
                      "QA_JOURNAL_EXPORT_ROW_BUDGET")
             export_rows.append(json.loads(line))
-    _require(len(export_rows) == len(rows), "QA_JOURNAL_EXPORT_COUNT_MISMATCH")
+    # A service export publishes an immutable prefix through its REQUESTED
+    # record, then durably appends its RESULT. Only that exact acknowledged
+    # final record may be absent from the just-published file.
+    tail_records = 1 if export_result is not None else 0
+    _require(len(export_rows) + tail_records == len(rows), "QA_JOURNAL_EXPORT_COUNT_MISMATCH")
     by_id, action_records = {}, {}
     previous = "0" * 64
     cleanup_count = 0
-    for index, (row, exported_row) in enumerate(zip(rows, export_rows), 1):
+    for index, row in enumerate(rows, 1):
         sequence, identifier, raw, previous_hash, digest = row
         _require(sequence == index and identifier not in by_id, "QA_JOURNAL_SEQUENCE_OR_DUPLICATE")
         actual = hashlib.sha256(previous.encode("ascii") + raw.encode("utf-8")).hexdigest()
@@ -57,8 +61,10 @@ def verify_action_journal(database: Path, exported: Path, expected_actions: list
         previous = digest
         record = json.loads(raw)
         _require(record.get("operation_id") == identifier, "QA_JOURNAL_RECORD_ID_MISMATCH")
-        _require(exported_row == {"record": record, "previous_sha256": previous_hash,
-                                  "record_sha256": digest}, "QA_JOURNAL_EXPORT_CONTENT_MISMATCH")
+        exported_row = export_rows[index - 1] if index <= len(export_rows) else None
+        if exported_row is not None:
+            _require(exported_row == {"record": record, "previous_sha256": previous_hash,
+                                      "record_sha256": digest}, "QA_JOURNAL_EXPORT_CONTENT_MISMATCH")
         for forbidden in forbidden_payloads:
             _require(not forbidden or (forbidden not in raw and forbidden not in json.dumps(exported_row)),
                      "QA_JOURNAL_RAW_MEMORY_LEAK")
@@ -67,6 +73,32 @@ def verify_action_journal(database: Path, exported: Path, expected_actions: list
             action_records.setdefault(record.get("action_id"), []).append(identifier)
         elif record.get("source") == "DIAGNOSTIC_SESSION_CLEANUP":
             cleanup_count += 1
+    if export_result is not None:
+        _require(export_result.get("operation") == "journal.export" and
+                 export_result.get("status") == "COMPLETED", "QA_JOURNAL_EXPORT_RESPONSE_NOT_COMPLETED")
+        export_id = export_result.get("operation_id")
+        _require(type(export_id) is str and export_id, "QA_JOURNAL_EXPORT_ACTION_ID_MISSING")
+        requested = by_id.get(export_id + ":requested")
+        completed = by_id.get(export_id + ":result")
+        _require(requested is not None and completed is not None and
+                 requested[0] == len(export_rows) and completed[0] == len(rows),
+                 "QA_JOURNAL_EXPORT_FINAL_PAIR_MISMATCH")
+        for item, phase in ((requested, "REQUESTED"), (completed, "RESULT")):
+            record = item[1]
+            _require(record.get("operation") == "journal.export" and
+                     record.get("source") == "BLACKBOX_DIAGNOSTIC_JOURNAL_EXPORT" and
+                     record.get("phase") == phase and record.get("action_id") == export_id and
+                     record.get("target") is None, "QA_JOURNAL_EXPORT_PAIR_ATTRIBUTION_MISMATCH")
+        expected_receipt = {"exported_records": len(export_rows), "exported_last_sequence": len(export_rows),
+                            "exported_chain_head_sha256": requested[2], "export_published": True,
+                            "memory_and_dumps": "EXCLUDED", "export_scope": "SNAPSHOT_THROUGH_EXPORT_REQUESTED"}
+        for data in (completed[1].get("data", {}), export_result.get("data", {})):
+            _require(all(data.get(key) == value for key, value in expected_receipt.items()),
+                     "QA_JOURNAL_EXPORT_PREFIX_RECEIPT_MISMATCH")
+        _require(completed[1].get("status") == "COMPLETED" and
+                 export_result.get("journal", {}).get("record_sha256") == completed[2] and
+                 export_result.get("journal", {}).get("operation_id") == export_id + ":result",
+                 "QA_JOURNAL_EXPORT_RESULT_ACKNOWLEDGEMENT_MISMATCH")
     expected_ids = [action.get("operation_id") for action in expected_actions]
     _require(expected_ids and all(type(item) is str and item for item in expected_ids) and
              len(set(expected_ids)) == len(expected_ids), "QA_JOURNAL_EXPECTED_ACTION_IDS_INVALID")
@@ -88,6 +120,7 @@ def verify_action_journal(database: Path, exported: Path, expected_actions: list
              "QA_JOURNAL_READ_ONLY_CHECK_CHANGED_SOURCE")
     return {"status": "PASS", "records": len(rows), "observed_actions": len(expected_actions),
             "cleanup_records": cleanup_count, "chain_head_sha256": previous,
+            "exported_records": len(export_rows), "verified_export_result_tail_records": tail_records,
             "source_sha256": original, "exact_action_target_status_pairs_verified": True,
             "read_only_source_unchanged": True, "known_raw_memory_omitted": True,
             "scope": "LOCAL_CHANGE_DETECTION_AND_REAL_ACTION_CORRELATION_NOT_AUTHENTICATED_PROVENANCE"}

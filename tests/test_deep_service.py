@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 import os
 from pathlib import Path
 import sqlite3
@@ -58,7 +59,7 @@ class DeepContractsTests(unittest.TestCase):
 
     def test_profile_command_accepts_only_bounded_explicit_systemwide_policy(self):
         identity = ProcessIdentity(42, 133000000000000001)
-        valid = {"duration_seconds": 2, "profile": "GeneralProfile.Light", "systemwide_confirmed": True}
+        valid = {"duration_seconds": 2, "profile": "GeneralProfile.Light+FileIO.Light", "systemwide_confirmed": True}
         self.assertEqual(ActionRequest("profile.etw", identity, valid, True).operation, "profile.etw")
         invalid = [dict(valid, duration_seconds=value) for value in (0, 31, True, 1.5)]
         invalid += [dict(valid, profile="custom.wprp"), dict(valid, systemwide_confirmed=False),
@@ -152,6 +153,42 @@ class DeepJournalTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "IDENTITY_MISMATCH"):
                 journal.compare(before, reused)
 
+    def test_compare_separates_collection_cost_from_unchanged_observation_without_editing_evidence(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            journal = EvidenceJournal(temporary)
+            identity = ProcessIdentity(42, 100).to_dict()
+            old = {name: {"status": "COMPLETED", "source": "WINDOWS_LIVE_INSPECTION", "target": identity,
+                          "data": {"rows": [{"address": 4096}], "duration_ns": 20},
+                          "limitations": ["SEQUENTIAL_OBSERVATION"], "duration_ns": 1000}
+                   for name in ("modules", "network", "memory_map")}
+            newer = deepcopy(old)
+            for value in newer.values():
+                value["duration_ns"] = 9000
+            before, after = journal.snapshot(identity, old), journal.snapshot(identity, newer)
+            compared = journal.compare(before, after)
+            self.assertEqual(compared["changed_sections"], [])
+            self.assertEqual(compared["before"], old)
+            self.assertEqual(compared["after"], newer)
+            self.assertEqual(compared["acquisition_metadata_changes"], {
+                name: {"before": {"duration_ns": 1000}, "after": {"duration_ns": 9000}} for name in old})
+            self.assertEqual(journal.compare(before, before)["before"], old)
+            self.assertEqual(journal.compare(after, after)["after"], newer)
+            # Semantic differences remain visible even when collection timing
+            # also varies, including a measured duration inside the payload.
+            changes = {
+                "measured_duration": lambda section: section["data"].update(duration_ns=21),
+                "module_row": lambda section: section["data"]["rows"].append({"address": 8192}),
+                "status": lambda section: section.update(status="INCOMPLETE_EVIDENCE"),
+                "source": lambda section: section.update(source="OTHER_OBSERVATION_SOURCE"),
+                "limitation": lambda section: section["limitations"].append("PARTIAL_DATA"),
+            }
+            for name, change in changes.items():
+                with self.subTest(change=name):
+                    different = deepcopy(newer)
+                    change(different["modules"])
+                    changed_id = journal.snapshot(identity, different)
+                    self.assertEqual(journal.compare(before, changed_id)["changed_sections"], ["modules"])
+
 
 class DeepEngineBoundaryTests(unittest.TestCase):
     def setUp(self):
@@ -162,7 +199,7 @@ class DeepEngineBoundaryTests(unittest.TestCase):
 
     def test_profile_refuses_standard_token_even_with_an_attached_file_handle(self):
         request = ActionRequest("profile.etw", self.identity, {
-            "duration_seconds": 1, "profile": "GeneralProfile.Light", "systemwide_confirmed": True}, True, 120)
+            "duration_seconds": 1, "profile": "GeneralProfile.Light+FileIO.Light", "systemwide_confirmed": True}, True, 120)
         with patch("blackbox_core.deep_native.verify_identity", return_value=self.identity), \
                 patch("blackbox_core.deep_helper.token_is_elevated", return_value=False), \
                 patch("blackbox_core.deep_profiling.capture_etw") as capture:
@@ -172,7 +209,7 @@ class DeepEngineBoundaryTests(unittest.TestCase):
 
     def test_unconfirmed_profile_cleanup_cannot_be_hidden_by_session_close(self):
         request = ActionRequest("profile.etw", self.identity, {
-            "duration_seconds": 1, "profile": "GeneralProfile.Light", "systemwide_confirmed": True}, True, 120)
+            "duration_seconds": 1, "profile": "GeneralProfile.Light+FileIO.Light", "systemwide_confirmed": True}, True, 120)
         unconfirmed = {"status": "RECOVERY_UNCONFIRMED", "error": "OWNED_ETW_STOP_UNCONFIRMED"}
         with patch("blackbox_core.deep_native.verify_identity", return_value=self.identity), \
                 patch("blackbox_core.deep_helper.token_is_elevated", return_value=True), \
@@ -232,11 +269,32 @@ class DeepServiceIntentTests(unittest.TestCase):
         self.identity = ProcessIdentity(42, 133000000000000001, "controlled.exe")
 
     def test_confirmation_required_without_launch(self):
-        with patch.object(self.service.broker, "launch") as launch:
+        secret = "eac137d985b420ff" * 32
+        with patch.object(self.service.broker, "launch") as launch, \
+                patch.object(self.service, "_ensure_session") as ensure:
             answer = self.service.execute(ActionRequest("memory.write", self.identity,
-                                                       {"address": 4096, "expected_hex": "01", "value_hex": "02"}))
+                                                       {"address": 4096, "expected_hex": secret, "value_hex": secret}))
         self.assertEqual(answer["status"], "CONFIRMATION_REQUIRED")
         launch.assert_not_called()
+        ensure.assert_not_called()
+        latest, requested = self.service.journal.timeline()
+        self.assertEqual((requested["phase"], latest["phase"]), ("REQUESTED", "RESULT"))
+        self.assertEqual(latest["action_id"], answer["operation_id"])
+        self.assertEqual(latest["status"], "CONFIRMATION_REQUIRED")
+        self.assertFalse(latest["data"]["execution_started"])
+        self.assertEqual(answer["journal"]["record_sha256"], latest["record_sha256"])
+        self.assertNotIn(secret, json.dumps([requested, latest]))
+
+    def test_confirmation_refusal_has_no_native_effect_when_its_audit_fails(self):
+        request = ActionRequest("memory.write", self.identity,
+                                {"address": 4096, "expected_hex": "01", "value_hex": "02"})
+        for failure in ([OSError("full")], [{}, OSError("full")]):
+            with self.subTest(failure=len(failure)), \
+                    patch.object(self.service.journal, "append", side_effect=failure), \
+                    patch.object(self.service, "_ensure_session") as ensure:
+                answer = self.service.execute(request)
+            self.assertEqual(answer["status"], "OPERATION_FAILED")
+            ensure.assert_not_called()
 
     def test_failed_intent_prevents_any_helper_operation(self):
         with patch.object(self.service.journal, "append", side_effect=OSError("disk full")), \
@@ -282,6 +340,116 @@ class DeepServiceIntentTests(unittest.TestCase):
         self.assertEqual(unrecorded["status"], "RECOVERY_UNCONFIRMED")
         self.assertEqual(close.call_count, 2)  # Close old session, then the unrecorded new grant.
 
+    def test_unconfirmed_and_invalid_typed_uac_scope_are_journaled_without_launch(self):
+        for operations, confirmed, status in ((["memory_read"], False, "CONFIRMATION_REQUIRED"),
+                                               (["timeline"], True, "OPERATION_FAILED"),
+                                               ([], True, "OPERATION_FAILED")):
+            with self.subTest(operations=operations, confirmed=confirmed), \
+                    patch.object(self.service, "_start_session") as start, \
+                    patch.object(self.service, "end_admin_session") as close:
+                answer = self.service.elevate(self.identity, operations, confirmed=confirmed)
+            self.assertEqual(answer["status"], status)
+            self.assertEqual(answer["uac"], {"requested": False, "result": "NOT_STARTED"})
+            start.assert_not_called()
+            close.assert_not_called()
+            latest, requested = self.service.journal.timeline(limit=2)
+            self.assertEqual((requested["phase"], latest["phase"]), ("REQUESTED", "RESULT"))
+            self.assertEqual(latest["status"], status)
+            self.assertEqual(latest["action_id"], answer["operation_id"])
+            self.assertFalse(latest["data"]["execution_started"])
+        with patch.object(self.service.journal, "append", side_effect=OSError("full")), \
+                patch.object(self.service, "_start_session") as start:
+            failed = self.service.elevate(self.identity, ["memory_read"])
+        self.assertEqual(failed["error"], "DURABLE_UAC_INTENT_FAILED")
+        start.assert_not_called()
+
+    def test_export_receipt_identifies_immutable_prefix_and_separate_durable_result(self):
+        self.service.journal.append({"operation_id": "original", "status": "COMPLETED"})
+        original = self.service.journal.timeline()[0]
+        for number in range(2):
+            destination = Path(self.temporary.name) / f"private-destination-{number}.jsonl"
+            answer = self.service.export_journal(destination)
+            self.assertEqual(answer["status"], "COMPLETED")
+            exported = [json.loads(line) for line in destination.read_text(encoding="utf-8").splitlines()]
+            local = list(reversed(self.service.journal.timeline(limit=1000)))
+            self.assertEqual(local[0], original)
+            self.assertEqual(len(local), len(exported) + 1)
+            self.assertEqual(answer["data"]["exported_records"], len(exported))
+            self.assertEqual(answer["data"]["exported_last_sequence"], local[-2]["sequence"])
+            self.assertEqual(answer["data"]["exported_chain_head_sha256"], exported[-1]["record_sha256"])
+            self.assertEqual(exported[-1]["record"]["operation_id"], answer["operation_id"] + ":requested")
+            self.assertEqual(local[-1]["operation_id"], answer["operation_id"] + ":result")
+            self.assertEqual(answer["journal"]["record_sha256"], local[-1]["record_sha256"])
+            self.assertEqual(local[-1]["data"]["export_scope"], "SNAPSHOT_THROUGH_EXPORT_REQUESTED")
+            self.assertEqual(answer["data"]["path"], str(destination))
+            self.assertNotIn("private-destination", json.dumps(local))
+            self.assertNotIn("path", local[-1]["data"])
+            self.assertNotIn("journal", local[-1])
+
+    def test_export_failure_and_cancellation_are_audited_without_clobber_or_path_leak(self):
+        destination = Path(self.temporary.name) / "private-existing.jsonl"
+        destination.write_text("keep this original", encoding="utf-8")
+        answer = self.service.export_journal(destination)
+        self.assertEqual(answer["error"], "JOURNAL_EXPORT_DESTINATION_EXISTS")
+        self.assertEqual(destination.read_text(encoding="utf-8"), "keep this original")
+        latest = self.service.journal.timeline()[0]
+        self.assertEqual(latest["status"], "OPERATION_FAILED")
+        self.assertFalse(latest["data"]["export_published"])
+        cancelled = threading.Event()
+        cancelled.set()
+        destination = destination.with_name("private-cancelled.jsonl")
+        answer = self.service.export_journal(destination, cancel_event=cancelled)
+        self.assertEqual(answer["status"], "CANCELLED")
+        self.assertFalse(destination.exists())
+        self.assertFalse(list(destination.parent.glob(".blackbox-deep-export-*")))
+        self.assertEqual(self.service.journal.timeline()[0]["status"], "CANCELLED")
+        self.assertNotIn("private-", json.dumps(self.service.journal.timeline()))
+
+    def test_export_intent_failure_prevents_copy_and_result_failure_preserves_publication_uncertainty(self):
+        destination = Path(self.temporary.name) / "private-output.jsonl"
+        with patch.object(self.service.journal, "append", side_effect=OSError(str(destination))), \
+                patch.object(self.service.journal, "export_snapshot") as export:
+            denied = self.service.export_journal(destination)
+        export.assert_not_called()
+        self.assertEqual(denied["error"], "DURABLE_EXPORT_INTENT_FAILED")
+        self.assertNotIn(str(destination), json.dumps(denied))
+        append = self.service.journal.append
+        def fail_result(record):
+            if record.get("phase") == "RESULT":
+                raise OSError(str(destination))
+            return append(record)
+        with patch.object(self.service.journal, "append", side_effect=fail_result):
+            unconfirmed = self.service.export_journal(destination)
+        self.assertEqual(unconfirmed["status"], "RECOVERY_UNCONFIRMED")
+        self.assertEqual(unconfirmed["error"], "EXPORT_RESULT_JOURNAL_COMMIT_FAILED")
+        self.assertTrue(unconfirmed["data"]["export_published"])
+        self.assertTrue(destination.is_file())
+        self.assertEqual(self.service.journal.timeline()[0]["phase"], "REQUESTED")
+        self.assertNotIn("private-output", json.dumps(self.service.journal.timeline()))
+
+    def test_export_hash_failure_is_audited_without_repairing_or_publishing_corrupt_history(self):
+        self.service.journal.append({"operation_id": "original", "status": "COMPLETED"})
+        db = sqlite3.connect(self.service.journal.path)
+        try:
+            db.execute("UPDATE actions SET record_json='{}' WHERE operation_id='original'")
+            db.commit()
+        finally:
+            db.close()
+        destination = Path(self.temporary.name) / "rejected.jsonl"
+        answer = self.service.export_journal(destination)
+        self.assertEqual(answer["status"], "OPERATION_FAILED")
+        self.assertEqual(answer["error"], "JOURNAL_HASH_CHAIN_MISMATCH")
+        self.assertFalse(destination.exists())
+        self.assertFalse(list(destination.parent.glob(".blackbox-deep-export-*")))
+        latest = self.service.journal.timeline()[0]
+        self.assertEqual(latest["phase"], "RESULT")
+        self.assertEqual(latest["error"], answer["error"])
+        db = sqlite3.connect(self.service.journal.path)
+        try:
+            self.assertEqual(db.execute("SELECT record_json FROM actions WHERE operation_id='original'").fetchone()[0], "{}")
+        finally:
+            db.close()
+
     def test_comparison_request_must_match_snapshot_target(self):
         before = self.service.journal.snapshot(self.identity.to_dict(), {"value": 1})
         after = self.service.journal.snapshot(self.identity.to_dict(), {"value": 2})
@@ -291,7 +459,7 @@ class DeepServiceIntentTests(unittest.TestCase):
 
     def test_profile_uac_retry_does_not_collide_with_own_unwritten_destination(self):
         destination = Path(self.temporary.name) / "explicit.etl"
-        parameters = {"duration_seconds": 2, "profile": "GeneralProfile.Light",
+        parameters = {"duration_seconds": 2, "profile": "GeneralProfile.Light+FileIO.Light",
                       "systemwide_confirmed": True, "destination": str(destination)}
         fake_os = types.SimpleNamespace(name="nt", path=os.path, getpid=os.getpid)
         sent = []

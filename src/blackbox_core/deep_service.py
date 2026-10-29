@@ -225,11 +225,38 @@ class InspectorService:
 
     def elevate(self, target: ProcessIdentity, operations: list[str], *, confirmed: bool = False, cancel_event=None) -> dict:
         target = ProcessIdentity.from_dict(target)
-        if confirmed is not True:
-            return result("session.elevate", "CONFIRMATION_REQUIRED", next_action="REVIEW_OPERATION_SCOPE_AND_UAC_PROMPT")
+        # Reject malformed/unbounded command input before constructing audit
+        # metadata. Known typed scope refusals are still diagnostic outcomes.
+        if type(operations) is not list or len(operations) > len(DEEP_ACTIONS):
+            raise ValueError("INVALID_ELEVATED_OPERATION_SCOPE_INPUT")
         scope = sorted({canonical_operation(name) for name in operations} | {"capabilities"})
-        if not operations or set(scope) & LOCAL_OPERATIONS:
-            return result("session.elevate", "OPERATION_FAILED", error="INVALID_ELEVATED_OPERATION_SCOPE")
+        if confirmed is not True or not operations or set(scope) & LOCAL_OPERATIONS:
+            identifier = uuid4().hex
+            answer = (result("session.elevate", "CONFIRMATION_REQUIRED",
+                             next_action="REVIEW_OPERATION_SCOPE_AND_UAC_PROMPT") if confirmed is not True else
+                      result("session.elevate", "OPERATION_FAILED", error="INVALID_ELEVATED_OPERATION_SCOPE"))
+            answer.update(operation_id=identifier, uac={"requested": False, "result": "NOT_STARTED"})
+            answer["data"] = {"execution_started": False, "changes": "NONE"}
+            base = {"action_id": identifier, "operation": "session.elevate", "target": target.to_dict(),
+                    "source": "BLACKBOX_DIAGNOSTIC_SESSION_ELEVATION", "permission_level": self._permission,
+                    "parameters": {"operations": scope}, "confirmation_provided": confirmed is True,
+                    "uac": answer["uac"], "before": {"elevation": "NOT_STARTED"}}
+            with self._lock:
+                try:
+                    self.journal.append({**base, "operation_id": identifier + ":requested", "phase": "REQUESTED"})
+                except Exception as exc:
+                    return result("session.elevate", "OPERATION_FAILED", operation_id=identifier,
+                                  error="DURABLE_UAC_INTENT_FAILED", uac=answer["uac"],
+                                  data={"execution_started": False, "error_type": type(exc).__name__})
+                try:
+                    answer["journal"] = self.journal.append({**base, **answer, "operation_id": identifier + ":result",
+                                                             "phase": "RESULT", "after": {"elevation": "NOT_STARTED"}})
+                except Exception as exc:
+                    return result("session.elevate", "OPERATION_FAILED", operation_id=identifier,
+                                  error="UAC_REFUSAL_RESULT_JOURNAL_FAILED", uac=answer["uac"],
+                                  data={"execution_started": False, "reported_operation_status": answer["status"],
+                                        "error_type": type(exc).__name__})
+            return answer
         identifier = uuid4().hex
         with self._lock:
             try:
@@ -369,14 +396,12 @@ class InspectorService:
         validate_parameters(request.parameters)
         identifier = uuid4().hex
         spec = DEEP_ACTIONS[request.operation]
-        if spec.confirmation_required and not request.confirmed:
-            return result(request.operation, "CONFIRMATION_REQUIRED", operation_id=identifier,
-                          next_action="CONFIRM_TARGET_PARAMETERS_AND_OPERATION_IMPACT")
         with self._lock:
             base = {"action_id": identifier, "operation": request.operation,
                     "target": request.target.to_dict(), "source": "BLACKBOX_DIAGNOSTIC_ACTION_ENGINE",
                     "parameters": request.parameters, "permission_level": self._permission,
                     "uac": {"requested": False, "result": "CURRENT_SESSION"},
+                    "confirmation": {"required": spec.confirmation_required, "provided": request.confirmed},
                     "before": {"session": self.session_status()}, "limitations": []}
             # A durable intent is mandatory BEFORE any process intervention.
             try:
@@ -391,7 +416,11 @@ class InspectorService:
             intervention_dispatch_attempted = False
             try:
                 check_deadline(time.monotonic() + request.timeout_seconds, cancel_event)
-                if request.operation in LOCAL_OPERATIONS:
+                if spec.confirmation_required and not request.confirmed:
+                    answer = result(request.operation, "CONFIRMATION_REQUIRED",
+                                    data={"execution_started": False, "changes": "NONE"},
+                                    next_action="CONFIRM_TARGET_PARAMETERS_AND_OPERATION_IMPACT")
+                elif request.operation in LOCAL_OPERATIONS:
                     answer = self._local(request, cancel_event)
                 elif os.name != "nt":
                     answer = result(request.operation, "UNSUPPORTED_PLATFORM", next_action="USE_WINDOWS_10_OR_11_X64")
@@ -495,7 +524,8 @@ class InspectorService:
                                           "query_limit": request.parameters.get("limit", 200)}
             elif request.operation == "compare":
                 journal_answer["data"] = {k: answer.get("data", {}).get(k) for k in
-                                          ("before_id", "after_id", "changed_sections", "interpretation")}
+                                          ("before_id", "after_id", "changed_sections", "acquisition_metadata_changes",
+                                           "comparison_scope", "interpretation")}
             try:
                 recorded = self.journal.append({**base, **journal_answer,
                                                 "operation_id": identifier + ":result", "action_id": identifier,
@@ -508,16 +538,66 @@ class InspectorService:
                     answer = self._retained_result(request.operation, failure, cleanup=reported)
                     answer["operation_id"] = identifier
                     answer["limitations"].append("The durable result could not be recorded; do not repeat the action blindly.")
+                elif answer.get("status") == "CONFIRMATION_REQUIRED":
+                    answer = result(request.operation, "OPERATION_FAILED", operation_id=identifier,
+                                    error="REFUSAL_RESULT_JOURNAL_COMMIT_FAILED",
+                                    data={**reported, "execution_started": False},
+                                    limitations=["The action was not started; its confirmation refusal could not be durably recorded."])
                 else:
                     answer = result(request.operation, "RECOVERY_UNCONFIRMED", operation_id=identifier,
                                     error=failure, data=reported,
                                     limitations=["The action may have completed; its durable result could not be recorded. Do not repeat blindly."])
             return answer
 
-    def export_journal(self, destination: str | Path) -> dict:
+    def export_journal(self, destination: str | Path, *, cancel_event=None) -> dict:
+        identifier = uuid4().hex
         with self._lock:
-            path = self.journal.export(destination)
-        return result("journal.export", "COMPLETED", data={"path": str(path), "memory_and_dumps": "EXCLUDED"})
+            base = {"action_id": identifier, "operation": "journal.export", "target": None,
+                    "source": "BLACKBOX_DIAGNOSTIC_JOURNAL_EXPORT", "permission_level": "GUI_TOKEN_NO_ELEVATION",
+                    "uac": {"requested": False, "result": "NOT_REQUIRED"},
+                    "parameters": {"format": "JSONL", "destination": "EXPLICIT_USER_SELECTION_OMITTED"},
+                    "before": {"publication": "NOT_STARTED"},
+                    "changes": {"process_state": "UNCHANGED", "artifact": "CREATE_NEW_METADATA_SNAPSHOT"},
+                    "limitations": ["The export is an immutable prefix through REQUESTED; its publication RESULT remains in the local journal and a later export."]}
+            try:
+                self.journal.append({**base, "operation_id": identifier + ":requested", "phase": "REQUESTED"})
+            except Exception as exc:
+                return result("journal.export", "OPERATION_FAILED", operation_id=identifier,
+                              error="DURABLE_EXPORT_INTENT_FAILED", data={"export_published": False,
+                              "error_type": type(exc).__name__, "winerror": getattr(exc, "winerror", None)},
+                              next_action="RESTORE_JOURNAL_STORAGE_BEFORE_RETRYING")
+            path = None
+            try:
+                receipt = self.journal.export_snapshot(destination, cancel_event=cancel_event)
+                path = receipt.pop("path")
+                answer = result("journal.export", "COMPLETED", data={**receipt, "export_published": True,
+                                "memory_and_dumps": "EXCLUDED", "export_scope": "SNAPSHOT_THROUGH_EXPORT_REQUESTED"},
+                                limitations=base["limitations"])
+            except Exception as exc:
+                # Exception text can contain the user-selected destination or
+                # other filesystem paths. Record only typed/native codes.
+                code = (str(exc) if type(exc) in (ValueError, InterruptedError) and str(exc) in
+                        {"JOURNAL_HASH_CHAIN_MISMATCH", "JOURNAL_EXPORT_CANCELLED"} else
+                        "JOURNAL_EXPORT_DESTINATION_EXISTS" if isinstance(exc, FileExistsError) else
+                        "JOURNAL_EXPORT_ACCESS_DENIED" if isinstance(exc, PermissionError) else "JOURNAL_EXPORT_FAILED")
+                answer = result("journal.export", "CANCELLED" if isinstance(exc, InterruptedError) else "OPERATION_FAILED",
+                                error=code, data={"export_published": False if isinstance(exc, (FileExistsError, InterruptedError)) or
+                                code == "JOURNAL_HASH_CHAIN_MISMATCH" else "UNCONFIRMED",
+                                "memory_and_dumps": "EXCLUDED", "error_type": type(exc).__name__,
+                                "winerror": getattr(exc, "winerror", None), "errno": getattr(exc, "errno", None)})
+            answer["operation_id"] = identifier
+            try:
+                answer["journal"] = self.journal.append({**base, **answer, "operation_id": identifier + ":result",
+                                                        "phase": "RESULT", "after": {"publication": answer["data"]["export_published"]}})
+            except Exception as exc:
+                answer = result("journal.export", "RECOVERY_UNCONFIRMED", operation_id=identifier,
+                                error="EXPORT_RESULT_JOURNAL_COMMIT_FAILED",
+                                data={**answer["data"], "reported_export_status": answer["status"],
+                                      "journal_error_type": type(exc).__name__},
+                                limitations=["Publication may have completed; the outcome was not durably recorded. Do not retry automatically or overwrite the destination."])
+            if path is not None:
+                answer["data"]["path"] = path  # UI response only, never the audit record.
+            return answer
 
     def end_admin_session(self) -> dict:
         with self._lock:

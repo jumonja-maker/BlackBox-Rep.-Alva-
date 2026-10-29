@@ -374,6 +374,18 @@ class Acceptance:
         require(any(int(row.get("base", row.get("address", 0))) <= address <
                     int(row.get("base", row.get("address", 0))) + int(row.get("size", 0))
                     for row in rows(mapping)), "KNOWN_NATIVE_BUFFER_REGION_NOT_ENUMERATED")
+        code_regions = [row for row in rows(mapping)
+                        if int(row.get("base", row.get("address", 0))) <= oracle["function_address"] <
+                        int(row.get("base", row.get("address", 0))) + int(row.get("size", 0))]
+        executable_name = Path(self.probe.process.args[0]).name.casefold()
+        require(len(code_regions) == 1 and code_regions[0].get("type_name") == "IMAGE" and
+                code_regions[0].get("mapped_file_status") == "OBSERVED" and
+                code_regions[0].get("association_kind") == "IMAGE_FILE_BACKING" and
+                code_regions[0].get("mapped_file_source") == "WIN32_GET_MAPPED_FILE_NAME" and
+                str(code_regions[0].get("image_name", "")).casefold() == executable_name and
+                bool(code_regions[0].get("mapped_file_path")),
+                "KNOWN_NATIVE_CODE_REGION_IMAGE_BACKING_NOT_CONFIRMED")
+        result["controlled_code_region"] = code_regions[0]
         memory = self.perform("memory_read", {"address": address, "length": 64})
         require(memory["data"].get("hex") == oracle["buffer_hex"] and
                 memory["data"].get("bytes_read") == 64, "NATIVE_MEMORY_READ_DIFFERS_FROM_ORACLE")
@@ -535,7 +547,7 @@ class Acceptance:
         """Capture real fixture activity; lack of privilege is not a trace result."""
         destination = self.output / "profile-controlled.etl"
         parameters = {"destination": str(destination), "duration_seconds": 5,
-                      "profile": "GeneralProfile.Light", "systemwide_confirmed": True}
+                      "profile": "GeneralProfile.Light+FileIO.Light", "systemwide_confirmed": True}
         before = self.probe.state()
         result = self.perform("profile.etw", parameters, confirmed=True, timeout=120,
                               statuses=("COMPLETED",) if permission == "ADMINISTRATOR" else ("ADMIN_REQUIRED",))

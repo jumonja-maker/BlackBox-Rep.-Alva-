@@ -111,6 +111,12 @@ FIELD_LABELS = {
     "observed_tree_depth": ("Observed tree depth", "Глубина наблюдаемого дерева"),
     "allocation_base": ("Allocation base", "База выделения"),
     "allocation_protection": ("Allocation protection", "Защита выделения"),
+    "mapped_file_path": ("Backing file (NT path)", "Связанный файл (NT-путь)"),
+    "mapped_file_status": ("File association status", "Статус связи с файлом"),
+    "association_kind": ("Region association", "Принадлежность региона"),
+    "image_name": ("Backing image name", "Имя связанного образа"),
+    "mapped_file_source": ("File association source", "Источник связи с файлом"),
+    "mapped_file_winerror": ("File query WinError", "WinError запроса файла"),
     "handle": ("Handle", "Дескриптор"), "type_index": ("Object type index", "Индекс типа объекта"),
     "granted_access": ("Granted access mask", "Маска полученного доступа"),
     "attributes": ("Attributes", "Атрибуты"), "name_status": ("Name lookup status", "Статус получения имени"),
@@ -536,7 +542,7 @@ class OverviewInspectorPanel(QWidget):
             seconds_label = self._translated(_plain_label(), "ETW duration, seconds", "Длительность ETW, секунд")
             fields.addRow(seconds_label, self.profile_seconds)
             self.profile_kind = QComboBox()
-            self.profile_kind.addItem("GeneralProfile.Light", "GeneralProfile.Light")
+            self.profile_kind.addItem("GeneralProfile.Light + FileIO.Light", "GeneralProfile.Light+FileIO.Light")
             profile_label = self._translated(_plain_label(), "Recording profile", "Профиль записи")
             fields.addRow(profile_label, self.profile_kind)
             layout.addLayout(fields)
@@ -1048,6 +1054,11 @@ class OverviewInspectorPanel(QWidget):
             preferred = ("event_name", "trace_relative_ms", "pid", "tid", "event_transfer_bytes",
                          "latency_ms", "trace_interval_start_ms", "trace_interval_end_ms",
                          "latency_status", "typed_observation", "fields", "process_instance")
+            columns = [key for key in preferred if any(key in row for row in rows[:500])]
+        elif result.get("operation") == "memory_map" and section == "memory":
+            preferred = ("base", "size", "type_name", "state_name", "protection", "allocation_base",
+                         "mapped_file_path", "mapped_file_status", "association_kind", "image_name",
+                         "mapped_file_winerror", "mapped_file_source")
             columns = [key for key in preferred if any(key in row for row in rows[:500])]
         for row in rows[:500]:
             for key in row:

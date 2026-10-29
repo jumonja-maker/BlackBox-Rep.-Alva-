@@ -137,27 +137,58 @@ class EvidenceJournal:
         if before[0] != after[0]:
             raise ValueError("SNAPSHOT_PROCESS_IDENTITY_MISMATCH")
         old, new = json.loads(before[2]), json.loads(after[2])
+
+        def section_values(value):
+            # Only the native section envelope's collection cost is acquisition
+            # metadata. Never recursively discard durations inside measured
+            # data, or suppress status/source/limitations/error changes.
+            if isinstance(value, dict) and {"status", "source", "data"} <= value.keys():
+                return ({key: item for key, item in value.items() if key != "duration_ns"},
+                        {"duration_ns": value["duration_ns"]} if "duration_ns" in value else {})
+            return value, {}
+
+        changed, acquisition = [], {}
+        for key in sorted(set(old) | set(new)):
+            old_content, old_acquisition = section_values(old.get(key))
+            new_content, new_acquisition = section_values(new.get(key))
+            if key not in old or key not in new or old_content != new_content:
+                changed.append(key)
+            if old_acquisition != new_acquisition:
+                acquisition[key] = {"before": old_acquisition, "after": new_acquisition}
         return {"before_id": before_id, "after_id": after_id, "target": json.loads(before[0]),
                 "before_timestamp_utc": before[1], "after_timestamp_utc": after[1],
                 "before": old, "after": new,
-                "changed_sections": [k for k in sorted(set(old) | set(new)) if old.get(k) != new.get(k)],
+                "changed_sections": changed, "acquisition_metadata_changes": acquisition,
+                "comparison_scope": "SECTION_CONTENT_AND_EVIDENCE_EXCLUDING_COLLECTION_DURATION",
                 "interpretation": "OBSERVED_DIFFERENCE_NOT_CAUSAL_PROOF"}
 
     def export(self, destination: str | Path, *, cancel_event=None) -> Path:
+        """Publish one immutable journal snapshot; preserve the Path API."""
+        return Path(self.export_snapshot(destination, cancel_event=cancel_event)["path"])
+
+    def export_snapshot(self, destination: str | Path, *, cancel_event=None) -> dict:
+        """Return the exact verified prefix receipt without appending records.
+
+        The service journals intent before this copy and outcome afterwards.
+        An export cannot contain its own acknowledged publication result.
+        """
         target = Path(destination)
         descriptor, temporary = tempfile.mkstemp(prefix=".blackbox-deep-export-", suffix=".tmp", dir=target.parent)
         published = False
+        records = last_sequence = 0
+        previous_expected = "0" * 64
         try:
             with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
                 with self._lock, self._connect() as db:
-                    previous_expected = "0" * 64
-                    for raw, previous, digest in db.execute("SELECT record_json,previous_sha256,record_sha256 FROM actions ORDER BY sequence"):
+                    for sequence, raw, previous, digest in db.execute("SELECT sequence,record_json,previous_sha256,record_sha256 FROM actions ORDER BY sequence"):
                         if cancel_event is not None and cancel_event.is_set():
                             raise InterruptedError("JOURNAL_EXPORT_CANCELLED")
                         actual = hashlib.sha256(previous.encode("ascii") + raw.encode("utf-8")).hexdigest()
                         if previous != previous_expected or actual != digest:
                             raise ValueError("JOURNAL_HASH_CHAIN_MISMATCH")
                         previous_expected = digest
+                        records += 1
+                        last_sequence = sequence
                         stream.write(json.dumps({"record": json.loads(raw), "previous_sha256": previous,
                                                  "record_sha256": digest}, ensure_ascii=False) + "\n")
                 stream.flush()
@@ -169,4 +200,6 @@ class EvidenceJournal:
             Path(temporary).unlink(missing_ok=True)
         if not published:
             raise OSError("JOURNAL_EXPORT_NOT_PUBLISHED")
-        return target
+        return {"path": str(target), "exported_records": records,
+                "exported_last_sequence": last_sequence,
+                "exported_chain_head_sha256": previous_expected}

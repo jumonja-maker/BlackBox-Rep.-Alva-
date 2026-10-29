@@ -105,6 +105,30 @@ class DeepInspectorGuiTests(unittest.TestCase):
             self.assertEqual(self.panel.pages.currentIndex(), index)
         self.assertEqual(self.bridge.calls, [])
 
+    def test_memory_backing_file_and_unknown_owner_remain_visible_with_column_budget(self):
+        row = {"base": 4096, "size": 4096, "allocation_base": 4096,
+               "allocation_protection": 32, "protection": 32, "state": 4096,
+               "type": 0x1000000, "state_name": "COMMIT", "type_name": "IMAGE",
+               "mapped_file_path": r"\Device\HarddiskVolume3\controlled.exe",
+               "image_name": "controlled.exe", "mapped_file_status": "OBSERVED",
+               "association_kind": "IMAGE_FILE_BACKING", "mapped_file_source": "WIN32_GET_MAPPED_FILE_NAME"}
+        denied = {**row, "base": 8192, "mapped_file_path": None, "image_name": None,
+                  "mapped_file_status": "ACCESS_DENIED", "mapped_file_winerror": 5}
+        for language in ("EN", "RU"):
+            self.window.language = language
+            self.panel.retranslate()
+            self.panel._show_result("memory", {"operation": "memory_map", "status": "INCOMPLETE_EVIDENCE",
+                                                "data": {"rows": [row, denied]}})
+            table = self.panel._tables["memory"]
+            self.assertLessEqual(table.columnCount(), 12)
+            rendered = [table.item(r, c).text() for r in range(table.rowCount())
+                        for c in range(table.columnCount()) if table.item(r, c) is not None]
+            self.assertIn(row["mapped_file_path"], rendered)
+            self.assertIn("IMAGE_FILE_BACKING", rendered)
+            self.assertIn("ACCESS_DENIED", rendered)
+            self.assertEqual(rendered.count("controlled.exe"), 1)
+        self.assertFalse(self.bridge.calls)
+
     def test_required_controls_exist_and_translate_without_commands(self):
         required = {"capabilities", "before", "after", "compare", "cancel", "end_admin", "retry_cleanup",
                     "processes", "modules", "threads", "thread_stacks", "wait_chains", "handles",
@@ -479,7 +503,7 @@ class DeepInspectorGuiTests(unittest.TestCase):
             self.panel._action_buttons["profile.etw"].click()
         operation, parameters, options = self.bridge.calls[-1]
         self.assertEqual(operation, "profile.etw")
-        self.assertEqual(parameters, {"duration_seconds": 3, "profile": "GeneralProfile.Light",
+        self.assertEqual(parameters, {"duration_seconds": 3, "profile": "GeneralProfile.Light+FileIO.Light",
                                       "destination": "selected.etl", "systemwide_confirmed": True})
         self.assertTrue(options["confirmed"])
         self.assertEqual(options["timeout_seconds"], 120)

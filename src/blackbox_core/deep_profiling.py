@@ -22,7 +22,7 @@ from . import deep_native_win as W
 from .deep_contracts import ProcessIdentity, result
 from .deep_native import NativeError, _check, _integer, _os_error, verify_identity
 
-PROFILE = "GeneralProfile.Light"
+PROFILE = "GeneralProfile.Light+FileIO.Light"
 MAX_TRACE_BYTES = 256 * 1024**2
 STAGING_SDDL = "O:BAG:BAD:P(A;OICI;FA;;;BA)(A;OICI;FA;;;SY)"
 _STAGE_NAME = re.compile(r"BLACKBOX-Deep-[0-9a-f]{32}\Z")

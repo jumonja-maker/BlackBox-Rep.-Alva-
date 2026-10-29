@@ -101,6 +101,22 @@ jobs:
         run: |
           python -m pip install --require-hashes -r requirements/ci-windows-py311.lock
           python -m pip install --no-build-isolation --no-deps -e .
+      - name: Retain installed fixed WPR profile definitions and required file I/O keywords
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path deep-profile-policy -Force | Out-Null
+          $wpr = Join-Path ([Environment]::SystemDirectory) 'wpr.exe'
+          $profile = 'GeneralProfile.Light+FileIO.Light'
+          & $wpr -profiledetails $profile 2>&1 | Out-File deep-profile-policy/profile-details.txt -Encoding utf8
+          if ($LASTEXITCODE -ne 0) { throw "Installed fixed WPR profile details unavailable" }
+          & $wpr -exportprofile $profile "$PWD/deep-profile-policy/installed-profile.wprp" 2>&1 | Out-File deep-profile-policy/profile-export.txt -Encoding utf8
+          if ($LASTEXITCODE -ne 0) { throw "Installed fixed WPR profile export failed" }
+          [xml]$definition = Get-Content deep-profile-policy/installed-profile.wprp -Raw
+          foreach ($keyword in @('FileIO', 'FileIOInit', 'Filename', 'DiskIO', 'ProcessThread')) {
+            if ($definition.SelectNodes("//*[local-name()='Keyword' and @Value='$keyword']").Count -eq 0) {
+              throw "Installed WPR policy lacks required keyword: $keyword"
+            }
+          }
       - name: Actual process memory debugger TCP UDP file and restricted-token acceptance
         run: python tools/qa_deep_inspection.py --output deep-native-qa
       - name: Real Qt buttons through bridge and helper to the controlled native target
@@ -122,6 +138,7 @@ jobs:
           name: BB-DEEP-001-NATIVE-EVIDENCE
           path: |
             deep-native-qa/
+            deep-profile-policy/
             deep-endurance-preflight/
             deep-overview-qa/
             deep-gui-e2e/

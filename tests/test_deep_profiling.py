@@ -70,11 +70,27 @@ class ProfilingPolicyTests(unittest.TestCase):
             self.assertEqual(error.exception.status, "CONFIRMATION_REQUIRED")
 
     def test_profile_and_arbitrary_tool_or_output_path_rejected(self):
-        for extra in ({"profile": "CPU.Verbose"}, {"profile": "-cancel"},
+        for extra in ({"profile": "CPU.Verbose"}, {"profile": "GeneralProfile.Light"},
+                      {"profile": "GeneralProfile.Light+arbitrary.wprp!X"}, {"profile": "-cancel"},
                       {"executable": "other.exe"}, {"destination": "C:\\privileged.etl"},
                       {"file_handle": 123}, {"argv": []}):
             with self.subTest(extra=extra), self.assertRaises(ValueError):
                 profiling.validate_policy({"systemwide_confirmed": True, **extra})
+
+    def test_fixed_file_io_policy_is_one_owned_capture_with_allowlisted_components(self):
+        from blackbox_core.trace_owner import TraceSupervisor
+        from blackbox_core.windows_research import WprCapture
+        with tempfile.TemporaryDirectory() as directory, \
+                patch("blackbox_core.windows_research.wpr_tool", return_value="system-wpr.exe"):
+            owner = TraceSupervisor(directory, profile=profiling.PROFILE)
+            capture = WprCapture(directory, profile=profiling.PROFILE)
+            with patch.object(capture, "_run") as command:
+                started = capture.start()
+            command.assert_called_once_with(["-start", "GeneralProfile.Light", "-start", "FileIO.Light"])
+            self.assertEqual(started["profile_components"], ["GeneralProfile.Light", "FileIO.Light"])
+            self.assertEqual(owner.data["policy"]["profile"], profiling.PROFILE)
+            self.assertEqual(TraceSupervisor(directory).data["policy"]["profile"], "GeneralProfile.Light")
+            self.assertEqual(WprCapture(directory).profiles, ("GeneralProfile.Light",))
 
     def _copy(self, data, output, *, budget=None, cancel=None):
         with tempfile.TemporaryDirectory() as directory:

@@ -6,9 +6,11 @@ helper; it does not certify a frozen GUI or interactive Secure Desktop.
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 import json
 import os
 from pathlib import Path
+import re
 import sys
 import threading
 import time
@@ -25,7 +27,7 @@ def run(args):
     require_hosted_windows()
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     import psutil
-    from PySide6.QtCore import Qt, QTimer
+    from PySide6.QtCore import Qt, QTimer, QProcess
     from PySide6.QtTest import QTest
     from PySide6.QtWidgets import QApplication, QMessageBox, QScrollArea
     from blackbox_core.deep_journal import journal_metadata
@@ -44,7 +46,7 @@ def run(args):
              "secure_desktop": "NOT_TESTED", "physical_windows_10_11": "NOT_TESTED",
              "selection": "EXISTING_GUI_ATTACH_COMMAND_WITH_OBSERVER_CACHED_CREATION_TIME",
              "actions": [], "confirmations": [], "unexpected_dialogs": []}
-    app = window = probe = pulse = dialog_timer = None
+    app = window = probe = pulse = dialog_timer = oracle_executor = None
     closed, results, services = [], [], []
     dialog_plan = {"operation": None, "decision": None, "answered": False}
     pulse_state = {"ticks": 0, "last": None, "max_gap_seconds": 0.0}
@@ -56,6 +58,13 @@ def run(args):
             QTest.qWait(5)
         app.processEvents()
         require(predicate(), "GUI_ACTION_OR_CLEANUP_DEADLINE")
+
+    def oracle_call(method, *arguments):
+        # Controlled C IPC is QA work, not GUI code: keep pumping Qt while
+        # waiting so the responsiveness measurement cannot count our own wait.
+        future = oracle_executor.submit(method, *arguments)
+        pump_until(future.done, timeout=30)
+        return future.result()
 
     try:
         expected_sha = os.environ.get("BB_QA_SOURCE_SHA", os.environ.get("GITHUB_SHA", ""))
@@ -82,6 +91,7 @@ def run(args):
             proof["diagnostic_helper_sha256"] = file_hash(helper)
         app = QApplication.instance() or QApplication([])
         app.setQuitOnLastWindowClosed(False)
+        oracle_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="deep-gui-qa-oracle")
         set_retro_theme(app)
         window = DecoderWindow(isolated=True, output_root=output / "sessions", allow_update_check=False)
         window._set_language("EN")
@@ -102,6 +112,11 @@ def run(args):
         bridge.result_ready.connect(results.append)
         bridge.closed.connect(closed.append)
         window._navigate("dashboard")
+        scroll = window.stack.currentWidget()
+        require(isinstance(scroll, QScrollArea), "GUI_OVERVIEW_PAGE_NOT_SCROLLABLE")
+        scroll.ensureWidgetVisible(window.deep_inspector_toggle)
+        app.processEvents()
+        require(window.deep_inspector_toggle.isVisible(), "GUI_DEEP_TOGGLE_NOT_VISIBLE")
         QTest.mouseClick(window.deep_inspector_toggle, Qt.MouseButton.LeftButton)
         app.processEvents()
         require(panel.isVisible() and not bridge.has_session, "EXPANDING_PANEL_STARTED_NATIVE_ACTION")
@@ -120,12 +135,14 @@ def run(args):
 
         def respond_to_actual_dialog():
             active = QApplication.activeModalWidget()
-            if not isinstance(active, QMessageBox):
+            if active is None:
                 return
             operation = dialog_plan["operation"]
-            if operation is not None and not dialog_plan["answered"]:
+            if isinstance(active, QMessageBox) and operation is not None and not dialog_plan["answered"]:
                 intended = QMessageBox.StandardButton.Yes if dialog_plan["decision"] else QMessageBox.StandardButton.Cancel
-                valid = (f"PID {oracle['pid']}" in active.text() and
+                valid = (re.search(r"\bPID " + str(oracle["pid"]) + r"(?!\d)", active.text()) is not None and
+                         active.button(QMessageBox.StandardButton.Yes) is not None and
+                         active.button(QMessageBox.StandardButton.Cancel) is not None and
                          active.defaultButton() == active.button(QMessageBox.StandardButton.Cancel))
                 proof["confirmations"].append({"operation": operation,
                     "decision": "YES" if dialog_plan["decision"] else "CANCEL",
@@ -137,13 +154,17 @@ def run(args):
                 button = active.button(intended)
                 if button is not None:
                     QTest.mouseClick(button, Qt.MouseButton.LeftButton)
-            elif operation is None:
-                proof["unexpected_dialogs"].append(active.windowTitle())
-                button = active.button(QMessageBox.StandardButton.Cancel) or active.button(QMessageBox.StandardButton.Ok)
-                if button is not None:
-                    QTest.mouseClick(button, Qt.MouseButton.LeftButton)
                 else:
+                    # A changed dialog contract must fail promptly, not leave
+                    # QTest.mouseClick trapped inside the nested modal loop.
                     active.reject()
+            else:
+                proof["unexpected_dialogs"].append(active.windowTitle())
+                reject = getattr(active, "reject", None)
+                if callable(reject):
+                    reject()
+                else:
+                    active.close()
 
         dialog_timer = QTimer()
         dialog_timer.setInterval(10)
@@ -156,6 +177,8 @@ def run(args):
                 "GUI_SELECTION_DID_NOT_PRESERVE_ACTUAL_OBSERVER_INSTANCE")
 
         def click(operation, section, *, consent=None, statuses=("COMPLETED",)):
+            proof["phase"] = "GUI_ACTION_" + operation
+            print("DEEP_GUI_ACTION_START " + operation, flush=True)
             panel.section.setCurrentIndex(panel.section.findData(section))
             app.processEvents()
             button = panel._action_buttons[operation]
@@ -189,6 +212,7 @@ def run(args):
                     "GUI_RESULT_NOT_BOUND_TO_EXACT_NATIVE_TARGET")
             require(result["status"] in panel.status_label.text(), "GUI_STATUS_DID_NOT_DISPLAY_ACTUAL_RESULT")
             proof["actions"].append(journal_metadata(result))
+            print("DEEP_GUI_ACTION_RESULT " + operation + " " + result["status"], flush=True)
             return result
 
         modules = click("modules", "modules", statuses=("COMPLETED", "INCOMPLETE_EVIDENCE"))
@@ -213,34 +237,41 @@ def run(args):
         panel.expected_bytes.setText(oracle["buffer_hex"])
         panel.new_bytes.setText(changed)
         click("memory.write", "memory", consent=False)
-        require(probe.state()["buffer_hex"] == oracle["buffer_hex"], "GUI_CANCEL_CHANGED_NATIVE_MEMORY")
+        require(oracle_call(probe.state)["buffer_hex"] == oracle["buffer_hex"], "GUI_CANCEL_CHANGED_NATIVE_MEMORY")
         written = click("memory.write", "memory", consent=True)
-        require(probe.state()["buffer_hex"] == changed and panel.write_id.text() == written["data"]["change_id"],
+        require(oracle_call(probe.state)["buffer_hex"] == changed and panel.write_id.text() == written["data"]["change_id"],
                 "GUI_WRITE_OR_RECORDED_CHANGE_ID_NOT_CONFIRMED")
         click("memory.rollback", "memory", consent=True)
-        require(probe.state()["buffer_hex"] == oracle["buffer_hex"], "GUI_ROLLBACK_NOT_CONFIRMED_BY_TARGET")
+        require(oracle_call(probe.state)["buffer_hex"] == oracle["buffer_hex"], "GUI_ROLLBACK_NOT_CONFIRMED_BY_TARGET")
         click("memory.write", "memory", consent=True)
-        require(probe.state()["buffer_hex"] == changed, "GUI_CLOSE_RECOVERY_PRECONDITION_NOT_ESTABLISHED")
+        require(oracle_call(probe.state)["buffer_hex"] == changed, "GUI_CLOSE_RECOVERY_PRECONDITION_NOT_ESTABLISHED")
         require(len(services) == 1 and services[0][1] != threading.get_ident(), "GUI_CONSTRUCTED_SERVICE_ON_EVENT_THREAD")
         service = services[0][0]
         helper_process = psutil.Process(service.helper_pid)
         proof["helper_pid"] = helper_process.pid
         proof["helper_created"] = helper_process.create_time()
-        before_close = probe.state()
+        before_close = oracle_call(probe.state)
+        proof["phase"] = "GUI_CLOSE_AND_NATIVE_RECOVERY"
         window.close()
         pump_until(lambda: bool(closed) and not bridge.has_session and not window.isVisible(), timeout=50)
         require(closed[-1].get("status") == "COMPLETED" and not proof["unexpected_dialogs"],
                 "GUI_CLOSE_DID_NOT_CONFIRM_DIAGNOSTIC_CLEANUP")
         require(not helper_process.is_running(), "GUI_CLOSE_LEFT_DIAGNOSTIC_HELPER_RUNNING")
-        require(probe.state()["buffer_hex"] == oracle["buffer_hex"], "GUI_CLOSE_DID_NOT_RESTORE_OWNED_BYTES")
-        probe.progress(before_close)
+        require(not window.probe.alive and window.probe.process.exitCode() == 0 and
+                window.probe.process.exitStatus() == QProcess.ExitStatus.NormalExit,
+                "GUI_CLOSE_OBSERVER_HELPER_NORMAL_EXIT_NOT_CONFIRMED")
+        proof["observer_helper_cleanup"] = {"exit_code": window.probe.process.exitCode(),
+                                             "normal_exit": True}
+        require(oracle_call(probe.state)["buffer_hex"] == oracle["buffer_hex"], "GUI_CLOSE_DID_NOT_RESTORE_OWNED_BYTES")
+        oracle_call(probe.progress, before_close)
         require(pulse_state["ticks"] >= 2 and pulse_state["max_gap_seconds"] < 2,
                 "GUI_EVENT_LOOP_PROGRESS_NOT_CONFIRMED")
+        pulse.stop()
         export_path = output / "diagnostic-metadata.jsonl"
         exported = service.export_journal(export_path)
         require(exported.get("status") == "COMPLETED", "GUI_REAL_JOURNAL_EXPORT_FAILED")
         proof["journal"] = verify_action_journal(output / "journal/deep-inspection.sqlite3", export_path,
-            results, forbidden_payloads=(oracle["buffer_hex"], changed))
+            results, forbidden_payloads=(oracle["buffer_hex"], changed), export_result=exported)
         require(proof["journal"]["cleanup_records"] >= 1, "GUI_HELPER_CLEANUP_NOT_RECORDED")
         proof.update(status="PASS", event_loop=pulse_state, diagnostic_close=journal_metadata(closed[-1]),
                      helper_exit_verified=True, target_survival_verified=True,
@@ -259,9 +290,17 @@ def run(args):
         for timer in (pulse, dialog_timer):
             if timer is not None:
                 timer.stop()
+        if oracle_executor is not None:
+            oracle_executor.shutdown(wait=True, cancel_futures=True)
         if probe is not None:
             try:
                 proof["target_cleanup"] = probe.close(kill=proof["status"] != "PASS")
+                if proof["status"] == "PASS":
+                    cleanup = proof["target_cleanup"]
+                    require(cleanup.get("status") == "COMPLETED" and cleanup.get("exit_code") == 0 and
+                            cleanup.get("last_state", {}).get("created_100ns") == proof["target"]["created_100ns"] and
+                            cleanup.get("last_state", {}).get("buffer_hex") == probe.ready["buffer_hex"],
+                            "GUI_NATIVE_TARGET_FINAL_IDENTITY_MEMORY_OR_GRACEFUL_EXIT_NOT_CONFIRMED")
             except BaseException as error:
                 proof.update(status="FAIL", target_cleanup_error=str(error)[:1000])
         save(output / "gui-e2e.json", proof)

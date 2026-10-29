@@ -15,6 +15,7 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT), str(ROOT / "src")]
@@ -230,6 +231,11 @@ def run(args: argparse.Namespace) -> int:
                 last_log = elapsed
             if observer.process.poll() is not None:
                 require(observer.process.returncode == 0, "PRODUCTION_GUI_ENDURANCE_FAILED")
+                if "observer" not in proof:
+                    # An early clean process exit is not evidence of a full
+                    # recording. Reject its saved result immediately instead
+                    # of keeping the controlled workload alive for hours.
+                    proof["observer"] = verify_observer(observer_root, "STANDARD", args.duration_seconds, source_sha)
                 # Keep a real target observation covering the requested interval,
                 # including any production-harness startup offset.
                 if sample_elapsed - first_sample_elapsed >= args.duration_seconds:
@@ -241,7 +247,7 @@ def run(args: argparse.Namespace) -> int:
         db = None
         action_log.close()
         action_log = None
-        proof["observer"] = verify_observer(observer_root, "STANDARD", args.duration_seconds, source_sha)
+        require("observer" in proof, "PRODUCTION_GUI_SAVED_EVIDENCE_NOT_VERIFIED")
         proof["observations"] = verify_samples(db_path, args.duration_seconds)
         proof["actual_seconds"] = time.monotonic() - start
         proof["deep_action_count"] = action_count
@@ -250,7 +256,8 @@ def run(args: argparse.Namespace) -> int:
                                                   proof["observer"]["actual_seconds"] >= 19800)
         successful = True
     except BaseException as error:
-        proof.update(status="FAIL", error=type(error).__name__, reason=str(error)[:1500])
+        proof.update(status="FAIL", error=type(error).__name__, reason=str(error)[:1500],
+                     failure_traceback=traceback.format_exc(limit=10))
     finally:
         for obj, label in ((service, "diagnostic_helper_cleanup"), (observer, "observer_cleanup"),
                            (probe, "target_cleanup")):

@@ -90,6 +90,60 @@ class DeepJournalEvidenceContracts(unittest.TestCase):
         with self.assertRaisesRegex(AssertionError, "OBSERVED_STATUS"):
             verify_action_journal(*self.evidence(), [{**self.action, "status": "RECOVERY_UNCONFIRMED"}])
 
+    def service_export_evidence(self, *, wrong_prefix_head=False):
+        database, exported = self.evidence()
+        base = {"source": "BLACKBOX_DIAGNOSTIC_JOURNAL_EXPORT", "operation": "journal.export",
+                "target": None, "action_id": "export-fixture"}
+        requested = {**base, "operation_id": "export-fixture:requested", "phase": "REQUESTED"}
+        with closing(sqlite3.connect(database)) as db:
+            previous = db.execute("SELECT record_sha256 FROM actions ORDER BY sequence DESC LIMIT 1").fetchone()[0]
+            raw = json.dumps(requested, sort_keys=True, separators=(",", ":"))
+            head = hashlib.sha256(previous.encode("ascii") + raw.encode("utf-8")).hexdigest()
+            db.execute("INSERT INTO actions VALUES(3,?,?,?,?)", (requested["operation_id"], raw, previous, head))
+            with exported.open("a", encoding="utf-8") as stream:
+                stream.write(json.dumps({"record": requested, "previous_sha256": previous,
+                                         "record_sha256": head}) + "\n")
+            data = {"exported_records": 3, "exported_last_sequence": 3,
+                    "exported_chain_head_sha256": "f" * 64 if wrong_prefix_head else head,
+                    "export_published": True, "memory_and_dumps": "EXCLUDED",
+                    "export_scope": "SNAPSHOT_THROUGH_EXPORT_REQUESTED"}
+            completed = {**base, "operation_id": "export-fixture:result", "phase": "RESULT",
+                         "status": "COMPLETED", "data": data}
+            raw = json.dumps(completed, sort_keys=True, separators=(",", ":"))
+            digest = hashlib.sha256(head.encode("ascii") + raw.encode("utf-8")).hexdigest()
+            db.execute("INSERT INTO actions VALUES(4,?,?,?,?)", (completed["operation_id"], raw, head, digest))
+            db.commit()
+        response = {"operation": "journal.export", "operation_id": "export-fixture", "status": "COMPLETED",
+                    "data": {**data, "path": str(exported)},
+                    "journal": {"operation_id": "export-fixture:result", "record_sha256": digest}}
+        return database, exported, response
+
+    def test_service_export_may_exclude_only_its_verified_final_publication_result(self):
+        database, exported, receipt = self.service_export_evidence()
+        result = verify_action_journal(database, exported, [self.action], export_result=receipt)
+        self.assertEqual(result["records"], 4)
+        self.assertEqual(result["exported_records"], 3)
+        self.assertEqual(result["verified_export_result_tail_records"], 1)
+
+    def test_valid_chain_cannot_claim_a_different_exported_prefix_head(self):
+        database, exported, receipt = self.service_export_evidence(wrong_prefix_head=True)
+        with self.assertRaisesRegex(AssertionError, "PREFIX_RECEIPT_MISMATCH"):
+            verify_action_journal(database, exported, [self.action], export_result=receipt)
+
+    def test_export_prefix_exception_requires_acknowledged_result_digest(self):
+        database, exported, receipt = self.service_export_evidence()
+        receipt["journal"]["record_sha256"] = "e" * 64
+        with self.assertRaisesRegex(AssertionError, "RESULT_ACKNOWLEDGEMENT"):
+            verify_action_journal(database, exported, [self.action], export_result=receipt)
+
+    def test_extra_unexported_action_cannot_hide_behind_export_prefix_semantics(self):
+        database, exported, receipt = self.service_export_evidence()
+        with closing(sqlite3.connect(database)) as db:
+            db.execute("INSERT INTO actions VALUES(5,'unexpected:requested','{}',?,?)", ("0" * 64, "f" * 64))
+            db.commit()
+        with self.assertRaisesRegex(AssertionError, "EXPORT_COUNT_MISMATCH"):
+            verify_action_journal(database, exported, [self.action], export_result=receipt)
+
 
 if __name__ == "__main__":
     unittest.main()

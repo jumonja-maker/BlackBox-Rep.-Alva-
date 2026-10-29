@@ -138,6 +138,12 @@ class Kernel:
                               C.POINTER(HANDLE), U32, BOOL, U32)
         self.virtual_query = bind(k, "VirtualQueryEx", SIZE, HANDLE, PTR,
                                   C.POINTER(MEMORY_BASIC_INFORMATION), SIZE)
+        try:
+            self.mapped_file_name = bind(k, "K32GetMappedFileNameW", U32,
+                                         HANDLE, PTR, C.c_wchar_p, U32)
+        except AttributeError:
+            # Keep VirtualQueryEx available when file attribution is unavailable.
+            self.mapped_file_name = None
         self.read_memory = bind(k, "ReadProcessMemory", BOOL, HANDLE, PTR, PTR, SIZE, C.POINTER(SIZE))
         self.suspend = bind(k, "SuspendThread", U32, HANDLE)
         self.resume = bind(k, "ResumeThread", U32, HANDLE)

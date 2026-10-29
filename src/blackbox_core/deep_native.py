@@ -6,9 +6,10 @@ Live snapshots are deliberately distinct from historical ETW evidence.
 """
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import contextmanager, ExitStack
 import ctypes as C
 import hashlib
+import ntpath
 import os
 from pathlib import Path
 import struct
@@ -22,6 +23,8 @@ from . import deep_native_win as W
 MAX_MEMORY_READ = 64 * 1024
 MAX_ROWS = 4096
 MAX_DUMP_BYTES = 512 * 1024 * 1024
+MAX_MAPPING_NAME_QUERIES = 256
+MAX_MAPPING_NAME_BYTES = 256 * 1024
 _DBGHELP_LOCK = threading.Lock()
 
 
@@ -301,8 +304,13 @@ class ProcessInspector:
     def _memory_map(self, params, deadline, cancel):
         limit = _integer(params.get("limit", 2048), "limit", 1, MAX_ROWS)
         address = _integer(params.get("start_address", 0), "start_address")
+        name_limit = _integer(params.get("mapped_file_limit", 128), "mapped_file_limit", 0,
+                              MAX_MAPPING_NAME_QUERIES)
         rows, complete = [], False
-        with self._open(0x400) as (kernel, handle):
+        name_queries = name_bytes = unidentified_files = 0
+        name_access = None
+        name_kernel = name_handle = None
+        with self._open(0x400) as (kernel, handle), ExitStack() as name_owner:
             while len(rows) < limit:
                 _check(deadline, cancel)
                 info = W.MEMORY_BASIC_INFORMATION()
@@ -315,17 +323,80 @@ class ProcessInspector:
                 base, size = int(info.base or 0), int(info.region_size)
                 if size <= 0 or base + size <= address or base + size >= 2**64:
                     raise NativeError("INCOMPLETE_EVIDENCE", "INVALID_MEMORY_REGION_PROGRESS")
-                rows.append({"base": base, "size": size,
+                row = {"base": base, "size": size,
                              "allocation_base": int(info.allocation_base or 0),
                              "allocation_protection": int(info.allocation_protect),
                              "protection": int(info.protect), "state": int(info.state), "type": int(info.type),
                              "state_name": {0x1000: "COMMIT", 0x2000: "RESERVE", 0x10000: "FREE"}.get(info.state, "UNKNOWN"),
-                             "type_name": {0x20000: "PRIVATE", 0x40000: "MAPPED", 0x1000000: "IMAGE", 0: "NONE"}.get(info.type, "UNKNOWN")})
+                             "type_name": {0x20000: "PRIVATE", 0x40000: "MAPPED", 0x1000000: "IMAGE", 0: "NONE"}.get(info.type, "UNKNOWN"),
+                             "mapped_file_path": None, "image_name": None}
+                eligible = info.state != 0x10000 and info.type in (0x40000, 0x1000000)
+                if not eligible:
+                    row.update(mapped_file_status="NOT_APPLICABLE" if info.state == 0x10000 else "NOT_ESTABLISHED",
+                               association_kind="FREE_REGION" if info.state == 0x10000 else
+                                   "PRIVATE_ALLOCATION_OWNER_NOT_ESTABLISHED" if info.type == 0x20000 else
+                                   "UNKNOWN_MAPPING_TYPE",
+                               mapped_file_source="WIN32_VIRTUAL_QUERY_EX")
+                else:
+                    row.update(association_kind="IMAGE_FILE_BACKING" if info.type == 0x1000000 else "MAPPED_FILE_BACKING",
+                               mapped_file_source="WIN32_GET_MAPPED_FILE_NAME",
+                               mapped_file_path_format="NT_DEVICE_PATH")
+                    if name_access is None:
+                        # File names need VM_READ in addition to VirtualQueryEx's
+                        # query rights. A refusal must not discard the basic map.
+                        if kernel.mapped_file_name is None:
+                            name_access = {"mapped_file_status": "API_UNAVAILABLE"}
+                        else:
+                            try:
+                                name_kernel, name_handle = name_owner.enter_context(self._open(0x410))
+                                name_access = {}
+                            except NativeError as error:
+                                if error.status in ("PROCESS_CHANGED", "CANCELLED", "TIMED_OUT"):
+                                    raise
+                                name_access = {"mapped_file_status": error.status,
+                                               "mapped_file_reason": error.reason,
+                                               "mapped_file_winerror": error.winerror}
+                    if name_access:
+                        row.update(name_access)
+                    elif name_queries >= name_limit or name_bytes >= MAX_MAPPING_NAME_BYTES:
+                        row["mapped_file_status"] = "QUERY_BUDGET_EXCEEDED"
+                    else:
+                        _check(deadline, cancel)
+                        name_queries += 1
+                        buffer = C.create_unicode_buffer(32768)
+                        C.set_last_error(0)
+                        length = name_kernel.mapped_file_name(name_handle, base, buffer, len(buffer))
+                        error = C.get_last_error()
+                        _check(deadline, cancel)
+                        if not length:
+                            row.update(mapped_file_status="ACCESS_DENIED" if error == 5 else "NAME_NOT_OBSERVED",
+                                       mapped_file_winerror=error)
+                        elif length >= len(buffer) - 1:
+                            row["mapped_file_status"] = "NAME_TRUNCATED"
+                        else:
+                            path = buffer[:length]
+                            encoded_size = len(path.encode("utf-8", errors="replace"))
+                            if not path or "\0" in path:
+                                row["mapped_file_status"] = "INVALID_NAME_RESULT"
+                            elif name_bytes + encoded_size > MAX_MAPPING_NAME_BYTES:
+                                row["mapped_file_status"] = "RESULT_BYTE_BUDGET_EXCEEDED"
+                            else:
+                                name_bytes += encoded_size
+                                row.update(mapped_file_path=path, mapped_file_status="OBSERVED",
+                                           image_name=ntpath.basename(path) if info.type == 0x1000000 else None)
+                    if row["mapped_file_status"] != "OBSERVED":
+                        unidentified_files += 1
+                rows.append(row)
                 address = base + size
         return {"rows": rows, "complete_address_space": complete,
+                "mapped_file_queries": name_queries, "mapped_file_query_limit": name_limit,
+                "mapped_file_name_bytes": name_bytes, "unidentified_file_regions": unidentified_files,
+                "file_backing_complete_for_returned_regions": unidentified_files == 0,
                 "next_address": None if complete else address, "_source": "WIN32_VIRTUAL_QUERY_EX",
-                "_status": "COMPLETED" if complete else "INCOMPLETE_EVIDENCE",
-                "_limitations": ["DYNAMIC_NON_ATOMIC_ADDRESS_SPACE_SNAPSHOT"]}
+                "_status": "COMPLETED" if complete and not unidentified_files else "INCOMPLETE_EVIDENCE",
+                "_limitations": ["DYNAMIC_NON_ATOMIC_ADDRESS_SPACE_SNAPSHOT",
+                                  "MAPPED_PATH_IS_OBSERVED_BACKING_FILE_NOT_AUTHENTICATED_FILE_OR_LOADER_IDENTITY",
+                                  "PRIVATE_ALLOCATION_COMPONENT_OWNERSHIP_NOT_ESTABLISHED"]}
 
     def _loaded_pe(self, kernel, handle, base):
         try:
