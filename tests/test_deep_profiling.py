@@ -133,21 +133,69 @@ class ProtectedStagingTests(unittest.TestCase):
     def test_two_owners_validate_acl_and_pin_until_both_close(self):
         first = profiling.ProtectedStaging()
         second = None
+        moved = first.path.with_name(first.path.name + "-renamed")
         try:
             second = profiling.ProtectedStaging(first.path)
             self.assertEqual(first.path, second.path)
+            # Independent Win32 oracle: DELETE access must be denied by the
+            # retained reader's sharing policy, not merely by Path behavior.
+            C.set_last_error(0)
+            deletion = first._create_file(str(first.path), 0x10000, 1 | 2 | 4,
+                                          None, 3, 0x02000000 | 0x00200000, None)
+            error = C.get_last_error()
+            if deletion and deletion != W.INVALID_HANDLE:
+                first.kernel.close(deletion)
+            self.assertEqual(deletion, W.INVALID_HANDLE)
+            self.assertEqual(error, 32)  # ERROR_SHARING_VIOLATION.
             with self.assertRaises(OSError):
-                first.path.rename(first.path.with_name(first.path.name + "-renamed"))
+                first.path.rename(moved)
+            self.assertTrue(first.path.is_dir())
+            self.assertFalse(moved.exists())
             first.close()
+            with self.assertRaises(OSError):
+                first.path.rename(moved)
             with self.assertRaises(OSError):
                 first.path.rmdir()
             second.close()
+            # Once both pins close, rename becomes possible. This proves the
+            # preceding denial came from retained handles rather than an ACL
+            # that prevents this elevated test from renaming its own fixture.
+            first.path.rename(moved)
+            self.assertFalse(first.path.exists())
+            moved.rename(first.path)
             self.assertEqual(first.cleanup(), [])
             self.assertFalse(first.path.exists())
         finally:
             if second is not None:
                 second.close()
+            first.close()
+            if moved.exists() and not first.path.exists():
+                moved.rename(first.path)
             first.cleanup()
+
+    def test_unpinned_directory_replacement_must_revalidate_acl(self):
+        original = profiling.ProtectedStaging()
+        moved = original.path.with_name(original.path.name + "-original")
+        marker = original.path / "caller-controlled.txt"
+        try:
+            original.close()
+            original.path.rename(moved)
+            original.path.mkdir()
+            marker.write_text("caller-controlled replacement")
+            # A same-name directory alone does not establish trusted staging.
+            # The new owner's inherited ProgramData DACL must be rejected.
+            with self.assertRaises(NativeError) as refusal:
+                profiling.ProtectedStaging(original.path)
+            self.assertEqual(refusal.exception.status, "ACCESS_DENIED")
+            self.assertEqual(marker.read_text(), "caller-controlled replacement")
+        finally:
+            original.close()
+            marker.unlink(missing_ok=True)
+            if moved.exists():
+                if original.path.exists():
+                    original.path.rmdir()
+                moved.rename(original.path)
+            original.cleanup()
 
     def test_foreign_directory_is_refused_without_changing_contents(self):
         with tempfile.TemporaryDirectory() as directory:

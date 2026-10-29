@@ -124,8 +124,11 @@ class ProtectedStaging:
             raise
 
     def _pin(self, path):
-        # FILE_READ_ATTRIBUTES | READ_CONTROL; backup semantics + open reparse.
-        handle = self._create_file(str(path), 0x80 | 0x20000, 1 | 2, None, 3,
+        # FILE_LIST_DIRECTORY establishes a read access in Windows share
+        # accounting. Metadata-only FILE_READ_ATTRIBUTES/READ_CONTROL handles
+        # do not prevent rename/delete merely by omitting FILE_SHARE_DELETE.
+        # Retain attributes/security queries and open the reparse point itself.
+        handle = self._create_file(str(path), 0x1 | 0x80 | 0x20000, 1 | 2, None, 3,
                                    0x02000000 | 0x00200000, None)
         if not handle or handle == W.INVALID_HANDLE:
             raise _os_error("PROTECTED_TRACE_DIRECTORY_OPEN_FAILED")

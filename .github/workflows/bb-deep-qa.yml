@@ -429,12 +429,15 @@ jobs:
           Copy-Item -LiteralPath "docs\RELEASE_v0.5.2.md" -Destination "$output\RELEASE-NOTES.md" -Force
       - name: Real native operations through the frozen diagnostic helper
         run: python tools/qa_deep_inspection.py --output deep-frozen-qa --helper dist/BLACK.BOX-Universal/diagnostic/BLACK.BOX-Diagnostic.exe
+      - name: Decode actual protected-profile ETL and verify typed disk and network evidence
+        run: python tools/qa_deep_trace_io.py --qa-root deep-frozen-qa --helper dist/BLACK.BOX-Universal/decoder/BLACK.BOX-Decoder.exe --output deep-frozen-io-qa
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         if: always()
         with:
           name: BB-DEEP-001-FROZEN-NATIVE-EVIDENCE
           path: |
             deep-frozen-qa/
+            deep-frozen-io-qa/
             !**/*.dmp
             !**/*.mdmp
           retention-days: 30
