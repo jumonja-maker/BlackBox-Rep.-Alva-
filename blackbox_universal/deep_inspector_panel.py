@@ -132,6 +132,13 @@ FIELD_LABELS = {
     "trace_interval_end_ms": ("Interval end, ms", "Конец интервала, мс"),
     "fields": ("Recorded fields", "Записанные поля"),
     "typed_observation": ("Typed observation", "Типизированное наблюдение"),
+    "frame_address": ("Selected frame PC", "PC выбранного кадра"),
+    "image_base": ("Recorded image base", "Записанная база образа"),
+    "image_size": ("Image size", "Размер образа"),
+    "module_name": ("Module name", "Имя модуля"),
+    "snapshot_pe": ("Captured PE identity", "Идентичность снятого PE"),
+    "snapshot_binding": ("Snapshot binding", "Привязка к снимку"),
+    "inspection_scope": ("Observation scope", "Область наблюдения"),
 }
 
 
@@ -166,6 +173,7 @@ class OverviewInspectorPanel(QWidget):
         self._dump_path = None
         self._captured_trace = None
         self._debug_state = "IDLE"
+        self._stack_context = None
         self._request_section = "processes"
         self._build()
         self.bridge.result_ready.connect(self._receive)
@@ -262,6 +270,8 @@ class OverviewInspectorPanel(QWidget):
             table.itemSelectionChanged.connect(lambda section=key: self._select_row(section))
             page_layout.addWidget(table)
             self._tables[key] = table
+            if key == "threads":
+                self._build_stack_frames(page_layout)
             self.pages.addWidget(page)
         self.section.currentIndexChanged.connect(self.pages.setCurrentIndex)
         self.section.currentIndexChanged.connect(self._section_changed)
@@ -282,6 +292,165 @@ class OverviewInspectorPanel(QWidget):
             "Memory and dump contents stay local and are excluded from the ordinary action-journal export. Historical trace events do not establish a link to a live process by PID alone.",
             "Содержимое памяти и дампов остаётся локальным и не входит в обычный экспорт журнала действий. Один PID не доказывает связь событий старой трассы с живым процессом.")
         layout.addWidget(self.privacy)
+
+    def _build_stack_frames(self, layout):
+        self.stack_source_label = _plain_label()
+        self.stack_source_label.setObjectName("deepStackSource")
+        layout.addWidget(self.stack_source_label)
+        self.stack_frames = QTableWidget(0, 7)
+        self.stack_frames.setObjectName("deepStackFrames")
+        self.stack_frames.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.stack_frames.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.stack_frames.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.stack_frames.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        self.stack_frames.horizontalHeader().setStretchLastSection(True)
+        self.stack_frames.setMinimumHeight(160)
+        self.stack_frames.setMaximumHeight(280)
+        self.stack_frames.itemSelectionChanged.connect(self._select_stack_frame)
+        layout.addWidget(self.stack_frames)
+        actions = ActionGrid(max_columns=1)
+        self._button(actions, "stack_frame_module", "Open selected frame's module", "Открыть модуль выбранного кадра", self._open_stack_module)
+        layout.addLayout(actions)
+
+    def _clear_stack_frames(self):
+        self._stack_context = None
+        self.stack_frames.blockSignals(True)
+        self.stack_frames.setRowCount(0)
+        self.stack_frames.blockSignals(False)
+        self.stack_source_label.setText(self.tr2(
+            "Select a captured thread or historical event to inspect its stack frames.",
+            "Выберите снятый поток или историческое событие для просмотра кадров стека."))
+
+    @staticmethod
+    def _address_text(value):
+        return hex(value) if type(value) is int and 0 <= value < 2**64 else str(value) if value is not None else "—"
+
+    def _show_stack_frames(self, row):
+        self._clear_stack_frames()
+        frames = row.get("frames")
+        if not isinstance(frames, list):
+            return
+        historical = row.get("source") == "HISTORICAL_TRACE"
+        current = (row.get("kind") == "LIVE_PSS_THREAD_CONTEXT" and row.get("historical_etw_stack") is False
+                   and type(row.get("tid")) is int and row["tid"] > 0
+                   and type(row.get("created_100ns")) is int and row["created_100ns"] > 0)
+        if not historical and not current:
+            return
+        self._stack_context = {"generation": self.bridge.generation,
+                               "kind": "HISTORICAL_TRACE" if historical else "CURRENT_PSS_CAPTURE",
+                               "tid": row.get("tid"), "thread_created_100ns": None if historical else row.get("created_100ns"),
+                               "captured_100ns": row.get("captured_100ns"),
+                               "pid": row.get("pid") if historical else self.bridge.target[0] if self.bridge.target else None,
+                               "process_instance": row.get("process_instance") if historical else None,
+                               "time_ms": row.get("time_ms") if historical else None,
+                               "unwind_completeness": row.get("unwind_completeness", "NOT_PROVEN")}
+        target = self._section_results.get("threads", {}).get("target")
+        if not historical and isinstance(target, dict):
+            self._stack_context["process_identity"] = dict(target)
+        label = self.tr2("Historical trace stack — live thread association NOT_ESTABLISHED",
+                         "Исторический стек трассы — связь с живым потоком НЕ УСТАНОВЛЕНА") if historical else self.tr2(
+                         "Current thread stack captured with PSS — completeness NOT_PROVEN",
+                         "Текущий стек потока, снятый PSS — полнота НЕ ДОКАЗАНА")
+        label += f"\nTID {row.get('tid', '—')}"
+        if historical:
+            label += self.tr2(" · recorded instance ", " · записанный экземпляр ") + str(row.get("process_instance", "—"))
+            label += f" · {row.get('time_ms', '—')} " + self.tr2("ms", "мс")
+        else:
+            label += " · FILETIME " + str(row.get("created_100ns", "—"))
+            label += self.tr2(" · capture ", " · снято ") + str(row.get("captured_100ns", "—"))
+        shown = min(len(frames), 128)
+        omitted = max(0, len(frames) - shown) + max(0, int(row.get("frames_omitted", 0)))
+        label += self.tr2("\nDisplayed frames: ", "\nПоказано кадров: ") + f"{shown}"
+        if omitted:
+            label += self.tr2(" · omitted: ", " · пропущено: ") + str(omitted)
+        self.stack_source_label.setText(label)
+        self.stack_frames.blockSignals(True)
+        self.stack_frames.setRowCount(shown)
+        for number, frame in enumerate(frames[:shown]):
+            if not isinstance(frame, dict):
+                frame = {"address": None}
+            module = frame.get("module")
+            module_name = module.get("module_name") if isinstance(module, dict) else module
+            symbol = frame.get("symbol") if isinstance(frame.get("symbol"), dict) else {}
+            name = frame.get("name") if historical else symbol.get("name")
+            location = symbol.get("source_location")
+            source = "HISTORICAL_TRACE_UNVERIFIED" if historical else frame.get("symbol_binding", "PSS_RAW_ADDRESS")
+            values = (number, self._address_text(frame.get("address")), module_name,
+                      self._address_text(frame.get("rva")), name, location, source)
+            for column, value in enumerate(values):
+                text = json.dumps(value, ensure_ascii=False) if isinstance(value, (dict, list)) else str(value) if value is not None else "—"
+                item = QTableWidgetItem(text[:2000])
+                item.setData(Qt.ItemDataRole.UserRole, frame)
+                self.stack_frames.setItem(number, column, item)
+        self.stack_frames.blockSignals(False)
+
+    def _selected_stack_frame(self):
+        if (self._stack_context is None or self._stack_context.get("generation") != self.bridge.generation):
+            return None
+        item = self.stack_frames.item(self.stack_frames.currentRow(), 0)
+        frame = item.data(Qt.ItemDataRole.UserRole) if item is not None else None
+        return frame if isinstance(frame, dict) else None
+
+    def _select_stack_frame(self):
+        frame = self._selected_stack_frame()
+        if frame is None:
+            self._refresh_controls()
+            return
+        self.details.setPlainText(self._technical_text({"stack_context": self._stack_context, "frame": frame}))
+        if self._stack_context["kind"] == "CURRENT_PSS_CAPTURE":
+            address = frame.get("address")
+            if type(address) is int and 0 < address < 2**64:
+                self.memory_address.setText(hex(address))
+                self.breakpoint_address.setText(hex(address))
+            base = frame.get("module_base")
+            if type(base) is int and 0 < base < 2**64:
+                self.stack_module_base.setText(hex(base))
+            else:
+                self.stack_module_base.clear()
+        else:
+            for field in (self.memory_address, self.breakpoint_address, self.stack_module_base):
+                field.clear()
+        self._refresh_controls()
+
+    def _stack_module(self):
+        frame = self._selected_stack_frame()
+        if frame is None:
+            return None
+        if self._stack_context["kind"] == "HISTORICAL_TRACE":
+            from blackbox_core.decoder_modules import validate_module_frame
+            try:
+                module = validate_module_frame(self._stack_context, frame)
+            except (ValueError, TypeError, KeyError):
+                return None
+            if module is not None:
+                return dict(module, inspection_scope="HISTORICAL_TRACE_MODULE", frame_address=frame.get("address"))
+            return None
+        module = frame.get("module_identity")
+        if (isinstance(module, dict) and module.get("source") == "SAME_PSS_CAPTURE"
+                and module.get("snapshot_binding") == "PSS_CLONE_PE_IDENTITY_AND_LAYOUT_MATCH"
+                and module.get("base") == frame.get("module_base")
+                and isinstance(module.get("snapshot_pe"), dict)
+                and type(module.get("base")) is int and type(module.get("size")) is int
+                and type(frame.get("address")) is int
+                and 0 < module["base"] <= frame["address"] < module["base"] + module["size"] <= 2**64
+                and frame.get("rva") == frame["address"] - module["base"]
+                and module["snapshot_pe"].get("image_size") == module["size"]):
+            return dict(module, inspection_scope="CURRENT_PSS_CAPTURE", frame_address=frame["address"])
+        return None
+
+    def _open_stack_module(self):
+        module = self._stack_module()
+        if module is None:
+            return
+        result = {"operation": "frame_module", "status": "INCOMPLETE_EVIDENCE",
+                  "source": self._stack_context["kind"],
+                  "data": {"rows": [module], "stack_context": dict(self._stack_context)},
+                  "limitations": [self.tr2(
+                      "Module identity belongs to the selected stack capture; this is not a fresh module inventory.",
+                      "Идентичность модуля относится к выбранному снятию стека; это не новая инвентаризация модулей.")]}
+        self._section_results["modules"] = result
+        self.section.setCurrentIndex(self.section.findData("modules"))
+        self._tables["modules"].selectRow(0)
 
     def _build_section(self, key, layout, actions):
         if key == "processes":
@@ -316,8 +485,8 @@ class OverviewInspectorPanel(QWidget):
             self.memory_size.setValue(256)
             size_label = self._translated(_plain_label(), "Read size, bytes", "Размер чтения, байт")
             fields.addRow(size_label, self.memory_size)
-            self.expected_bytes = self._field(fields, "expected", "Expected original bytes (hex)", "Ожидаемые исходные байты (hex)")
-            self.new_bytes = self._field(fields, "replacement", "Replacement bytes (hex)", "Новые байты (hex)")
+            self.expected_bytes = self._field(fields, "expected", "Expected original bytes (hex, up to 4096 bytes)", "Ожидаемые исходные байты (hex, до 4096 байт)")
+            self.new_bytes = self._field(fields, "replacement", "Replacement bytes (hex, up to 4096 bytes)", "Новые байты (hex, до 4096 байт)")
             self.expected_bytes.setMaxLength(131072)
             self.new_bytes.setMaxLength(131072)
             self.write_id = self._field(fields, "write_id", "Recorded write ID to restore", "Идентификатор записи для восстановления")
@@ -420,8 +589,10 @@ class OverviewInspectorPanel(QWidget):
     def _memory_write_parameters(self):
         expected = bytes.fromhex(self._required(self.expected_bytes))
         replacement = bytes.fromhex(self._required(self.new_bytes))
-        if not expected or len(expected) != len(replacement) or len(expected) > 65536:
+        if not expected or len(expected) != len(replacement):
             raise ValueError("MEMORY_BYTES_MUST_HAVE_EQUAL_BOUNDED_LENGTH")
+        if len(expected) > 4096:
+            raise ValueError("MEMORY_WRITE_LIMIT_4096_BYTES")
         return {"address": self._integer(self.memory_address), "expected_hex": expected.hex(), "value_hex": replacement.hex()}
 
     def _request(self, operation, parameters=None, *, tag=""):
@@ -668,6 +839,7 @@ class OverviewInspectorPanel(QWidget):
         self._dump_path = None
         self._captured_trace = None
         self._section_results.clear()
+        self._clear_stack_frames()
         self._row_details = None
         self.elevate_button.hide()
         for table in self._tables.values():
@@ -700,6 +872,9 @@ class OverviewInspectorPanel(QWidget):
         self.status_label.setStyleSheet("color: #a12020; font-weight: bold;" if status == "RECOVERY_UNCONFIRMED" else "")
 
     def _receive(self, result):
+        if (result.get("generation", self.bridge.generation) != self.bridge.generation
+                and result.get("request_kind") != "close"):
+            return
         self._last_result = result
         status = str(result.get("status", "OPERATION_FAILED"))
         self._render_operation_status(result)
@@ -808,6 +983,8 @@ class OverviewInspectorPanel(QWidget):
         return rendered
 
     def _show_result(self, section, result):
+        if section == "threads":
+            self._clear_stack_frames()
         rows = self._rows(result.get("data"))
         if result.get("operation") == "processes":
             rows = self._process_tree_rows(rows)
@@ -825,6 +1002,8 @@ class OverviewInspectorPanel(QWidget):
             columns = [key for key in preferred if any(key in row for row in rows[:500])]
         for row in rows[:500]:
             for key in row:
+                if section == "threads" and key in ("frames", "context"):
+                    continue
                 if key not in columns and len(columns) < 12:
                     columns.append(key)
         columns = columns or ["field", "value"]
@@ -870,20 +1049,30 @@ class OverviewInspectorPanel(QWidget):
             return
         self._row_details = row
         self.details.setPlainText(self._technical_text(row))
+        historical = (row.get("source") == "HISTORICAL_TRACE" or
+                      row.get("inspection_scope") == "HISTORICAL_TRACE_MODULE" or
+                      self._section_results.get(section, {}).get("operation") == "trace_evidence")
+        if section == "threads":
+            self._show_stack_frames(row)
         tid = row.get("tid", row.get("thread_id"))
         created = row.get("thread_created_100ns", row.get("created_100ns"))
-        if tid is not None:
+        if tid is not None and not historical:
             self.thread_tid.setText(str(tid))
             self.debug_tid.setText(str(tid))
             self.thread_created.setText(str(created) if created is not None else "")
             self.debug_created.setText(str(created) if created is not None else "")
-        address = row.get("base_address", row.get("address", row.get("base")))
-        if isinstance(address, int) and address > 0:
+        elif historical:
+            for field in (self.thread_tid, self.thread_created, self.debug_tid, self.debug_created):
+                field.clear()
+        address = row.get("frame_address", row.get("base_address", row.get("address", row.get("base"))))
+        if isinstance(address, int) and address > 0 and not historical:
             self.memory_address.setText(hex(address))
             self.breakpoint_address.setText(hex(address))
             if section == "modules":
-                self.stack_module_base.setText(hex(address))
-        if row.get("breakpoint_id") is not None:
+                base = row.get("base", address)
+                if type(base) is int and base > 0:
+                    self.stack_module_base.setText(hex(base))
+        if row.get("breakpoint_id") is not None and not historical:
             self.breakpoint_id.setText(str(row["breakpoint_id"]))
         self._refresh_controls()
 
@@ -905,6 +1094,7 @@ class OverviewInspectorPanel(QWidget):
         self.end_admin_button.setEnabled(available and self.bridge.admin_active)
         self._action_buttons["compare"].setEnabled(available and self._before_id is not None and self._after_id is not None)
         self._action_buttons["captured_trace"].setEnabled(available and self._captured_trace is not None)
+        self._action_buttons["stack_frame_module"].setEnabled(available and self._stack_module() is not None)
         interval_available = available and self._trace_interval_parameters() is not None
         for key in ("historical_network_interval", "historical_disk_interval"):
             self._action_buttons[key].setEnabled(interval_available)
@@ -920,6 +1110,12 @@ class OverviewInspectorPanel(QWidget):
                 widget.setAccessibleName(widget.text())
         for index, (_, en, ru) in enumerate(SECTIONS):
             self.section.setItemText(index, self.tr2(en, ru))
+        self.stack_frames.setHorizontalHeaderLabels([
+            self.tr2("Frame", "Кадр"), "PC", self.tr2("Module", "Модуль"), "RVA",
+            self.tr2("Function / recorded name", "Функция / записанное имя"),
+            self.tr2("Source location", "Строка исходников"), self.tr2("Evidence source", "Источник данных")])
+        if self._stack_context is None:
+            self._clear_stack_frames()
         self._render_target()
         self.debug_state_label.setText(self.tr2("DEBUG: ", "ОТЛАДКА: ") + self._debug_state)
         if self._last_result:

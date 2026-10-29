@@ -156,9 +156,68 @@ def worker(helper, trace_root, output):
     return code
 
 
-def restricted_child(args, *, cwd, timeout_seconds=210):
+def token_integrity(token=None):
+    """Read the actual mandatory integrity SID; never infer it from admin status."""
+    require(os.name == "nt", "WINDOWS_REQUIRED")
+    kernel = C.WinDLL("kernel32", use_last_error=True)
+    adv = C.WinDLL("advapi32", use_last_error=True)
+
+    class Label(C.Structure):
+        _fields_ = [("sid", C.c_void_p), ("attributes", W.DWORD)]
+
+    kernel.GetCurrentProcess.restype = W.HANDLE
+    kernel.CloseHandle.argtypes = [W.HANDLE]
+    kernel.LocalFree.argtypes = [C.c_void_p]
+    kernel.LocalFree.restype = C.c_void_p
+    adv.OpenProcessToken.argtypes = [W.HANDLE, W.DWORD, C.POINTER(W.HANDLE)]
+    adv.OpenProcessToken.restype = W.BOOL
+    adv.GetTokenInformation.argtypes = [W.HANDLE, C.c_int, C.c_void_p, W.DWORD, C.POINTER(W.DWORD)]
+    adv.GetTokenInformation.restype = W.BOOL
+    adv.IsValidSid.argtypes = [C.c_void_p]
+    adv.IsValidSid.restype = W.BOOL
+    adv.GetLengthSid.argtypes = [C.c_void_p]
+    adv.GetLengthSid.restype = W.DWORD
+    adv.ConvertSidToStringSidW.argtypes = [C.c_void_p, C.POINTER(C.c_void_p)]
+    adv.ConvertSidToStringSidW.restype = W.BOOL
+    owned = W.HANDLE()
+    string = C.c_void_p()
+    try:
+        if token is None:
+            if not adv.OpenProcessToken(kernel.GetCurrentProcess(), 0x8, C.byref(owned)):
+                raise OSError(C.get_last_error(), "QA_INTEGRITY_OPEN_TOKEN_FAILED")
+            token = owned
+        length = W.DWORD()
+        adv.GetTokenInformation(token, 25, None, 0, C.byref(length))
+        require(C.sizeof(Label) <= length.value <= 65536, "QA_INTEGRITY_LABEL_SIZE_INVALID")
+        buffer = C.create_string_buffer(length.value)
+        if not adv.GetTokenInformation(token, 25, buffer, len(buffer), C.byref(length)):
+            raise OSError(C.get_last_error(), "QA_INTEGRITY_QUERY_FAILED")
+        label = Label.from_buffer(buffer)
+        start, end = C.addressof(buffer), C.addressof(buffer) + len(buffer)
+        require(label.sid and start <= label.sid <= end - 8 and adv.IsValidSid(label.sid),
+                "QA_INTEGRITY_SID_INVALID")
+        require(8 <= adv.GetLengthSid(label.sid) <= end - label.sid and label.attributes & 0x20,
+                "QA_INTEGRITY_SID_BOUNDS_OR_ATTRIBUTES_INVALID")
+        if not adv.ConvertSidToStringSidW(label.sid, C.byref(string)):
+            raise OSError(C.get_last_error(), "QA_INTEGRITY_SID_FORMAT_FAILED")
+        value = C.wstring_at(string)
+        require(value.startswith("S-1-16-") and value[7:].isdigit(), "QA_INTEGRITY_AUTHORITY_INVALID")
+        rid = int(value[7:])
+        names = {0: "UNTRUSTED", 4096: "LOW", 8192: "MEDIUM", 8448: "MEDIUM_PLUS",
+                 12288: "HIGH", 16384: "SYSTEM", 20480: "PROTECTED"}
+        return {"sid": value, "rid": rid, "level": names.get(rid, "OTHER"),
+                "source": "GetTokenInformation(TokenIntegrityLevel)"}
+    finally:
+        if string:
+            kernel.LocalFree(string)
+        if owned:
+            kernel.CloseHandle(owned)
+
+
+def restricted_child(args, *, cwd, timeout_seconds=210, medium_integrity=False):
     """Launch the temporary restricted token in an owned job, no shell or PATH."""
     require(os.name == "nt", "WINDOWS_REQUIRED")
+    require(type(medium_integrity) is bool, "QA_MEDIUM_INTEGRITY_OPTION_MUST_BE_BOOLEAN")
     kernel = C.WinDLL("kernel32", use_last_error=True)
     adv = C.WinDLL("advapi32", use_last_error=True)
     class Sid(C.Structure):
@@ -196,19 +255,35 @@ def restricted_child(args, *, cwd, timeout_seconds=210):
     adv.ConvertStringSidToSidW.argtypes = [W.LPCWSTR, C.POINTER(C.c_void_p)]
     adv.CreateRestrictedToken.argtypes = [W.HANDLE, W.DWORD, W.DWORD, C.POINTER(Sid), W.DWORD,
                                          C.c_void_p, W.DWORD, C.c_void_p, C.POINTER(W.HANDLE)]
+    adv.SetTokenInformation.argtypes = [W.HANDLE, C.c_int, C.c_void_p, W.DWORD]
+    adv.SetTokenInformation.restype = W.BOOL
+    adv.GetLengthSid.argtypes = [C.c_void_p]
+    adv.GetLengthSid.restype = W.DWORD
     adv.CreateProcessAsUserW.argtypes = [W.HANDLE, W.LPCWSTR, W.LPWSTR, C.c_void_p, C.c_void_p,
                                         W.BOOL, W.DWORD, C.c_void_p, W.LPCWSTR,
                                         C.POINTER(Startup), C.POINTER(Process)]
     original = W.HANDLE(); restricted = W.HANDLE(); admin_sid = C.c_void_p()
+    medium_sid = C.c_void_p(); child_token = W.HANDLE()
+    integrity = child_integrity = None
     process = Process(); job = None; started = False
     try:
-        if not adv.OpenProcessToken(kernel.GetCurrentProcess(), 0xB, C.byref(original)):
+        token_access = 0xB | (0x80 if medium_integrity else 0)
+        if not adv.OpenProcessToken(kernel.GetCurrentProcess(), token_access, C.byref(original)):
             raise OSError(C.get_last_error(), "QA_OPEN_TOKEN_FAILED")
         if not adv.ConvertStringSidToSidW("S-1-5-32-544", C.byref(admin_sid)):
             raise OSError(C.get_last_error(), "QA_ADMIN_SID_FAILED")
         disabled = Sid(admin_sid, 0)
         if not adv.CreateRestrictedToken(original, 1, 1, C.byref(disabled), 0, None, 0, None, C.byref(restricted)):
             raise OSError(C.get_last_error(), "QA_RESTRICT_TOKEN_FAILED")
+        if medium_integrity:
+            if not adv.ConvertStringSidToSidW("S-1-16-8192", C.byref(medium_sid)):
+                raise OSError(C.get_last_error(), "QA_MEDIUM_INTEGRITY_SID_FAILED")
+            mandatory_label = Sid(medium_sid, 0x20)  # SE_GROUP_INTEGRITY.
+            if not adv.SetTokenInformation(restricted, 25, C.byref(mandatory_label),
+                                            C.sizeof(mandatory_label) + adv.GetLengthSid(medium_sid)):
+                raise OSError(C.get_last_error(), "QA_SET_MEDIUM_INTEGRITY_FAILED")
+            integrity = token_integrity(restricted)
+            require(integrity["sid"] == "S-1-16-8192", "QA_MEDIUM_INTEGRITY_TOKEN_READBACK_FAILED")
         job = kernel.CreateJobObjectW(None, None)
         if not job:
             raise OSError(C.get_last_error(), "QA_OWNED_JOB_FAILED")
@@ -224,6 +299,11 @@ def restricted_child(args, *, cwd, timeout_seconds=210):
                                         creation_flags, None, str(cwd), C.byref(startup), C.byref(process)):
             raise OSError(C.get_last_error(), "QA_RESTRICTED_START_FAILED")
         started = True
+        if medium_integrity:
+            if not adv.OpenProcessToken(process.process, 0x8, C.byref(child_token)):
+                raise OSError(C.get_last_error(), "QA_CHILD_TOKEN_QUERY_FAILED")
+            child_integrity = token_integrity(child_token)
+            require(child_integrity["sid"] == "S-1-16-8192", "QA_MEDIUM_INTEGRITY_CHILD_READBACK_FAILED")
         if not kernel.AssignProcessToJobObject(job, process.process):
             raise OSError(C.get_last_error(), "QA_RESTRICTED_JOB_ASSIGNMENT_FAILED")
         if kernel.ResumeThread(process.thread) == 0xFFFFFFFF:
@@ -234,11 +314,17 @@ def restricted_child(args, *, cwd, timeout_seconds=210):
         code = W.DWORD()
         if not kernel.GetExitCodeProcess(process.process, C.byref(code)):
             raise OSError(C.get_last_error(), "QA_RESTRICTED_EXIT_UNAVAILABLE")
-        return {"pid": process.pid, "exit_code": code.value,
+        result = {"pid": process.pid, "exit_code": code.value,
                 "token": "ADMIN_SID_DISABLED_PRIVILEGES_REMOVED",
                 "cleanup": "OWNED_JOB_KILL_ON_CLOSE",
                 "creation_flags": creation_flags,
                 "job_assigned_before_resume": True}
+        if medium_integrity:
+            result.update(medium_integrity_requested=True, token_integrity=integrity,
+                          child_token_integrity=child_integrity,
+                          scope="RESTRICTED_RUNNER_IDENTITY_AT_MEDIUM_IL_NOT_A_SEPARATE_STANDARD_ACCOUNT",
+                          interactive_uac_secure_desktop="NOT_TESTED")
+        return result
     finally:
         if job:
             kernel.TerminateJobObject(job, 1)
@@ -247,11 +333,13 @@ def restricted_child(args, *, cwd, timeout_seconds=210):
             if kernel.WaitForSingleObject(process.process, 0) != 0:
                 kernel.TerminateProcess(process.process, 1)
             kernel.WaitForSingleObject(process.process, 3000)
-        for handle in (process.thread, process.process, job, restricted, original):
+        for handle in (child_token, process.thread, process.process, job, restricted, original):
             if handle:
                 kernel.CloseHandle(handle)
         if admin_sid:
             kernel.LocalFree(admin_sid)
+        if medium_sid:
+            kernel.LocalFree(medium_sid)
 
 
 def validate_worker(proof, child, plan):

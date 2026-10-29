@@ -305,6 +305,8 @@ class Acceptance:
                 target: Any = None, cancel_event: threading.Event | None = None) -> dict:
         from blackbox_core.deep_contracts import ActionRequest
         started = time.monotonic()
+        if sys.stdout is not None:
+            print("DEEP_ACTION_START " + operation, flush=True)
         response = self.service.execute(ActionRequest(operation=operation,
                                                       target=target or self.identity,
                                                       parameters=parameters or {}, confirmed=confirmed,
@@ -316,9 +318,15 @@ class Acceptance:
                                 "elapsed_seconds": time.monotonic() - started,
                                 "result": journal_metadata(response)})
         save(self.output / "operations.json", self.operations)
+        if sys.stdout is not None:
+            print("DEEP_ACTION_RESULT " + json.dumps({"operation": operation,
+                  "status": response.get("status"), "elapsed_seconds": time.monotonic() - started,
+                  "reason": str(response.get("error") or response.get("reason") or "")[:700],
+                  "winerror": response.get("winerror")}), flush=True)
         require(response.get("status") in statuses,
                 "UNEXPECTED_" + operation + "_STATUS_" + str(response.get("status")) +
-                ":" + str(response.get("error"))[:700])
+                ":" + str(response.get("error") or response.get("reason") or "NO_ERROR_DETAIL")[:700] +
+                "; winerror=" + str(response.get("winerror")))
         require(response.get("operation_id"), "ACTION_OPERATION_ID_MISSING")
         return response
 
@@ -744,7 +752,7 @@ def exited_target_check(output: Path, executable: Path, helper: Path | None) -> 
             probe.close(kill=True)
 
 
-def run_acceptance(output: Path, executable: Path, helper: Path | None) -> dict:
+def run_acceptance(output: Path, executable: Path, helper: Path | None, *, require_medium_integrity=False) -> dict:
     from blackbox_core.windows_research import privilege
     require_hosted_windows()
     proof: dict[str, Any] = {"status": "RUNNING", "source_sha": os.environ.get("GITHUB_SHA"),
@@ -757,6 +765,13 @@ def run_acceptance(output: Path, executable: Path, helper: Path | None) -> dict:
     probe = None
     acceptance = None
     try:
+        from tools.qa_decoder_standard_token import token_integrity
+        proof["token_integrity"] = token_integrity()
+        if require_medium_integrity:
+            require(proof["privilege"] == {"mode": "STANDARD", "windows": True} and
+                    proof["token_integrity"]["sid"] == "S-1-16-8192",
+                    "ACTUAL_STANDARD_MEDIUM_INTEGRITY_TOKEN_REQUIRED")
+            proof["token_scope"] = "RESTRICTED_SAME_RUNNER_IDENTITY_AT_MEDIUM_IL_NOT_SEPARATE_STANDARD_ACCOUNT"
         probe = Probe(executable, output / "probe")
         acceptance = Acceptance(output, probe, helper=helper)
         proof["target"] = acceptance.identity.to_dict()
@@ -811,11 +826,7 @@ def main() -> int:
     output.mkdir(parents=True, exist_ok=False)
     executable = args.probe.resolve(strict=True) if args.probe else build_probe(output / "build")
     helper = args.helper.resolve(strict=True) if args.helper else None
-    if args.standard_worker:
-        from blackbox_core.windows_research import privilege
-        require(privilege() == {"mode": "STANDARD", "windows": True},
-                "ACTUAL_STANDARD_TOKEN_REQUIRED")
-    report = run_acceptance(output, executable, helper)
+    report = run_acceptance(output, executable, helper, require_medium_integrity=args.standard_worker)
     if report["status"] != "PASS":
         print("DEEP_NATIVE_ACCEPTANCE_FAIL", report.get("reason", ""))
         return 1
@@ -827,17 +838,21 @@ def main() -> int:
         if helper:
             command.extend(["--helper", helper])
         try:
-            child = restricted_child(command, cwd=ROOT, timeout_seconds=420)
+            child = restricted_child(command, cwd=ROOT, timeout_seconds=420, medium_integrity=True)
             report["standard_child"] = child
             standard_proof = standard_output / "acceptance.json"
             require(standard_proof.is_file(), "STANDARD_WORKER_PROOF_MISSING_0x" + format(child["exit_code"], "08X"))
             standard = json.loads(standard_proof.read_text(encoding="utf-8"))
             require(child["exit_code"] == 0 and standard["status"] == "PASS" and
                     standard["pid"] == child["pid"] and
-                    standard["privilege"] == {"mode": "STANDARD", "windows": True},
+                    standard["privilege"] == {"mode": "STANDARD", "windows": True} and
+                    standard["token_integrity"]["sid"] == "S-1-16-8192" and
+                    child["child_token_integrity"]["sid"] == "S-1-16-8192",
                     "STANDARD_TOKEN_NATIVE_ACCEPTANCE_NOT_CONFIRMED:" + str(standard.get("reason", "")))
             report["standard_token"] = {"status": "PASS", "pid": child["pid"],
                                          "helper_pid": standard["helper_pid"],
+                                         "token_integrity": standard["token_integrity"],
+                                         "scope": standard["token_scope"],
                                          "operation_count": standard["operation_count"],
                                          "proof": "standard-token/acceptance.json"}
         except BaseException as error:

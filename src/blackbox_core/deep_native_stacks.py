@@ -29,6 +29,43 @@ def _same_unwind_image(captured, disk):
                 ("guid", "age", "machine", "image_size", "image_timestamp")))
 
 
+def _snapshot_module_identity(module):
+    """Keep frame navigation bound to this capture, never a later module list."""
+    binding = "PSS_CLONE_PE_IDENTITY_AND_LAYOUT_MATCH"
+    if (module is None or module.get("snapshot_binding") != binding or
+            not isinstance(module.get("snapshot_pe"), dict)):
+        return None
+    return {key: module[key] for key in ("base", "size", "name", "path")} | {
+        "snapshot_pe": dict(module["snapshot_pe"]),
+        "snapshot_binding": binding, "source": "SAME_PSS_CAPTURE"}
+
+
+def _stack_positions(initial, advance, limit):
+    """Keep the captured PC and allow StackWalk64's first initialization step.
+
+    The first successful native call can return the input PC/SP unchanged;
+    only subsequent repetition proves lack of progress. Permit that one
+    initialization result without duplicating a displayed frame.
+    """
+    if not initial[0]:
+        return
+    seen = {initial}
+    yield initial
+    first = True
+    while len(seen) < limit:
+        position = advance()
+        if position is None or not position[0]:
+            return
+        if first and position == initial:
+            first = False
+            continue
+        first = False
+        if position in seen:
+            return
+        seen.add(position)
+        yield position
+
+
 @contextmanager
 def _unwind_image(kernel, module):
     """Pin the verified disk image while DbgHelp borrows its unwind metadata.
@@ -223,23 +260,9 @@ def collect_stacks(inspector, params, deadline, cancel):
                         frame = W.STACKFRAME64()
                         frame.pc.offset, frame.frame.offset, frame.stack.offset = context.rip, context.rbp, context.rsp
                         frame.pc.mode = frame.frame.mode = frame.stack.mode = 3
-                        seen = set()
-                        for _ in range(frame_limit):
+
+                        def advance():
                             _check(deadline, cancel)
-                            pc, sp = int(frame.pc.offset), int(frame.stack.offset)
-                            if not pc or (pc, sp) in seen:
-                                break
-                            seen.add((pc, sp))
-                            found = next((m for m in modules if m["base"] <= pc < m["base"] + m["size"]), None)
-                            record = {"address": pc, "stack_pointer": sp,
-                                      "module": found["name"] if found else None,
-                                      "module_base": found["base"] if found else None,
-                                      "rva": pc - found["base"] if found else None,
-                                      "unwind_metadata_status": found.get("unwind_metadata_status") if found else None}
-                            if symbols is not None and found and found["base"] == symbol_module["base"]:
-                                record["symbol"] = symbols.lookup(pc - found["base"])
-                                record["symbol_binding"] = "PSS_CLONE_CODEVIEW_AND_LOCAL_PE_PDB_MATCH"
-                            row["frames"].append(record)
                             C.set_last_error(0)
                             walked = stack_walk(0x8664, clone, int(entry.tid), C.byref(frame), C.byref(context),
                                                 C.cast(read_clone, W.PTR), C.cast(function_table, W.PTR),
@@ -248,10 +271,28 @@ def collect_stacks(inspector, params, deadline, cancel):
                                 raise read_failure["error"]
                             if not walked:
                                 row["unwind_winerror"] = C.get_last_error()
-                                break
+                                return None
+                            return int(frame.pc.offset), int(frame.stack.offset)
+
+                        initial = int(context.rip), int(context.rsp)
+                        for pc, sp in _stack_positions(initial, advance, frame_limit):
+                            _check(deadline, cancel)
+                            found = next((m for m in modules if m["base"] <= pc < m["base"] + m["size"]), None)
+                            record = {"address": pc, "stack_pointer": sp,
+                                      "module": found["name"] if found else None,
+                                      "module_base": found["base"] if found else None,
+                                      "module_identity": _snapshot_module_identity(found),
+                                      "rva": pc - found["base"] if found else None,
+                                      "unwind_metadata_status": found.get("unwind_metadata_status") if found else None}
+                            if symbols is not None and found and found["base"] == symbol_module["base"]:
+                                record["symbol"] = symbols.lookup(pc - found["base"])
+                                record["symbol_binding"] = "PSS_CLONE_CODEVIEW_AND_LOCAL_PE_PDB_MATCH"
+                            row["frames"].append(record)
                         del storage
-                        row.update(status="COMPLETED" if row["frames"] else "INCOMPLETE_EVIDENCE",
+                        row.update(status="COMPLETED" if len(row["frames"]) > 1 else "INCOMPLETE_EVIDENCE",
                                    truncated=len(row["frames"]) >= frame_limit, unwind_completeness="NOT_PROVEN")
+                        if len(row["frames"]) == 1:
+                            row["reason"] = "ONLY_CAPTURED_CONTEXT_NO_UNWOUND_CALLER"
                         rows.append(row)
                 finally:
                     if initialized:

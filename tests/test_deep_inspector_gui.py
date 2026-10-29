@@ -108,7 +108,7 @@ class DeepInspectorGuiTests(unittest.TestCase):
                     "debug.breakpoints", "debug.breakpoint.add", "debug.breakpoint.disable", "debug.breakpoint.remove",
                     "thread.suspend", "thread.resume", "dump", "dump_inspect", "symbols_verify", "export", "trace_evidence",
                     "profile.etw", "captured_trace", "profiling", "stack_pdb", "dump_read_memory",
-                    "historical_network_interval", "historical_disk_interval"}
+                    "historical_network_interval", "historical_disk_interval", "stack_frame_module"}
         self.assertTrue(required.issubset(self.panel._action_buttons))
         english = {k: b.text() for k, b in self.panel._action_buttons.items()}
         self.window.language = "RU"
@@ -169,6 +169,126 @@ class DeepInspectorGuiTests(unittest.TestCase):
         count = len(self.bridge.calls)
         self.panel._action_buttons["thread.resume"].click()
         self.assertEqual(len(self.bridge.calls), count)
+
+    def test_oversized_memory_write_refuses_before_confirmation(self):
+        self.panel.memory_address.setText("0x20000")
+        self.panel.expected_bytes.setText("00" * 4097)
+        self.panel.new_bytes.setText("01" * 4097)
+        with patch.object(self.panel, "_confirm") as confirm:
+            self.panel._action_buttons["memory.write"].click()
+        confirm.assert_not_called()
+        self.assertEqual(self.bridge.calls, [])
+        self.assertIn("MEMORY_WRITE_LIMIT_4096_BYTES", self.panel.status_label.text())
+
+    @staticmethod
+    def current_stack_frame():
+        return {"address": 0x10020, "module": "controlled.dll", "module_base": 0x10000, "rva": 0x20,
+                "module_identity": {"base": 0x10000, "size": 0x1000, "name": "controlled.dll",
+                                    "path": "controlled.dll", "snapshot_pe": {"image_size": 0x1000, "guid": "observed-guid", "age": 1},
+                                    "snapshot_binding": "PSS_CLONE_PE_IDENTITY_AND_LAYOUT_MATCH", "source": "SAME_PSS_CAPTURE"},
+                "symbol": {"name": "ControlledFunction", "source_location": {"file": "controlled.c", "line": 19}},
+                "symbol_binding": "PSS_CLONE_CODEVIEW_AND_LOCAL_PE_PDB_MATCH"}
+
+    def test_current_stack_frames_navigate_only_snapshot_bound_module(self):
+        self.panel.section.setCurrentIndex(self.panel.section.findData("threads"))
+        self.panel._request_section = "threads"
+        frame = self.current_stack_frame()
+        self.panel._receive({"operation": "thread_stacks", "status": "COMPLETED", "generation": 1,
+                             "target": {"pid": 234, "created_100ns": 12345, "image_path": "controlled.exe"}, "data": {"rows": [
+            {"tid": 75, "created_100ns": 4567, "captured_100ns": 6789, "kind": "LIVE_PSS_THREAD_CONTEXT",
+             "historical_etw_stack": False, "frames": [frame], "unwind_completeness": "NOT_PROVEN"}]}})
+        self.panel._tables["threads"].selectRow(0)
+        self.app.processEvents()
+        self.assertEqual(self.panel.stack_frames.rowCount(), 1)
+        self.assertIn("Current thread stack", self.panel.stack_source_label.text())
+        self.assertIn("FILETIME 4567", self.panel.stack_source_label.text())
+        self.assertEqual(self.panel.stack_frames.item(0, 1).text(), "0x10020")
+        self.assertEqual(self.panel.stack_frames.item(0, 4).text(), "ControlledFunction")
+        self.assertIn("controlled.c", self.panel.stack_frames.item(0, 5).text())
+        self.panel.stack_frames.selectRow(0)
+        self.app.processEvents()
+        self.assertTrue(self.panel._action_buttons["stack_frame_module"].isEnabled())
+        self.panel._action_buttons["stack_frame_module"].click()
+        self.assertEqual(self.panel.section.currentData(), "modules")
+        module = self.panel._section_results["modules"]["data"]["rows"][0]
+        self.assertEqual(module["base"], 0x10000)
+        self.assertEqual(module["frame_address"], 0x10020)
+        self.assertEqual(module["source"], "SAME_PSS_CAPTURE")
+        self.assertEqual(self.panel._section_results["modules"]["data"]["stack_context"]["thread_created_100ns"], 4567)
+        self.assertEqual(self.panel.memory_address.text(), "0x10020")
+        self.assertEqual(self.panel.stack_module_base.text(), "0x10000")
+        self.assertEqual(self.bridge.calls, [])
+
+    def test_selecting_another_thread_preserves_unresolved_pc_without_old_symbol(self):
+        self.panel.section.setCurrentIndex(self.panel.section.findData("threads"))
+        self.panel._request_section = "threads"
+        rows = [{"tid": 75, "created_100ns": 4567, "kind": "LIVE_PSS_THREAD_CONTEXT",
+                 "historical_etw_stack": False, "frames": [self.current_stack_frame()]},
+                {"tid": 76, "created_100ns": 4568, "kind": "LIVE_PSS_THREAD_CONTEXT",
+                 "historical_etw_stack": False, "frames": [{"address": 0x123456, "module": None, "rva": None}]}]
+        self.panel._receive({"operation": "thread_stacks", "status": "INCOMPLETE_EVIDENCE", "data": {"rows": rows}})
+        self.panel._tables["threads"].selectRow(0)
+        self.panel.stack_frames.selectRow(0)
+        self.app.processEvents()
+        self.panel._tables["threads"].selectRow(1)
+        self.app.processEvents()
+        self.panel.stack_frames.selectRow(0)
+        self.app.processEvents()
+        self.assertEqual(self.panel.thread_tid.text(), "76")
+        self.assertEqual(self.panel.thread_created.text(), "4568")
+        self.assertEqual(self.panel.stack_frames.item(0, 1).text(), "0x123456")
+        self.assertEqual(self.panel.stack_frames.item(0, 4).text(), "—")
+        self.assertEqual(self.panel.stack_frames.item(0, 2).text(), "—")
+        self.assertFalse(self.panel._action_buttons["stack_frame_module"].isEnabled())
+        self.assertEqual(self.panel.stack_module_base.text(), "")
+
+    def test_historical_stack_module_never_populates_live_thread_or_memory_inputs(self):
+        self.panel.section.setCurrentIndex(self.panel.section.findData("threads"))
+        self.panel._request_section = "threads"
+        module = {"schema": "blackbox.trace-module/1", "source": "TRACEEVENT_NATIVE_LOAD_WINDOW",
+                  "process_instance": 8, "module_file_index": 0, "image_base": "0x10000", "image_size": 0x1000,
+                  "image_timestamp": 1, "load_time_ms": 0, "unload_time_ms": 100, "pdb_guid": None,
+                  "pdb_age": None, "module_name": "recorded.dll"}
+        row = {"pid": 234, "tid": 75, "process_instance": 8, "time_ms": 20, "source": "HISTORICAL_TRACE",
+               "frames": [{"address": "0x10020", "name": "RecordedName", "module": module, "rva": 0x20}]}
+        self.panel.thread_tid.setText("999")
+        self.panel.thread_created.setText("1001")
+        self.panel.memory_address.setText("0x7777")
+        self.panel._receive({"operation": "trace_evidence", "status": "INCOMPLETE_EVIDENCE", "data": {
+            "trace_selection": {"process_instance": 8}, "events": [row]}})
+        self.panel._tables["threads"].selectRow(0)
+        self.app.processEvents()
+        self.panel.stack_frames.selectRow(0)
+        self.app.processEvents()
+        self.assertIn("Historical trace stack", self.panel.stack_source_label.text())
+        self.assertIn("NOT_ESTABLISHED", self.panel.stack_source_label.text())
+        self.assertEqual(self.panel.thread_tid.text(), "")
+        self.assertEqual(self.panel.thread_created.text(), "")
+        self.assertEqual(self.panel.memory_address.text(), "")
+        self.assertEqual(self.panel.stack_frames.item(0, 4).text(), "RecordedName")
+        self.assertTrue(self.panel._action_buttons["stack_frame_module"].isEnabled())
+        self.panel._action_buttons["stack_frame_module"].click()
+        self.assertEqual(self.panel._section_results["modules"]["data"]["rows"][0]["inspection_scope"], "HISTORICAL_TRACE_MODULE")
+        self.assertEqual(self.panel.memory_address.text(), "")
+        self.assertEqual(self.bridge.calls, [])
+
+    def test_stack_frames_are_bounded_and_target_change_rejects_stale_stack_result(self):
+        self.panel.section.setCurrentIndex(self.panel.section.findData("threads"))
+        self.panel._request_section = "threads"
+        packet = {"operation": "thread_stacks", "generation": 1, "status": "INCOMPLETE_EVIDENCE", "data": {"rows": [
+            {"tid": 75, "created_100ns": 4567, "kind": "LIVE_PSS_THREAD_CONTEXT", "historical_etw_stack": False,
+             "frames": [{"address": i + 1} for i in range(140)]}]}}
+        self.panel._receive(packet)
+        self.panel._tables["threads"].selectRow(0)
+        self.app.processEvents()
+        self.assertEqual(self.panel.stack_frames.rowCount(), 128)
+        self.assertIn("omitted: 12", self.panel.stack_source_label.text())
+        self.panel.set_target(235, 2000., "new instance")
+        self.assertEqual(self.panel.stack_frames.rowCount(), 0)
+        self.assertIsNone(self.panel._stack_context)
+        self.panel._receive(packet)
+        self.assertEqual(self.panel._tables["threads"].rowCount(), 0)
+        self.assertFalse(self.panel._action_buttons["stack_frame_module"].isEnabled())
 
     def test_debug_buttons_confirm_and_propagate_stopped_context(self):
         self.panel._receive({"operation": "debug.pause", "status": "COMPLETED", "data": {

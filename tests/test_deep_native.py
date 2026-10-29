@@ -13,7 +13,8 @@ from blackbox_core import deep_native as native
 from blackbox_core import deep_native_win as W
 from blackbox_core.deep_contracts import ProcessIdentity
 from blackbox_core.deep_native_dump import CALLBACK_INPUT, IO_CALLBACK
-from blackbox_core.deep_native_stacks import PSS_THREAD_ENTRY, _same_unwind_image
+from blackbox_core.deep_native_stacks import (PSS_THREAD_ENTRY, _same_unwind_image,
+                                             _snapshot_module_identity, _stack_positions)
 
 
 @contextmanager
@@ -142,6 +143,35 @@ class NativePolicyTests(unittest.TestCase):
             with self.subTest(field=field):
                 self.assertFalse(_same_unwind_image(captured, replacement))
         self.assertFalse(_same_unwind_image({**captured, "guid": None}, {**captured, "guid": None}))
+
+    def test_frame_module_navigation_requires_same_snapshot_binding(self):
+        module = {"base": 0x10000, "size": 0x4000, "name": "fixture.dll",
+                  "path": "C:\\fixture.dll", "loaded_pe": {"guid": "old-guid", "age": 1}}
+        self.assertIsNone(_snapshot_module_identity(module))
+        module.update(snapshot_binding="PSS_CLONE_PE_IDENTITY_AND_LAYOUT_MATCH",
+                      snapshot_pe={"guid": "captured-guid", "age": 2})
+        identity = _snapshot_module_identity(module)
+        self.assertEqual(identity["source"], "SAME_PSS_CAPTURE")
+        self.assertEqual(identity["snapshot_pe"], {"guid": "captured-guid", "age": 2})
+        module["snapshot_pe"]["guid"] = "later-module-guid"
+        self.assertEqual(identity["snapshot_pe"]["guid"], "captured-guid")
+        self.assertIsNone(_snapshot_module_identity(None))
+
+    def test_stackwalk_initialization_repeat_does_not_hide_real_callers(self):
+        initial, caller, entry = (0x1100, 0x8000), (0x2200, 0x8040), (0x3300, 0x8100)
+        advance = Mock(side_effect=[initial, caller, entry, None])
+        self.assertEqual(list(_stack_positions(initial, advance, 16)), [initial, caller, entry])
+        self.assertEqual(advance.call_count, 4)
+
+    def test_stackwalk_true_cycle_still_stops_and_failed_walk_keeps_context(self):
+        initial, caller = (0x1100, 0x8000), (0x2200, 0x8040)
+        advance = Mock(side_effect=[initial, caller, initial])
+        self.assertEqual(list(_stack_positions(initial, advance, 16)), [initial, caller])
+        self.assertEqual(advance.call_count, 3)
+        self.assertEqual(list(_stack_positions(initial, Mock(return_value=None), 16)), [initial])
+        limited = Mock(side_effect=[initial, caller, (0x3300, 0x8100)])
+        self.assertEqual(list(_stack_positions(initial, limited, 2)), [initial, caller])
+        self.assertEqual(limited.call_count, 2)
 
     def test_memory_map_has_continuation_on_budget(self):
         kernel = Mock()

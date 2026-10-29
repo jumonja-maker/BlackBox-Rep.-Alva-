@@ -12,7 +12,7 @@ import types
 import unittest
 from unittest.mock import Mock, patch
 
-from blackbox_core.deep_contracts import ActionRequest, ProcessIdentity, canonical_operation
+from blackbox_core.deep_contracts import ActionRequest, ProcessIdentity, canonical_operation, describe_actions
 from blackbox_core.deep_helper import DiagnosticActionEngine, validate_parameters
 from blackbox_core.deep_elevation import ElevationCancelled
 from blackbox_core.deep_ipc import IPCError, PipeServer, connect_pipe
@@ -66,6 +66,37 @@ class DeepContractsTests(unittest.TestCase):
         for parameters in invalid:
             with self.subTest(parameters=parameters), self.assertRaises(ValueError):
                 ActionRequest("profile.etw", identity, parameters, True)
+
+    def test_scenario_catalog_declares_lifecycle_cleanup_and_non_retry_policy(self):
+        actions = {entry["operation"]: entry for entry in describe_actions()}
+        for name, entry in actions.items():
+            with self.subTest(operation=name):
+                self.assertIsInstance(entry["preconditions"], list)
+                self.assertTrue(entry["preconditions"])
+                for field in ("required_rights", "impact", "stop_method", "cleanup", "failure_action", "output"):
+                    self.assertIsInstance(entry[field], str)
+                    self.assertTrue(entry[field].strip())
+                self.assertGreater(entry["timeout_seconds"], 0)
+                self.assertLessEqual(entry["timeout_seconds"], 120)
+                self.assertIn("DESCRIPTIVE_ONLY", entry["authority"])
+                if entry["mode"] == "INTERVENE":
+                    self.assertTrue(entry["confirmation_required"])
+                    self.assertIn("Never automatically retry", entry["failure_action"])
+                    self.assertIn("RECOVERY_UNCONFIRMED", entry["failure_action"])
+        step_conditions = " ".join(actions["debug.step"]["preconditions"])
+        self.assertIn("ATTACHED", step_conditions)
+        self.assertIn("PAUSED", step_conditions)
+        self.assertIn("instruction-pointer", step_conditions)
+        self.assertIn("thread_created_100ns", " ".join(actions["thread.suspend"]["preconditions"]))
+        self.assertIn("suspension_id", actions["thread.suspend"]["output"])
+        self.assertIn("expected_hex", " ".join(actions["memory.write"]["preconditions"]))
+        self.assertIn("change_id", actions["memory.write"]["output"])
+        self.assertIn("readback", actions["memory.rollback"]["output"])
+        self.assertIn("debug.detach", actions["debug.breakpoint.add"]["stop_method"])
+        self.assertIn("owned suspensions", actions["debug.detach"]["cleanup"])
+        self.assertIn("snapshot_id", actions["snapshot"]["output"])
+        self.assertIn("no live-process access", " ".join(actions["trace_evidence"]["preconditions"]))
+        self.assertIn("saved_verified", actions["profile.etw"]["output"])
 
 
 class DeepJournalTests(unittest.TestCase):
