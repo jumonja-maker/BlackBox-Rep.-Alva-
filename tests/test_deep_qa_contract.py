@@ -10,11 +10,12 @@ import os
 from pathlib import Path
 import sqlite3
 import struct
+import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
 
-from tools.qa_deep_inspection import minidump_evidence, require_hosted_windows
+from tools.qa_deep_inspection import compiler_environment, minidump_evidence, require_hosted_windows
 from tools.qa_deep_endurance import verify_samples
 
 
@@ -40,6 +41,51 @@ def synthetic_dump(*, full=False, truncate_memory=False):
 
 
 class DeepAcceptanceEvidenceContracts(unittest.TestCase):
+    @unittest.skipUnless(os.name == "nt", "Real cmd.exe quoting is a Windows contract")
+    def test_compiler_setup_with_spaces_preserves_diagnostics_but_not_environment(self):
+        self._exercise_cmd_setup(exit_code=0)
+
+    @unittest.skipUnless(os.name == "nt", "Real cmd.exe quoting is a Windows contract")
+    def test_compiler_setup_failure_preserves_actual_batch_diagnostic(self):
+        self._exercise_cmd_setup(exit_code=27)
+
+    def _exercise_cmd_setup(self, *, exit_code):
+        actual_run = subprocess.run
+        with tempfile.TemporaryDirectory(prefix="deep compiler quoting ") as temporary:
+            root = Path(temporary)
+            installer = root / "Microsoft Visual Studio/Installer/vswhere.exe"
+            installer.parent.mkdir(parents=True)
+            installer.write_bytes(b"NOT_EXECUTED_DISCOVERY_FIXTURE")
+            location = root / "Visual Studio With Spaces"
+            setup = location / "VC/Auxiliary/Build/vcvars64.bat"
+            setup.parent.mkdir(parents=True)
+            setup.write_text('@echo setup diagnostic from actual cmd.exe\n'
+                             '@set "BB_COMPILER_TEST_PRIVATE_VALUE=must-not-be-an-artifact"\n'
+                             f'@exit /b {exit_code}\n', encoding="ascii")
+            output = root / "build output"
+            output.mkdir()
+
+            def run(command, **kwargs):
+                if isinstance(command, list) and command[0] == str(installer):
+                    return subprocess.CompletedProcess(command, 0, str(location) + "\n", "")
+                return actual_run(command, **kwargs)
+
+            with patch.dict(os.environ, {"ProgramFiles(x86)": str(root)}), \
+                    patch("tools.qa_deep_inspection.shutil.which", side_effect=[None, "cl.exe"]), \
+                    patch("tools.qa_deep_inspection.subprocess.run", side_effect=run):
+                if exit_code:
+                    with self.assertRaisesRegex(AssertionError, "COMPILER_SETUP_FAILED"):
+                        compiler_environment(output)
+                else:
+                    compiler, environment = compiler_environment(output)
+                    self.assertEqual(compiler, "cl.exe")
+                    self.assertEqual(environment["BB_COMPILER_TEST_PRIVATE_VALUE"],
+                                     "must-not-be-an-artifact")
+            self.assertIn("setup diagnostic from actual cmd.exe",
+                          (output / "compiler-setup.log").read_text(encoding="utf-8"))
+            for artifact in output.iterdir():
+                self.assertNotIn("must-not-be-an-artifact", artifact.read_text(encoding="utf-8"))
+
     def test_native_executable_harness_refuses_non_actions(self):
         with patch.dict(os.environ, {"GITHUB_ACTIONS": "false", "RUNNER_ENVIRONMENT": "github-hosted"}):
             with self.assertRaisesRegex(AssertionError, "GITHUB_HOSTED_WINDOWS"):

@@ -49,25 +49,43 @@ def save(path: Path, value: Any) -> None:
     os.replace(temporary, path)
 
 
-def compiler_environment() -> tuple[str, dict[str, str]]:
+def compiler_environment(output: Path) -> tuple[str, dict[str, str]]:
     """Use the installed Microsoft x64 build environment; never print its env."""
     compiler = shutil.which("cl.exe")
     if compiler:
         return compiler, dict(os.environ)
     installer = Path(os.environ.get("ProgramFiles(x86)", "C:/Program Files (x86)")) / "Microsoft Visual Studio/Installer/vswhere.exe"
     require(installer.is_file(), "WINDOWS_NATIVE_COMPILER_INSTALLATION_REQUIRED")
-    location = subprocess.run([str(installer), "-latest", "-products", "*", "-requires",
-                               "Microsoft.VisualStudio.Component.VC.Tools.x86.x64", "-property",
-                               "installationPath"], check=True, capture_output=True,
-                              text=True, timeout=20).stdout.strip()
+    discovered = subprocess.run([str(installer), "-latest", "-products", "*", "-requires",
+                                 "Microsoft.VisualStudio.Component.VC.Tools.x86.x64", "-property",
+                                 "installationPath"], capture_output=True,
+                                text=True, errors="replace", timeout=20)
+    (output / "compiler-discovery.log").write_text(
+        discovered.stdout + discovered.stderr, encoding="utf-8")
+    require(discovered.returncode == 0, "WINDOWS_NATIVE_COMPILER_DISCOVERY_FAILED")
+    location = discovered.stdout.strip()
     require(bool(location) and "\n" not in location and '"' not in location,
             "WINDOWS_NATIVE_COMPILER_LOCATION_INVALID")
     setup = Path(location) / "VC/Auxiliary/Build/vcvars64.bat"
     require(setup.is_file(), "WINDOWS_X64_COMPILER_SETUP_REQUIRED")
-    # This is Microsoft's installed fixed build script, not a user command.
-    result = subprocess.run([os.environ.get("COMSPEC", "cmd.exe"), "/d", "/s", "/c",
-                             f'call "{setup}" >nul && set'], check=True, capture_output=True,
+    # cmd.exe does not use the CRT argv quoting implemented by list2cmdline:
+    # a list containing `call "C:\\Program Files\\..."` inserts literal backslashes
+    # before the quotes. Supply its raw command line, with /s's outer quotes.
+    # Keep setup output separate: successful stdout contains the environment and
+    # MUST NOT be persisted in artifacts, including on setup/compiler failures.
+    command_processor = os.environ.get("COMSPEC", "cmd.exe")
+    setup_log = output / "compiler-setup.log"
+    require(all(not any(character in str(value) for character in ('"', '\r', '\n', '%', '!'))
+                for value in (command_processor, setup, setup_log)),
+            "WINDOWS_COMPILER_SETUP_PATH_UNSAFE")
+    command = (f'"{command_processor}" /d /s /c "call "{setup}" '
+               f'>"{setup_log}" 2>&1 && set"')
+    result = subprocess.run(command, shell=False, capture_output=True,
                             text=True, errors="replace", timeout=45)
+    if result.stderr:
+        with setup_log.open("a", encoding="utf-8") as log:
+            log.write(result.stderr)
+    require(result.returncode == 0, "WINDOWS_X64_COMPILER_SETUP_FAILED_SEE_COMPILER_SETUP_LOG")
     environment = dict(os.environ)
     for line in result.stdout.splitlines():
         name, separator, value = line.partition("=")
@@ -81,7 +99,7 @@ def compiler_environment() -> tuple[str, dict[str, str]]:
 def build_probe(output: Path) -> Path:
     require_hosted_windows()
     output.mkdir(parents=True, exist_ok=False)
-    compiler, environment = compiler_environment()
+    compiler, environment = compiler_environment(output)
     source = ROOT / "tools/fixtures/DeepInspectionProbe/probe.c"
     executable = output / "deep-probe.exe"
     command = [compiler, "/nologo", "/W4", "/Od", "/Zi", "/MT", "/DUNICODE",
