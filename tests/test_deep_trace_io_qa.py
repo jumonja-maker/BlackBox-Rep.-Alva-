@@ -41,7 +41,8 @@ def fixture(*, network=True):
                             payload={"size": 1, "sport": ORACLE[key], "dport": ORACLE[key]})
                 row.update(opcode=26 if version == 6 else 10, version=2)
                 row["io_observation"] = {"schema": "blackbox.trace-io/1", "source": "ETW_KERNEL_NETWORK",
-                    "parser": "TRACEEVENT_TcpIpV6TraceData" if version == 6 else
+                    "parser": "TRACEEVENT_UpdIpV6TraceData" if protocol == "UDP" and version == 6 else
+                              "TRACEEVENT_TcpIpV6SendTraceData" if version == 6 else
                               "TRACEEVENT_UdpIpTraceData" if protocol == "UDP" else "TRACEEVENT_TcpIpSendTraceData",
                     "kind": "network", "protocol": protocol, "operation": "send", "family": "IPv" + str(version),
                     "transferred_bytes": 1, "source_address": address, "destination_address": address,
@@ -109,6 +110,20 @@ class DeepTraceIoAcceptanceContracts(unittest.TestCase):
             self.assertEqual(endpoint["status"], "NOT_COLLECTED")
             self.assertEqual(endpoint["matched_events"], 0)
             self.assertEqual(endpoint["latency"], "NOT_ESTABLISHED_BY_NETWORK_METADATA")
+
+    def test_udp_ipv6_fixture_cannot_masquerade_as_tcp_parser(self):
+        rows = fixture()
+        rows[-1]["io_observation"]["parser"] = "TRACEEVENT_TcpIpV6SendTraceData"
+        with self.assertRaisesRegex(ValueError, "TYPED_IO"):
+            self.analyze(rows)
+
+    def test_unconfirmed_ipv6_layout_is_not_a_supported_positive_case(self):
+        rows = fixture(network=False)
+        row = event("UdpIp/SendIPV6", payload={"size": 1})
+        row.update(opcode=26, version=1)
+        rows.append(row)
+        result = self.analyze(rows)
+        self.assertEqual(result["network"]["udp6_port"]["status"], "NOT_COLLECTED")
 
     def test_recorded_target_family_must_match_known_native_port(self):
         rows = fixture()

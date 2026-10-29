@@ -55,6 +55,7 @@ class InspectorService:
         self._lock = threading.RLock()
         self._interventions_started = False
         self._active_request_id = None
+        self._owner_retained = False
 
     @property
     def helper_pid(self):
@@ -76,6 +77,8 @@ class InspectorService:
                 "expires_in_seconds": max(0, round(self._expires - time.monotonic(), 3)),
                 "target": self._target.to_dict() if self._target else None,
                 "operations": sorted(self._scope),
+                "owner_retained": self._owner_retained,
+                "cleanup_required": self._owner_retained,
                 "recovery_report": str(self._recovery_path) if self._recovery_path else None,
                 "recovery": self.recovery_status()}
 
@@ -144,6 +147,7 @@ class InspectorService:
             self._target, self._scope = target, frozenset(operations)
             self._permission, self._expires = permission, time.monotonic() + MAX_SESSION_SECONDS
             self._interventions_started = False
+            self._owner_retained = False
             return result("session.open", "COMPLETED", data=self.session_status(), permission_level=permission)
         except BaseException:
             self._discard_helper(force=True)
@@ -160,7 +164,12 @@ class InspectorService:
                     self.helper.terminate()
             except Exception as exc:
                 errors.append(str(exc))
-            finally:
+            if errors and self.helper.alive():
+                # A failed termination must not erase the only held identity
+                # of a still-live privileged owner. Keep it visible/retryable.
+                self._owner_retained = True
+                raise OSError("; ".join(errors))
+            else:
                 self.helper.close_handle()
                 self.helper = None
         if self._recovery_stream is not None:
@@ -168,6 +177,7 @@ class InspectorService:
             self._recovery_stream = None
         self._target, self._scope, self._expires = None, frozenset(), 0.0
         self._permission = "STANDARD"
+        self._owner_retained = False
         if errors:
             raise OSError("; ".join(errors))
 
@@ -175,7 +185,16 @@ class InspectorService:
         if self.helper is not None:
             if not self.helper.alive() or time.monotonic() >= self._expires:
                 unconfirmed = self._interventions_started
-                self._discard_helper(force=True)
+                # Let the helper finish its original finite lease cleanup.
+                # Killing a held INT3 owner immediately could resume unsafe RIP.
+                if unconfirmed and self.helper.alive() and time.monotonic() < self._expires + 30:
+                    return self._retained_result(request.operation, "SESSION_EXPIRED_CLEANUP_PENDING")
+                try:
+                    self._discard_helper(force=True)
+                except Exception as exc:
+                    if self.helper is not None and self.helper.alive():
+                        return self._retained_result(request.operation, "EXPIRED_HELPER_STOP_UNCONFIRMED: " + str(exc)[:1000])
+                    raise
                 if unconfirmed:
                     return result(request.operation, "RECOVERY_UNCONFIRMED", error="PREVIOUS_INTERVENTION_SESSION_TERMINATED",
                                   next_action="REVIEW_RECOVERY_REPORT_BEFORE_STARTING_A_NEW_SESSION")
@@ -186,11 +205,23 @@ class InspectorService:
             elif request.operation not in self._scope:
                 return result(request.operation, "ACCESS_DENIED", error="OPERATION_OUTSIDE_APPROVED_SESSION_SCOPE",
                               next_action="END_SESSION_AND_APPROVE_A_NEW_OPERATION_SCOPE")
+            elif self._owner_retained and request.operation not in (
+                    "debug.detach", "debug.context", "debug.breakpoints", "capabilities"):
+                return self._retained_result(request.operation, "PREVIOUS_OWNER_CLEANUP_REQUIRES_RETRY")
             else:
                 return None
         opened = self._start_session(request.target, sorted(set(DEEP_ACTIONS) - LOCAL_OPERATIONS),
                                      elevated=False, cancel_event=cancel_event)
         return opened if opened["status"] != "COMPLETED" else None
+
+    def _retained_result(self, operation: str, error: str, *, cleanup=None) -> dict:
+        self._owner_retained = True
+        return result(operation, "RECOVERY_UNCONFIRMED", error=error, retains_service=True,
+                      data={"owner_retained": True, "retry_cleanup_required": True,
+                            "helper_pid": self.helper_pid, "target": self._target.to_dict() if self._target else None,
+                            "expires_in_seconds": max(0, self._expires - time.monotonic()),
+                            "cleanup": cleanup},
+                      limitations=["The original helper lease is not extended. Retry cleanup before it expires; owner exit at the finite lease/cleanup boundary can resume an unverified debug context."])
 
     def elevate(self, target: ProcessIdentity, operations: list[str], *, confirmed: bool = False, cancel_event=None) -> dict:
         target = ProcessIdentity.from_dict(target)
@@ -275,6 +306,14 @@ class InspectorService:
                 return value
         except Exception:
             pass
+        if self._interventions_started and self.helper is not None and self.helper.alive():
+            cleanup = self.end_admin_session()
+            if cleanup.get("data", {}).get("owner_retained"):
+                return self._retained_result("unknown", "INTERVENTION_CANCELLATION_ACKNOWLEDGEMENT_LOST", cleanup=cleanup)
+            return result("unknown", "RECOVERY_UNCONFIRMED",
+                          error="INTERVENTION_CANCELLATION_ACKNOWLEDGEMENT_LOST",
+                          permission_level=permission, data={"cleanup": cleanup},
+                          limitations=["The original action result is unknown even if subsequent cleanup completed."])
         try:
             self._discard_helper(force=True)
         except Exception as exc:
@@ -349,6 +388,7 @@ class InspectorService:
             dump_stream = None
             output_path = None
             operation_permission = self._permission
+            intervention_dispatch_attempted = False
             try:
                 check_deadline(time.monotonic() + request.timeout_seconds, cancel_event)
                 if request.operation in LOCAL_OPERATIONS:
@@ -391,6 +431,7 @@ class InspectorService:
                             self._interventions_started = True
                         deadline = time.monotonic() + request.timeout_seconds + 2
                         try:
+                            intervention_dispatch_attempted = spec.mode == "INTERVENE" or request.operation == "thread_stacks"
                             self._channel.send(envelope, deadline=deadline, cancel_event=cancel_event)
                             response = self._channel.receive(deadline=deadline, cancel_event=cancel_event)
                             if response.get("kind") != "result" or response.get("request_id") != identifier:
@@ -409,6 +450,10 @@ class InspectorService:
                     snapshot = answer.get("data", {})
                     snapshot_id = self.journal.snapshot(request.target.to_dict(), snapshot)
                     answer["data"] = {"snapshot_id": snapshot_id, "snapshot": snapshot}
+                if answer.get("data", {}).get("owner_retained"):
+                    self._owner_retained = True
+                elif request.operation == "debug.detach" and answer.get("status") == "COMPLETED":
+                    self._owner_retained = False
                 if output_path is not None:
                     answer.setdefault("data", {})["destination"] = str(output_path)
                     answer["data"]["sensitive_artifact"] = True
@@ -419,9 +464,21 @@ class InspectorService:
                 answer = result(request.operation, "TIMED_OUT", error=str(exc))
             except Exception as exc:
                 status = getattr(exc, "status", "OPERATION_FAILED")
-                if self._interventions_started and self.helper is not None and not self.helper.alive():
-                    status = "RECOVERY_UNCONFIRMED"
-                answer = result(request.operation, status, error=str(exc)[:2000], winerror=getattr(exc, "winerror", None))
+                if intervention_dispatch_attempted:
+                    # A living helper can have performed the native effect
+                    # before its pipe/reply fails. Liveness is not an ACK.
+                    cleanup = self.end_admin_session()
+                    if cleanup.get("data", {}).get("owner_retained"):
+                        answer = self._retained_result(request.operation, "INTERVENTION_RESULT_ACKNOWLEDGEMENT_LOST: " + str(exc)[:1000], cleanup=cleanup)
+                    else:
+                        answer = result(request.operation, "RECOVERY_UNCONFIRMED",
+                                        error="INTERVENTION_RESULT_ACKNOWLEDGEMENT_LOST: " + str(exc)[:1000],
+                                        data={"cleanup": cleanup},
+                                        limitations=["A native action may have completed; subsequent cleanup does not prove it never ran. Do not retry automatically."])
+                else:
+                    if self._interventions_started and self.helper is not None and not self.helper.alive():
+                        status = "RECOVERY_UNCONFIRMED"
+                    answer = result(request.operation, status, error=str(exc)[:2000], winerror=getattr(exc, "winerror", None))
             finally:
                 if dump_stream is not None:
                     dump_stream.close()
@@ -445,10 +502,16 @@ class InspectorService:
                                                 "phase": "RESULT"})
                 answer["journal"] = recorded
             except Exception as exc:
-                answer = result(request.operation, "RECOVERY_UNCONFIRMED", operation_id=identifier,
-                                error="RESULT_JOURNAL_COMMIT_FAILED: " + str(exc)[:1000],
-                                data={"reported_operation_status": answer.get("status")},
-                                limitations=["The action may have completed; its durable result could not be recorded. Do not repeat blindly."])
+                failure = "RESULT_JOURNAL_COMMIT_FAILED: " + str(exc)[:1000]
+                reported = {"reported_operation_status": answer.get("status")}
+                if self._owner_retained and self.helper is not None:
+                    answer = self._retained_result(request.operation, failure, cleanup=reported)
+                    answer["operation_id"] = identifier
+                    answer["limitations"].append("The durable result could not be recorded; do not repeat the action blindly.")
+                else:
+                    answer = result(request.operation, "RECOVERY_UNCONFIRMED", operation_id=identifier,
+                                    error=failure, data=reported,
+                                    limitations=["The action may have completed; its durable result could not be recorded. Do not repeat blindly."])
             return answer
 
     def export_journal(self, destination: str | Path) -> dict:
@@ -465,27 +528,50 @@ class InspectorService:
             closing_permission = self._permission
             answer = result("session.close", "RECOVERY_UNCONFIRMED" if had_interventions else "COMPLETED",
                             limitations=["No successful cleanup acknowledgement was received."])
+            late_results = []
             try:
                 if self.helper.alive() and self._channel is not None:
                     deadline = time.monotonic() + 20
                     self._channel.send({"kind": "close"}, deadline=deadline)
-                    response = self._channel.receive(deadline=deadline)
-                    if response.get("kind") == "closed":
-                        answer = response["result"]
+                    for _ in range(4):
+                        response = self._channel.receive(deadline=deadline)
+                        if response.get("kind") == "closed":
+                            answer = response["result"]
+                            break
+                        if response.get("kind") != "result":
+                            raise ValueError("UNEXPECTED_SESSION_CLEANUP_REPLY")
+                        # Cancellation/lost-ACK recovery can leave one completed
+                        # operation reply in flight. Do not confuse it with the
+                        # explicit cleanup acknowledgement or retain payloads.
+                        late_results.append({"request_id": response.get("request_id"),
+                                             "status": response.get("result", {}).get("status")})
             except Exception as exc:
                 answer["error"] = str(exc)[:2000]
-            finally:
+            alive = self.helper is not None and self.helper.alive()
+            retained = bool(answer.get("data", {}).get("owner_retained"))
+            if (alive and (retained or had_interventions and answer.get("status") != "COMPLETED")
+                    and time.monotonic() < self._expires + 30):
+                answer = self._retained_result("session.close", answer.get("error") or "OWNED_DEBUG_CONTEXT_CLEANUP_UNCONFIRMED",
+                                               cleanup=answer)
+            else:
                 try:
                     self._discard_helper(force=True)
                 except Exception as exc:
-                    answer = result("session.close", "RECOVERY_UNCONFIRMED", error=str(exc)[:2000])
-            self._interventions_started = False
+                    answer = (self._retained_result("session.close", str(exc)[:2000], cleanup=answer)
+                              if self.helper is not None and self.helper.alive() else
+                              result("session.close", "RECOVERY_UNCONFIRMED", error=str(exc)[:2000]))
+                if self.helper is None:
+                    self._interventions_started = False
             answer.setdefault("data", {})["recovery"] = self.recovery_status()
+            if late_results:
+                answer["data"]["late_result_statuses"] = late_results
             try:
                 self.journal.append({**answer, "operation_id": uuid4().hex, "source": "DIAGNOSTIC_SESSION_CLEANUP",
                                      "target": closing_target, "permission_level": closing_permission})
             except Exception as exc:
-                answer = result("session.close", "RECOVERY_UNCONFIRMED", error="CLEANUP_JOURNAL_FAILED: " + str(exc)[:1000])
+                answer = (self._retained_result("session.close", "CLEANUP_JOURNAL_FAILED: " + str(exc)[:1000], cleanup=answer)
+                          if self._owner_retained and self.helper is not None else
+                          result("session.close", "RECOVERY_UNCONFIRMED", error="CLEANUP_JOURNAL_FAILED: " + str(exc)[:1000]))
             return answer
 
     def close(self) -> dict:

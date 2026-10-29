@@ -131,7 +131,8 @@ class DeepAcceptanceEvidenceContracts(unittest.TestCase):
                 db.execute("CREATE TABLE samples(seq INTEGER,elapsed REAL,heartbeat INTEGER,io_cycles INTEGER,"
                            "network_cycles INTEGER,qa_rss INTEGER,target_rss INTEGER,helper_pid INTEGER,helper_rss INTEGER)")
                 db.executemany("INSERT INTO samples VALUES(?,?,?,?,?,?,?,?,?)",
-                               [(1, 0, 1, 1, 1, 10, 20, 90, 30), (2, 30, 2, 2, 2, 11, 21, 90, 31)])
+                               [(i + 1, i * 5, i + 1, i + 1, i + 1, 10, 20, 90, 30)
+                                for i in range(7)])
                 db.commit()
             result = verify_samples(path, 30)
             self.assertEqual(result["observed_span_seconds"], 30)

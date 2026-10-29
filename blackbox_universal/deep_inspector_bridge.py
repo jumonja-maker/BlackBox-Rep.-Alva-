@@ -59,8 +59,10 @@ class _DeepTask(QThread):
             if command["kind"] == "close":
                 result = self.service.close() if self.service is not None else {
                     "status": "COMPLETED", "data": {"cleanup": "NO_SESSION"}}
-                self.service = None
-                self.identity = None
+                retained = bool(result.get("retains_service") or (result.get("data") or {}).get("owner_retained"))
+                if not retained:
+                    self.service = None
+                    self.identity = None
             else:
                 if self.service is None:
                     self.service = self.factory()
@@ -105,6 +107,11 @@ class _DeepTask(QThread):
             result = _failure(operation, getattr(exc, "status", "OPERATION_FAILED"), str(exc)[:1000])
         if command["kind"] == "close" and result.get("status") not in ("COMPLETED", "DETACHED"):
             result["status"] = "RECOVERY_UNCONFIRMED"
+        if command["kind"] == "close" and self.service is not None:
+            # An exception or an explicit retained-owner result must never
+            # make the GUI forget a still-owned debug/helper session.
+            result["retains_service"] = True
+            result["status"] = "RECOVERY_UNCONFIRMED"
         result["generation"] = command["generation"]
         result["request_kind"] = command["kind"]
         result["request_tag"] = command.get("tag", "")
@@ -117,6 +124,7 @@ class DeepInspectorBridge(QObject):
     busy_changed = Signal(bool)
     target_changed = Signal()
     closed = Signal(object)
+    recovery_required = Signal(object)
     idle = Signal()
 
     def __init__(self, parent=None, *, service_factory=None, journal_root=None):
@@ -137,6 +145,7 @@ class DeepInspectorBridge(QObject):
         self._reset_pending = False
         self._closing = False
         self._close_result = None
+        self.cleanup_required = False
         self._status_timer = QTimer(self)
         self._status_timer.setInterval(500)
         self._status_timer.timeout.connect(self._expire_admin_status)
@@ -144,7 +153,7 @@ class DeepInspectorBridge(QObject):
 
     @property
     def busy(self):
-        return self.worker is not None or self._reset_pending
+        return self.worker is not None or self._reset_pending or self.cleanup_required
 
     @property
     def has_session(self):
@@ -211,8 +220,16 @@ class DeepInspectorBridge(QObject):
         if self.worker is not None:
             self.worker.cancel()
 
+    def retry_cleanup(self):
+        if self.worker is not None or not self.cleanup_required or self._service is None:
+            return False
+        self._reset_pending = True
+        return self._start({"kind": "close"})
+
     def shutdown(self):
         if self._closing:
+            if self.cleanup_required:
+                self.retry_cleanup()
             return
         self._closing = True
         self.generation += 1
@@ -237,6 +254,9 @@ class DeepInspectorBridge(QObject):
         if result.get("generation") != self.generation or self._closing:
             return
         self.admin_active = bool(result.get("admin_active", False))
+        if result.get("retains_service") or (result.get("data") or {}).get("owner_retained"):
+            self.cleanup_required = True
+            self._close_result = result
         self.admin_checked_at = time.strftime("%H:%M:%S") if self.admin_active else ""
         remaining = result.get("diagnostic_session", {}).get("expires_in_seconds", 0)
         self._admin_expires = time.monotonic() + max(0, float(remaining or 0))
@@ -256,15 +276,24 @@ class DeepInspectorBridge(QObject):
             return
         self.worker = None
         self._service = task.service
-        if task.command["generation"] == self.generation:
+        if task.command["generation"] == self.generation and task.command["kind"] != "close":
             self._identity = task.identity
         task.deleteLater()
         if task.command["kind"] == "close":
             self._reset_pending = False
             self.admin_active = False
             self._identity = None
+            self.cleanup_required = self._service is not None
+            if self.cleanup_required:
+                self.busy_changed.emit(True)
+                self.recovery_required.emit(self._close_result or _failure("close", "RECOVERY_UNCONFIRMED"))
+                return
         elif self._reset_pending or self._closing:
             self._start({"kind": "close"})
+            return
+        elif self.cleanup_required:
+            self.busy_changed.emit(True)
+            self.recovery_required.emit(self._close_result or _failure("close", "RECOVERY_UNCONFIRMED"))
             return
         self.busy_changed.emit(False)
         if self._closing:

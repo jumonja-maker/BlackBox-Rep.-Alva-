@@ -24,6 +24,7 @@ class FakeBridge(QObject):
     target_changed = Signal()
     idle = Signal()
     closed = Signal(object)
+    recovery_required = Signal(object)
 
     def __init__(self):
         super().__init__()
@@ -31,6 +32,7 @@ class FakeBridge(QObject):
         self.generation = 1
         self.busy = False
         self.admin_active = False
+        self.cleanup_required = False
         self.calls = []
 
     def submit(self, operation, parameters=None, **kwargs):
@@ -57,6 +59,9 @@ class FakeBridge(QObject):
 
     def cancel(self):
         self.calls.append(("cancel", {}, {}))
+
+    def retry_cleanup(self):
+        self.calls.append(("retry_cleanup", {}, {}))
 
     def shutdown(self):
         self.calls.append(("shutdown", {}, {}))
@@ -101,7 +106,7 @@ class DeepInspectorGuiTests(unittest.TestCase):
         self.assertEqual(self.bridge.calls, [])
 
     def test_required_controls_exist_and_translate_without_commands(self):
-        required = {"capabilities", "before", "after", "compare", "cancel", "end_admin",
+        required = {"capabilities", "before", "after", "compare", "cancel", "end_admin", "retry_cleanup",
                     "processes", "modules", "threads", "thread_stacks", "wait_chains", "handles",
                     "memory_map", "memory_read", "memory.write", "memory.rollback", "network", "disk",
                     "debug.attach", "debug.pause", "debug.continue", "debug.step", "debug.context", "debug.detach",
@@ -155,6 +160,82 @@ class DeepInspectorGuiTests(unittest.TestCase):
         with patch.object(self.panel, "_confirm", return_value=True):
             self.panel._action_buttons["memory.rollback"].click()
         self.assertEqual(self.bridge.calls[-1][1], {"change_id": "change-1"})
+
+    def test_memory_confirmation_cannot_rebind_to_changed_or_reselected_target(self):
+        for return_to_original in (False, True):
+            with self.subTest(return_to_original=return_to_original):
+                self.panel.set_target(234, 1000., "original")
+                self.panel.memory_address.setText("0x20000")
+                self.panel.expected_bytes.setText("00")
+                self.panel.new_bytes.setText("01")
+                def changed_during_confirmation(*_):
+                    self.panel.set_target(235, 2000., "replacement")
+                    if return_to_original:
+                        self.panel.set_target(234, 1000., "original selected again")
+                    return True
+                with patch.object(self.panel, "_confirm", side_effect=changed_during_confirmation):
+                    self.panel._action_buttons["memory.write"].click()
+                self.assertEqual(self.bridge.calls, [])
+                self.assertIn("CANCELLED", self.panel.status_label.text())
+                self.assertIsNone(self.panel._last_request)
+
+    def test_elevation_consent_cannot_authorize_a_replacement_target(self):
+        self.panel._request("modules")
+        self.panel._receive({"operation": "modules", "status": "ADMIN_REQUIRED", "data": {}})
+        count = len(self.bridge.calls)
+        with patch("blackbox_universal.deep_inspector_panel.QMessageBox") as message_box:
+            dialog = message_box.return_value
+            grant = object()
+            dialog.addButton.return_value = grant
+            dialog.clickedButton.return_value = grant
+            dialog.exec.side_effect = lambda: self.panel.set_target(235, 2000., "replacement")
+            self.panel._elevate()
+        self.assertEqual(len(self.bridge.calls), count)
+        self.assertIsNone(self.panel._pending_retry)
+        self.assertIn("CANCELLED", self.panel.status_label.text())
+
+    def test_file_selection_cannot_carry_destination_to_a_new_target(self):
+        for action in (self.panel._record_etw, self.panel._export):
+            with self.subTest(action=action.__name__):
+                self.panel.set_target(234, 1000., "original")
+                def changed_during_picker(*_):
+                    self.panel.set_target(235, 2000., "replacement")
+                    return "chosen-for-original.etl", ""
+                with patch("blackbox_universal.deep_inspector_panel.QFileDialog.getSaveFileName", side_effect=changed_during_picker), \
+                     patch.object(self.panel, "_confirm") as confirm:
+                    action()
+                confirm.assert_not_called()
+                self.assertEqual(self.bridge.calls, [])
+                self.assertIn("CANCELLED", self.panel.status_label.text())
+
+    def test_multistep_dialog_chains_stop_after_target_changes(self):
+        def changed_during_type(*_):
+            self.panel.set_target(235, 2000., "replacement")
+            return "Minidump", True
+        with patch("blackbox_universal.deep_inspector_panel.QInputDialog.getItem", side_effect=changed_during_type), \
+             patch("blackbox_universal.deep_inspector_panel.QFileDialog.getSaveFileName") as save:
+            self.panel._dump()
+        save.assert_not_called()
+        self.panel.set_target(234, 1000., "original")
+        def changed_during_pe(*_):
+            self.panel.set_target(235, 2000., "replacement")
+            return "original.exe", ""
+        with patch("blackbox_universal.deep_inspector_panel.QFileDialog.getOpenFileName", side_effect=changed_during_pe) as choose:
+            self.panel._symbols()
+        self.assertEqual(choose.call_count, 1)
+        self.assertEqual(self.bridge.calls, [])
+
+    def test_trace_instance_picker_discards_old_request_after_target_change(self):
+        self.panel._trace_request = {"index_path": "original.sqlite3", "limit": 200}
+        def changed_during_instance(*args):
+            self.panel.set_target(235, 2000., "replacement")
+            return args[3][0], True
+        with patch("blackbox_universal.deep_inspector_panel.QInputDialog.getItem", side_effect=changed_during_instance):
+            self.panel._choose_trace_instance({"candidate_instances": [
+                {"process_instance": 8, "pid": 234, "first_ms": 0, "last_ms": 10}]})
+        self.assertIsNone(self.panel._trace_request)
+        self.assertEqual(self.bridge.calls, [])
+        self.assertIn("CANCELLED", self.panel.status_label.text())
 
     def test_thread_selection_carries_lifetime_not_tid_alone(self):
         result = {"operation": "threads", "status": "COMPLETED", "data": {
@@ -328,6 +409,17 @@ class DeepInspectorGuiTests(unittest.TestCase):
         self.assertTrue(self.panel.cancel_button.isEnabled())
         self.panel.cancel_button.click()
         self.assertEqual(self.bridge.calls[-1][0], "cancel")
+
+    def test_retained_owner_blocks_new_actions_and_exposes_cleanup_retry(self):
+        self.bridge.busy = True
+        self.bridge.cleanup_required = True
+        self.bridge.busy_changed.emit(True)
+        self.assertFalse(self.panel._action_buttons["memory.write"].isEnabled())
+        self.assertFalse(self.panel._action_buttons["debug.attach"].isEnabled())
+        self.assertFalse(self.panel.cancel_button.isEnabled())
+        self.assertTrue(self.panel._action_buttons["retry_cleanup"].isEnabled())
+        self.panel._action_buttons["retry_cleanup"].click()
+        self.assertEqual(self.bridge.calls[-1][0], "retry_cleanup")
 
     def test_uac_cancel_never_retries_the_requested_operation(self):
         self.panel._request("modules")
@@ -602,11 +694,52 @@ class DeepInspectorBridgeTests(unittest.TestCase):
             bridge.submit("modules")
             self.wait(lambda: bridge.worker is None)
         closed = []
+        recovery = []
         bridge.closed.connect(closed.append)
+        bridge.recovery_required.connect(recovery.append)
         bridge.shutdown()
+        self.wait(lambda: len(recovery) == 1)
+        self.assertEqual(closed, [])
+        self.assertIs(bridge._service, service)
+        self.assertTrue(bridge.cleanup_required)
+        self.assertEqual(recovery[0]["status"], "RECOVERY_UNCONFIRMED")
+        self.assertIn("CONTROLLED_CLEANUP_FAILURE", recovery[0]["error"])
+        service.close_failure = False
+        self.assertTrue(bridge.retry_cleanup())
         self.wait(lambda: len(closed) == 1)
-        self.assertEqual(closed[0]["status"], "RECOVERY_UNCONFIRMED")
-        self.assertIn("CONTROLLED_CLEANUP_FAILURE", closed[0]["error"])
+        self.assertEqual(closed[0]["status"], "COMPLETED")
+        self.assertFalse(bridge.has_session)
+
+    def test_retained_owner_keeps_old_service_on_target_switch_until_cleanup_succeeds(self):
+        service = _FakeService()
+        calls = []
+        def retain_then_release():
+            calls.append("close")
+            return ({"status": "RECOVERY_UNCONFIRMED", "data": {
+                "owner_retained": True, "retry_cleanup_required": True}}
+                if len(calls) == 1 else {"status": "COMPLETED", "data": {"cleanup": "VERIFIED"}})
+        service.close = retain_then_release
+        bridge = DeepInspectorBridge(service_factory=lambda: service)
+        bridge.set_target(123, 1000.)
+        with patch("psutil.Process") as process:
+            process.return_value.create_time.return_value = 1000.
+            bridge.submit("modules")
+            self.wait(lambda: bridge.worker is None)
+        recovery = []
+        bridge.recovery_required.connect(recovery.append)
+        bridge.set_target(456, 2000.)
+        self.wait(lambda: len(recovery) == 1)
+        self.assertIs(bridge._service, service)
+        self.assertTrue(bridge.busy)
+        self.assertFalse(bridge.submit("memory.write", {"address": 1}, confirmed=True))
+        self.assertEqual(len(service.executed), 1)
+        self.assertEqual(bridge.target, (456, 2000.))
+        self.assertTrue(bridge.retry_cleanup())
+        self.wait(lambda: bridge.worker is None and not bridge.busy)
+        self.assertIsNone(bridge._service)
+        self.assertFalse(bridge.cleanup_required)
+        self.assertEqual(calls, ["close", "close"])
+        bridge.shutdown()
 
     def test_expired_cached_admin_status_does_not_remain_active(self):
         bridge = DeepInspectorBridge(service_factory=lambda: _FakeService())
@@ -621,6 +754,35 @@ class DeepOverviewIntegrationTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
+
+    def test_window_close_is_deferred_while_diagnostic_owner_is_retained(self):
+        from blackbox_universal.window import UniversalWindow
+        window = UniversalWindow(allow_update_check=False)
+        window._timer.stop()
+        window.show()
+        self.app.processEvents()
+        bridge = window.deep_inspector_panel.bridge
+        bridge._service = object()
+        bridge._closing = True
+        bridge.cleanup_required = True
+        try:
+            with patch.object(bridge, "retry_cleanup", return_value=False) as retry:
+                self.assertFalse(window.close())
+            retry.assert_called_once()
+            self.assertTrue(window.isVisible())
+            self.assertTrue(window._pending_close)
+            with patch("blackbox_universal.window.QMessageBox.warning") as warning:
+                window._deep_inspector_recovery_required({"status": "RECOVERY_UNCONFIRMED", "data": {"owner_retained": True}})
+            warning.assert_called_once()
+            self.assertFalse(window._deep_close_complete)
+            self.assertTrue(window.deep_inspector_toggle.isChecked())
+            self.assertTrue(window.isVisible())
+        finally:
+            bridge._service = None
+            bridge.cleanup_required = False
+            bridge._closing = False
+            from qt_test_support import close_and_drain
+            close_and_drain(window, self.app)
 
     def test_about_uses_package_version_and_keeps_deep_panel_lazy(self):
         from blackbox_universal import __version__

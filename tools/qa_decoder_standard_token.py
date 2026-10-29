@@ -15,6 +15,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -212,6 +213,142 @@ def token_integrity(token=None):
             kernel.LocalFree(string)
         if owned:
             kernel.CloseHandle(owned)
+
+
+def current_medium_startup_diagnostics():
+    """Observe the current token and owned handle creation without changing ACLs.
+
+    This is failure evidence for the hosted medium-token worker, not a substitute
+    for the real OwnedProcess/native-probe acceptance. Never raise over that
+    worker's original exception or disclose an environment block/token contents.
+    """
+    evidence = {"scope": "CURRENT_TOKEN_DEFAULT_DACL_AND_OWNED_HANDLE_DIAGNOSTICS",
+                "pid": os.getpid(), "acl_changes": False, "stages": {}, "cleanup_errors": []}
+    if os.name != "nt":
+        evidence["status"] = "UNSUPPORTED_PLATFORM"
+        return evidence
+
+    def failure(stage, error):
+        evidence["stages"][stage] = {"status": "FAILED", "error": type(error).__name__,
+                                     "reason": str(error)[:1000],
+                                     "winerror": getattr(error, "winerror", None),
+                                     "errno": getattr(error, "errno", None)}
+
+    try:
+        kernel = C.WinDLL("kernel32", use_last_error=True, winmode=0x800)
+        adv = C.WinDLL("advapi32", use_last_error=True, winmode=0x800)
+        kernel.GetCurrentProcess.restype = W.HANDLE
+        kernel.CloseHandle.argtypes, kernel.CloseHandle.restype = [W.HANDLE], W.BOOL
+        kernel.LocalFree.argtypes, kernel.LocalFree.restype = [C.c_void_p], C.c_void_p
+        kernel.CreatePipe.argtypes = [C.POINTER(W.HANDLE), C.POINTER(W.HANDLE), C.c_void_p, W.DWORD]
+        kernel.CreatePipe.restype = W.BOOL
+        kernel.DuplicateHandle.argtypes = [W.HANDLE, W.HANDLE, W.HANDLE, C.POINTER(W.HANDLE),
+                                          W.DWORD, W.BOOL, W.DWORD]
+        kernel.DuplicateHandle.restype = W.BOOL
+        kernel.GetFileType.argtypes, kernel.GetFileType.restype = [W.HANDLE], W.DWORD
+        adv.OpenProcessToken.argtypes = [W.HANDLE, W.DWORD, C.POINTER(W.HANDLE)]
+        adv.OpenProcessToken.restype = W.BOOL
+        adv.GetTokenInformation.argtypes = [W.HANDLE, C.c_int, C.c_void_p, W.DWORD, C.POINTER(W.DWORD)]
+        adv.GetTokenInformation.restype = W.BOOL
+        adv.InitializeSecurityDescriptor.argtypes = [C.c_void_p, W.DWORD]
+        adv.InitializeSecurityDescriptor.restype = W.BOOL
+        adv.SetSecurityDescriptorDacl.argtypes = [C.c_void_p, W.BOOL, C.c_void_p, W.BOOL]
+        adv.SetSecurityDescriptorDacl.restype = W.BOOL
+        adv.ConvertSecurityDescriptorToStringSecurityDescriptorW.argtypes = [
+            C.c_void_p, W.DWORD, W.DWORD, C.POINTER(C.c_void_p), C.POINTER(W.DWORD)]
+        adv.ConvertSecurityDescriptorToStringSecurityDescriptorW.restype = W.BOOL
+    except Exception as error:
+        failure("bind_native_diagnostics", error)
+        return evidence
+
+    def close(handle, label):
+        if handle and not kernel.CloseHandle(handle):
+            evidence["cleanup_errors"].append({"resource": label, "winerror": C.get_last_error()})
+
+    token, sddl = W.HANDLE(), C.c_void_p()
+    token_phase = "OpenProcessToken(TOKEN_QUERY)"
+    try:
+        if not adv.OpenProcessToken(kernel.GetCurrentProcess(), 0x8, C.byref(token)):
+            raise C.WinError(C.get_last_error())
+        token_phase = "GetTokenInformation(TokenDefaultDacl)"
+        required = W.DWORD()
+        adv.GetTokenInformation(token, 6, None, 0, C.byref(required))  # TokenDefaultDacl.
+        if not C.sizeof(C.c_void_p) <= required.value <= 65536:
+            raise ValueError("TOKEN_DEFAULT_DACL_SIZE_INVALID")
+        buffer = C.create_string_buffer(required.value)
+        if not adv.GetTokenInformation(token, 6, buffer, len(buffer), C.byref(required)):
+            raise C.WinError(C.get_last_error())
+        dacl = C.c_void_p.from_buffer(buffer).value
+        if dacl:
+            first, end = C.addressof(buffer), C.addressof(buffer) + len(buffer)
+            if not first <= dacl <= end - 8:
+                raise ValueError("TOKEN_DEFAULT_DACL_POINTER_OUT_OF_BOUNDS")
+            acl_size = C.c_uint16.from_address(dacl + 2).value
+            if not 8 <= acl_size <= end - dacl:
+                raise ValueError("TOKEN_DEFAULT_DACL_CONTENT_OUT_OF_BOUNDS")
+        class SecurityDescriptor(C.Structure):
+            _fields_ = [("revision", W.BYTE), ("reserved", W.BYTE), ("control", W.WORD),
+                        ("owner", C.c_void_p), ("group", C.c_void_p),
+                        ("sacl", C.c_void_p), ("dacl", C.c_void_p)]
+        descriptor = SecurityDescriptor()
+        length = W.DWORD()
+        token_phase = "Convert_observed_DACL_to_SDDL_in_local_memory"
+        if (not adv.InitializeSecurityDescriptor(C.byref(descriptor), 1) or
+                not adv.SetSecurityDescriptorDacl(C.byref(descriptor), True, dacl, False) or
+                not adv.ConvertSecurityDescriptorToStringSecurityDescriptorW(
+                    C.byref(descriptor), 1, 4, C.byref(sddl), C.byref(length))):
+            raise C.WinError(C.get_last_error())
+        if not sddl.value or not 1 <= length.value <= 65536:
+            raise ValueError("TOKEN_DEFAULT_DACL_SDDL_SIZE_INVALID")
+        evidence["stages"]["token_default_dacl"] = {
+            "status": "OBSERVED", "sddl_dacl": C.wstring_at(sddl.value, length.value).rstrip("\0"),
+            "source": "GetTokenInformation(TokenDefaultDacl)", "null_dacl": dacl is None}
+    except Exception as error:
+        failure("token_default_dacl", error)
+        evidence["stages"]["token_default_dacl"]["failed_stage"] = token_phase
+    finally:
+        if sddl:
+            kernel.LocalFree(sddl)
+        close(token, "query_token")
+
+    read_handle, write_handle = W.HANDLE(), W.HANDLE()
+    pipe_created = False
+    try:
+        pipe_created = bool(kernel.CreatePipe(C.byref(read_handle), C.byref(write_handle), None, 0))
+        if not pipe_created:
+            raise C.WinError(C.get_last_error())
+        evidence["stages"]["create_pipe_default_security"] = {
+            "status": "SUCCEEDED", "read_file_type": kernel.GetFileType(read_handle),
+            "write_file_type": kernel.GetFileType(write_handle)}
+    except Exception as error:
+        failure("create_pipe_default_security", error)
+    finally:
+        # CreatePipe documents its outputs as indeterminate on failure.
+        if pipe_created:
+            close(read_handle, "anonymous_pipe_read")
+            close(write_handle, "anonymous_pipe_write")
+
+    duplicate = W.HANDLE()
+    duplicate_phase = "Create_owned_temporary_file"
+    try:
+        import msvcrt
+        with tempfile.TemporaryFile(mode="w+b") as stream:
+            source = msvcrt.get_osfhandle(stream.fileno())
+            duplicate_phase = "DuplicateHandle_owned_file_via_current_process"
+            if not kernel.DuplicateHandle(kernel.GetCurrentProcess(), source, kernel.GetCurrentProcess(),
+                                          C.byref(duplicate), 0, False, 2):
+                raise C.WinError(C.get_last_error())
+            evidence["stages"]["duplicate_owned_temporary_file"] = {
+                "status": "SUCCEEDED", "duplicate_file_type": kernel.GetFileType(duplicate),
+                "source_and_target_process": "GetCurrentProcess", "access": "DUPLICATE_SAME_ACCESS"}
+            duplicate_phase = "Close_owned_temporary_file"
+    except Exception as error:
+        failure("duplicate_owned_temporary_file", error)
+        evidence["stages"]["duplicate_owned_temporary_file"]["failed_stage"] = duplicate_phase
+    finally:
+        close(duplicate, "temporary_file_duplicate")
+    evidence["status"] = "DIAGNOSTICS_RECORDED_NOT_APPLICATION_ACCEPTANCE"
+    return evidence
 
 
 def restricted_child(args, *, cwd, timeout_seconds=210, medium_integrity=False):

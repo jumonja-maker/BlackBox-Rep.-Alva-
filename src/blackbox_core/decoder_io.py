@@ -8,9 +8,13 @@ from .decoder_cpu import ETW_PROVIDER_GUID
 
 IO_SCHEMA = "blackbox.trace-io/1"
 _NETWORK_PARSERS = {
-    "TRACEEVENT_TcpIpTraceData", "TRACEEVENT_TcpIpSendTraceData",
-    "TRACEEVENT_TcpIpV6TraceData", "TRACEEVENT_TcpIpV6SendTraceData",
-    "TRACEEVENT_UdpIpTraceData",
+    "TRACEEVENT_TcpIpTraceData": ("TCP", "IPv4", {"receive"}),
+    "TRACEEVENT_TcpIpSendTraceData": ("TCP", "IPv4", {"send"}),
+    "TRACEEVENT_TcpIpV6TraceData": ("TCP", "IPv6", {"receive"}),
+    "TRACEEVENT_TcpIpV6SendTraceData": ("TCP", "IPv6", {"send"}),
+    "TRACEEVENT_UdpIpTraceData": ("UDP", "IPv4", {"send", "receive"}),
+    # The spelling is the actual public type in pinned TraceEvent 4.0.0.
+    "TRACEEVENT_UpdIpV6TraceData": ("UDP", "IPv6", {"send", "receive"}),
 }
 
 
@@ -67,6 +71,10 @@ def validate_io_observation(row):
                  _int(value["source_port"], 0, 65535) and _int(value["destination_port"], 0, 65535) and
                  value["byte_count_scope"] == "THIS_RECORDED_KERNEL_EVENT_NOT_PROCESS_OR_LINK_TOTAL" and
                  value["packet_contents"] == "NOT_COLLECTED")
+        protocol, address_family, operations = _NETWORK_PARSERS[value["parser"]]
+        _require(value["protocol"] == protocol and value["family"] == address_family and
+                 value["operation"] in operations and
+                 (address_family != "IPv6" or row["version"] == 2))
         family = "TcpIp" if value["protocol"] == "TCP" else "UdpIp"
         action = "Send" if value["operation"] == "send" else "Recv"
         suffix = "IPV6" if value["family"] == "IPv6" else ""

@@ -13,7 +13,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 from blackbox_core.deep_contracts import ActionRequest, ProcessIdentity, canonical_operation, describe_actions
-from blackbox_core.deep_helper import DiagnosticActionEngine, validate_parameters
+from blackbox_core.deep_helper import DiagnosticActionEngine, validate_parameters, _close_after_cancel
 from blackbox_core.deep_elevation import ElevationCancelled
 from blackbox_core.deep_ipc import IPCError, PipeServer, connect_pipe
 from blackbox_core.deep_journal import EvidenceJournal
@@ -191,6 +191,38 @@ class DeepEngineBoundaryTests(unittest.TestCase):
             self.engine.execute(request)
         probe.assert_not_called()
 
+    def test_engine_keeps_inspector_and_owner_for_retryable_debug_cleanup(self):
+        self.engine.debug = Mock()
+        self.engine.debug.close.side_effect = [
+            {"status": "RECOVERY_UNCONFIRMED", "data": {"owner_retained": True, "retry_cleanup_required": True}},
+            {"status": "COMPLETED", "data": {"state": "DETACHED"}},
+        ]
+        retained = self.engine.close()
+        self.assertTrue(retained["data"]["owner_retained"])
+        self.assertTrue(retained["retains_service"])
+        self.inspector.close.assert_not_called()
+        denied = self.engine.execute(ActionRequest("dump", self.identity, {}, True), file_handle=123)
+        self.assertEqual(denied["status"], "RECOVERY_UNCONFIRMED")
+        self.assertEqual(self.engine.close()["status"], "COMPLETED")
+        self.inspector.close.assert_called_once()
+
+    def test_active_operation_past_cancel_grace_retains_owner_instead_of_closing_engine(self):
+        engine, active = Mock(), Mock()
+        active.is_alive.return_value = True
+        cancelled = threading.Event()
+        response = _close_after_cancel(engine, active, cancelled)
+        self.assertTrue(cancelled.is_set())
+        active.join.assert_called_once_with(timeout=5)
+        engine.close.assert_not_called()
+        self.assertEqual(response["status"], "RECOVERY_UNCONFIRMED")
+        self.assertTrue(response["retains_service"])
+        self.assertTrue(response["data"]["owner_retained"])
+        self.assertTrue(response["data"]["operation_cancellation_pending"])
+        active.is_alive.return_value = False
+        engine.close.return_value = {"status": "COMPLETED"}
+        self.assertEqual(_close_after_cancel(engine, active, cancelled)["status"], "COMPLETED")
+        engine.close.assert_called_once()
+
 
 class DeepServiceIntentTests(unittest.TestCase):
     def setUp(self):
@@ -341,6 +373,103 @@ class DeepServiceIntentTests(unittest.TestCase):
         self.assertEqual(len(sent), 1)
         self.assertEqual(answer["status"], "RECOVERY_UNCONFIRMED")
         self.assertIn("RESULT_JOURNAL_COMMIT_FAILED", answer["error"])
+
+    def _retained_helper_fixture(self, replies):
+        helper = Mock(pid=456)
+        helper.alive.return_value = True
+        helper.terminate.side_effect = lambda: setattr(helper.alive, "return_value", False)
+        channel = Mock()
+        channel.receive.side_effect = replies
+        self.service.helper = helper
+        self.service._channel = channel
+        self.service._target = self.identity
+        self.service._scope = frozenset({"memory.write", "snapshot", "debug.detach"})
+        self.service._expires = time.monotonic() + 60
+        self.service._permission = "ADMINISTRATOR"
+        self.service._interventions_started = True
+        return helper, channel
+
+    def test_lost_intervention_ack_is_unconfirmed_even_when_live_helper_cleans_up(self):
+        helper, channel = self._retained_helper_fixture([
+            OSError("reply pipe failed after native write"),
+            {"kind": "closed", "result": {"status": "COMPLETED", "data": {}}},
+        ])
+        fake_os = types.SimpleNamespace(name="nt", path=os.path, getpid=os.getpid)
+        with patch("blackbox_core.deep_service.os", fake_os):
+            answer = self.service.execute(ActionRequest("memory.write", self.identity,
+                {"address": 4096, "expected_hex": "01", "value_hex": "02"}, True))
+        self.assertEqual(answer["status"], "RECOVERY_UNCONFIRMED")
+        self.assertIn("ACKNOWLEDGEMENT_LOST", answer["error"])
+        self.assertEqual(answer["data"]["cleanup"]["status"], "COMPLETED")
+        self.assertEqual([call.args[0]["kind"] for call in channel.send.call_args_list], ["execute", "close"])
+        self.assertEqual(self.service.journal.timeline()[0]["status"], "RECOVERY_UNCONFIRMED")
+        helper.terminate.assert_called_once()
+
+    def test_unsafe_cleanup_retains_owner_and_original_lease_until_explicit_retry(self):
+        helper, channel = self._retained_helper_fixture([
+            {"kind": "result", "request_id": "late-action", "result": {"status": "COMPLETED", "data": {"payload": "private"}}},
+            {"kind": "closed", "result": {"status": "RECOVERY_UNCONFIRMED", "data": {
+                "owner_retained": True, "retry_cleanup_required": True}}},
+            {"kind": "closed", "result": {"status": "COMPLETED", "data": {}}},
+        ])
+        expires = self.service._expires
+        failed = self.service.close()
+        self.assertEqual(failed["status"], "RECOVERY_UNCONFIRMED")
+        self.assertTrue(failed["data"]["owner_retained"])
+        self.assertTrue(failed["retains_service"])
+        self.assertNotIn("private", json.dumps(failed))
+        self.assertIs(self.service.helper, helper)
+        self.assertIs(self.service._channel, channel)
+        self.assertEqual(self.service._expires, expires)
+        helper.terminate.assert_not_called()
+        denied = self.service._ensure_session(ActionRequest("snapshot", self.identity))
+        self.assertEqual(denied["status"], "RECOVERY_UNCONFIRMED")
+        self.assertIsNone(self.service._ensure_session(ActionRequest("debug.detach", self.identity, confirmed=True)))
+        succeeded = self.service.close()
+        self.assertEqual(succeeded["status"], "COMPLETED")
+        self.assertIsNone(self.service.helper)
+        helper.terminate.assert_called_once()
+
+    def test_retained_owner_has_finite_expiry_grace_and_failed_stop_keeps_identity(self):
+        helper, channel = self._retained_helper_fixture([])
+        self.service._expires = 100
+        request = ActionRequest("snapshot", self.identity)
+        with patch("blackbox_core.deep_service.time", types.SimpleNamespace(monotonic=lambda: 110)):
+            grace = self.service._ensure_session(request)
+        self.assertTrue(grace["data"]["owner_retained"])
+        helper.terminate.assert_not_called()
+        helper.terminate.side_effect = OSError("termination denied")
+        with patch("blackbox_core.deep_service.time", types.SimpleNamespace(monotonic=lambda: 131)):
+            failure = self.service._ensure_session(request)
+        self.assertEqual(failure["status"], "RECOVERY_UNCONFIRMED")
+        self.assertIs(self.service.helper, helper)
+        self.assertEqual(self.service.helper_pid, 456)
+        helper.close_handle.assert_not_called()
+
+    def test_result_journal_failure_preserves_retained_owner_for_gui_retry(self):
+        helper, channel = self._retained_helper_fixture([])
+        def receive(**kwargs):
+            request_id = channel.send.call_args.args[0]["request_id"]
+            return {"kind": "result", "request_id": request_id, "result": {
+                "status": "RECOVERY_UNCONFIRMED", "data": {
+                    "owner_retained": True, "retry_cleanup_required": True}}}
+        channel.receive.side_effect = receive
+        append = self.service.journal.append
+        def journal(record):
+            if record.get("phase") == "RESULT":
+                raise OSError("result storage unavailable")
+            return append(record)
+        fake_os = types.SimpleNamespace(name="nt", path=os.path, getpid=os.getpid)
+        with patch("blackbox_core.deep_service.os", fake_os), \
+                patch.object(self.service.journal, "append", side_effect=journal):
+            answer = self.service.execute(ActionRequest("debug.detach", self.identity, {}, True))
+        self.assertEqual(answer["status"], "RECOVERY_UNCONFIRMED")
+        self.assertIn("RESULT_JOURNAL_COMMIT_FAILED", answer["error"])
+        self.assertTrue(answer["data"]["owner_retained"])
+        self.assertTrue(answer["data"]["retry_cleanup_required"])
+        self.assertTrue(answer["retains_service"])
+        self.assertIs(self.service.helper, helper)
+        helper.terminate.assert_not_called()
 
 
 @unittest.skipUnless(os.name == "nt", "Actual Windows named-pipe peer identity requires Windows")

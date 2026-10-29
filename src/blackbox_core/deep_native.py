@@ -511,11 +511,15 @@ class ProcessInspector:
         selected_created = params.get("thread_created_100ns", params.get("created_100ns"))
         if selected_created is not None:
             _integer(selected_created, "thread_created_100ns", 1)
-        threads = self._threads({"limit": 2048}, deadline, cancel)["rows"]
+        inventory = self._threads({"limit": 2048}, deadline, cancel)
+        threads = inventory["rows"]
+        inventory_complete = not inventory.get("truncated", False)
         if selected is not None:
             _integer(selected, "tid", 1, 0xFFFFFFFF)
             threads = [r for r in threads if r["tid"] == selected]
             if not threads:
+                if not inventory_complete:
+                    raise NativeError("INCOMPLETE_EVIDENCE", "SELECTED_THREAD_NOT_OBSERVED_IN_PARTIAL_INVENTORY")
                 raise NativeError("PROCESS_CHANGED", "THREAD_NOT_OWNED_BY_TARGET")
             if selected_created is not None:
                 if threads[0]["created_100ns"] is None:
@@ -546,11 +550,18 @@ class ProcessInspector:
                     rows.append(result)
                 finally:
                     kernel.close(h)
-        complete = len(threads) <= limit and all(r.get("status") == "OK" for r in rows)
+        unknown_omissions = selected is None and not inventory_complete
+        complete = not unknown_omissions and len(threads) <= limit and all(r.get("status") == "OK" for r in rows)
+        limitations = ["SUPPORTED_WCT_SYNCHRONIZATION_ONLY",
+                       "CYCLE_REPORTED_IS_A_DYNAMIC_OS_OBSERVATION_NOT_UNIVERSAL_DEADLOCK_PROOF"]
+        if unknown_omissions:
+            limitations.append("THREAD_ENUMERATION_INCOMPLETE_OMITTED_COUNT_IS_LOWER_BOUND")
         return {"rows": rows, "omitted": max(0, len(threads) - limit),
+                "omitted_is_lower_bound": unknown_omissions,
+                "thread_inventory_complete": inventory_complete,
                 "_source": "WIN32_WAIT_CHAIN_TRAVERSAL",
                 "_status": "COMPLETED" if complete else "INCOMPLETE_EVIDENCE",
-                "_limitations": ["SUPPORTED_WCT_SYNCHRONIZATION_ONLY", "CYCLE_REPORTED_IS_A_DYNAMIC_OS_OBSERVATION_NOT_UNIVERSAL_DEADLOCK_PROOF"]}
+                "_limitations": limitations}
 
     def _network(self, params, deadline, cancel):
         import psutil

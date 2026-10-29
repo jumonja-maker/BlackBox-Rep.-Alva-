@@ -1,5 +1,6 @@
 """Explicit, cancellable offline decoder analysis. No recording or network."""
 import json
+from pathlib import Path
 from html import escape
 from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtWidgets import (QDialog, QVBoxLayout, QLabel, QTreeWidget,
@@ -9,6 +10,11 @@ from threading import Event
 
 from blackbox_core.decoder_calltree import build_calltree
 from blackbox_core.decoder_native_symbols import resolve_event_stack
+
+
+def _dump_stamp(path):
+    info = Path(path).stat()
+    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
 
 
 class DecoderAnalysisWorker(QThread):
@@ -33,10 +39,23 @@ class DecoderAnalysisWorker(QThread):
                 result = assess_session_alignment(**self.arguments, cancel=self.cancel_event)
             elif self.kind == 'minidump':
                 from blackbox_core.deep_dump import inspect_dump
+                stamp = _dump_stamp(self.arguments['path'])
                 packet = inspect_dump(**self.arguments, cancel_event=self.cancel_event)
+                if _dump_stamp(self.arguments['path']) != stamp:
+                    raise ValueError('DUMP_CHANGED_DURING_REVIEW')
                 result = {**packet['data'], 'status': packet['status'],
                           'limitations': packet.get('limitations', []),
-                          'next_action': packet.get('next_action')}
+                          'next_action': packet.get('next_action'),
+                          '_dump_file_identity': stamp, '_dump_path': str(self.arguments['path'])}
+            elif self.kind == 'minidump_memory':
+                from blackbox_core.deep_dump import read_dump_memory
+                arguments = dict(self.arguments)
+                expected = tuple(arguments.pop('expected_identity'))
+                if _dump_stamp(arguments['path']) != expected:
+                    raise ValueError('DUMP_CHANGED_SINCE_METADATA_INSPECTION')
+                result = read_dump_memory(**arguments, cancel_event=self.cancel_event)
+                if _dump_stamp(arguments['path']) != expected:
+                    raise ValueError('DUMP_CHANGED_SINCE_METADATA_INSPECTION')
             else:
                 raise ValueError('UNKNOWN_DECODER_ANALYSIS')
             self.result_ready.emit(result, '')

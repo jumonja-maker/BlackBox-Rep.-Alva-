@@ -39,6 +39,7 @@ class DiagnosticActionEngine:
         self.recovery_handle = recovery_handle
         self.interventions_started = False
         self.profile_recovery = []
+        self.retained_cleanup = None
         self.controller_pid = controller_pid
 
     def execute(self, request: ActionRequest, *, cancel_event=None, file_handle=None) -> dict:
@@ -48,6 +49,10 @@ class DiagnosticActionEngine:
         if request.operation not in self.operations:
             return result(request.operation, "ACCESS_DENIED", error="OPERATION_OUTSIDE_APPROVED_SESSION_SCOPE",
                           next_action="END_SESSION_AND_APPROVE_A_NEW_OPERATION_SCOPE")
+        if self.retained_cleanup is not None and request.operation not in (
+                "debug.detach", "debug.context", "debug.breakpoints", "capabilities"):
+            return result(request.operation, "RECOVERY_UNCONFIRMED", error="OWNED_DEBUG_CONTEXT_REQUIRES_CLEANUP",
+                          data={"owner_retained": True, "retry_cleanup_required": True})
         validate_parameters(request.parameters)
         spec = DEEP_ACTIONS[request.operation]
         if spec.confirmation_required and not request.confirmed:
@@ -128,7 +133,12 @@ class DiagnosticActionEngine:
             parameters["_confirmed"] = request.confirmed
             if spec.mode == "INTERVENE":
                 self.interventions_started = True
-            return self.debug.execute(request.operation, parameters, deadline=deadline, cancel_event=cancel_event)
+            answer = self.debug.execute(request.operation, parameters, deadline=deadline, cancel_event=cancel_event)
+            if answer.get("data", {}).get("owner_retained"):
+                self.retained_cleanup = answer
+            elif request.operation == "debug.detach" and answer.get("status") == "COMPLETED":
+                self.retained_cleanup = None
+            return answer
         return self.inspector.execute(request.operation, parameters, deadline=deadline, cancel_event=cancel_event)
 
     def close(self) -> dict:
@@ -141,6 +151,13 @@ class DiagnosticActionEngine:
                     errors.append(cleanup)
             except Exception as exc:
                 errors.append({"error": str(exc)[:1000]})
+        retained = bool(isinstance(cleanup, dict) and cleanup.get("data", {}).get("owner_retained"))
+        if retained:
+            self.retained_cleanup = cleanup
+            return result("session.close", "RECOVERY_UNCONFIRMED", retains_service=True,
+                          data={"debug_cleanup": cleanup, "errors": errors,
+                                "owner_retained": True, "retry_cleanup_required": True},
+                          limitations=["Cleanup is retryable only within the original helper lease; unverified held debug context must not be silently resumed."])
         try:
             self.inspector.close()
         except Exception as exc:
@@ -148,6 +165,21 @@ class DiagnosticActionEngine:
         return result("session.close", "RECOVERY_UNCONFIRMED" if errors else "COMPLETED",
                       data={"debug_cleanup": cleanup, "errors": errors},
                       limitations=["Cleanup covers only actions owned by this diagnostic session."])
+
+
+def _close_after_cancel(engine, active, active_cancel):
+    """A live native worker still owns its state even after cancellation grace."""
+    if active_cancel is not None:
+        active_cancel.set()
+    if active is not None:
+        active.join(timeout=5)
+    if active is not None and active.is_alive():
+        return result("session.close", "RECOVERY_UNCONFIRMED", retains_service=True,
+                      error="OPERATION_DID_NOT_STOP_BEFORE_SESSION_CLOSE",
+                      data={"owner_retained": True, "retry_cleanup_required": True,
+                            "operation_cancellation_pending": True},
+                      limitations=["The active native owner is retained only within the original helper lease; retry cleanup after cancellation is acknowledged."])
+    return engine.close()
 
 
 def _parent_handle(parent: ProcessIdentity):
@@ -291,14 +323,14 @@ def run_helper(pipe_name: str, nonce: str, parent: ProcessIdentity) -> int:
                     active_cancel.set()
                 continue
             if kind == "close":
-                if active_cancel is not None:
-                    active_cancel.set()
-                if active is not None:
-                    active.join(timeout=5)
-                cleanup = engine.close() if active is None or not active.is_alive() else result(
-                    "session.close", "RECOVERY_UNCONFIRMED", error="OPERATION_DID_NOT_STOP_BEFORE_SESSION_CLOSE")
+                cleanup = _close_after_cancel(engine, active, active_cancel)
                 with send_lock:
                     channel.send({"kind": "closed", "result": cleanup}, deadline=time.monotonic() + 5)
+                if cleanup.get("data", {}).get("owner_retained"):
+                    # Keep the owning debug thread/event for an explicit retry.
+                    # Do not renew expires: parent death or original TTL is the
+                    # finite, explicitly unconfirmed last-resort boundary.
+                    continue
                 engine = None if cleanup["status"] == "COMPLETED" else engine
                 break
             if kind == "execute" and active is not None:

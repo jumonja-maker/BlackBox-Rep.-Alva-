@@ -58,6 +58,9 @@ class DecoderPanel(QWidget):
         self.analysis_report = None
         self.alignment_report = None
         self._analysis_kind = None
+        self._dump_path = None
+        self._dump_identity = None
+        self._dump_generation = 0
         layout = QVBoxLayout(self)
         layout.setContentsMargins(18, 12, 18, 12)
         self.notice = QLabel()
@@ -80,6 +83,35 @@ class DecoderPanel(QWidget):
         self.status = QLabel()
         self.status.setWordWrap(True)
         layout.addWidget(self.status)
+        self.dump_memory_notice = QLabel()
+        self.dump_memory_notice.setTextFormat(Qt.TextFormat.PlainText)
+        self.dump_memory_notice.setWordWrap(True)
+        layout.addWidget(self.dump_memory_notice)
+        memory_controls = QGridLayout()
+        self.dump_address_label = QLabel()
+        self.dump_address = QLineEdit()
+        self.dump_address.setObjectName("decoderDumpMemoryAddress")
+        self.dump_address.setMaxLength(22)
+        self.dump_size_label = QLabel()
+        self.dump_size = QSpinBox()
+        self.dump_size.setObjectName("decoderDumpMemorySize")
+        self.dump_size.setRange(1, 4096)
+        self.dump_size.setValue(64)
+        self.dump_memory_button = QPushButton()
+        self.dump_memory_button.setObjectName("decoderReadDumpMemory")
+        self.dump_memory_button.clicked.connect(self.read_saved_dump_memory)
+        memory_controls.addWidget(self.dump_address_label, 0, 0)
+        memory_controls.addWidget(self.dump_address, 0, 1)
+        memory_controls.addWidget(self.dump_size_label, 1, 0)
+        memory_controls.addWidget(self.dump_size, 1, 1)
+        memory_controls.addWidget(self.dump_memory_button, 2, 0, 1, 2)
+        layout.addLayout(memory_controls)
+        self.dump_memory_view = QPlainTextEdit()
+        self.dump_memory_view.setObjectName("decoderPrivateDumpBytes")
+        self.dump_memory_view.setReadOnly(True)
+        self.dump_memory_view.setMaximumHeight(160)
+        self.dump_memory_view.hide()
+        layout.addWidget(self.dump_memory_view)
         filters = QHBoxLayout()
         self.mode = QComboBox()
         for key in ("events", "stacks", "gc", "cpu_stacks", "gc_summary", "clock", "modules"):
@@ -175,11 +207,16 @@ class DecoderPanel(QWidget):
         self.next_cursor = 0
         self.retranslate()
         self.mode.currentIndexChanged.connect(self.reset_page)
+        self.mode.currentIndexChanged.connect(self._dump_mode_changed)
 
     def tr2(self, en, ru):
         return ru if self.window.language == "RU" else en
 
     def retranslate(self):
+        self.dump_address_label.setText(self.tr2("Saved memory address (0x… or decimal)", "Адрес сохранённой памяти (0x… или десятичный)"))
+        self.dump_size_label.setText(self.tr2("Read size, bytes (1–4096)", "Размер чтения, байт (1–4096)"))
+        self.dump_memory_button.setText(self.tr2("READ SAVED DUMP MEMORY", "ПРОЧИТАТЬ ПАМЯТЬ СОХРАНЁННОГО ДАМПА"))
+        self.dump_memory_button.setAccessibleName(self.dump_memory_button.text())
         self.notice.setText(self.tr2(
             "OFFLINE TRACE DECODER · ETL / EventPipe / BLACK.BOX JSONL; saved minidump metadata. No recording or symbol downloads. "
             "Session time requires checked clock evidence; UTC alone does not establish synchronization. "
@@ -250,6 +287,7 @@ class DecoderPanel(QWidget):
         self.table.setColumnWidth(1, 195 if mode == "clock" else 85)
 
     def render_status(self):
+        self._refresh_dump_controls()
         dump_metadata = (self.analysis_report is not None and
                          self.analysis_report.get("schema") == "blackbox.deep-minidump/1")
         self.export_analysis_button.setText(
@@ -270,7 +308,7 @@ class DecoderPanel(QWidget):
             if self.import_failure:
                 text += self.tr2(" Open the original again to retry. No partial result was published.",
                                  " Для повтора откройте исходный файл заново. Частичный результат не опубликован.")
-        elif self._analysis_kind == "minidump" and self.analysis_report is not None:
+        elif self._analysis_kind in ("minidump", "minidump_memory") and self.analysis_report is not None:
             text = self.tr2("Saved minidump metadata: ", "Метаданные сохранённого дампа: ")
             text += str(self.analysis_report.get("status", "INCOMPLETE_EVIDENCE"))
             text += self.tr2(" · historical state; live process binding NOT_ESTABLISHED",
@@ -325,6 +363,7 @@ class DecoderPanel(QWidget):
             self.state, self.error = "error", "STOP_RECORDING_BEFORE_OFFLINE_DECODE"
             self.render_status()
             return
+        self._clear_dump_state()
         output = Path(self.cache.name) / (uuid4().hex + ".sqlite3")
         # Never show an old trace as though it belonged to the new input,
         # including while decoding or after a malformed file fails.
@@ -366,6 +405,12 @@ class DecoderPanel(QWidget):
     def cancel(self):
         if self.worker is not None:
             self.worker.cancel_event.set()
+            if getattr(self.worker, "kind", "") == "minidump_memory":
+                self._dump_generation += 1
+                self.dump_memory_view.clear()
+                self.dump_memory_view.hide()
+                self.state, self.error = "error", "DUMP_MEMORY_READ_CANCELLED"
+                self.render_status()
 
     def received(self, packet, error):
         self.clock_review = None
@@ -411,7 +456,56 @@ class DecoderPanel(QWidget):
             self.export_analysis_button.setEnabled(self.analysis_report is not None)
             self._refresh_stack_action()
         self._enable_cpu_scope(True)
+        self._refresh_dump_controls()
         self.idle.emit()
+
+    def _clear_dump_state(self):
+        self._dump_generation += 1
+        self._dump_path = None
+        self._dump_identity = None
+        self.dump_address.clear()
+        self.dump_memory_view.clear()
+        self.dump_memory_view.hide()
+        self._refresh_dump_controls()
+
+    def _dump_mode_changed(self, *_):
+        self._clear_dump_state()
+        if self.worker is not None and getattr(self.worker, "kind", "") in ("minidump", "minidump_memory"):
+            self.worker.cancel_event.set()
+
+    def _refresh_dump_controls(self):
+        loaded = self._dump_path is not None and self._dump_identity is not None
+        available = self.worker is None and loaded
+        for control in (self.dump_memory_notice, self.dump_address_label, self.dump_address,
+                        self.dump_size_label, self.dump_size, self.dump_memory_button):
+            control.setVisible(loaded)
+        for control in (self.dump_address, self.dump_size, self.dump_memory_button):
+            control.setEnabled(available)
+        if not loaded:
+            self.dump_memory_view.hide()
+        self.dump_memory_notice.setText(
+            (self.tr2("Saved dump: ", "Сохранённый дамп: ") + Path(self._dump_path).name + "\n" if self._dump_path else
+             self.tr2("Open a saved dump to read its recorded memory.\n", "Откройте сохранённый дамп для чтения записанной памяти.\n")) +
+            self.tr2("Imported historical bytes are displayed only here; SAVE DUMP METADATA excludes them. No live process is required. File consistency checks do not authenticate the dump's origin.",
+                     "Импортированные исторические байты показываются только здесь и не входят в СОХРАНЕНИЕ МЕТАДАННЫХ ДАМПА. Живой процесс не требуется. Проверка неизменности файла не удостоверяет происхождение дампа."))
+
+    def read_saved_dump_memory(self):
+        if self.worker is not None or self._dump_path is None or self._dump_identity is None:
+            return
+        self.dump_memory_view.clear()
+        self.dump_memory_view.hide()
+        try:
+            text = self.dump_address.text().strip()
+            address = int(text, 16 if text.lower().startswith("0x") else 10)
+            size = self.dump_size.value()
+            if not 0 <= address < 2**64 or not 1 <= size <= 4096 or address + size > 2**64:
+                raise ValueError("INVALID_DUMP_MEMORY_READ")
+        except ValueError:
+            self.state, self.error = "error", "INVALID_DUMP_MEMORY_ADDRESS_OR_SIZE_1_TO_4096"
+            self.render_status()
+            return
+        self.start_analysis("minidump_memory", {"path": self._dump_path, "expected_identity": self._dump_identity,
+                                               "address": address, "size": size})
 
     def reset_page(self):
         self.cursors = [0]
@@ -689,19 +783,26 @@ class DecoderPanel(QWidget):
             self.start_analysis("minidump", {"path": Path(selected)})
 
     def start_analysis(self, kind, arguments):
-        if self.worker is not None or (self.index is None and kind != "minidump"):
+        if self.worker is not None or (self.index is None and kind not in ("minidump", "minidump_memory")):
             return
         if getattr(self.window.probe, "active", False):
             self.state, self.error = "error", "STOP_RECORDING_BEFORE_OFFLINE_ANALYSIS"
             self.render_status(); return
         self._close_calltree()
-        self.analysis_report = None
+        if kind == "minidump_memory":
+            self._dump_generation += 1
+            self.dump_memory_view.clear()
+            self.dump_memory_view.hide()
+        else:
+            self._clear_dump_state()
+            self.analysis_report = None
         if kind == "alignment":
             self.alignment_report = None
         self._analysis_kind = kind
         self.state, self.error = "analyzing", ""
         self.import_failure = None
-        self.details.clear()
+        if kind != "minidump_memory":
+            self.details.clear()
         for button in (self.open_button, self.session_button, self.dump_button, self.calltree_button, self.resolve_tree_button,
                        self.resolve_stack_button, self.export_analysis_button,
                        self.review_pdb_button, self.review_clock_button, self.waits_button,
@@ -710,16 +811,43 @@ class DecoderPanel(QWidget):
         self.cancel_button.setEnabled(True)
         self._enable_cpu_scope(False)
         self.worker = DecoderAnalysisWorker(kind, arguments, self)
+        self.worker.view_generation = self._dump_generation
         self.worker.result_ready.connect(self.analysis_received)
         self.worker.finished.connect(self.finished)
         self.render_status(); self.worker.start()
 
-    def analysis_received(self, report, error):
+    def analysis_received(self, report, error, *, kind=None, generation=None):
+        kind = kind or getattr(self.worker, "kind", self._analysis_kind)
+        if generation is None:
+            generation = getattr(self.worker, "view_generation", None)
+        if kind in ("minidump", "minidump_memory") and generation is not None and generation != self._dump_generation:
+            self.state = "error"
+            if self.error != "DUMP_MEMORY_READ_CANCELLED":
+                self.error = "DUMP_SELECTION_CHANGED_DURING_ANALYSIS"
+            self.render_status()
+            return
+        if kind == "minidump_memory":
+            if error:
+                self.state, self.error = "error", error
+                if error == "DUMP_CHANGED_SINCE_METADATA_INSPECTION":
+                    self._clear_dump_state()
+            else:
+                self.state, self.error = "decoded", ""
+                self.dump_memory_view.setPlainText(json.dumps(report, ensure_ascii=False, indent=2))
+                self.dump_memory_view.show()
+            # Sensitive bytes never replace metadata in analysis_report, so
+            # ordinary analysis export cannot accidentally disclose this view.
+            self.render_status()
+            return
         if error:
             self.state, self.error = "error", error
             self.analysis_report = None
         else:
             self.state, self.error = "decoded", ""
+            if kind == "minidump":
+                report = dict(report)
+                self._dump_path = report.pop("_dump_path")
+                self._dump_identity = tuple(report.pop("_dump_file_identity"))
             self.analysis_report = report
             self.details.setPlainText(json.dumps(report, ensure_ascii=False, indent=2))
             if self._analysis_kind == "calltree":
@@ -736,8 +864,9 @@ class DecoderPanel(QWidget):
     def save_analysis(self):
         if self.analysis_report is None or self.worker is not None:
             return
-        tree = self.analysis_report.get("schema") == "blackbox.cpu-calltree/1"
-        dump_metadata = self.analysis_report.get("schema") == "blackbox.deep-minidump/1"
+        report = self.analysis_report
+        tree = report.get("schema") == "blackbox.cpu-calltree/1"
+        dump_metadata = report.get("schema") == "blackbox.deep-minidump/1"
         filters = "JSON (*.json);;Offline flame view (*.html)" if tree else "JSON (*.json)"
         name, chosen = QFileDialog.getSaveFileName(self,
             (self.tr2("Save dump metadata (memory contents excluded)",
@@ -745,10 +874,10 @@ class DecoderPanel(QWidget):
              self.tr2("Save derived analysis (may contain private data)",
                       "Сохранить производный анализ (может содержать личные данные)")),
             "dump-metadata.json" if dump_metadata else "decoder-analysis.json", filters)
-        if not name:
+        if not name or self.analysis_report is not report or self.worker is not None:
             return
         try:
-            export_analysis(self.analysis_report, Path(name), html=tree and chosen.endswith("(*.html)"))
+            export_analysis(report, Path(name), html=tree and chosen.endswith("(*.html)"))
         except (OSError, ValueError) as exc:
             self.state, self.error = "error", type(exc).__name__
             self.render_status()

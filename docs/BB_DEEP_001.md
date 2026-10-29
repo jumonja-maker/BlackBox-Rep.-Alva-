@@ -62,11 +62,15 @@ Historical stack frames retain original addresses/names and load-window module m
 
 Dump metadata inspection does not return memory bytes. An explicit saved-memory read is limited to 4096 bytes and rejects absent, overlapping or cross-range descriptors. The default dump size limit is 2 GiB; metadata reads are limited to 8 MiB, lists to 65,536 entries and display lists to 200 rows. Large/unsupported/damaged structures fail with an explicit reason; partial bytes are not silently interpreted as valid structures.
 
+After opening a dump in Trace Decoder, enter a saved address and length in **READ SAVED DUMP MEMORY**. This works without a live process or trace index. Private bytes appear in a separate view and never enter **SAVE DUMP METADATA**. File replacement, cancellation or changing the selection invalidates pending reads. File identity checks detect changes during review; they are not authenticated provenance.
+
 ## Status and recovery
 
 `AVAILABLE`, `ADMIN_REQUIRED`, `UAC_CANCELLED`, `ACCESS_DENIED`, `PROTECTED_PROCESS`, `PROCESS_CHANGED`, `ALREADY_DEBUGGED`, `OPERATION_FAILED`, `INCOMPLETE_EVIDENCE` and `COMPLETED` retain different meanings. Cancellation/deadline/session expiration and `RECOVERY_UNCONFIRMED` are explicit additional states. Show the underlying Windows error where it is available; access denial alone does not prove PPL protection.
 
 Closing the deep panel's active session or exiting the application requests owned cleanup. Emergency recovery is best effort and must report which state was actually verified. Memory writes and application side effects are not automatically reversible. Snapshot comparisons show observed differences, not an assertion that an intervention caused every difference.
+
+If instruction-pointer, trap-flag or breakpoint restoration cannot be verified while a debug event is held, cleanup retains the owner instead of knowingly continuing that event. The GUI stays open with **RECOVERY_UNCONFIRMED** and **Retry diagnostic cleanup**. This does not extend the original 15-minute helper lease; expiry or forced process termination is a last-resort boundary that may resume an unverified execution context. A lost operation acknowledgement remains unconfirmed even if later cleanup succeeds. Confirmation is bound to the selected process instance and is discarded if selection changes while a dialog is open.
 
 ## Automation and acceptance
 

@@ -478,6 +478,7 @@ class UniversalWindow(QMainWindow):
         self.deep_inspector_toggle.toggled.connect(self.deep_inspector_panel.setVisible)
         self.deep_inspector_panel.setVisible(False)
         self.deep_inspector_panel.closed.connect(self._deep_inspector_closed)
+        self.deep_inspector_panel.recovery_required.connect(self._deep_inspector_recovery_required)
         self._deep_close_complete = False
         content.addWidget(self.deep_inspector_toggle)
         content.addWidget(self.deep_inspector_panel)
@@ -2429,6 +2430,23 @@ class UniversalWindow(QMainWindow):
             QMessageBox.warning(self, "BLACK.BOX — RECOVERY_UNCONFIRMED", message)
         if self._pending_close:
             QTimer.singleShot(0, self.close)
+
+    def _deep_inspector_recovery_required(self, result) -> None:
+        # A failed cleanup can still own a held debug event. Keep both the
+        # service and the GUI alive; closed is emitted only after release.
+        self._deep_close_complete = False
+        self.deep_inspector_toggle.setChecked(True)
+        self._navigate("dashboard")
+        scroll = self.stack.currentWidget()
+        if hasattr(scroll, "ensureWidgetVisible"):
+            scroll.ensureWidgetVisible(self.deep_inspector_panel.status_label)
+        message = ("Завершение диагностики не подтверждено. Компонент диагностики сохранён для повторной попытки; "
+                   "окно остаётся открытым. Используйте «Повторить завершение диагностики». "
+                   "Исходный срок сессии не продлевается. Безопасное восстановление цели пока не подтверждено." if self.language == "RU" else
+                   "Diagnostic cleanup is not confirmed. The diagnostic owner is retained for another cleanup attempt; "
+                   "this window remains open. Use Retry diagnostic cleanup. "
+                   "The original session deadline is not extended. Safe target recovery remains unconfirmed.")
+        QMessageBox.warning(self, "BLACK.BOX — RECOVERY_UNCONFIRMED", message)
 
     def closeEvent(self, event) -> None:
         if (hasattr(self, 'deep_inspector_panel') and not self._deep_close_complete

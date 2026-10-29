@@ -14,7 +14,7 @@ from blackbox_core import deep_native_win as W
 from blackbox_core.deep_contracts import ProcessIdentity
 from blackbox_core.deep_native_dump import CALLBACK_INPUT, IO_CALLBACK
 from blackbox_core.deep_native_stacks import (PSS_THREAD_ENTRY, _same_unwind_image,
-                                             _snapshot_module_identity, _stack_positions)
+                                             _snapshot_module_identity, _stack_positions, collect_stacks)
 
 
 @contextmanager
@@ -96,6 +96,26 @@ class NativePolicyTests(unittest.TestCase):
         self.assertEqual(incomplete.exception.status, "INCOMPLETE_EVIDENCE")
         query.assert_not_called()
 
+    def test_selected_thread_missing_from_partial_inventory_is_not_reported_as_reuse(self):
+        rows = [{"tid": 33, "created_100ns": 99, "status": "COMPLETED"}]
+        for truncated, status in ((True, "INCOMPLETE_EVIDENCE"), (False, "PROCESS_CHANGED")):
+            with self.subTest(truncated=truncated), \
+                    patch.object(self.inspector, "_threads", return_value={"rows": rows, "truncated": truncated}), \
+                    patch("blackbox_core.windows_research.wait_chain") as query:
+                with self.assertRaises(native.NativeError) as missing:
+                    self.inspector._wait_chains({"tid": 34, "thread_created_100ns": 100}, None, None)
+            self.assertEqual(missing.exception.status, status)
+            query.assert_not_called()
+
+    def test_wait_chain_inventory_gap_keeps_unknown_omissions_explicit(self):
+        with patch.object(self.inspector, "_threads", return_value={"rows": [], "truncated": True}), \
+                patch.object(self.inspector, "_open", return_value=opened()):
+            result = self.inspector._wait_chains({}, None, None)
+        self.assertEqual(result["_status"], "INCOMPLETE_EVIDENCE")
+        self.assertFalse(result["thread_inventory_complete"])
+        self.assertTrue(result["omitted_is_lower_bound"])
+        self.assertIn("THREAD_ENUMERATION_INCOMPLETE_OMITTED_COUNT_IS_LOWER_BOUND", result["_limitations"])
+
     def test_failed_thread_enumeration_is_not_a_complete_empty_inventory(self):
         kernel = Mock()
         kernel.snapshot.return_value = 7
@@ -172,6 +192,37 @@ class NativePolicyTests(unittest.TestCase):
         limited = Mock(side_effect=[initial, caller, (0x3300, 0x8100)])
         self.assertEqual(list(_stack_positions(initial, limited, 2)), [initial, caller])
         self.assertEqual(limited.call_count, 2)
+
+    def test_cancel_during_stack_preparation_never_starts_native_snapshot(self):
+        cancelled = threading.Event()
+        kernel, capture = Mock(), Mock()
+        def modules(*_):
+            cancelled.set()
+            return {"rows": []}
+        def machine(handle, process, native_machine):
+            C.cast(native_machine, C.POINTER(W.U16))[0] = 0x8664
+            return True
+        kernel.wow64.side_effect = machine
+        with patch.object(self.inspector, "_modules", side_effect=modules), \
+                patch.object(self.inspector, "_open", return_value=opened(kernel)), \
+                patch.object(W, "bind", return_value=capture):
+            with self.assertRaises(native.NativeError) as stopped:
+                collect_stacks(self.inspector, {}, None, cancelled)
+        self.assertEqual(stopped.exception.status, "CANCELLED")
+        capture.assert_not_called()
+
+    def test_stack_symbol_preparation_obeys_action_deadline(self):
+        module = {"base": 0x10000, "path": "fixture.exe"}
+        def load(binary, pdb, *, cancel):
+            cancel.is_set()
+            self.fail("Expired stack operation must stop symbol preparation")
+        with patch.object(self.inspector, "_modules", return_value={"rows": [module]}), \
+                patch("blackbox_core.decoder_native_symbols.load_native_symbols", side_effect=load), \
+                patch.object(self.inspector, "_open") as opened_target:
+            with self.assertRaises(native.NativeError) as expired:
+                collect_stacks(self.inspector, {"module_base": 0x10000, "pdb_path": "fixture.pdb"}, 0, None)
+        self.assertEqual(expired.exception.status, "TIMED_OUT")
+        opened_target.assert_not_called()
 
     def test_memory_map_has_continuation_on_budget(self):
         kernel = Mock()

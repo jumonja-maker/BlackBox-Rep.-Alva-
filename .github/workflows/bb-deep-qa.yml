@@ -19,6 +19,21 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  decoder-api-build:
+    name: Compile decoder against pinned TraceEvent API
+    if: github.ref == 'refs/heads/patch/bb-deep-001'
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
+        with:
+          dotnet-version: '10.0.x'
+      - name: Catch managed API incompatibilities before native acceptance completes
+        run: dotnet build tools/decoder-host/BlackBox.Decoder.csproj --configuration Release
+
   contracts:
     name: Deep inspection contracts (${{ matrix.os }})
     if: github.ref == 'refs/heads/patch/bb-deep-001'
@@ -88,6 +103,8 @@ jobs:
           python -m pip install --no-build-isolation --no-deps -e .
       - name: Actual process memory debugger TCP UDP file and restricted-token acceptance
         run: python tools/qa_deep_inspection.py --output deep-native-qa
+      - name: Real Qt buttons through bridge and helper to the controlled native target
+        run: python tools/qa_deep_gui_e2e.py --output deep-gui-e2e --probe deep-native-qa/build/deep-probe.exe
       - name: Deep Overview RU EN layout at four DPI scales
         shell: pwsh
         run: |
@@ -107,6 +124,7 @@ jobs:
             deep-native-qa/
             deep-endurance-preflight/
             deep-overview-qa/
+            deep-gui-e2e/
             !**/*.dmp
             !**/*.mdmp
           retention-days: 30
@@ -237,7 +255,7 @@ jobs:
         run: python -m blackbox_core --help
 
   windows-portable:
-    needs: native-inspection
+    needs: [native-inspection, decoder-api-build]
     name: Full portable EXE including diagnostic helper
     # Exact-SHA native decoder acceptance accompanies the release candidate.
     # Publication still requires *all* three jobs green.
@@ -429,6 +447,8 @@ jobs:
           Copy-Item -LiteralPath "docs\RELEASE_v0.5.2.md" -Destination "$output\RELEASE-NOTES.md" -Force
       - name: Real native operations through the frozen diagnostic helper
         run: python tools/qa_deep_inspection.py --output deep-frozen-qa --helper dist/BLACK.BOX-Universal/diagnostic/BLACK.BOX-Diagnostic.exe
+      - name: Source GUI buttons through packaged diagnostic helper to the native target
+        run: python tools/qa_deep_gui_e2e.py --output deep-frozen-helper-gui-qa --probe deep-frozen-qa/build/deep-probe.exe --helper dist/BLACK.BOX-Universal/diagnostic/BLACK.BOX-Diagnostic.exe
       - name: Decode actual protected-profile ETL and verify typed disk and network evidence
         run: python tools/qa_deep_trace_io.py --qa-root deep-frozen-qa --helper dist/BLACK.BOX-Universal/decoder/BLACK.BOX-Decoder.exe --output deep-frozen-io-qa
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
@@ -438,6 +458,7 @@ jobs:
           path: |
             deep-frozen-qa/
             deep-frozen-io-qa/
+            deep-frozen-helper-gui-qa/
             !**/*.dmp
             !**/*.mdmp
           retention-days: 30

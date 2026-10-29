@@ -1,7 +1,7 @@
 """Continuous BB-DEEP-001 + existing GUI recording on GitHub-hosted Windows.
 
 A requested 19,800 seconds is 5h30m, never an eight-hour certification. The job
-needs a 360 minute deadline to leave room for setup, cleanup and artifacts.
+uses a 355 minute job deadline to leave room for setup, cleanup and artifacts.
 """
 from __future__ import annotations
 
@@ -20,6 +20,33 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT), str(ROOT / "src")]
 
 from tools.qa_deep_inspection import Probe, build_probe, file_hash, require, require_hosted_windows, save
+from tools.qa_github_endurance import verify_sampling_coverage
+
+
+class ObserverProgressWatchdog:
+    """A rewriting heartbeat cannot conceal a recorder whose sample count froze."""
+
+    def __init__(self, started, *, timeout_seconds=180):
+        self.last_advance = started
+        self.last_count = 0
+        self.timeout_seconds = timeout_seconds
+
+    def check(self, path, *, now, alive=True):
+        if not alive:
+            return
+        try:
+            if path.stat().st_size > 64 * 1024:
+                raise AssertionError("OBSERVER_PROGRESS_FILE_BUDGET")
+            current = json.loads(path.read_text(encoding="utf-8")).get("recorded_samples")
+        except (OSError, ValueError):
+            current = None
+        if type(current) is int and current >= 0:
+            require(current >= self.last_count, "OBSERVER_RECORDING_SAMPLE_COUNT_REGRESSED")
+            if current > self.last_count:
+                self.last_count = current
+                self.last_advance = now
+        require(now - self.last_advance <= self.timeout_seconds,
+                "OBSERVER_RECORDING_SAMPLES_NOT_PROGRESSING")
 
 
 def verify_samples(path: Path, minimum_seconds: float) -> dict:
@@ -43,6 +70,14 @@ def verify_samples(path: Path, minimum_seconds: float) -> dict:
             ) WHERE heartbeat <= old_heartbeat OR io_cycles <= old_io OR network_cycles <= old_network
         """).fetchone()[0]
         require(regressions == 0, "CONTINUOUS_NATIVE_WORKLOAD_PROGRESS_NOT_CONFIRMED")
+        max_gap, nonpositive_gaps = db.execute("""
+            SELECT MAX(gap),COALESCE(SUM(CASE WHEN gap<=0 THEN 1 ELSE 0 END),0)
+            FROM (SELECT elapsed-LAG(elapsed) OVER(ORDER BY seq) gap FROM samples)
+        """).fetchone()
+        coverage = verify_sampling_coverage(count=count, span_seconds=last - first,
+            max_gap_seconds=max_gap or 0, nonpositive_gaps=nonpositive_gaps,
+            requested_seconds=minimum_seconds, boundary_tolerance_seconds=0,
+            maximum_gap_seconds=90, minimum_count_interval_seconds=20, label="DEEP_OBSERVER")
         rss = db.execute("SELECT MAX(qa_rss),MAX(target_rss),MAX(helper_rss) FROM samples").fetchone()
         helpers = db.execute("SELECT COUNT(DISTINCT helper_pid) FROM samples WHERE helper_pid>0").fetchone()[0]
     require(file_hash(path) == digest, "READ_ONLY_ENDURANCE_VERIFICATION_CHANGED_DATABASE")
@@ -50,6 +85,7 @@ def verify_samples(path: Path, minimum_seconds: float) -> dict:
             "last_seconds": last, "observed_span_seconds": last - first,
             "max_qa_rss": rss[0], "max_target_rss": rss[1], "max_helper_rss": rss[2],
             "observed_helper_instances": helpers, "nonprogress_intervals": regressions,
+            "sampling_coverage": coverage,
             "sha256": digest, "rss_measurement": "SAMPLED_PROCESS_WORKING_SET_NOT_HARD_LIMIT"}
 
 
@@ -77,6 +113,11 @@ def run(args: argparse.Namespace) -> int:
     probe = observer = service = db = observer_log = action_log = None
     successful = False
     try:
+        from blackbox_core.windows_research import privilege
+        from tools.qa_decoder_standard_token import token_integrity
+        proof["privilege"] = privilege()
+        proof["token_integrity"] = token_integrity()
+        proof["permission_scope"] = "ACTUAL_CURRENT_RUNNER_TOKEN; MEDIUM_IL_NATIVE_ACCEPTANCE_IS_A_SEPARATE_CASE"
         executable = args.probe.resolve(strict=True) if args.probe else build_probe(output / "build")
         helper = args.helper.resolve(strict=True) if args.helper else None
         probe = Probe(executable, output / "probe")
@@ -101,6 +142,7 @@ def run(args: argparse.Namespace) -> int:
           helper_pid INTEGER, helper_rss INTEGER)""")
         action_log = (output / "deep-actions.jsonl").open("x", encoding="utf-8")
         start = time.monotonic()
+        observer_watchdog = ObserverProgressWatchdog(start)
         last_deep = last_renewal = last_write = last_log = float("-inf")
         last_record = None
         first_sample_elapsed = None
@@ -117,6 +159,7 @@ def run(args: argparse.Namespace) -> int:
             # The regular log contains metadata only. The fixed test buffer is not exported here.
             action_log.write(json.dumps({"elapsed": time.monotonic() - start, "operation": operation,
                                          "operation_id": result.get("operation_id"),
+                                         "target": identity.to_dict(),
                                          "status": result["status"], "limitations": result.get("limitations", [])},
                                         allow_nan=False) + "\n")
             action_log.flush()
@@ -174,6 +217,8 @@ def run(args: argparse.Namespace) -> int:
                         state["network_cycles"], qa_process.memory_info().rss,
                         target_process.memory_info().rss, helper_pid, helper_rss))
             db.commit()
+            observer_watchdog.check(observer_root / "run/progress.json", now=time.monotonic(),
+                                    alive=observer.process.poll() is None)
             if elapsed - last_log >= 60:
                 progress = {"status": "RUNNING", "elapsed_seconds": elapsed,
                             "requested_seconds": args.duration_seconds, "samples": sequence,
@@ -221,6 +266,10 @@ def run(args: argparse.Namespace) -> int:
                     proof[label] = cleanup
                     if label == "diagnostic_helper_cleanup":
                         require(cleanup.get("status") == "COMPLETED", "ENDURANCE_FINAL_HELPER_CLEANUP_UNCONFIRMED")
+                    elif label == "target_cleanup" and successful:
+                        require(cleanup.get("status") == "COMPLETED" and cleanup.get("exit_code") == 0 and
+                                cleanup.get("last_state", {}).get("created_100ns") == proof["target_identity"]["created_100ns"],
+                                "ENDURANCE_TARGET_GRACEFUL_SHUTDOWN_NOT_CONFIRMED")
                 except BaseException as error:
                     successful = False
                     proof[label] = {"status": "FAILED", "reason": str(error)[:1000]}

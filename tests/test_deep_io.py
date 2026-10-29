@@ -31,7 +31,8 @@ def network_event(*, ipv6=False, udp=False):
         "opcode": 26 if ipv6 else 10, "version": 2,
         "payload": {"size": 123, "sport": 10001, "dport": 10002}, "frames": [],
         "io_observation": {"schema": IO_SCHEMA, "source": "ETW_KERNEL_NETWORK",
-            "parser": "TRACEEVENT_TcpIpV6SendTraceData" if ipv6 else
+            "parser": "TRACEEVENT_UpdIpV6TraceData" if udp and ipv6 else
+                      "TRACEEVENT_TcpIpV6SendTraceData" if ipv6 else
                       "TRACEEVENT_UdpIpTraceData" if udp else "TRACEEVENT_TcpIpSendTraceData",
             "kind": "network", "protocol": "UDP" if udp else "TCP", "operation": "send",
             "family": "IPv6" if ipv6 else "IPv4", "transferred_bytes": 123,
@@ -113,6 +114,31 @@ class DeepTypedIoTests(unittest.TestCase):
             row = network_event(); row["io_observation"][key] = value
             with self.subTest(key=key), self.assertRaises(ValueError):
                 validate_io_observation(row)
+
+    def test_network_parser_cannot_claim_another_protocol_family_or_operation(self):
+        for ipv6, udp, parser in (
+                (True, True, "TRACEEVENT_TcpIpV6SendTraceData"),
+                (True, True, "TRACEEVENT_UdpIpTraceData"),
+                (False, False, "TRACEEVENT_TcpIpTraceData"),
+                (True, False, "TRACEEVENT_TcpIpV6TraceData")):
+            row = network_event(ipv6=ipv6, udp=udp)
+            row["io_observation"]["parser"] = parser
+            with self.subTest(parser=parser), self.assertRaises(ValueError):
+                validate_io_observation(row)
+
+    def test_udp_ipv6_public_addresses_do_not_require_generic_payload_fields(self):
+        row = network_event(ipv6=True, udp=True)
+        self.assertNotIn("saddr", row["payload"])
+        self.assertNotIn("daddr", row["payload"])
+        saved = read_index(self.index(row))["rows"][0]["event"]["io_observation"]
+        self.assertEqual(saved["parser"], "TRACEEVENT_UpdIpV6TraceData")
+        self.assertEqual((saved["source_address"], saved["destination_address"]), ("::1", "::1"))
+
+    def test_unconfirmed_ipv6_version_is_not_promoted_to_typed_observation(self):
+        row = network_event(ipv6=True, udp=True)
+        row["version"] = 1
+        with self.assertRaises(ValueError):
+            validate_io_observation(row)
 
     def test_missing_address_remains_explicitly_partial(self):
         row = network_event()

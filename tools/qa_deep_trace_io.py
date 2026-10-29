@@ -118,7 +118,8 @@ def analyze_events(row_source, oracle, engine, *, target_image, known_file):
                     "response_qpc_ticks": ticks, "counter_frequency_hz": frequency,
                     "fixture_issuing_thread": own_thread, "known_file_bound": own_file})
         if (name.startswith(("TcpIp/", "UdpIp/")) and row.get("opcode") in (10, 11, 26, 27)
-                and row.get("version") in (1, 2)):
+                and row.get("version") in (1, 2) and
+                (row["opcode"] < 26 or row["version"] == 2)):
             require(typed is not None and typed["kind"] == "network",
                     "REAL_SUPPORTED_NETWORK_EVENT_MISSING_TYPED_PROJECTION")
             key = ("tcp" if typed["protocol"] == "TCP" else "udp") + \

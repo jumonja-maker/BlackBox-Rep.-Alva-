@@ -414,6 +414,9 @@ class DebugSession:
         self._recovery_handle = recovery_handle
         self._fatal: dict[str, Any] | None = None
         self._closed = False
+        self._close_command: _Command | None = None
+        self._close_result: dict[str, Any] | None = None
+        self._owner_retained = False
 
     def execute(self, operation: str, parameters: dict[str, Any], *, deadline: float | None = None,
                 cancel_event: Any = None) -> dict[str, Any]:
@@ -421,6 +424,10 @@ class DebugSession:
         deadline = time.monotonic() + 15 if deadline is None else deadline
         if self._closed:
             return _result("OPERATION_FAILED", error="DEBUG_SESSION_CLOSED")
+        if self._owner_retained and operation not in {
+                "debug.detach", "debug.context", "debug.breakpoints", "debug.state"}:
+            return _result("RECOVERY_UNCONFIRMED", error="UNRECOVERED_BREAKPOINT_CONTEXT_HELD",
+                           data={"state": self.state, "owner_retained": True, "retry_cleanup_required": True})
         if self._worker is not None and not self._worker.is_alive():
             return self._fatal or _result("OPERATION_FAILED", error="DEBUG_WORKER_STOPPED")
         if os.name != "nt":
@@ -446,20 +453,39 @@ class DebugSession:
 
     def close(self) -> dict[str, Any]:
         if self._closed:
-            return self._fatal or _result(data={"state": self.state})
+            # A timeout closes the public command interface, not necessarily
+            # the native worker. Only its acknowledged cleanup result can
+            # replace the previously returned unconfirmed status.
+            if self._close_command is not None and self._close_command.done.is_set():
+                self._close_result = self._close_command.result or _result(
+                    "RECOVERY_UNCONFIRMED", error="EMPTY_CLEANUP_RESULT")
+                if self._close_result.get("data", {}).get("owner_retained") is True:
+                    self._closed = False  # Only a new cleanup retry may release the held event.
+            return self._close_result or self._fatal or _result(
+                "RECOVERY_UNCONFIRMED", error="DEBUG_CLEANUP_RESULT_NOT_OBSERVED",
+                data={"state": self.state})
         if self._worker is None:
             self._closed = True
-            return _result(data={"state": "DETACHED", "owned_resources_remaining": 0})
+            self._close_result = _result(data={"state": "DETACHED", "owned_resources_remaining": 0})
+            return self._close_result
         command = _Command("_close", {}, time.monotonic() + 10, None, threading.Event())
         try:
             self._queue.put(command, timeout=1)
         except queue.Full:
-            return _result("RECOVERY_UNCONFIRMED", error="CLEANUP_QUEUE_FULL")
+            return _result("RECOVERY_UNCONFIRMED", error="CLEANUP_QUEUE_FULL",
+                           data={"state": self.state, "owner_retained": True, "retry_cleanup_required": True})
+        self._close_command = command
         command.done.wait(12)
         self._closed = True
         if not command.done.is_set():
-            return _result("RECOVERY_UNCONFIRMED", error="DEBUG_CLEANUP_UNCONFIRMED")
-        return command.result or _result("RECOVERY_UNCONFIRMED", error="EMPTY_CLEANUP_RESULT")
+            self._close_result = _result("RECOVERY_UNCONFIRMED", error="DEBUG_CLEANUP_UNCONFIRMED",
+                data={"state": self.state, "owner_retained": True, "retry_cleanup_required": True,
+                      "cleanup_acknowledgement_pending": True})
+        else:
+            self._close_result = command.result or _result("RECOVERY_UNCONFIRMED", error="EMPTY_CLEANUP_RESULT")
+            if self._close_result.get("data", {}).get("owner_retained") is True:
+                self._closed = False
+        return self._close_result
 
     def _run(self) -> None:
         try:
@@ -473,22 +499,37 @@ class DebugSession:
                     try:
                         if command.operation == "_close":
                             command.result = self._cleanup()
-                            if command.result["status"] != "COMPLETED":
-                                self._fatal = command.result
-                            self._stopping.set()
+                            self._fatal = command.result if command.result["status"] != "COMPLETED" else None
+                            if command.result.get("data", {}).get("owner_retained") is not True:
+                                self._stopping.set()
                         else:
                             self._check(command)
                             command.result = self._dispatch(command)
                     except DebugError as exc:
-                        command.result = _result(exc.status, error=str(exc),
-                                                 winerror=exc.winerror, data={"state": self.state})
+                        if (self._unsafe_breakpoint_ids() or self._stepping) and self._event is not None:
+                            command.result = self._retain_debug_owner(str(exc), winerror=exc.winerror)
+                        else:
+                            command.result = _result(exc.status, error=str(exc),
+                                                     winerror=exc.winerror, data={"state": self.state})
                     except BaseException as exc:
-                        command.result = _result("OPERATION_FAILED", error=f"{type(exc).__name__}: {exc}",
-                                                 data={"state": self.state})
+                        if (self._unsafe_breakpoint_ids() or self._stepping) and self._event is not None:
+                            command.result = self._retain_debug_owner(f"{type(exc).__name__}: {exc}",
+                                                                     winerror=getattr(exc, "winerror", None))
+                        else:
+                            command.result = _result("OPERATION_FAILED", error=f"{type(exc).__name__}: {exc}",
+                                                     data={"state": self.state})
                     finally:
                         command.done.set()
                 if self._attached and self._event is None:
-                    self._pump(10)
+                    try:
+                        self._pump(10)
+                    except BaseException as exc:
+                        if (self._unsafe_breakpoint_ids() or self._stepping) and self._event is not None:
+                            self._fatal = self._retain_debug_owner(
+                                f"DEBUG_EVENT_RECOVERY_REQUIRED: {type(exc).__name__}: {exc}",
+                                winerror=getattr(exc, "winerror", None))
+                        else:
+                            raise
         except BaseException as exc:
             self.state = "ERROR"
             self._fatal = _result("RECOVERY_UNCONFIRMED" if self._attached else "OPERATION_FAILED",
@@ -528,6 +569,8 @@ class DebugSession:
                                   "owned_suspensions": len(self._suspensions),
                                   "breakpoints": len(self._breakpoints),
                                   "pending_memory_changes": len(self._changes)}
+        if self._owner_retained:
+            result.update(owner_retained=True, retry_cleanup_required=True)
         if self._event:
             result["stopped_tid"] = self._event.tid
             handle, created = self._api.thread(self._event.tid, rights=0)
@@ -537,6 +580,27 @@ class DebugSession:
             result["guardian_pid"] = self._guard.pid
             result["recovery_report_handle_configured"] = self._recovery_handle is not None
         return result
+
+    def _unsafe_breakpoint_ids(self) -> list[str]:
+        return [identifier for identifier, item in self._breakpoints.items()
+                if (identifier == self._paused_breakpoint or item.get("hit_context"))
+                and item.get("hit_context", {}).get("phase") != "rewind_verified"]
+
+    def _retain_debug_owner(self, error: str, *, winerror: int | None = None,
+                            native_failures: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+        self.state = "RECOVERY_UNCONFIRMED"
+        self._owner_retained = True
+        event = self._event
+        return _result("RECOVERY_UNCONFIRMED", error=error, winerror=winerror,
+                       data={"state": self.state, "attached": self._attached, "owner_retained": True,
+                             "retry_cleanup_required": True, "unsafe_breakpoint_ids": self._unsafe_breakpoint_ids(),
+                             "remaining_breakpoint_ids": list(self._breakpoints),
+                             "pending_single_step": self._stepping is not None,
+                             "held_debug_event": {"pid": event.pid, "tid": event.tid, "code": event.code} if event else None,
+                             "native_cleanup_failures": native_failures or [],
+                             "owned_resources_remaining": len(self._breakpoints) + len(self._changes) + len(self._suspensions)},
+                       limitations=["Unverified owned execution changes remain stopped; retry cleanup before continuing.",
+                                    "Parent loss or the original session deadline can still end the owner; recovery then remains best effort."])
 
     def _ensure_guard(self) -> None:
         if self._guard is None:
@@ -575,6 +639,7 @@ class DebugSession:
         elif operation == "debug.pause":
             self._require_attached()
             if self._event is None:
+                self._check(command)
                 self._pause_requested = True
                 self._api.break_process()
                 self._until_stopped(command)
@@ -585,17 +650,17 @@ class DebugSession:
         elif operation == "debug.context":
             return self._context_result(p)
         elif operation == "debug.breakpoint.add":
-            return self._add_breakpoint(p)
+            return self._add_breakpoint(p, command=command)
         elif operation in ("debug.breakpoint.disable", "debug.breakpoint.remove"):
-            return self._remove_breakpoint(p, remove=operation.endswith("remove"))
+            return self._remove_breakpoint(p, remove=operation.endswith("remove"), command=command)
         elif operation == "thread.suspend":
-            return self._suspend(p)
+            return self._suspend(p, command=command)
         elif operation == "thread.resume":
-            return self._resume(p)
+            return self._resume(p, command=command)
         elif operation == "memory.write":
-            return self._write_memory(p)
+            return self._write_memory(p, command=command)
         elif operation == "memory.rollback":
-            return self._rollback_memory(p)
+            return self._rollback_memory(p, command=command)
         else:
             raise DebugError("OPERATION_FAILED", "UNSUPPORTED_DEBUG_OPERATION")
         return _result(data=self._snapshot(), before=before, after=self._snapshot(),
@@ -612,6 +677,7 @@ class DebugSession:
         if present.value:
             raise DebugError("ALREADY_DEBUGGED", "TARGET_HAS_ANOTHER_DEBUGGER")
         self._ensure_guard()
+        self._check(command)
         self.state = "ATTACHING"
         if not self._api.k.DebugActiveProcess(self.identity.pid):
             self.state = "ATTACH_FAILED"
@@ -766,6 +832,8 @@ class DebugSession:
         self._require_attached()
         if self._event is None:
             raise DebugError("OPERATION_FAILED", "NO_STOPPED_DEBUG_EVENT")
+        if self._stepping is not None:
+            raise DebugError("RECOVERY_UNCONFIRMED", "PREVIOUS_SINGLE_STEP_TRANSITION_REQUIRES_CLEANUP")
         event = self._event
         if self._paused_breakpoint:
             breakpoint = self._breakpoints.get(self._paused_breakpoint)
@@ -779,10 +847,24 @@ class DebugSession:
                                   "original_tf": bool(context.get32(68) & 0x100),
                                   "breakpoint_id": self._paused_breakpoint, "pause_after": step}
                 self._sync_guard()
+                try:
+                    self._check(command)
+                except DebugError:
+                    self._stepping = None  # No SetThreadContext effect has happened.
+                    self._sync_guard()
+                    raise
                 context.set32(68, context.get32(68) | 0x100)
                 self._api.set_context(handle, context)
             finally:
                 self._api.k.CloseHandle(handle)
+        try:
+            self._check(command)
+        except DebugError:
+            if self._stepping is not None:
+                cleanup = self._cleanup()
+                if cleanup["status"] != "COMPLETED":
+                    raise DebugError("RECOVERY_UNCONFIRMED", "CANCELLED_STEP_CLEANUP_UNCONFIRMED")
+            raise
         if not self._api.k.ContinueDebugEvent(event.pid, event.tid, self._event_continue):
             self._api.fail("CONTINUE_DEBUG_EVENT")
         self._event = None
@@ -808,7 +890,7 @@ class DebugSession:
                              "thread_created_100ns": actual, "registers": registers,
                              "state": self.state})
 
-    def _add_breakpoint(self, p: dict[str, Any]) -> dict[str, Any]:
+    def _add_breakpoint(self, p: dict[str, Any], *, command: _Command | None = None) -> dict[str, Any]:
         self._require_attached()
         if self._event is None:
             raise DebugError("OPERATION_FAILED", "BREAKPOINT_CHANGE_REQUIRES_PAUSED_PROCESS")
@@ -821,11 +903,19 @@ class DebugSession:
         original_protection = self._api.executable_protection(address)
         if original == b"\xcc":
             raise DebugError("OPERATION_FAILED", "EXISTING_INT3_IS_NOT_OWNED")
+        self._ensure_guard()
         identifier = uuid.uuid4().hex
         item = {"breakpoint_id": identifier, "address": address, "original_hex": original.hex(),
                 "enabled": True, "installed": True, "original_protection": original_protection}
         self._breakpoints[identifier] = item
         self._sync_guard()  # recovery intent is durable in the separate live guardian first.
+        try:
+            if command is not None:
+                self._check(command)
+        except DebugError:
+            del self._breakpoints[identifier]  # No code/protection effect yet.
+            self._sync_guard()
+            raise
         try:
             self._api.replace(address, original, b"\xcc", executable=True,
                               original_protection=original_protection)
@@ -837,7 +927,8 @@ class DebugSession:
                        limitations=["Software breakpoint temporarily modifies one code byte.",
                                     "Other threads can cross the address during a single-step rearm window."])
 
-    def _remove_breakpoint(self, p: dict[str, Any], *, remove: bool) -> dict[str, Any]:
+    def _remove_breakpoint(self, p: dict[str, Any], *, remove: bool,
+                           command: _Command | None = None) -> dict[str, Any]:
         self._require_attached()
         if self._event is None:
             raise DebugError("OPERATION_FAILED", "BREAKPOINT_CHANGE_REQUIRES_PAUSED_PROCESS")
@@ -846,6 +937,8 @@ class DebugSession:
         if item is None:
             raise DebugError("OPERATION_FAILED", "UNKNOWN_BREAKPOINT")
         self._restore_breakpoint_context(item)
+        if command is not None:
+            self._check(command)
         if item["installed"]:
             self._api.replace(item["address"], b"\xcc", bytes.fromhex(item["original_hex"]), executable=True,
                               original_protection=item["original_protection"])
@@ -861,6 +954,18 @@ class DebugSession:
 
     def _restore_breakpoint_context(self, item: dict[str, Any]) -> None:
         hit = item.get("hit_context")
+        if not hit and self._paused_breakpoint == item["breakpoint_id"]:
+            if self._event is None:
+                raise DebugError("RECOVERY_UNCONFIRMED", "BREAKPOINT_STOP_CONTEXT_NO_LONGER_HELD")
+            # An OpenThread failure on first INT3 handling can precede the
+            # first acknowledged hit-context record. Retry identity capture
+            # only while the actual debug event is still held by this thread.
+            handle, created = self._api.thread(self._event.tid)
+            self._api.k.CloseHandle(handle)
+            hit = {"tid": self._event.tid, "created_100ns": created,
+                   "rip_before": item["address"] + 1, "phase": "rewind_pending"}
+            item["hit_context"] = hit
+            self._sync_guard()
         if not hit or hit["phase"] == "rewind_verified":
             return
         if self._event is None or self._event.tid != hit["tid"]:
@@ -880,7 +985,7 @@ class DebugSession:
         finally:
             self._api.k.CloseHandle(handle)
 
-    def _suspend(self, p: dict[str, Any]) -> dict[str, Any]:
+    def _suspend(self, p: dict[str, Any], *, command: _Command | None = None) -> dict[str, Any]:
         tid = _positive(p.get("tid"), "tid", 0xFFFFFFFF)
         created = _positive(p.get("thread_created_100ns"), "thread_created_100ns")
         if len(self._suspensions) >= MAX_SUSPENSIONS:
@@ -894,12 +999,23 @@ class DebugSession:
                 "phase": "pending", "handle": handle}
         self._suspensions[identifier] = item
         self._sync_guard()
-        previous = self._api.k.SuspendThread(handle)
-        if previous == 0xFFFFFFFF:
-            del self._suspensions[identifier]
+        try:
+            if command is not None:
+                self._check(command)
+        except DebugError:
+            del self._suspensions[identifier]  # The OS count has not changed.
             self._api.k.CloseHandle(handle)
             self._sync_guard()
-            self._api.fail("SUSPEND_THREAD")
+            raise
+        previous = self._api.k.SuspendThread(handle)
+        if previous == 0xFFFFFFFF:
+            try:
+                self._api.fail("SUSPEND_THREAD")
+            except DebugError:
+                del self._suspensions[identifier]
+                self._api.k.CloseHandle(handle)
+                self._sync_guard()
+                raise
         item.update(phase="active", previous_count=previous)
         self._sync_guard()
         return _result(data={"suspension_id": identifier, "tid": tid,
@@ -907,7 +1023,7 @@ class DebugSession:
                              "owned_increment": 1},
                        limitations=["An abrupt failure between the OS call and acknowledgement may leave recovery unconfirmed."])
 
-    def _resume(self, p: dict[str, Any]) -> dict[str, Any]:
+    def _resume(self, p: dict[str, Any], *, command: _Command | None = None) -> dict[str, Any]:
         identifier = p.get("suspension_id")
         if identifier is None:
             tid = _positive(p.get("tid"), "tid", 0xFFFFFFFF)
@@ -919,6 +1035,13 @@ class DebugSession:
             raise DebugError("OPERATION_FAILED", "NO_OWNED_SUSPENSION")
         item["phase"] = "resuming"
         self._sync_guard()  # Guardian will not double-resume an uncertain in-flight decrement.
+        try:
+            if command is not None:
+                self._check(command)
+        except DebugError:
+            item["phase"] = "active"  # No OS decrement; retain the owned increment.
+            self._sync_guard()
+            raise
         previous = self._api.k.ResumeThread(item["handle"])
         if previous == 0xFFFFFFFF or previous == 0:
             raise DebugError("RECOVERY_UNCONFIRMED", "OWNED_THREAD_RESUME_UNCONFIRMED")
@@ -929,7 +1052,7 @@ class DebugSession:
                              "remaining_suspend_count_observed": previous - 1,
                              "other_suspend_counts_preserved": True})
 
-    def _write_memory(self, p: dict[str, Any]) -> dict[str, Any]:
+    def _write_memory(self, p: dict[str, Any], *, command: _Command | None = None) -> dict[str, Any]:
         address = _positive(p.get("address"), "address", (1 << 47) - 1)
         original, value = _hex(p.get("expected_hex"), "expected_hex"), _hex(p.get("value_hex"), "value_hex")
         if len(original) != len(value):
@@ -951,6 +1074,13 @@ class DebugSession:
                 "value_hex": value.hex()}
         self._changes[identifier] = item
         self._sync_guard()
+        try:
+            if command is not None:
+                self._check(command)
+        except DebugError:
+            del self._changes[identifier]  # No WriteProcessMemory effect yet.
+            self._sync_guard()
+            raise
         self._api.replace(address, original, value)
         return _result(data={"change_id": identifier, "address": address, "size": len(value),
                              "readback_verified": True, "recovery_bytes_retained_privately": True},
@@ -958,12 +1088,14 @@ class DebugSession:
                        limitations=["The target can modify or consume these bytes immediately.",
                                     "Restoring bytes cannot undo effects already caused by application execution."])
 
-    def _rollback_memory(self, p: dict[str, Any]) -> dict[str, Any]:
+    def _rollback_memory(self, p: dict[str, Any], *, command: _Command | None = None) -> dict[str, Any]:
         identifier = p.get("change_id", p.get("operation_id"))
         item = self._changes.get(identifier)
         if item is None:
             raise DebugError("OPERATION_FAILED", "UNKNOWN_MEMORY_CHANGE")
         original, value = bytes.fromhex(item["original_hex"]), bytes.fromhex(item["value_hex"])
+        if command is not None:
+            self._check(command)
         self._api.replace(item["address"], value, original)
         del self._changes[identifier]
         self._sync_guard()
@@ -1006,6 +1138,8 @@ class DebugSession:
                 except BaseException as stop_error:
                     errors.append(f"GUARDIAN_SHUTDOWN_UNCONFIRMED: {stop_error}")
                     self.state = "RECOVERY_UNCONFIRMED"
+                    if (self._breakpoints or self._stepping) and self._attached and self._event is not None:
+                        return self._retain_debug_owner("; ".join(errors))
                     # A live guardian may still act on the old acknowledged
                     # plan. Do not race it with another ResumeThread decrement
                     # or memory restoration. The helper's owner will terminate
@@ -1057,6 +1191,15 @@ class DebugSession:
                 del self._breakpoints[identifier]
             except BaseException as exc:
                 record_caught_failure("BREAKPOINT", exc)
+        if (self._breakpoints or self._stepping) and self._attached and self._event is not None:
+            # Continuing an owned INT3 at address+1 would knowingly execute
+            # an unverified instruction stream. Unrestored TF, code bytes
+            # and page protection likewise make execution unsafe. Keep the
+            # event, debug owner and guardian alive for a cleanup retry.
+            # Helper/service preserve only the original finite session lease.
+            return self._retain_debug_owner("; ".join(errors),
+                winerror=native_failures[0]["winerror"] if native_failures else None,
+                native_failures=native_failures)
         for identifier in list(self._changes):
             try:
                 item = self._changes[identifier]
@@ -1085,6 +1228,9 @@ class DebugSession:
             else:
                 self._attached = False
                 self._event = None
+                self._owner_retained = False
+                self._paused_breakpoint = None
+                self._pause_requested = False
                 if self._api.debug_handle:
                     self._api.k.CloseHandle(self._api.debug_handle)
                     self._api.debug_handle = None

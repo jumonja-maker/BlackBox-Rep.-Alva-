@@ -117,7 +117,13 @@ def collect_stacks(inspector, params, deadline, cancel):
         symbol_module = next((m for m in modules if m["base"] == module_base), None)
         if symbol_module is None:
             raise ValueError("SYMBOL_MODULE_NOT_LOADED")
-        symbols = load_native_symbols(symbol_module["path"], params["pdb_path"], cancel=cancel)
+        class _SymbolCancellation:
+            def is_set(self):
+                # Keep the action's shorter deadline and typed cancellation
+                # status during bounded local PE/PDB preparation as well.
+                _check(deadline, cancel)
+                return False
+        symbols = load_native_symbols(symbol_module["path"], params["pdb_path"], cancel=_SymbolCancellation())
         loaded = symbol_module.get("loaded_pe") or {}
         if not loaded.get("guid") or any(loaded.get(key) != symbols.pe.get(key)
                                          for key in ("guid", "age", "image_size", "image_timestamp")):
@@ -136,6 +142,9 @@ def collect_stacks(inspector, params, deadline, cancel):
         marker_free = W.bind(kernel.dll, "PssWalkMarkerFree", W.U32, W.HANDLE)
         walk_snapshot = W.bind(kernel.dll, "PssWalkSnapshot", W.U32, W.HANDLE, W.U32, W.HANDLE, W.PTR, W.U32)
         snapshot, marker, clone = W.HANDLE(), W.HANDLE(), W.HANDLE()
+        # Module/symbol preparation may consume the deadline. Never begin a
+        # new process snapshot (which may briefly pause threads) after that.
+        _check(deadline, cancel)
         error = capture(process, 0x1 | 0x80 | 0x100, 0x00100003, C.byref(snapshot))
         if error:
             raise _os_error("PSS_CAPTURE_SNAPSHOT_FAILED", error)

@@ -151,6 +151,7 @@ def _plain_label():
 
 class OverviewInspectorPanel(QWidget):
     closed = Signal(object)
+    recovery_required = Signal(object)
 
     def __init__(self, window, *, bridge=None):
         super().__init__(window)
@@ -181,6 +182,7 @@ class OverviewInspectorPanel(QWidget):
         self.bridge.target_changed.connect(self._target_changed)
         self.bridge.idle.connect(self._idle)
         self.bridge.closed.connect(self.closed.emit)
+        self.bridge.recovery_required.connect(self.recovery_required.emit)
         self.retranslate()
 
     def tr2(self, en, ru):
@@ -234,6 +236,7 @@ class OverviewInspectorPanel(QWidget):
         self._action(common, "compare", parameters=lambda: {"before_id": self._before_id, "after_id": self._after_id})
         self.cancel_button = self._button(common, "cancel", "Cancel operation", "Отменить операцию", self.bridge.cancel)
         self.end_admin_button = self._button(common, "end_admin", "End administrator session", "Завершить сеанс администратора", self.bridge.end_admin)
+        self._button(common, "retry_cleanup", "Retry diagnostic cleanup", "Повторить завершение диагностики", self.bridge.retry_cleanup)
         self._button(common, "profiling", "Profiling / EventPipe / ETW…", "Профилирование / EventPipe / ETW…", self._open_profiling)
         layout.addLayout(common)
         self.elevate_button = QPushButton()
@@ -571,8 +574,9 @@ class OverviewInspectorPanel(QWidget):
         return parameters
 
     def _choose_stack_pdb(self):
+        interaction = self._interaction_token()
         path, _ = QFileDialog.getOpenFileName(self, self.tr2("Local stack PDB", "Локальный PDB для стека"), "", "PDB (*.pdb)")
-        if path:
+        if path and self._interaction_current(interaction):
             self.stack_pdb.setText(path)
 
     def _debug_thread_parameters(self):
@@ -595,8 +599,23 @@ class OverviewInspectorPanel(QWidget):
             raise ValueError("MEMORY_WRITE_LIMIT_4096_BYTES")
         return {"address": self._integer(self.memory_address), "expected_hex": expected.hex(), "value_hex": replacement.hex()}
 
+    def _interaction_token(self):
+        """Bind modal choices to the selected instance before Qt re-enters."""
+        return self.bridge.generation, self.bridge.target
+
+    def _interaction_current(self, token):
+        if token == self._interaction_token() and token[1] is not None:
+            return True
+        self.status_label.setText(self.tr2(
+            "CANCELLED · The selected process changed while choosing or confirming the action. Review the new target and start the action again.",
+            "CANCELLED · Выбранный процесс изменился во время выбора или подтверждения действия. Проверьте новую цель и начните действие заново."))
+        return False
+
     def _request(self, operation, parameters=None, *, tag=""):
+        interaction = self._interaction_token()
         try:
+            if not self._interaction_current(interaction):
+                return False
             if callable(parameters):
                 parameters = parameters()
             parameters = parameters or {}
@@ -605,12 +624,15 @@ class OverviewInspectorPanel(QWidget):
             confirmed = not spec.confirmation_required or self._confirm(operation, parameters)
             if not confirmed:
                 return False
+            if not self._interaction_current(interaction):
+                return False
             accepted = self.bridge.submit(operation, parameters, confirmed=confirmed,
                                           tag=tag, timeout_seconds=spec.timeout_seconds)
             if accepted:
                 self._request_section = self.section.currentData()
                 self._last_request = {"operation": operation, "parameters": dict(parameters), "tag": tag,
-                                      "confirmed": confirmed, "timeout_seconds": spec.timeout_seconds}
+                                      "confirmed": confirmed, "timeout_seconds": spec.timeout_seconds,
+                                      "interaction": interaction}
                 self.elevate_button.hide()
             return accepted
         except (ValueError, TypeError, KeyError) as exc:
@@ -643,12 +665,17 @@ class OverviewInspectorPanel(QWidget):
         dialog = QMessageBox(QMessageBox.Icon.Warning, "BLACK.BOX", text,
                              QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel, self)
         dialog.setTextFormat(Qt.TextFormat.PlainText)
+        dialog.button(QMessageBox.StandardButton.Yes).setText(self.tr2("CONFIRM", "ПОДТВЕРДИТЬ"))
+        dialog.button(QMessageBox.StandardButton.Cancel).setText(self.tr2("CANCEL", "ОТМЕНА"))
         dialog.setDefaultButton(QMessageBox.StandardButton.Cancel)
         return dialog.exec() == QMessageBox.StandardButton.Yes
 
     def _elevate(self):
+        interaction = self._interaction_token()
         request = self._last_request
         if not request or self.bridge.busy:
+            return
+        if (request.get("interaction") != interaction or not self._interaction_current(interaction)):
             return
         operation = request["operation"]
         operations = [operation]
@@ -667,28 +694,35 @@ class OverviewInspectorPanel(QWidget):
                              self.tr2("BLACK.BOX — Administrator permission", "BLACK.BOX — Права администратора"),
                              text, QMessageBox.StandardButton.Cancel, self)
         dialog.setTextFormat(Qt.TextFormat.PlainText)
+        dialog.button(QMessageBox.StandardButton.Cancel).setText(self.tr2("CANCEL", "ОТМЕНА"))
         grant = dialog.addButton(self.tr2("GRANT ADMINISTRATOR PERMISSION", "ПРЕДОСТАВИТЬ ПРАВА АДМИНИСТРАТОРА"), QMessageBox.ButtonRole.AcceptRole)
         dialog.setDefaultButton(QMessageBox.StandardButton.Cancel)
         dialog.exec()
         if dialog.clickedButton() is grant:
+            if not self._interaction_current(interaction):
+                return
             self._pending_retry = dict(request)
             if not self.bridge.elevate(operations):
                 self._pending_retry = None
 
     def _dump(self):
+        interaction = self._interaction_token()
         choices = [self.tr2("Minidump", "Минидамп"), self.tr2("Extended dump with memory", "Расширенный дамп с памятью")]
         selected, ok = QInputDialog.getItem(self, "BLACK.BOX", self.tr2("Dump type", "Тип дампа"), choices, 0, False)
         if not ok:
             return
+        if not self._interaction_current(interaction):
+            return
         path, _ = QFileDialog.getSaveFileName(self, self.tr2("New diagnostic dump", "Новый диагностический дамп"), "BLACKBOX-Diagnostic.dmp", "Dump (*.dmp)")
-        if path:
+        if path and self._interaction_current(interaction):
             self._request("dump", {"destination": path, "full": selected == choices[1], "max_bytes": 1024 * 1024 * 1024})
 
     def _record_etw(self):
+        interaction = self._interaction_token()
         path, _ = QFileDialog.getSaveFileName(
             self, self.tr2("New system-wide ETW recording", "Новая системная запись ETW"),
             "BLACKBOX-Diagnostic.etl", "ETW (*.etl)")
-        if path:
+        if path and self._interaction_current(interaction):
             self._request("profile.etw", {
                 "duration_seconds": self.profile_seconds.value(),
                 "profile": self.profile_kind.currentData(),
@@ -697,16 +731,18 @@ class OverviewInspectorPanel(QWidget):
             })
 
     def _inspect_dump(self):
+        interaction = self._interaction_token()
         path, _ = QFileDialog.getOpenFileName(self, self.tr2("Saved diagnostic dump", "Сохранённый диагностический дамп"), "", "Dump (*.dmp)")
-        if path:
+        if path and self._interaction_current(interaction):
             self._dump_path = path
             self._request("dump_inspect", {"path": path})
 
     def _read_dump_memory(self):
+        interaction = self._interaction_token()
         path = self._dump_path
         if not path:
             path, _ = QFileDialog.getOpenFileName(self, self.tr2("Saved diagnostic dump", "Сохранённый диагностический дамп"), "", "Dump (*.dmp)")
-        if path:
+        if path and self._interaction_current(interaction):
             self._dump_path = path
             self._request("dump_read_memory", lambda: self._saved_memory_parameters(path))
 
@@ -717,16 +753,22 @@ class OverviewInspectorPanel(QWidget):
         return dict(parameters, path=path)
 
     def _symbols(self):
+        interaction = self._interaction_token()
         pe, _ = QFileDialog.getOpenFileName(self, self.tr2("Local module PE", "Локальный PE модуля"), "", "PE (*.exe *.dll)")
         if not pe:
             return
+        if not self._interaction_current(interaction):
+            return
         pdb, _ = QFileDialog.getOpenFileName(self, self.tr2("Local PDB", "Локальный PDB"), "", "PDB (*.pdb)")
-        if pdb:
+        if pdb and self._interaction_current(interaction):
             self._request("symbols_verify", {"pe_path": pe, "pdb_path": pdb})
 
     def _trace(self):
+        interaction = self._interaction_token()
         path, _ = QFileDialog.getOpenFileName(self, self.tr2("Trace Decoder index", "Индекс Trace Decoder"), "", "SQLite (*.sqlite3 *.sqlite *.db)")
         if not path:
+            return
+        if not self._interaction_current(interaction):
             return
         # First list the actual trace instances; never substitute the live PID
         # for a recorded lifetime identifier.
@@ -734,10 +776,12 @@ class OverviewInspectorPanel(QWidget):
         self._request("trace_evidence", self._trace_request)
 
     def _choose_trace_instance(self, data):
+        interaction = self._interaction_token()
         candidates = data.get("candidate_instances")
         if (not isinstance(candidates, list) or not candidates or self._trace_request is None
                 or self._trace_request.get("process_instance") is not None):
             return
+        trace_request = dict(self._trace_request)
         choices = [self.tr2("Instance ", "Экземпляр ") +
                    f"{row.get('process_instance', '?')} · PID {row.get('pid', '?')} · "
                    f"{row.get('first_ms', '?')}–{row.get('last_ms', '?')} " + self.tr2("ms", "мс")
@@ -747,11 +791,13 @@ class OverviewInspectorPanel(QWidget):
             "Выберите записанный экземпляр. Совпадение PID не доказывает связь с живой целью."), choices, 0, False)
         if not ok:
             return
+        if not self._interaction_current(interaction) or self._trace_request != trace_request:
+            return
         row = candidates[choices.index(selected)]
         instance = row.get("process_instance", row.get("instance_id", row.get("id"))) if isinstance(row, dict) else row
         if instance is None:
             return
-        self._trace_request = dict(self._trace_request, process_instance=instance)
+        self._trace_request = dict(trace_request, process_instance=instance)
         self._request("trace_evidence", self._trace_request)
 
     def _trace_interval_parameters(self):
@@ -789,8 +835,9 @@ class OverviewInspectorPanel(QWidget):
         self._request("trace_evidence", parameters)
 
     def _export(self):
+        interaction = self._interaction_token()
         path, _ = QFileDialog.getSaveFileName(self, self.tr2("Export action journal", "Сохранить журнал действий"), "BLACKBOX-Diagnostic-Journal.json", "JSON (*.json)")
-        if path:
+        if path and self._interaction_current(interaction):
             self._request_section = self.section.currentData()
             self.bridge.export(path)
 
@@ -929,6 +976,8 @@ class OverviewInspectorPanel(QWidget):
         if request and self._last_result and self._last_result.get("request_kind") == "elevate":
             self._pending_retry = None
             if self._last_result.get("status") == "COMPLETED":
+                if not self._interaction_current(request.get("interaction")):
+                    return
                 self.bridge.submit(request["operation"], request["parameters"],
                                    confirmed=request["confirmed"], tag=request["tag"],
                                    timeout_seconds=request["timeout_seconds"])
@@ -1090,7 +1139,9 @@ class OverviewInspectorPanel(QWidget):
         available = self.bridge.target is not None and not self.bridge.busy
         for key, button in self._action_buttons.items():
             button.setEnabled(available)
-        self.cancel_button.setEnabled(self.bridge.busy)
+        cleanup_required = bool(getattr(self.bridge, "cleanup_required", False))
+        self.cancel_button.setEnabled(self.bridge.busy and not cleanup_required)
+        self._action_buttons["retry_cleanup"].setEnabled(cleanup_required and getattr(self.bridge, "worker", None) is None)
         self.end_admin_button.setEnabled(available and self.bridge.admin_active)
         self._action_buttons["compare"].setEnabled(available and self._before_id is not None and self._after_id is not None)
         self._action_buttons["captured_trace"].setEnabled(available and self._captured_trace is not None)

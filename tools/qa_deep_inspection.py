@@ -18,6 +18,7 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -47,6 +48,22 @@ def save(path: Path, value: Any) -> None:
     temporary.write_text(json.dumps(value, indent=2, ensure_ascii=False,
                                     allow_nan=False), encoding="utf-8")
     os.replace(temporary, path)
+
+
+def startup_access_diagnostics(paths: list[Path]) -> dict:
+    """Read-only startup evidence from the parent after a restricted failure."""
+    tool = Path(os.environ.get("SystemRoot", "C:/Windows")) / "System32/icacls.exe"
+    evidence = {"scope": "READ_ONLY_FILE_ACLS_NO_PERMISSION_OR_POLICY_CHANGES", "paths": []}
+    for path in paths:
+        row = {"path": str(path), "exists": path.exists()}
+        evidence["paths"].append(row)
+        try:
+            result = subprocess.run([str(tool), str(path)], capture_output=True,
+                                    text=True, encoding="utf-8", errors="replace", timeout=10)
+            row.update(exit_code=result.returncode, acl=(result.stdout + result.stderr)[:8000])
+        except (OSError, subprocess.TimeoutExpired) as error:
+            row.update(error=type(error).__name__, reason=str(error)[:1000])
+    return evidence
 
 
 def compiler_environment(output: Path) -> tuple[str, dict[str, str]]:
@@ -132,11 +149,13 @@ class Probe:
         self.owner = None
         self.reader = None
         self.lines: queue.Queue = queue.Queue(maxsize=32)
+        phase = "START_OWNED_NATIVE_PROCESS"
         try:
             self.owner = OwnedProcess([str(executable.resolve(strict=True)), str(self.path)],
                                       stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                       stderr=self.stderr, detach_console=True)
             self.process = self.owner.process
+            phase = "READ_NATIVE_READY_MESSAGE"
             self.reader = threading.Thread(target=self._reader, name="deep-qa-probe-reader", daemon=True)
             self.reader.start()
             self.ready = self.receive("ready", timeout=15)
@@ -145,7 +164,8 @@ class Probe:
             require(self.ready["buffer_hex"] == bytes(i ^ 0x5A for i in range(64)).hex(),
                     "KNOWN_NATIVE_MEMORY_ORACLE_MISMATCH")
             save(output / "oracle.json", self.ready)
-        except BaseException:
+        except BaseException as error:
+            error.add_note("Controlled native fixture startup phase: " + phase)
             self.close(kill=True)
             raise
 
@@ -208,6 +228,8 @@ class Probe:
                     require(self.process.returncode == 0, "NATIVE_PROBE_GRACEFUL_EXIT_FAILED")
                     result = {"status": "COMPLETED", "exit_code": 0, "last_state": stopped}
                 else:
+                    require(kill, "NATIVE_PROBE_EXITED_BEFORE_REQUESTED_STOP_" +
+                            str(self.process.poll()))
                     result = {"status": "KILLED_FOR_QA_CLEANUP" if kill else "EXITED",
                               "exit_code": self.process.poll()}
         finally:
@@ -795,7 +817,16 @@ def run_acceptance(output: Path, executable: Path, helper: Path | None, *, requi
         proof["operation_count"] = len(acceptance.operations)
         proof["status"] = "PASS"
     except BaseException as error:
-        proof.update(status="FAIL", error=type(error).__name__, reason=str(error)[:1500])
+        proof.update(status="FAIL", error=type(error).__name__, reason=str(error)[:1500],
+                     winerror=getattr(error, "winerror", None),
+                     failure_traceback="".join(traceback.format_exception(error))[-12000:])
+        if require_medium_integrity:
+            try:
+                from tools.qa_decoder_standard_token import current_medium_startup_diagnostics
+                proof["medium_startup_diagnostics"] = current_medium_startup_diagnostics()
+            except BaseException as diagnostic_error:
+                proof["medium_startup_diagnostics"] = {
+                    "status": "DIAGNOSTIC_FAILED", "reason": str(diagnostic_error)[:1000]}
     finally:
         if acceptance is not None:
             try:
@@ -858,6 +889,9 @@ def main() -> int:
                                          "proof": "standard-token/acceptance.json"}
         except BaseException as error:
             report.update(status="FAIL", error=type(error).__name__, reason=str(error)[:1500])
+            save(output / "standard-startup-access.json", startup_access_diagnostics(
+                [executable, executable.parent, standard_output, standard_output / "probe",
+                 Path(command[0])]))
             print("DEEP_STANDARD_TOKEN_ACCEPTANCE_FAIL", report["reason"])
             return 1
         finally:
