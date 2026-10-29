@@ -229,6 +229,12 @@ def token_default_dacl(token=None):
     adv.OpenProcessToken.restype = W.BOOL
     adv.GetTokenInformation.argtypes = [W.HANDLE, C.c_int, C.c_void_p, W.DWORD, C.POINTER(W.DWORD)]
     adv.GetTokenInformation.restype = W.BOOL
+    adv.IsValidAcl.argtypes, adv.IsValidAcl.restype = [C.c_void_p], W.BOOL
+    adv.GetAce.argtypes, adv.GetAce.restype = [C.c_void_p, W.DWORD, C.POINTER(C.c_void_p)], W.BOOL
+    adv.IsValidSid.argtypes, adv.IsValidSid.restype = [C.c_void_p], W.BOOL
+    adv.GetLengthSid.argtypes, adv.GetLengthSid.restype = [C.c_void_p], W.DWORD
+    adv.ConvertSidToStringSidW.argtypes = [C.c_void_p, C.POINTER(C.c_void_p)]
+    adv.ConvertSidToStringSidW.restype = W.BOOL
     adv.InitializeSecurityDescriptor.argtypes = [C.c_void_p, W.DWORD]
     adv.InitializeSecurityDescriptor.restype = W.BOOL
     adv.SetSecurityDescriptorDacl.argtypes = [C.c_void_p, W.BOOL, C.c_void_p, W.BOOL]
@@ -249,11 +255,48 @@ def token_default_dacl(token=None):
         if not adv.GetTokenInformation(token, 6, buffer, len(buffer), C.byref(required)):
             raise C.WinError(C.get_last_error())
         dacl = C.c_void_p.from_buffer(buffer).value
+        entries = []
         if dacl:
             first, end = C.addressof(buffer), C.addressof(buffer) + len(buffer)
             require(first <= dacl <= end - 8, "TOKEN_DEFAULT_DACL_POINTER_OUT_OF_BOUNDS")
-            require(8 <= C.c_uint16.from_address(dacl + 2).value <= end - dacl,
-                    "TOKEN_DEFAULT_DACL_CONTENT_OUT_OF_BOUNDS")
+            acl_size = C.c_uint16.from_address(dacl + 2).value
+            require(8 <= acl_size <= end - dacl, "TOKEN_DEFAULT_DACL_CONTENT_OUT_OF_BOUNDS")
+            require(adv.IsValidAcl(dacl), "TOKEN_DEFAULT_DACL_INVALID")
+            acl_end = dacl + acl_size
+            count = C.c_uint16.from_address(dacl + 4).value
+            require(count <= (acl_size - 8) // 4, "TOKEN_DEFAULT_DACL_ACE_COUNT_INVALID")
+            for index in range(count):
+                ace, sid_text = C.c_void_p(), C.c_void_p()
+                if not adv.GetAce(dacl, index, C.byref(ace)):
+                    raise C.WinError(C.get_last_error())
+                require(ace.value and dacl + 8 <= ace.value <= acl_end - 4,
+                        "TOKEN_DEFAULT_DACL_ACE_POINTER_INVALID")
+                ace_type = C.c_ubyte.from_address(ace.value).value
+                ace_flags = C.c_ubyte.from_address(ace.value + 1).value
+                ace_size = C.c_uint16.from_address(ace.value + 2).value
+                require(4 <= ace_size <= acl_end - ace.value, "TOKEN_DEFAULT_DACL_ACE_SIZE_INVALID")
+                entry = {"type": ace_type, "flags": ace_flags}
+                # ACCESS_ALLOWED_ACE / ACCESS_DENIED_ACE have the same fixed
+                # header, mask and SID layout. Other types remain explicit;
+                # they can never satisfy our narrowly allowed QA policy.
+                if ace_type in (0, 1):
+                    require(ace_size >= 16, "TOKEN_DEFAULT_DACL_ACCESS_ACE_TOO_SHORT")
+                    sid = ace.value + 8
+                    require(8 + 4 * C.c_ubyte.from_address(sid + 1).value <= ace_size - 8 and
+                            adv.IsValidSid(sid), "TOKEN_DEFAULT_DACL_ACE_SID_INVALID")
+                    require(adv.GetLengthSid(sid) == ace_size - 8,
+                            "TOKEN_DEFAULT_DACL_ACE_SID_SIZE_INVALID")
+                    try:
+                        if not adv.ConvertSidToStringSidW(sid, C.byref(sid_text)):
+                            raise C.WinError(C.get_last_error())
+                        entry.update(mask=C.c_uint32.from_address(ace.value + 4).value,
+                                     sid=C.wstring_at(sid_text))
+                    finally:
+                        if sid_text:
+                            kernel.LocalFree(sid_text)
+                else:
+                    entry["opaque_ace_hex"] = C.string_at(ace.value, ace_size).hex()
+                entries.append(entry)
         class SecurityDescriptor(C.Structure):
             _fields_ = [("revision", W.BYTE), ("reserved", W.BYTE), ("control", W.WORD),
                         ("owner", C.c_void_p), ("group", C.c_void_p),
@@ -266,7 +309,8 @@ def token_default_dacl(token=None):
             raise C.WinError(C.get_last_error())
         require(sddl.value and 1 <= length.value <= 65536, "TOKEN_DEFAULT_DACL_SDDL_SIZE_INVALID")
         return {"status": "OBSERVED", "sddl_dacl": C.wstring_at(sddl.value, length.value).rstrip("\0"),
-                "source": "GetTokenInformation(TokenDefaultDacl)", "null_dacl": dacl is None}
+                "source": "GetTokenInformation(TokenDefaultDacl)", "null_dacl": dacl is None,
+                "aces": entries}
     finally:
         if sddl:
             kernel.LocalFree(sddl)
@@ -307,6 +351,26 @@ def token_user_sid(token):
             kernel.LocalFree(text)
 
 
+def require_ephemeral_qa_default_dacl(readback, user_sid):
+    """Require exactly two explicit GENERIC_ALL grants using binary ACE facts.
+
+    SDDL may render an account SID as LA/DA or reorder two equivalent allow
+    ACEs. Neither text formatting nor account-name resolution is authority.
+    Exact full SIDs, ACE type/flags and rights remain mandatory; no extra ACE,
+    null DACL, inherited grant or narrower/broader mask is accepted.
+    """
+    entries = readback.get("aces", [])
+    expected_sids = {user_sid, "S-1-5-18"}
+    valid = (readback.get("status") == "OBSERVED" and readback.get("null_dacl") is False and
+             len(expected_sids) == 2 and len(entries) == 2 and
+             all(entry.get("type") == 0 and entry.get("flags") == 0 and
+                 entry.get("mask") == 0x10000000 and
+                 set(entry) == {"type", "flags", "mask", "sid"} for entry in entries) and
+             {entry.get("sid") for entry in entries} == expected_sids)
+    require(valid, "QA_TOKEN_DEFAULT_DACL_READBACK_MISMATCH: " +
+            json.dumps(readback, ensure_ascii=True, sort_keys=True))
+
+
 def _set_ephemeral_qa_default_dacl(restricted, user_sid):
     """Modify only the newly-created QA token, never an existing object's ACL."""
     require(token_user_sid(restricted) == user_sid, "QA_RESTRICTED_TOKEN_USER_CHANGED")
@@ -336,7 +400,7 @@ def _set_ephemeral_qa_default_dacl(restricted, user_sid):
         if not adv.SetTokenInformation(restricted, 6, C.byref(replacement), C.sizeof(replacement)):
             raise C.WinError(C.get_last_error())
         readback = token_default_dacl(restricted)
-        require(readback["sddl_dacl"] == expected, "QA_TOKEN_DEFAULT_DACL_READBACK_MISMATCH")
+        require_ephemeral_qa_default_dacl(readback, user_sid)
         return readback
     finally:
         if descriptor:

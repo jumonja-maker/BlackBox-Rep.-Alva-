@@ -19,13 +19,51 @@ from blackbox_core.optional_jobs import OwnedProcess
 from blackbox_core.windows_research import privilege
 from tools.qa_decoder_standard_token import (
     current_medium_startup_diagnostics, restricted_child, restricted_interpreter,
-    token_default_dacl, token_integrity,
+    require_ephemeral_qa_default_dacl, token_default_dacl, token_integrity,
 )
 
 MARKER = b"BLACKBOX_MEDIUM_OWNED_PIPE_CONTRACT\n"
 HOSTED_WINDOWS = (os.name == "nt" and C.sizeof(C.c_void_p) == 8 and
                   os.environ.get("GITHUB_ACTIONS") == "true" and
                   os.environ.get("RUNNER_ENVIRONMENT") == "github-hosted")
+
+
+class QaDefaultDaclPolicyContracts(unittest.TestCase):
+    """Pure policy checks, separate from the actual Windows token evidence."""
+    user = "S-1-5-21-1-2-3-500"
+
+    def observed(self):
+        return {"status": "OBSERVED", "null_dacl": False,
+                "sddl_dacl": "D:(A;;GA;;;SY)(A;;GA;;;LA)",
+                "aces": [{"type": 0, "flags": 0, "mask": 0x10000000, "sid": "S-1-5-18"},
+                         {"type": 0, "flags": 0, "mask": 0x10000000, "sid": self.user}]}
+
+    def test_full_sid_and_exact_rights_accept_alias_text_and_equivalent_allow_order(self):
+        observed = self.observed()
+        require_ephemeral_qa_default_dacl(observed, self.user)
+        observed["aces"].reverse()
+        observed["sddl_dacl"] = f"D:(A;;GA;;;{self.user})(A;;GA;;;SY)"
+        require_ephemeral_qa_default_dacl(observed, self.user)
+
+    def test_extra_denied_inherited_wrong_identity_and_wrong_rights_never_match(self):
+        mutations = {
+            "null": lambda value: value.update(null_dacl=True),
+            "missing": lambda value: value["aces"].pop(),
+            "extra": lambda value: value["aces"].append(dict(value["aces"][0])),
+            "deny": lambda value: value["aces"][1].update(type=1),
+            "inherit_only": lambda value: value["aces"][1].update(flags=8),
+            "inherited": lambda value: value["aces"][1].update(flags=16),
+            "read_only": lambda value: value["aces"][1].update(mask=0x80000000),
+            "extra_rights": lambda value: value["aces"][1].update(mask=0x10000001),
+            "everyone": lambda value: value["aces"][1].update(sid="S-1-1-0"),
+            "duplicate_system": lambda value: value["aces"][1].update(sid="S-1-5-18"),
+        }
+        for name, mutate in mutations.items():
+            with self.subTest(name=name):
+                observed = self.observed()
+                mutate(observed)
+                with self.assertRaisesRegex(AssertionError, "QA_TOKEN_DEFAULT_DACL_READBACK_MISMATCH"):
+                    require_ephemeral_qa_default_dacl(observed, self.user)
 
 
 def _grandchild():
@@ -154,8 +192,9 @@ class DeepMediumTokenNativeContract(unittest.TestCase):
         self.assertEqual(proof["startup"]["stages"]["duplicate_owned_temporary_file"]["status"], "SUCCEEDED", details)
         self.assertFalse(proof["startup"]["cleanup_errors"], details)
         adjustment = child["qa_default_dacl_adjustment"]
-        expected = f"D:(A;;GA;;;{adjustment['token_user_sid']})(A;;GA;;;SY)"
-        self.assertEqual(adjustment["after"]["sddl_dacl"], expected, details)
+        require_ephemeral_qa_default_dacl(adjustment["after"], adjustment["token_user_sid"])
+        require_ephemeral_qa_default_dacl(proof["default_dacl"], adjustment["token_user_sid"])
+        require_ephemeral_qa_default_dacl(proof["grandchild"]["default_dacl"], adjustment["token_user_sid"])
         self.assertEqual(adjustment["child_readback"], proof["default_dacl"])
         self.assertEqual(proof["grandchild"]["default_dacl"], proof["default_dacl"])
         self.assertFalse(adjustment["existing_object_or_file_acl_changes"])
