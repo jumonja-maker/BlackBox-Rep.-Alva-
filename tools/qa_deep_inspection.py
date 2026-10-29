@@ -598,6 +598,7 @@ class Acceptance:
         return proof
 
     def negatives(self) -> dict:
+        from tools.qa_deep_protection import probe_protected_processes
         changed_identity = replace(self.identity, created_100ns=self.identity.created_100ns + 1)
         mismatch = self.perform("memory_read", {"address": self.probe.ready["buffer_address"], "length": 64},
                                 target=changed_identity, statuses=("PROCESS_CHANGED",))
@@ -608,7 +609,7 @@ class Acceptance:
         return {"mismatched_creation_identity": mismatch,
                 "pre_start_cancellation": cancellation,
                 "pid_recycling": "IDENTITY_MISMATCH_REJECTION; ACTUAL_OS_PID_RECYCLING_NOT_FORCED",
-                "protected_process": "NOT_PROBED_NO_UNRELATED_SYSTEM_TARGETS"}
+                "protected_process": probe_protected_processes()}
 
     def access_denial(self) -> dict:
         self.probe.send("deny_read")

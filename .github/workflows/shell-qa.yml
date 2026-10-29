@@ -28,6 +28,9 @@ permissions:
 
 jobs:
   shell-tests:
+    # This patch has the full source/portable/native gates in bb-deep-qa.yml.
+    # Do not duplicate the complete build on every draft PR synchronization.
+    if: github.event_name != 'pull_request' || github.head_ref != 'patch/bb-deep-001'
     name: Windows shell / read-only observer
     runs-on: windows-latest
     # The full 825-test Windows source suite exceeded the previous 30-minute
@@ -104,6 +107,7 @@ jobs:
           if (($helpText -join ' ') -match 'handoff') { throw 'Deprecated command visible' }
 
   linux-tests:
+    if: github.event_name != 'pull_request' || github.head_ref != 'patch/bb-deep-001'
     name: Linux compatibility check (independent of Windows release)
     runs-on: ubuntu-latest
     timeout-minutes: 18
@@ -150,6 +154,7 @@ jobs:
         run: python -m blackbox_core --help
 
   windows-portable:
+    if: github.event_name != 'pull_request' || github.head_ref != 'patch/bb-deep-001'
     name: Windows portable exe
     # Exact-SHA native decoder acceptance accompanies the release candidate.
     # Publication still requires *all* three jobs green.

@@ -133,6 +133,9 @@ class _WinAPI:
             "OpenProcess": (w.HANDLE, [w.DWORD, w.BOOL, w.DWORD]),
             "OpenThread": (w.HANDLE, [w.DWORD, w.BOOL, w.DWORD]),
             "CloseHandle": (w.BOOL, [w.HANDLE]),
+            "GetCurrentProcess": (w.HANDLE, []),
+            "DuplicateHandle": (w.BOOL, [w.HANDLE, w.HANDLE, w.HANDLE,
+                                          ctypes.POINTER(w.HANDLE), w.DWORD, w.BOOL, w.DWORD]),
             "GetProcessTimes": (w.BOOL, [w.HANDLE] + [ctypes.POINTER(w.FILETIME)] * 4),
             "GetThreadTimes": (w.BOOL, [w.HANDLE] + [ctypes.POINTER(w.FILETIME)] * 4),
             "GetProcessIdOfThread": (w.DWORD, [w.HANDLE]),
@@ -215,6 +218,26 @@ class _WinAPI:
             self.ensure_rights(0x1FFFFF)
         if not self.k.DebugBreakProcess(self.debug_handle or self.handle):
             self.fail("DEBUG_BREAK_PROCESS")
+
+    def retain_debug_process_handle(self, supplied_handle: int) -> None:
+        """Keep our own duplicate, never close WaitForDebugEvent's HANDLE.
+
+        Windows tracks CREATE_PROCESS/CREATE_THREAD handles and closes them
+        on continued exit events or detach. Closing those numeric values
+        early permits Windows to close an unrelated later handle after reuse.
+        Only the accompanying image/DLL file handles belong to the caller.
+        """
+        from ctypes import wintypes as w
+        if not supplied_handle or supplied_handle == 0xFFFFFFFFFFFFFFFF:
+            raise DebugError("RECOVERY_UNCONFIRMED", "DEBUG_PROCESS_HANDLE_MISSING")
+        owned = w.HANDLE()
+        current = self.k.GetCurrentProcess()
+        if not self.k.DuplicateHandle(current, supplied_handle, current,
+                                      ctypes.byref(owned), 0, False, 2):
+            self.fail("DUPLICATE_DEBUG_PROCESS_HANDLE")
+        previous, self.debug_handle = self.debug_handle, owned.value
+        if previous:
+            self.k.CloseHandle(previous)
 
     def creation(self, handle: Any, *, thread: bool = False) -> int:
         from ctypes import wintypes as w
@@ -635,21 +658,15 @@ class DebugSession:
         self._event = event
         self._event_continue = DBG_EXCEPTION_NOT_HANDLED if event.code == 1 else DBG_CONTINUE
         raw = event.raw()
-        if event.code in (2, 3, 6):
-            # Debug API ownership: close thread/process/load-image handles supplied by Windows.
-            offsets = (0,) if event.code in (2, 6) else (0, 16)
-            if event.code == 3:
-                process_handle = struct.unpack_from("<Q", raw, 8)[0]
-                if event.pid == self.identity.pid:
-                    if self._api.debug_handle:
-                        self._api.k.CloseHandle(self._api.debug_handle)
-                    self._api.debug_handle = process_handle
-                elif process_handle:
-                    self._api.k.CloseHandle(process_handle)
-            for offset in offsets:
-                handle = struct.unpack_from("<Q", raw, offset)[0]
-                if handle and handle != 0xFFFFFFFFFFFFFFFF:
-                    self._api.k.CloseHandle(handle)
+        if event.code in (3, 6):
+            # CREATE_PROCESS.hFile and LOAD_DLL.hFile are caller-owned.
+            # hProcess and every CREATE_THREAD/CREATE_PROCESS.hThread are
+            # system-managed debug handles; WaitForDebugEvent retains them.
+            file_handle = struct.unpack_from("<Q", raw, 0)[0]
+            if file_handle and file_handle != 0xFFFFFFFFFFFFFFFF:
+                self._api.k.CloseHandle(file_handle)
+            if event.code == 3 and event.pid == self.identity.pid:
+                self._api.retain_debug_process_handle(struct.unpack_from("<Q", raw, 8)[0])
         if event.pid != self.identity.pid:
             code = DBG_EXCEPTION_NOT_HANDLED if event.code == 1 else DBG_CONTINUE
             if not self._api.k.ContinueDebugEvent(event.pid, event.tid, code):
@@ -956,6 +973,24 @@ class DebugSession:
 
     def _cleanup(self) -> dict[str, Any]:
         errors: list[str] = []
+        native_failures: list[dict[str, Any]] = []
+
+        def record_caught_failure(label: str, failure: BaseException) -> None:
+            errors.append(f"{label}: {failure}")
+            code = getattr(failure, "winerror", None)
+            if code is not None:
+                native_failures.append({"operation": label, "winerror": code, "detail": str(failure)})
+
+        def record_native_failure(label: str) -> None:
+            # Capture GetLastError before another API/guardian call overwrites
+            # it. Cleanup remains unconfirmed even for an ordinary Win32 error.
+            try:
+                self._api.fail(label)
+            except DebugError as failure:
+                errors.append(str(failure))
+                native_failures.append({"operation": label, "winerror": failure.winerror,
+                                        "detail": str(failure)})
+
         self.state = "DETACHING"
         if self._guard:
             try:
@@ -991,7 +1026,7 @@ class DebugSession:
                 if self._attached and self._event is None:
                     errors.append("NO_CONFIRMED_STOP_FOR_CLEANUP")
             except BaseException as exc:
-                errors.append(str(exc))
+                record_caught_failure("DEBUG_STOP_FOR_CLEANUP", exc)
         if self._stepping:
             try:
                 item = self._stepping
@@ -1007,7 +1042,7 @@ class DebugSession:
                     self._api.k.CloseHandle(handle)
                 self._stepping = None
             except BaseException as exc:
-                errors.append(f"TRAP_FLAG: {exc}")
+                record_caught_failure("TRAP_FLAG", exc)
         for identifier, item in list(self._breakpoints.items()):
             try:
                 self._restore_breakpoint_context(item)
@@ -1021,7 +1056,7 @@ class DebugSession:
                 self._api.restore_executable_protection(item["address"], item["original_protection"])
                 del self._breakpoints[identifier]
             except BaseException as exc:
-                errors.append(f"BREAKPOINT: {exc}")
+                record_caught_failure("BREAKPOINT", exc)
         for identifier in list(self._changes):
             try:
                 item = self._changes[identifier]
@@ -1032,21 +1067,24 @@ class DebugSession:
                 else:
                     self._rollback_memory({"change_id": identifier})
             except BaseException as exc:
-                errors.append(f"MEMORY_RESTORE: {exc}")
+                record_caught_failure("MEMORY_RESTORE", exc)
         for identifier in list(self._suspensions):
             try:
                 self._resume({"suspension_id": identifier})
             except BaseException as exc:
-                errors.append(f"THREAD_RESUME: {exc}")
+                record_caught_failure("THREAD_RESUME", exc)
         if self._event is not None:
-            event, self._event = self._event, None
+            event = self._event
             if not self._api.k.ContinueDebugEvent(event.pid, event.tid, self._event_continue):
-                errors.append("CONTINUE_BEFORE_DETACH_FAILED")
+                record_native_failure("CONTINUE_BEFORE_DETACH_FAILED")
+            else:
+                self._event = None
         if self._attached:
             if not self._api.k.DebugActiveProcessStop(self.identity.pid):
-                errors.append("DEBUG_ACTIVE_PROCESS_STOP_FAILED")
+                record_native_failure("DEBUG_ACTIVE_PROCESS_STOP_FAILED")
             else:
                 self._attached = False
+                self._event = None
                 if self._api.debug_handle:
                     self._api.k.CloseHandle(self._api.debug_handle)
                     self._api.debug_handle = None
@@ -1065,6 +1103,8 @@ class DebugSession:
                 item["handle"] = None
         return _result("RECOVERY_UNCONFIRMED" if errors else "COMPLETED",
                        data={"state": self.state, "attached": self._attached,
-                             "owned_resources_remaining": len(self._breakpoints) + len(self._changes) + len(self._suspensions)},
+                             "owned_resources_remaining": len(self._breakpoints) + len(self._changes) + len(self._suspensions),
+                             "native_cleanup_failures": native_failures},
                        error="; ".join(errors) if errors else None,
+                       winerror=native_failures[0]["winerror"] if native_failures else None,
                        limitations=["Byte and suspension cleanup cannot reverse application-side effects."])

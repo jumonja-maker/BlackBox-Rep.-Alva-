@@ -10,7 +10,7 @@ from unittest.mock import Mock
 
 from blackbox_core.deep_contracts import ProcessIdentity
 from blackbox_core.deep_debug import (
-    DebugError, DebugSession, _Command, _Context, _DebugEvent, _hex, _positive, _require_native_amd64,
+    DebugError, DebugSession, _Command, _Context, _DebugEvent, _WinAPI, _hex, _positive, _require_native_amd64,
 )
 from blackbox_core.deep_debug_guardian import encode_report, recover, validate_plan
 
@@ -48,6 +48,7 @@ class FakeAPI:
         self.alive = True
         self.before_replace = None
         self.protections = {0x2000: 0x20}
+        self.debug_handle = None
 
     def verify(self):
         if not self.alive:
@@ -117,6 +118,61 @@ def plan(**updates):
 
 
 class DeepDebugContracts(unittest.TestCase):
+    def test_wait_event_process_and_thread_handles_remain_system_owned(self):
+        item = session()
+        item._api.retain_debug_process_handle = Mock()
+        item._api.k.ContinueDebugEvent = Mock(return_value=True)
+        events = [(2, (400,)), (3, (401, 402, 403)), (6, (404,))]
+        def wait(event_ref, milliseconds):
+            code, handles = events.pop(0)
+            event = event_ref._obj
+            event.code, event.pid, event.tid = code, 88, 7
+            raw = bytearray(160)
+            for offset, handle in enumerate(handles):
+                struct.pack_into("<Q", raw, offset * 8, handle)
+            event.information[:] = raw
+            return True
+        item._api.k.WaitForDebugEvent = wait
+        for _ in range(3):
+            item._pump(1)
+        # Windows retains 400/402/403 for later EXIT/detach cleanup. Closing
+        # them here could later double-close a reused, unrelated HANDLE value.
+        self.assertEqual(item._api.k.closed, [401, 404])
+        item._api.retain_debug_process_handle.assert_called_once_with(402)
+        self.assertIsNone(item._event)
+
+    def test_debug_break_handle_is_an_independently_owned_duplicate(self):
+        api = object.__new__(_WinAPI)
+        api.k = FakeKernel()
+        api.debug_handle = 901
+        api.k.GetCurrentProcess = Mock(return_value=-1)
+        def duplicate(source_process, source_handle, destination_process, destination, rights, inherit, options):
+            self.assertEqual((source_process, source_handle, destination_process, rights, inherit, options),
+                             (-1, 402, -1, 0, False, 2))
+            destination._obj.value = 902
+            return True
+        api.k.DuplicateHandle = duplicate
+        api.retain_debug_process_handle(402)
+        self.assertEqual(api.debug_handle, 902)
+        self.assertEqual(api.k.closed, [901])
+
+    def test_cleanup_keeps_pending_event_and_native_error_when_continue_and_detach_fail(self):
+        item = session()
+        item._attached = True
+        item._event = _DebugEvent()
+        item._event.pid, item._event.tid = 88, 7
+        item._api.k.ContinueDebugEvent = Mock(return_value=False)
+        item._api.k.DebugActiveProcessStop = Mock(return_value=False)
+        item._api.fail = Mock(side_effect=[
+            DebugError("OPERATION_FAILED", "CONTINUE_BEFORE_DETACH_FAILED: controlled error", 6),
+            DebugError("ACCESS_DENIED", "DEBUG_ACTIVE_PROCESS_STOP_FAILED: controlled error", 5)])
+        result = item._cleanup()
+        self.assertEqual(result["status"], "RECOVERY_UNCONFIRMED")
+        self.assertEqual(result["winerror"], 6)
+        self.assertEqual([failure["winerror"] for failure in result["data"]["native_cleanup_failures"]], [6, 5])
+        self.assertTrue(item._attached)
+        self.assertIsNotNone(item._event)
+
     def test_context_abi_requires_native_amd64_not_arm64_or_wow64(self):
         _require_native_amd64(0, 0x8664)
         for process, native in ((0, 0xAA64), (0x8664, 0xAA64), (0x014C, 0x8664), (0, 0)):
