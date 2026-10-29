@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import ctypes
+import struct
 import threading
 import time
 import unittest
@@ -9,7 +10,7 @@ from unittest.mock import Mock
 
 from blackbox_core.deep_contracts import ProcessIdentity
 from blackbox_core.deep_debug import (
-    DebugError, DebugSession, _Command, _Context, _DebugEvent, _hex, _positive,
+    DebugError, DebugSession, _Command, _Context, _DebugEvent, _hex, _positive, _require_native_amd64,
 )
 from blackbox_core.deep_debug_guardian import encode_report, recover, validate_plan
 
@@ -46,6 +47,7 @@ class FakeAPI:
         self.replacements = []
         self.alive = True
         self.before_replace = None
+        self.protections = {0x2000: 0x20}
 
     def verify(self):
         if not self.alive:
@@ -61,7 +63,15 @@ class FakeAPI:
     def executable_address(self, address):
         return address == 0x2000
 
-    def replace(self, address, expected, value, *, executable=False):
+    def executable_protection(self, address):
+        return self.protections[address]
+
+    def restore_executable_protection(self, address, original):
+        if self.protections[address] not in (original, 0x40):
+            raise DebugError("RECOVERY_UNCONFIRMED", "BREAKPOINT_PAGE_PROTECTION_CHANGED_EXTERNALLY")
+        self.protections[address] = original
+
+    def replace(self, address, expected, value, *, executable=False, original_protection=None):
         self.verify()
         if self.memory[address] != expected:
             raise DebugError("OPERATION_FAILED", "EXPECTED_BYTES_MISMATCH")
@@ -69,6 +79,8 @@ class FakeAPI:
             self.before_replace()
         self.memory[address] = value
         self.replacements.append((address, expected, value, executable))
+        if executable:
+            self.restore_executable_protection(address, original_protection)
 
     def thread(self, tid, created=None, *, rights=0x0018):
         self.verify()
@@ -105,6 +117,12 @@ def plan(**updates):
 
 
 class DeepDebugContracts(unittest.TestCase):
+    def test_context_abi_requires_native_amd64_not_arm64_or_wow64(self):
+        _require_native_amd64(0, 0x8664)
+        for process, native in ((0, 0xAA64), (0x8664, 0xAA64), (0x014C, 0x8664), (0, 0)):
+            with self.subTest(process=process, native=native), self.assertRaisesRegex(DebugError, "AMD64"):
+                _require_native_amd64(process, native)
+
     def test_native_structures_have_x64_windows_layout_and_alignment(self):
         self.assertEqual(ctypes.sizeof(_DebugEvent), 176)
         context = _Context()
@@ -206,6 +224,70 @@ class DeepDebugContracts(unittest.TestCase):
             item._add_breakpoint({"address": 0x2000})
         self.assertFalse(item._breakpoints)
 
+    def test_breakpoint_protection_intent_precedes_native_page_change(self):
+        item = session()
+        item._attached = True
+        item._event = Mock()
+        item._api.before_replace = lambda: self.assertEqual(
+            item._guard.plans[-1]["breakpoints"][0]["original_protection"], 0x20)
+        result = item._add_breakpoint({"address": 0x2000})
+        self.assertEqual(result["status"], "COMPLETED")
+        self.assertEqual(item._api.protections[0x2000], 0x20)
+
+    def test_uncertain_guardian_shutdown_never_duplicates_suspend_cleanup(self):
+        item = session()
+        item._suspensions["owned"] = {"tid": 7, "created_100ns": 45678,
+                                      "handle": 100, "phase": "active", "previous_count": 2}
+        item._api.k.counts[100] = 3
+        item._guard.update = Mock(side_effect=TimeoutError("NO_ACK"))
+        item._guard.abandon = Mock(side_effect=TimeoutError("STILL_RUNNING"))
+        result = item._cleanup()
+        self.assertEqual(result["status"], "RECOVERY_UNCONFIRMED")
+        self.assertEqual(item._api.k.counts[100], 3)
+        self.assertIn("owned", item._suspensions)
+
+    def test_failed_kill_on_exit_setup_retains_unconfirmed_attachment_for_cleanup(self):
+        item = session()
+        item._api.ensure_rights = Mock()
+        item._api.handle = 101
+        item._api.k.CheckRemoteDebuggerPresent = Mock(return_value=True)
+        item._api.k.DebugActiveProcess = Mock(return_value=True)
+        item._api.k.DebugSetProcessKillOnExit = Mock(return_value=False)
+        item._api.k.DebugActiveProcessStop = Mock(return_value=False)
+        command = _Command("debug.attach", {}, time.monotonic() + 5, None, threading.Event())
+        with self.assertRaisesRegex(DebugError, "KILL_ON_EXIT_CONFIGURATION_FAILED"):
+            item._attach(command)
+        self.assertTrue(item._attached)
+        self.assertEqual(item.state, "RECOVERY_UNCONFIRMED")
+
+    def test_breakpoint_context_failure_retains_pending_debug_event_and_blocks_continue(self):
+        item = session()
+        item._attached = True
+        item._breakpoints["bp"] = {"breakpoint_id": "bp", "address": 0x2000,
+                                    "original_hex": "90", "installed": True, "enabled": True,
+                                    "original_protection": 0x20}
+        item._api.memory[0x2000] = b"\xcc"
+        def wait(event_ref, milliseconds):
+            event = event_ref._obj
+            event.code, event.pid, event.tid = 1, 88, 7
+            raw = bytearray(160)
+            struct.pack_into("<I", raw, 0, 0x80000003)
+            struct.pack_into("<Q", raw, 16, 0x2000)
+            struct.pack_into("<I", raw, 152, 1)
+            event.information[:] = raw
+            return True
+        item._api.k.WaitForDebugEvent = wait
+        item._api.context = Mock(side_effect=DebugError("ACCESS_DENIED", "CONTROLLED_CONTEXT_FAILURE"))
+        with self.assertRaisesRegex(DebugError, "CONTROLLED_CONTEXT_FAILURE"):
+            item._pump(1)
+        self.assertIsNotNone(item._event)
+        self.assertEqual(item._event.tid, 7)
+        self.assertEqual(item._event_continue, 0x10002)
+        self.assertEqual(item._breakpoints["bp"]["hit_context"]["phase"], "rewind_pending")
+        command = _Command("debug.continue", {}, time.monotonic() + 5, None, threading.Event())
+        with self.assertRaisesRegex(DebugError, "INSTRUCTION_POINTER_NOT_VERIFIED"):
+            item._continue(command, step=False)
+
 
 class DeepRecoveryContracts(unittest.TestCase):
     def test_oversize_recovery_report_stays_valid_json_and_never_claims_success(self):
@@ -262,12 +344,35 @@ class DeepRecoveryContracts(unittest.TestCase):
     def test_breakpoint_byte_recovery_does_not_claim_instruction_pointer_recovery(self):
         api = FakeAPI()
         api.memory[0x2000] = b"\xcc"
-        result = recover(api, plan(breakpoints=[{"address": 0x2000, "original_hex": "90"}]),
+        result = recover(api, plan(breakpoints=[{"address": 0x2000, "original_hex": "90",
+                                               "original_protection": 0x20}]),
                          reason="HELPER_EXITED")
         self.assertEqual(api.memory[0x2000], b"\x90")
         self.assertEqual(result["restored"]["breakpoints"], 1)
         self.assertEqual(result["status"], "RECOVERY_UNCONFIRMED")
         self.assertIn("BREAKPOINT_EXECUTION_CONTEXT_RECOVERY_NOT_ESTABLISHED", result["errors"])
+
+    def test_guardian_restores_page_protection_when_crash_preceded_byte_write(self):
+        api = FakeAPI()
+        api.protections[0x2000] = 0x40
+        result = recover(api, plan(breakpoints=[{"address": 0x2000, "original_hex": "90",
+                                               "original_protection": 0x20}]), reason="HELPER_EXITED")
+        self.assertEqual(api.protections[0x2000], 0x20)
+        self.assertFalse(api.replacements)
+        self.assertEqual(result["restored"]["breakpoints"], 1)
+
+    def test_guardian_does_not_overwrite_external_protection_changes(self):
+        api = FakeAPI()
+        api.protections[0x2000] = 0x80
+        result = recover(api, plan(breakpoints=[{"address": 0x2000, "original_hex": "90",
+                                               "original_protection": 0x20}]), reason="HELPER_EXITED")
+        self.assertEqual(api.protections[0x2000], 0x80)
+        self.assertEqual(result["status"], "RECOVERY_UNCONFIRMED")
+        self.assertEqual(result["restored"]["breakpoints"], 0)
+
+    def test_guardian_rejects_breakpoint_without_protection_recovery_intent(self):
+        with self.assertRaisesRegex(ValueError, "PROTECTION_INTENT"):
+            validate_plan(plan(breakpoints=[{"address": 0x2000, "original_hex": "90"}]))
 
     def test_guardian_rejects_unbounded_or_extra_commands(self):
         with self.assertRaises(ValueError):

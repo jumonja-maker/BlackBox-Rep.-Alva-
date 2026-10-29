@@ -20,7 +20,8 @@ def execution_level(path):
     with pefile.PE(str(path), fast_load=False) as pe:
         if pe.FILE_HEADER.Machine != 0x8664:
             raise ValueError("DIAGNOSTIC_PACKAGE_REQUIRES_X64")
-        for entry in getattr(pe, "DIRECTORY_ENTRY_RESOURCE", ()).entries:
+        resources = getattr(pe, "DIRECTORY_ENTRY_RESOURCE", None)
+        for entry in resources.entries if resources is not None else ():
             if entry.id != 24:
                 continue
             for identity in entry.directory.entries:
@@ -51,11 +52,14 @@ def verify(root):
     archive = CArchiveReader(str(helper))
     embedded = archive.open_embedded_archive("PYZ.pyz")
     required = ("deep_contracts", "deep_helper", "deep_ipc", "deep_native",
-                "deep_debug", "deep_debug_guardian")
+                "deep_debug", "deep_debug_guardian", "deep_profiling", "trace_owner")
     missing = [name for name in required
                if "blackbox_core." + name not in embedded.toc]
     if missing:
         raise ValueError("DIAGNOSTIC_MODULES_MISSING: " + ", ".join(missing))
+    if any(name == "PySide6" or name.startswith(("PySide6.", "blackbox_universal"))
+           for name in embedded.toc):
+        raise ValueError("DIAGNOSTIC_HELPER_MUST_NOT_BUNDLE_GUI")
     gui_source = json.loads((root / "_internal" / "blackbox-build.json").read_text())
     helper_source = json.loads((helper.parent / "_internal" / "blackbox-build.json").read_text())
     if (helper_source != gui_source or not gui_source.get("tracked_worktree_clean")

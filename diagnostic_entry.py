@@ -16,6 +16,9 @@ def main():
     if arguments and arguments[0] == "--deep-handle-query":
         from blackbox_core.deep_native_handles import main as handles_main
         return handles_main(arguments[1:])
+    if arguments and arguments[0] == "--deep-trace-owner":
+        from blackbox_core.deep_profiling import owner_main
+        return owner_main(arguments[1:])
     from blackbox_core.deep_helper import main as helper_main
     return helper_main(arguments)
 

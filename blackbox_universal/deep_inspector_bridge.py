@@ -68,9 +68,9 @@ class _DeepTask(QThread):
                 if self.cancel_event.is_set():
                     raise InterruptedError("DIAGNOSTIC_CANCELLED")
                 if command["kind"] == "capabilities":
-                    result = self.service.capabilities(target)
-                    if "status" not in result:
-                        result = {"status": "COMPLETED", "data": result}
+                    from blackbox_core.deep_contracts import ActionRequest
+                    result = self.service.execute(ActionRequest("capabilities", target, timeout_seconds=30),
+                                                  cancel_event=self.cancel_event)
                 elif command["kind"] == "elevate":
                     result = self.service.elevate(
                         target, command["operations"], confirmed=True,

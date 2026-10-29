@@ -5,7 +5,9 @@ owns transient snapshot capture; all unwinding reads the resulting VA clone.
 """
 from __future__ import annotations
 
+from contextlib import contextmanager, ExitStack
 import ctypes as C
+import os
 import time
 
 from . import deep_native_win as W
@@ -20,6 +22,44 @@ class PSS_THREAD_ENTRY(C.Structure):
                 ("user_time", W.FILETIME), ("start_address", W.PTR),
                 ("captured", W.FILETIME), ("flags", W.U32),
                 ("suspend_count", W.U16), ("context_size", W.U16), ("context", W.PTR)]
+
+
+def _same_unwind_image(captured, disk):
+    return bool(captured.get("guid") and all(captured.get(key) == disk.get(key) for key in
+                ("guid", "age", "machine", "image_size", "image_timestamp")))
+
+
+@contextmanager
+def _unwind_image(kernel, module):
+    """Pin the verified disk image while DbgHelp borrows its unwind metadata.
+
+    Do not let SymLoadModuleEx reopen a pathname which could have been replaced
+    after Toolhelp/PSS capture. Denying write/delete sharing also prevents a
+    later writer from mutating this metadata during the stack walk.
+    """
+    import msvcrt
+    from .deep_native import _os_error
+    from .decoder_pdb import _local_file, _stable_file
+    from .decoder_native_symbols import _pe_layout
+    path, initial = _local_file(module["path"])
+    create = W.bind(kernel.dll, "CreateFileW", W.HANDLE, C.c_wchar_p, W.U32,
+                    W.U32, W.PTR, W.U32, W.U32, W.HANDLE)
+    handle = create(str(path), 0x80000000, 1, None, 3, 0x00200080, None)
+    if not handle or handle == W.INVALID_HANDLE:
+        raise _os_error("UNWIND_IMAGE_OPEN_FAILED")
+    try:
+        descriptor = msvcrt.open_osfhandle(int(handle), os.O_RDONLY | os.O_BINARY)
+    except BaseException:
+        kernel.close(handle)
+        raise
+    with os.fdopen(descriptor, "rb") as stream:
+        _stable_file(path, initial, os.fstat(stream.fileno()))
+        disk = _pe_layout(stream, initial.st_size)
+        _stable_file(path, initial, os.fstat(stream.fileno()))
+        if not _same_unwind_image(module["snapshot_pe"], disk):
+            raise ValueError("UNWIND_IMAGE_DIFFERS_FROM_PSS_CLONE")
+        stream.seek(0)
+        yield handle
 
 
 def collect_stacks(inspector, params, deadline, cancel):
@@ -45,7 +85,7 @@ def collect_stacks(inspector, params, deadline, cancel):
         if not loaded.get("guid") or any(loaded.get(key) != symbols.pe.get(key)
                                          for key in ("guid", "age", "image_size", "image_timestamp")):
             raise ValueError("LOADED_MODULE_PE_PDB_IDENTITY_MISMATCH")
-    rows, omitted, cleanup_error = [], 0, None
+    rows, omitted, cleanup_error, unwind_withheld = [], 0, None, 0
     with inspector._open(0x4D0) as (kernel, process):
         process_machine, native_machine = W.U16(), W.U16()
         if not kernel.wow64(process, C.byref(process_machine), C.byref(native_machine)):
@@ -100,20 +140,57 @@ def collect_stacks(inspector, params, deadline, cancel):
                                      C.c_wchar_p, C.c_wchar_p, W.U64, W.U32, W.PTR, W.U32)
                 stack_walk = W.bind(dbg, "StackWalk64", W.BOOL, W.U32, W.HANDLE, W.HANDLE,
                                     C.POINTER(W.STACKFRAME64), W.PTR, W.PTR, W.PTR, W.PTR, W.PTR)
+                read_type = C.WINFUNCTYPE(W.BOOL, W.HANDLE, W.U64, W.PTR, W.U32, C.POINTER(W.U32))
+                read_failure = {"error": None}
+
+                @read_type
+                def read_clone(_, address, output, requested, received):
+                    try:
+                        if received:
+                            received[0] = 0
+                        _check(deadline, cancel)
+                        if (not received or not output or not address or not 0 < requested <= 65536 or
+                                address + requested > 2**64):
+                            return False
+                        count = W.SIZE()
+                        ok = kernel.read_memory(clone, address, output, requested, C.byref(count))
+                        if count.value > requested:
+                            return False
+                        received[0] = count.value
+                        return bool(ok)
+                    except NativeError as error:
+                        read_failure["error"] = error
+                        return False
+                    except BaseException:
+                        read_failure["error"] = NativeError("INCOMPLETE_EVIDENCE", "PSS_STACK_MEMORY_CALLBACK_FAILED")
+                        return False
                 function_table = W.bind(dbg, "SymFunctionTableAccess64", W.PTR, W.HANDLE, W.U64)
                 module_base_api = W.bind(dbg, "SymGetModuleBase64", W.U64, W.HANDLE, W.U64)
                 previous_options = get_options()
-                # Ignore environment symbol paths, disable image search/prompts.
-                set_options(0x4 | 0x200 | 0x400 | 0x1000 | 0x20000 | 0x80000)
+                # StackWalk needs PE unwind metadata, not DbgHelp's PDB loader.
+                # Ignore embedded CodeView paths (which can be UNC), environment
+                # symbol paths and automatic symbol-server discovery. Explicit
+                # local PDB names/lines are parsed independently above.
+                set_options(0x4 | 0x80 | 0x100 | 0x200 | 0x400 | 0x1000 |
+                            0x20000 | 0x40000 | 0x80000 | 0x200000 | 0x2000000)
                 initialized = False
+                image_owners = ExitStack()
                 try:
                     if not initialize(clone, "", False):
                         raise _os_error("SYM_INITIALIZE_FAILED")
                     initialized = True
                     for module in modules:
                         _check(deadline, cancel)
-                        if module["path"] and not module["path"].startswith(("\\\\", "//")):
-                            load_module(clone, None, module["path"], None, module["base"], module["size"], None, 0)
+                        try:
+                            image_handle = image_owners.enter_context(_unwind_image(kernel, module))
+                            loaded_base = load_module(clone, image_handle, None, module["name"],
+                                                      module["base"], module["size"], None, 0)
+                            if loaded_base != module["base"]:
+                                raise ValueError("DBGHELP_UNWIND_IMAGE_NOT_LOADED")
+                            module["unwind_metadata_status"] = "PINNED_LOCAL_IMAGE_MATCHES_PSS_CODEVIEW_AND_LAYOUT"
+                        except (OSError, ValueError, NativeError):
+                            unwind_withheld += 1
+                            module["unwind_metadata_status"] = "INCOMPLETE_EVIDENCE"
                     while True:
                         _check(deadline, cancel)
                         entry = PSS_THREAD_ENTRY()
@@ -157,14 +234,19 @@ def collect_stacks(inspector, params, deadline, cancel):
                             record = {"address": pc, "stack_pointer": sp,
                                       "module": found["name"] if found else None,
                                       "module_base": found["base"] if found else None,
-                                      "rva": pc - found["base"] if found else None}
+                                      "rva": pc - found["base"] if found else None,
+                                      "unwind_metadata_status": found.get("unwind_metadata_status") if found else None}
                             if symbols is not None and found and found["base"] == symbol_module["base"]:
                                 record["symbol"] = symbols.lookup(pc - found["base"])
                                 record["symbol_binding"] = "PSS_CLONE_CODEVIEW_AND_LOCAL_PE_PDB_MATCH"
                             row["frames"].append(record)
                             C.set_last_error(0)
-                            if not stack_walk(0x8664, clone, None, C.byref(frame), C.byref(context), None,
-                                              C.cast(function_table, W.PTR), C.cast(module_base_api, W.PTR), None):
+                            walked = stack_walk(0x8664, clone, int(entry.tid), C.byref(frame), C.byref(context),
+                                                C.cast(read_clone, W.PTR), C.cast(function_table, W.PTR),
+                                                C.cast(module_base_api, W.PTR), None)
+                            if read_failure["error"] is not None:
+                                raise read_failure["error"]
+                            if not walked:
                                 row["unwind_winerror"] = C.get_last_error()
                                 break
                         del storage
@@ -174,6 +256,7 @@ def collect_stacks(inspector, params, deadline, cancel):
                 finally:
                     if initialized:
                         cleanup(clone)
+                    image_owners.close()
                     set_options(previous_options)
             finally:
                 _DBGHELP_LOCK.release()
@@ -181,12 +264,16 @@ def collect_stacks(inspector, params, deadline, cancel):
             if marker:
                 marker_free(marker)
             cleanup_error = free(kernel.current_process(), snapshot)
+            if cleanup_error:
+                raise NativeError("RECOVERY_UNCONFIRMED", "PSS_FREE_SNAPSHOT_FAILED", cleanup_error)
     if requested_tid is not None and not rows:
         raise NativeError("PROCESS_CHANGED", "REQUESTED_THREAD_NOT_CAPTURED")
-    incomplete = not rows or omitted or module_mismatches or any(r["status"] != "COMPLETED" or r.get("truncated") for r in rows)
+    incomplete = not rows or omitted or module_mismatches or unwind_withheld or any(
+        r["status"] != "COMPLETED" or r.get("truncated") for r in rows)
     return {"rows": rows, "omitted": omitted, "owned_suspension_count": 0,
             "snapshot_cleanup_winerror": cleanup_error,
             "module_bindings_withheld": module_mismatches,
+            "unwind_module_metadata_withheld": unwind_withheld,
             "local_pdb": symbols.summary() if symbols is not None else None,
             "_source": "LIVE_PSS_THREAD_CONTEXT_AND_DBGHELP_STACKWALK64",
             "_status": "RECOVERY_UNCONFIRMED" if cleanup_error else "INCOMPLETE_EVIDENCE" if incomplete else "COMPLETED",

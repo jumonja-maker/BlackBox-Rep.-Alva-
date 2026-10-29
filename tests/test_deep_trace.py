@@ -54,6 +54,16 @@ class DeepHistoricalTraceTests(unittest.TestCase):
         self.assertEqual(len(result["data"]["candidate_instances"]), 2)
         self.assertEqual(result["data"]["live_target_relation"], "NOT_ESTABLISHED")
 
+    def test_selected_interval_refuses_another_source_trace(self):
+        p = self.index([row(1)])
+        with self.assertRaisesRegex(ValueError, "TRACE_SOURCE_CHANGED"):
+            build_trace_evidence(p, TARGET, process_instance=1,
+                                 expected_source_trace_sha256="b" * 64)
+        result = build_trace_evidence(p, TARGET, process_instance=1,
+                                     expected_source_trace_sha256="a" * 64)
+        self.assertEqual(len(result["data"]["events"]), 1)
+        self.assertEqual(result["data"]["live_target_relation"], "NOT_ESTABLISHED")
+
     def test_missing_process_lifetime_not_recovered_from_pid(self):
         p = self.index([row(1, None), row(2, 2)])
         result = build_trace_evidence(p, TARGET, process_instance=2)
@@ -83,6 +93,22 @@ class DeepHistoricalTraceTests(unittest.TestCase):
         p = self.index([row(1, name="TcpIp/Send", payload={"size": 123})])
         result = build_trace_evidence(p, TARGET, process_instance=1)
         self.assertEqual(result["data"]["io_events"], [])
+
+    def test_io_after_generic_display_limit_retains_its_own_bounded_rows(self):
+        observations = [row(i) for i in range(1, 5)]
+        for i in range(5, 9):
+            item = row(i, name="DiskIO/Write", payload={"TransferSize": 4096})
+            item["provider_guid"] = KERNEL_GUID
+            observations.append(item)
+        p = self.index(observations)
+        report = build_trace_evidence(p, TARGET, process_instance=1, limit=2)
+        self.assertEqual([r["ordinal"] for r in report["data"]["events"]], [1, 2])
+        self.assertEqual([r["event_id"] for r in report["data"]["io_events"]], [5, 6])
+        coverage = report["data"]["coverage"]
+        self.assertEqual(coverage["selected_io_events"], 4)
+        self.assertEqual(coverage["shown_io_events"], 2)
+        self.assertEqual(coverage["omitted_io_events"], 2)
+        self.assertIn("IO_ROWS_OMITTED_BY_BUDGET", report["limitations"])
 
     def test_network_and_disk_fields_do_not_invent_latency_packets_or_totals(self):
         a = row(1, name="TcpIp/Send", payload={"size": 123, "saddr": "127.0.0.1", "sport": 8080})

@@ -218,6 +218,11 @@ def validate_plan(plan: Any) -> None:
                 if name == "breakpoints":
                     if len(original) != 1 or original == b"\xcc":
                         raise ValueError("INVALID_BREAKPOINT_RESTORE")
+                    protection = item.get("original_protection")
+                    if (type(protection) is not int or not 0 < protection <= 0xFFFFFFFF
+                            or (protection & 0xFF) not in (0x10, 0x20, 0x40, 0x80)
+                            or protection & 0x100):
+                        raise ValueError("INVALID_BREAKPOINT_PROTECTION_INTENT")
                     hit = item.get("hit_context")
                     if hit is not None:
                         if not isinstance(hit, dict) or hit.get("phase") not in ("rewind_pending", "rewind_verified"):
@@ -258,13 +263,19 @@ def recover(api: _WinAPI, plan: dict[str, Any], *, reason: str) -> dict[str, Any
             original = bytes.fromhex(item["original_hex"])
             current = api.read(item["address"], 1)
             if current == b"\xcc":
-                api.replace(item["address"], current, original, executable=True)
+                api.replace(item["address"], current, original, executable=True,
+                            original_protection=item["original_protection"])
             elif current != original:
                 raise DebugError("RECOVERY_UNCONFIRMED", "BREAKPOINT_BYTES_CHANGED_EXTERNALLY")
+            # The helper can die after making the page writable but before
+            # writing a byte or executing its finally block. The acknowledged
+            # plan owns the protection intent even if the bytes are original.
+            api.restore_executable_protection(item["address"], item["original_protection"])
             restored["breakpoints"] += 1
             # A debug event may arrive between the last acknowledged plan and
             # helper death. Bytes alone cannot establish the instruction pointer.
-            if reason != "HELPER_REQUESTED_RECOVERY":
+            if (reason != "HELPER_REQUESTED_RECOVERY" or
+                    item.get("hit_context", {}).get("phase") == "rewind_pending"):
                 errors.append("BREAKPOINT_EXECUTION_CONTEXT_RECOVERY_NOT_ESTABLISHED")
         except BaseException as exc:
             errors.append(f"BREAKPOINT: {exc}")

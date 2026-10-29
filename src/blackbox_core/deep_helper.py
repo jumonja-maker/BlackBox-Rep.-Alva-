@@ -10,7 +10,7 @@ import threading
 import time
 
 from .deep_contracts import (ActionRequest, DEEP_ACTIONS, MAX_SESSION_SECONDS,
-                             ProcessIdentity, bounded_json, result)
+                             ProcessIdentity, bounded_json, result, validate_profile_parameters)
 from .deep_ipc import check_deadline, connect_pipe, token_is_elevated
 
 _FORBIDDEN_PARAMETERS = frozenset({"handle", "file_handle", "recovery_handle", "source_handle",
@@ -27,7 +27,7 @@ def validate_parameters(parameters: dict) -> None:
 class DiagnosticActionEngine:
     """Worker-owned coordination, independent of the sampling subsystem."""
     def __init__(self, target: ProcessIdentity, operations: list[str], *, recovery_handle=None,
-                 inspector_factory=None, debug_factory=None):
+                 inspector_factory=None, debug_factory=None, controller_pid=None):
         from .deep_native import ProcessInspector
         self.target = ProcessIdentity.from_dict(target)
         self.operations = frozenset(operations)
@@ -38,6 +38,8 @@ class DiagnosticActionEngine:
         self.debug = None
         self.recovery_handle = recovery_handle
         self.interventions_started = False
+        self.profile_recovery = []
+        self.controller_pid = controller_pid
 
     def execute(self, request: ActionRequest, *, cancel_event=None, file_handle=None) -> dict:
         from .deep_native import verify_identity
@@ -56,29 +58,61 @@ class DiagnosticActionEngine:
         verified = verify_identity(self.target)
         if isinstance(verified, dict) and verified.get("status") not in (None, "AVAILABLE", "COMPLETED", "OK"):
             return verified
+        own_controllers = {os.getpid(), self.controller_pid}
+        if spec.mode == "INTERVENE" and request.operation != "profile.etw" and self.target.pid in own_controllers:
+            return result(request.operation, "OPERATION_FAILED", error="CONTROL_PROCESS_INTERVENTION_UNSAFE",
+                          next_action="USE_A_SEPARATE_BLACKBOX_INSTANCE_TO_CONTROL_THIS_PROCESS",
+                          limitations=["Stopping this session's GUI or helper would remove its control and cleanup path."])
         parameters = dict(request.parameters)
         if "length" in parameters and "size" not in parameters:
             parameters["size"] = parameters.pop("length")
-        if request.operation == "dump":
+        if request.operation in ("dump", "profile.etw"):
             if not file_handle:
-                return result("dump", "ACCESS_DENIED", error="GUI_CREATED_OUTPUT_HANDLE_REQUIRED")
-            parameters["file_handle"] = file_handle
+                return result(request.operation, "ACCESS_DENIED", error="GUI_CREATED_OUTPUT_HANDLE_REQUIRED")
+            if request.operation == "dump":
+                parameters["file_handle"] = file_handle
         if request.operation == "capabilities":
             from .deep_native import probe_access
+            names = parameters.get("operations", sorted(self.operations))
+            if (set(parameters) - {"operations"} or not isinstance(names, list) or not names
+                    or any(not isinstance(name, str) for name in names)
+                    or len(names) > len(DEEP_ACTIONS) or len(names) != len(set(names))
+                    or not set(names) <= self.operations):
+                raise ValueError("INVALID_CAPABILITY_OPERATION_FILTER")
             operations = []
-            for name in sorted(self.operations):
+            for name in sorted(names):
                 check_deadline(deadline, cancel_event)
                 info = dict(DEEP_ACTIONS[name].to_dict())
                 try:
-                    probe = probe_access(self.target, name)
+                    if name == "profile.etw":
+                        probe = {"status": "AVAILABLE" if token_is_elevated() else "ADMIN_REQUIRED",
+                                 "source": "HELPER_TOKEN_ELEVATION_CHECK",
+                                 "limitations": ["WPR availability and recording permissions are rechecked when capture starts."]}
+                    else:
+                        probe = probe_access(self.target, name)
                     info.update(probe)
                 except Exception as exc:
                     info.update(status="OPERATION_FAILED", error=str(exc)[:1000])
                 if info.get("status") == "ACCESS_DENIED" and not token_is_elevated():
                     info.update(status="ADMIN_REQUIRED", next_action="REQUEST_UAC_FOR_THIS_OPERATION")
                 info["operation"] = name
+                if DEEP_ACTIONS[name].mode == "INTERVENE" and name != "profile.etw" and self.target.pid in own_controllers:
+                    info.update(status="OPERATION_FAILED", error="CONTROL_PROCESS_INTERVENTION_UNSAFE",
+                                next_action="USE_A_SEPARATE_BLACKBOX_INSTANCE_TO_CONTROL_THIS_PROCESS")
                 operations.append(info)
             return result("capabilities", "COMPLETED", data={"operations": operations})
+        if request.operation == "profile.etw":
+            validate_profile_parameters(parameters)
+            if not token_is_elevated():
+                return result("profile.etw", "ADMIN_REQUIRED", error="ETW_PROFILE_REQUIRES_SCOPED_ADMINISTRATOR_HELPER",
+                              next_action="REQUEST_UAC_FOR_THIS_OPERATION")
+            from .deep_profiling import capture_etw
+            self.interventions_started = True
+            captured = capture_etw(self.target, parameters, file_handle=file_handle,
+                                   deadline=deadline, cancel_event=cancel_event)
+            if captured.get("status") == "RECOVERY_UNCONFIRMED":
+                self.profile_recovery.append(captured)
+            return captured
         if request.operation == "snapshot":
             sections = {}
             for name in ("threads", "modules", "memory_map", "network", "disk"):
@@ -98,7 +132,7 @@ class DiagnosticActionEngine:
         return self.inspector.execute(request.operation, parameters, deadline=deadline, cancel_event=cancel_event)
 
     def close(self) -> dict:
-        errors = []
+        errors = list(self.profile_recovery)
         cleanup = None
         if self.debug is not None:
             try:
@@ -191,7 +225,7 @@ def run_helper(pipe_name: str, nonce: str, parent: ProcessIdentity) -> int:
         if init.get("require_admin") is True and not elevated:
             raise PermissionError("ELEVATED_TOKEN_NOT_GRANTED")
         recovery_handle = _duplicate_parent_file(kernel, parent_handle, init["recovery_source_handle"])
-        engine = DiagnosticActionEngine(target, operations, recovery_handle=recovery_handle)
+        engine = DiagnosticActionEngine(target, operations, recovery_handle=recovery_handle, controller_pid=parent.pid)
         expires = time.monotonic() + duration
         channel.send({"kind": "ready", "target": target.to_dict(), "operations": operations,
                       "permission_level": "ADMINISTRATOR" if elevated else "STANDARD"}, deadline=time.monotonic() + 10)
@@ -205,7 +239,8 @@ def run_helper(pipe_name: str, nonce: str, parent: ProcessIdentity) -> int:
                 output_handle = None
                 attachment = message.get("attachment")
                 if attachment is not None:
-                    if req.operation != "dump" or set(attachment) != {"source_file_handle"}:
+                    if (req.operation not in ("dump", "profile.etw") or not isinstance(attachment, dict)
+                            or set(attachment) != {"source_file_handle"}):
                         raise ValueError("INVALID_DIAGNOSTIC_ATTACHMENT")
                     output_handle = _duplicate_parent_file(kernel, parent_handle, attachment["source_file_handle"])
                 try:
@@ -266,6 +301,14 @@ def run_helper(pipe_name: str, nonce: str, parent: ProcessIdentity) -> int:
                     channel.send({"kind": "closed", "result": cleanup}, deadline=time.monotonic() + 5)
                 engine = None if cleanup["status"] == "COMPLETED" else engine
                 break
+            if kind == "execute" and active is not None:
+                # A sequential GUI request can arrive immediately after the
+                # previous worker sent its result but before its Thread has
+                # returned. Reap that finalization window before rejecting an
+                # actually concurrent operation.
+                active.join(timeout=1)
+                if not active.is_alive():
+                    active, active_cancel, active_id = None, None, None
             if kind != "execute" or active is not None or not isinstance(message.get("request_id"), str):
                 raise ValueError("DIAGNOSTIC_PROTOCOL_SEQUENCE_ERROR")
             active_id = message["request_id"]

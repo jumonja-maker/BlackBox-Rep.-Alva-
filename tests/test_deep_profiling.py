@@ -1,0 +1,158 @@
+"""Profiling consent, privileged staging and exact output verification.
+
+Run exclusively in GitHub-hosted CI. These bounded tests do not manufacture
+ETW evidence; the native acceptance job separately captures the C fixture.
+"""
+import ctypes as C
+import hashlib
+import os
+from pathlib import Path
+import tempfile
+import threading
+import time
+import unittest
+from unittest.mock import patch
+
+from blackbox_core import deep_profiling as profiling
+from blackbox_core import deep_native_win as W
+from blackbox_core.deep_native import NativeError
+
+
+class OutputHandle:
+    """Only models file HANDLE read/write; never models ETW availability."""
+    dll = None
+
+    def __init__(self, *, corrupt=False, initial=b""):
+        self.data = bytearray(initial)
+        self.offset = 0
+        self.corrupt = corrupt
+        self.writes = 0
+
+    def file_type(self, handle):
+        return 1
+
+    def file_size(self, handle, output):
+        C.cast(output, C.POINTER(W.I64))[0] = len(self.data)
+        return True
+
+    def file_pointer(self, handle, offset, output, origin):
+        self.offset = offset
+        return True
+
+    def write_file(self, handle, pointer, size, count, overlapped):
+        self.data[self.offset:self.offset + size] = C.string_at(pointer, size)
+        self.offset += size
+        self.writes += 1
+        C.cast(count, C.POINTER(W.U32))[0] = size
+        return True
+
+    def flush_file(self, handle):
+        return True
+
+    def read_file(self, handle, pointer, size, count, overlapped):
+        block = bytes(self.data[self.offset:self.offset + size])
+        if self.corrupt and block:
+            block = bytes([block[0] ^ 1]) + block[1:]
+        C.memmove(pointer, block, len(block))
+        self.offset += len(block)
+        C.cast(count, C.POINTER(W.U32))[0] = len(block)
+        return True
+
+
+class ProfilingPolicyTests(unittest.TestCase):
+    def test_bounded_duration_and_exact_consent(self):
+        for value in (True, 0, 31, 5.0, "5"):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                profiling.validate_policy({"duration_seconds": value, "systemwide_confirmed": True})
+        for consent in (None, False, 1, "yes"):
+            with self.subTest(consent=consent), self.assertRaises(NativeError) as error:
+                profiling.validate_policy({"systemwide_confirmed": consent})
+            self.assertEqual(error.exception.status, "CONFIRMATION_REQUIRED")
+
+    def test_profile_and_arbitrary_tool_or_output_path_rejected(self):
+        for extra in ({"profile": "CPU.Verbose"}, {"profile": "-cancel"},
+                      {"executable": "other.exe"}, {"destination": "C:\\privileged.etl"},
+                      {"file_handle": 123}, {"argv": []}):
+            with self.subTest(extra=extra), self.assertRaises(ValueError):
+                profiling.validate_policy({"systemwide_confirmed": True, **extra})
+
+    def _copy(self, data, output, *, budget=None, cancel=None):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "observed.etl"
+            path.write_bytes(data)
+            with patch.object(W, "bind", return_value=output.read_file), \
+                    patch.object(profiling, "MAX_TRACE_BYTES", budget or profiling.MAX_TRACE_BYTES):
+                return profiling._copy_verified(output, 17, path,
+                                                deadline=time.monotonic() + 10, cancel_event=cancel)
+
+    def test_completed_save_requires_identical_handle_readback(self):
+        data = b"controlled-file-copy-not-etw" * 16384
+        output = OutputHandle()
+        metadata = self._copy(data, output)
+        self.assertEqual(bytes(output.data), data)
+        self.assertEqual(metadata["trace_bytes"], len(data))
+        self.assertEqual(metadata["sha256"], hashlib.sha256(data).hexdigest())
+        self.assertTrue(metadata["saved_verified"])
+
+    def test_successful_write_with_corrupt_readback_is_not_verified(self):
+        with self.assertRaises(NativeError) as error:
+            self._copy(b"controlled bytes", OutputHandle(corrupt=True))
+        self.assertEqual(error.exception.status, "INCOMPLETE_EVIDENCE")
+
+    def test_nonempty_destination_is_never_overwritten(self):
+        output = OutputHandle(initial=b"existing user data")
+        with self.assertRaises(ValueError):
+            self._copy(b"new data", output)
+        self.assertEqual(bytes(output.data), b"existing user data")
+        self.assertEqual(output.writes, 0)
+
+    def test_oversized_capture_is_not_partially_copied(self):
+        output = OutputHandle()
+        with self.assertRaises(NativeError) as error:
+            self._copy(b"0123456789", output, budget=9)
+        self.assertEqual(error.exception.status, "LIMIT_REACHED")
+        self.assertEqual(output.writes, 0)
+
+    def test_cancelled_copy_has_no_success_metadata_or_write(self):
+        stop = threading.Event()
+        stop.set()
+        output = OutputHandle()
+        with self.assertRaises(NativeError) as error:
+            self._copy(b"controlled bytes", output, cancel=stop)
+        self.assertEqual(error.exception.status, "CANCELLED")
+        self.assertEqual(output.writes, 0)
+
+
+@unittest.skipUnless(os.name == "nt", "Actual Windows filesystem security required")
+class ProtectedStagingTests(unittest.TestCase):
+    def setUp(self):
+        from blackbox_core.deep_ipc import token_is_elevated
+        if not token_is_elevated():
+            self.skipTest("Elevated hosted-runner token required for protected staging")
+
+    def test_two_owners_validate_acl_and_pin_until_both_close(self):
+        first = profiling.ProtectedStaging()
+        second = None
+        try:
+            second = profiling.ProtectedStaging(first.path)
+            self.assertEqual(first.path, second.path)
+            with self.assertRaises(OSError):
+                first.path.rename(first.path.with_name(first.path.name + "-renamed"))
+            first.close()
+            with self.assertRaises(OSError):
+                first.path.rmdir()
+            second.close()
+            self.assertEqual(first.cleanup(), [])
+            self.assertFalse(first.path.exists())
+        finally:
+            if second is not None:
+                second.close()
+            first.cleanup()
+
+    def test_foreign_directory_is_refused_without_changing_contents(self):
+        with tempfile.TemporaryDirectory() as directory:
+            marker = Path(directory) / "keep.txt"
+            marker.write_text("unchanged")
+            with self.assertRaises(ValueError):
+                profiling.ProtectedStaging(directory)
+            self.assertEqual(marker.read_text(), "unchanged")

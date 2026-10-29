@@ -250,6 +250,11 @@ class DecoderPanel(QWidget):
         self.table.setColumnWidth(1, 195 if mode == "clock" else 85)
 
     def render_status(self):
+        dump_metadata = (self.analysis_report is not None and
+                         self.analysis_report.get("schema") == "blackbox.deep-minidump/1")
+        self.export_analysis_button.setText(
+            self.tr2("SAVE DUMP METADATA…", "СОХРАНИТЬ МЕТАДАННЫЕ ДАМПА…") if dump_metadata else
+            self.tr2("SAVE ANALYSIS…", "СОХРАНИТЬ АНАЛИЗ…"))
         if self.state == "analyzing":
             text = self.tr2("Offline analysis; cancel is available. Sources are not modified.",
                             "Офлайн-анализ; можно отменить. Исходные файлы не изменяются.")
@@ -732,11 +737,14 @@ class DecoderPanel(QWidget):
         if self.analysis_report is None or self.worker is not None:
             return
         tree = self.analysis_report.get("schema") == "blackbox.cpu-calltree/1"
+        dump_metadata = self.analysis_report.get("schema") == "blackbox.deep-minidump/1"
         filters = "JSON (*.json);;Offline flame view (*.html)" if tree else "JSON (*.json)"
         name, chosen = QFileDialog.getSaveFileName(self,
-            self.tr2("Save derived analysis (may contain private data)",
-                     "Сохранить производный анализ (может содержать личные данные)"),
-            "decoder-analysis.json", filters)
+            (self.tr2("Save dump metadata (memory contents excluded)",
+                      "Сохранить метаданные дампа (без содержимого памяти)") if dump_metadata else
+             self.tr2("Save derived analysis (may contain private data)",
+                      "Сохранить производный анализ (может содержать личные данные)")),
+            "dump-metadata.json" if dump_metadata else "decoder-analysis.json", filters)
         if not name:
             return
         try:

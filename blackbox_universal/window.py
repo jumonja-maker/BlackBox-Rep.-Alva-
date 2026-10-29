@@ -2400,15 +2400,25 @@ class UniversalWindow(QMainWindow):
         self._update_report_preview()
 
     def _about(self) -> None:
+        from . import __version__
+        text = ("Локальное наблюдение, глубокое исследование и управляемые диагностические действия.\n"
+                "Сеансы, HTML/JSON-отчёты, ETW/EventPipe и локальный декодер трасс.\n"
+                "В Overview доступны INSPECT и INTERVENE: память, потоки, стеки, ожидания, "
+                "дампы и отладчик. Изменения выполняются после явного подтверждения.\n"
+                "Необходимые права Windows запрашиваются отдельным ограниченным helper через UAC.\n\n"
+                "Неполные данные и неподтверждённое восстановление показываются явно. "
+                "Автоматической загрузки в облако и скрытого внедрения в процессы нет."
+                if self.language == "RU" else
+                "Local observation, deep inspection and controlled diagnostic actions.\n"
+                "Sessions, HTML/JSON reports, ETW/EventPipe and the local Trace Decoder.\n"
+                "Overview provides INSPECT and INTERVENE: memory, threads, stacks, waits, "
+                "dumps and debugging. Changes require explicit confirmation.\n"
+                "Required Windows permissions are requested by a separate scoped helper through UAC.\n\n"
+                "Incomplete evidence and unconfirmed recovery remain explicit. "
+                "No automatic cloud upload or hidden process injection.")
         QMessageBox.about(
             self, "BLACK.BOX Universal",
-            "BLACK.BOX Universal v0.3.6 — reliability and visual fixes.\n\n"
-            "Offline monitoring, human-readable HTML and JSON reports: available.\n"
-            "Diagnostics use local operating-system observations.\n"
-            "Research: action episodes, local instrumentation, Windows HWND/WCT, "
-            "explicit ETW/minidump capture and portable evidence packages.\n"
-            "Source capabilities and access restrictions are reported per session.\n\n"
-            "No background cloud upload or hidden process injection.")
+            f"BLACK.BOX Universal v{__version__} · BB-DEEP-001\n\n" + text)
 
     def _deep_inspector_closed(self, result) -> None:
         self._deep_close_complete = True

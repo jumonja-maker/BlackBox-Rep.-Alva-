@@ -83,6 +83,9 @@ DEEP_ACTIONS = {s.operation: s for s in (
     _spec("dump", confirmation=True, timeout=120,
           impact="Creates a sensitive diagnostic dump in the explicitly selected file; may briefly stop the target.",
           rights="Process query/read/duplicate-handle rights; explicit ordinary-user file handle."),
+    _spec("profile.etw", mode="INTERVENE", confirmation=True, timeout=120,
+          impact="Records system-wide ETW metadata for 1–30 seconds, including other processes; adds tracing overhead.",
+          rights="Administrator helper token; a scoped owned WPR session and ordinary-user output file handle."),
     _spec("timeline", "OBSERVE"), _spec("compare", "OBSERVE"),
     _spec("capabilities", "OBSERVE"),
     _spec("trace_evidence", "OBSERVE"), _spec("dump_inspect", "OBSERVE"),
@@ -130,6 +133,30 @@ def bounded_json(value: Any) -> bytes:
     return raw
 
 
+def validate_profile_parameters(parameters: dict[str, Any], *, allow_destination: bool = False) -> None:
+    """One fixed WPR policy, never a command line or provider expression."""
+    permitted = {"duration_seconds", "profile", "systemwide_confirmed"}
+    if allow_destination:
+        permitted.update({"destination", "output_path", "path"})
+    if set(parameters) - permitted:
+        raise ValueError("UNSUPPORTED_PROFILE_PARAMETER")
+    duration = parameters.get("duration_seconds")
+    if type(duration) is not int or not 1 <= duration <= 30:
+        raise ValueError("INVALID_PROFILE_DURATION")
+    if parameters.get("profile") != "GeneralProfile.Light":
+        raise ValueError("PROFILE_NOT_ALLOWED")
+    if parameters.get("systemwide_confirmed") is not True:
+        raise ValueError("EXPLICIT_SYSTEMWIDE_PROFILE_CONSENT_REQUIRED")
+    if allow_destination:
+        destinations = [key for key in ("destination", "output_path", "path") if key in parameters]
+        if len(destinations) > 1:
+            raise ValueError("AMBIGUOUS_PROFILE_DESTINATION")
+        if destinations:
+            value = parameters[destinations[0]]
+            if not isinstance(value, str) or not value or "\0" in value or len(value) > 32768:
+                raise ValueError("INVALID_PROFILE_DESTINATION")
+
+
 @dataclass(frozen=True)
 class ActionRequest:
     operation: str
@@ -148,6 +175,8 @@ class ActionRequest:
         if (type(self.timeout_seconds) not in (int, float) or not math.isfinite(self.timeout_seconds)
                 or not 0.1 <= self.timeout_seconds <= MAX_OPERATION_SECONDS):
             raise ValueError("INVALID_ACTION_DEADLINE")
+        if self.operation == "profile.etw":
+            validate_profile_parameters(self.parameters, allow_destination=True)
         bounded_json(self.parameters)
 
     def to_dict(self) -> dict[str, Any]:

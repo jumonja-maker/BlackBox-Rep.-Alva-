@@ -47,6 +47,8 @@ def _check(deadline=None, cancel_event=None):
 def _windows():
     if os.name != "nt":
         raise NativeError("UNSUPPORTED_PLATFORM", "WINDOWS_API_REQUIRED")
+    if C.sizeof(C.c_void_p) != 8:
+        raise NativeError("INCOMPLETE_EVIDENCE", "WINDOWS_64_BIT_INSPECTOR_REQUIRED")
 
 
 def _os_error(reason, error=None):
@@ -243,6 +245,15 @@ class ProcessInspector:
                 omitted += 1
                 continue
             row = {"pid": process.pid}
+            if process.pid == 0:
+                # Windows lists its idle accounting pseudo-process as PID 0.
+                # It has no ordinary user-process lifetime identity and must
+                # not abort the inventory of real selectable processes.
+                row.update(name="System Idle Process", identity=None,
+                           status="INCOMPLETE_EVIDENCE", kind="SYSTEM_IDLE_PROCESS",
+                           reason="IDLE_PSEUDO_PROCESS_HAS_NO_USER_PROCESS_IDENTITY")
+                rows.append(row)
+                continue
             try:
                 row["identity"] = capture_identity(process.pid).to_dict()
                 with process.oneshot():
@@ -258,7 +269,8 @@ class ProcessInspector:
         verify_identity(self.identity)
         return {"rows": rows, "omitted": omitted, "selected_pid": self.identity.pid,
                 "_source": "WIN32_PROCESS_IDENTITIES_AND_PSUTIL_METADATA",
-                "_status": "INCOMPLETE_EVIDENCE" if omitted else "COMPLETED",
+                "_status": "INCOMPLETE_EVIDENCE" if omitted or any(
+                    row["status"] != "COMPLETED" for row in rows) else "COMPLETED",
                 "_limitations": ["DYNAMIC_PROCESS_TREE_PARENT_PID_IS_NOT_PARENT_LIFETIME_IDENTITY"]}
 
     @staticmethod
@@ -334,10 +346,15 @@ class ProcessInspector:
                       "image_timestamp": struct.unpack_from("<I", pe, 8)[0],
                       "image_size": struct.unpack_from("<I", pe, 24 + 56)[0],
                       "guid": None, "age": None}
+            image_size = result["image_size"]
+            if image_size < offset + len(pe) or image_size > 2**32 - 1:
+                raise ValueError("INVALID_LOADED_IMAGE_SIZE")
+            if struct.unpack_from("<I", pe, directories - 4)[0] < 7:
+                return result
             debug_rva, debug_size = struct.unpack_from("<II", pe, directories + 6 * 8)
             if not debug_rva or not debug_size:
                 return result
-            if debug_size % 28 or debug_size > 28 * 256:
+            if debug_size % 28 or debug_size > 28 * 256 or debug_rva + debug_size > image_size:
                 raise ValueError("LOADED_DEBUG_DIRECTORY_BUDGET")
             entries, complete = self._read(kernel, handle, base + debug_rva, debug_size)
             if not complete:
@@ -347,7 +364,7 @@ class ProcessInspector:
                 if struct.unpack_from("<I", entries, at + 12)[0] != 2:
                     continue
                 size, rva = struct.unpack_from("<II", entries, at + 16)
-                if not 24 <= size <= 4096 or not rva:
+                if not 24 <= size <= 4096 or not rva or rva + size > image_size:
                     continue
                 data, complete = self._read(kernel, handle, base + rva, size)
                 if complete and data[:4] == b"RSDS":
@@ -428,6 +445,8 @@ class ProcessInspector:
             entry = W.THREADENTRY32()
             entry.size = C.sizeof(entry)
             ok = kernel.thread_first(snapshot, C.byref(entry))
+            if not ok and C.get_last_error() != 18:  # ERROR_NO_MORE_FILES
+                raise _os_error("THREAD_ENUMERATION_START_FAILED")
             while ok:
                 _check(deadline, cancel)
                 if entry.pid == self.identity.pid:
@@ -452,6 +471,10 @@ class ProcessInspector:
                         row.update(status="INCOMPLETE_EVIDENCE", winerror=C.get_last_error())
                     rows.append(row)
                 ok = kernel.thread_next(snapshot, C.byref(entry))
+                if not ok and C.get_last_error() != 18:
+                    # Preserve observed rows but do not call an interrupted
+                    # system-wide enumeration complete for this process.
+                    more = True
         finally:
             kernel.close(snapshot)
         return rows, more
@@ -494,12 +517,19 @@ class ProcessInspector:
             threads = [r for r in threads if r["tid"] == selected]
             if not threads:
                 raise NativeError("PROCESS_CHANGED", "THREAD_NOT_OWNED_BY_TARGET")
-            if selected_created is not None and threads[0]["created_100ns"] != selected_created:
-                raise NativeError("PROCESS_CHANGED", "SELECTED_THREAD_INSTANCE_CHANGED")
+            if selected_created is not None:
+                if threads[0]["created_100ns"] is None:
+                    raise NativeError("INCOMPLETE_EVIDENCE", "SELECTED_THREAD_IDENTITY_NOT_OBSERVED")
+                if threads[0]["created_100ns"] != selected_created:
+                    raise NativeError("PROCESS_CHANGED", "SELECTED_THREAD_INSTANCE_CHANGED")
         rows = []
         with self._open(0x1000) as (kernel, _):
             for thread in threads[:limit]:
                 _check(deadline, cancel)
+                if thread.get("created_100ns") is None:
+                    rows.append({"tid": thread["tid"], "status": "INCOMPLETE_EVIDENCE",
+                                 "reason": "THREAD_LIFETIME_IDENTITY_NOT_OBSERVED"})
+                    continue
                 h = kernel.open_thread(0x800 | 0x100000, False, thread["tid"])
                 if not h:
                     rows.append({"tid": thread["tid"], "status": "INCOMPLETE_EVIDENCE", "winerror": C.get_last_error()})
@@ -532,6 +562,8 @@ class ProcessInspector:
                 connections = process.net_connections(kind="all")
             except psutil.AccessDenied as error:
                 raise NativeError("ACCESS_DENIED", "NETWORK_TABLE_ACCESS_DENIED", 5) from error
+            except psutil.NoSuchProcess as error:
+                raise NativeError("PROCESS_CHANGED", "PROCESS_EXITED_DURING_NETWORK_QUERY") from error
             rows = []
             for connection in connections[:limit]:
                 _check(deadline, cancel)
@@ -558,6 +590,8 @@ class ProcessInspector:
                 files = process.open_files()
             except psutil.AccessDenied as error:
                 raise NativeError("ACCESS_DENIED", "PROCESS_IO_QUERY_DENIED", 5) from error
+            except psutil.NoSuchProcess as error:
+                raise NativeError("PROCESS_CHANGED", "PROCESS_EXITED_DURING_IO_QUERY") from error
             rows = [{"path": f.path, "fd": f.fd, "kind": "CURRENT_OPEN_FILE"} for f in files[:limit]]
         return {"counters": counters, "open_files": rows, "rows": rows,
                 "omitted": max(0, len(files) - limit), "operation_latencies": None,

@@ -3,6 +3,7 @@ from contextlib import contextmanager
 import ctypes as C
 import hashlib
 import os
+import struct
 import threading
 import time
 import unittest
@@ -12,7 +13,7 @@ from blackbox_core import deep_native as native
 from blackbox_core import deep_native_win as W
 from blackbox_core.deep_contracts import ProcessIdentity
 from blackbox_core.deep_native_dump import CALLBACK_INPUT, IO_CALLBACK
-from blackbox_core.deep_native_stacks import PSS_THREAD_ENTRY
+from blackbox_core.deep_native_stacks import PSS_THREAD_ENTRY, _same_unwind_image
 
 
 @contextmanager
@@ -85,6 +86,63 @@ class NativePolicyTests(unittest.TestCase):
         self.assertEqual(changed.exception.status, "PROCESS_CHANGED")
         query.assert_not_called()
 
+    def test_missing_thread_identity_is_not_reported_as_reuse(self):
+        rows = [{"tid": 33, "created_100ns": None, "status": "INCOMPLETE_EVIDENCE"}]
+        with patch.object(self.inspector, "_threads", return_value={"rows": rows}), \
+                patch("blackbox_core.windows_research.wait_chain") as query:
+            with self.assertRaises(native.NativeError) as incomplete:
+                self.inspector._wait_chains({"tid": 33, "thread_created_100ns": 98}, None, None)
+        self.assertEqual(incomplete.exception.status, "INCOMPLETE_EVIDENCE")
+        query.assert_not_called()
+
+    def test_failed_thread_enumeration_is_not_a_complete_empty_inventory(self):
+        kernel = Mock()
+        kernel.snapshot.return_value = 7
+        kernel.thread_first.return_value = False
+        with patch.object(C, "get_last_error", return_value=5, create=True):
+            with self.assertRaises(native.NativeError) as denied:
+                self.inspector._thread_rows(kernel, None, None, 8)
+        self.assertEqual(denied.exception.status, "ACCESS_DENIED")
+        kernel.close.assert_called_once_with(7)
+
+    def test_partial_process_inventory_retains_access_failure(self):
+        process = Mock(pid=9)
+        with patch.object(native, "verify_identity"), \
+                patch("psutil.process_iter", return_value=iter([process])), \
+                patch.object(native, "capture_identity", side_effect=native.NativeError("ACCESS_DENIED", "DENIED", 5)):
+            result = self.inspector._processes({}, None, None)
+        self.assertEqual(result["_status"], "INCOMPLETE_EVIDENCE")
+        self.assertEqual(result["rows"][0]["status"], "ACCESS_DENIED")
+
+    def test_windows_idle_pid_does_not_abort_real_process_inventory(self):
+        processes = [Mock(pid=0), Mock(pid=9)]
+        with patch.object(native, "verify_identity"), \
+                patch("psutil.process_iter", return_value=iter(processes)), \
+                patch.object(native, "capture_identity", side_effect=native.NativeError("ACCESS_DENIED", "DENIED", 5)) as capture:
+            result = self.inspector._processes({}, None, None)
+        self.assertEqual([row["pid"] for row in result["rows"]], [0, 9])
+        self.assertIsNone(result["rows"][0]["identity"])
+        self.assertEqual(result["rows"][0]["kind"], "SYSTEM_IDLE_PROCESS")
+        self.assertEqual(result["_status"], "INCOMPLETE_EVIDENCE")
+        capture.assert_called_once_with(9)
+
+    def test_32_bit_helper_refused_before_using_64_bit_structures(self):
+        with patch.object(native.os, "name", "nt"), patch.object(C, "sizeof", return_value=4):
+            with self.assertRaises(native.NativeError) as unsupported:
+                native._windows()
+        self.assertEqual(unsupported.exception.status, "INCOMPLETE_EVIDENCE")
+        self.assertEqual(unsupported.exception.reason, "WINDOWS_64_BIT_INSPECTOR_REQUIRED")
+
+    def test_unwind_metadata_requires_snapshot_identity_not_only_path_or_size(self):
+        captured = {"guid": "fixture-guid", "age": 1, "machine": 0x8664,
+                    "image_size": 0x10000, "image_timestamp": 1234}
+        self.assertTrue(_same_unwind_image(captured, dict(captured)))
+        for field in captured:
+            replacement = {**captured, field: "other"}
+            with self.subTest(field=field):
+                self.assertFalse(_same_unwind_image(captured, replacement))
+        self.assertFalse(_same_unwind_image({**captured, "guid": None}, {**captured, "guid": None}))
+
     def test_memory_map_has_continuation_on_budget(self):
         kernel = Mock()
         def query(_, address, pointer, size):
@@ -97,6 +155,45 @@ class NativePolicyTests(unittest.TestCase):
         self.assertEqual(result["next_address"], 8192)
         self.assertEqual(result["_status"], "INCOMPLETE_EVIDENCE")
         self.assertFalse(result["complete_address_space"])
+
+    def test_loaded_pe_debug_identity_read_from_target_bytes(self):
+        base = 0x100000
+        dos = bytearray(64)
+        dos[:2] = b"MZ"
+        struct.pack_into("<I", dos, 60, 128)
+        pe = bytearray(512)
+        pe[:4] = b"PE\0\0"
+        struct.pack_into("<H", pe, 4, 0x8664)
+        struct.pack_into("<I", pe, 8, 12345)
+        struct.pack_into("<H", pe, 24, 0x20B)
+        struct.pack_into("<I", pe, 80, 0x4000)
+        struct.pack_into("<I", pe, 132, 16)
+        struct.pack_into("<II", pe, 184, 0x2000, 28)
+        directory = bytearray(28)
+        struct.pack_into("<III", directory, 12, 2, 24, 0x3000)
+        rsds = b"RSDS" + bytes.fromhex("00112233445566778899aabbccddeeff") + struct.pack("<I", 7)
+        expected = {(base, 64): bytes(dos), (base + 128, 512): bytes(pe),
+                    (base + 0x2000, 28): bytes(directory), (base + 0x3000, 24): rsds}
+        with patch.object(self.inspector, "_read", side_effect=lambda k, h, a, n: (expected[(a, n)], True)):
+            result = self.inspector._loaded_pe(None, 7, base)
+        self.assertEqual(result["guid"], "33221100-5544-7766-8899-aabbccddeeff")
+        self.assertEqual(result["age"], 7)
+        self.assertEqual(result["image_size"], 0x4000)
+
+    def test_loaded_pe_refuses_debug_directory_outside_image(self):
+        base = 0x100000
+        dos, pe = bytearray(64), bytearray(512)
+        dos[:2] = b"MZ"
+        struct.pack_into("<I", dos, 60, 128)
+        pe[:4] = b"PE\0\0"
+        struct.pack_into("<H", pe, 24, 0x20B)
+        struct.pack_into("<I", pe, 80, 0x4000)
+        struct.pack_into("<I", pe, 132, 16)
+        struct.pack_into("<II", pe, 184, 0x5000, 28)
+        with patch.object(self.inspector, "_read", side_effect=[(bytes(dos), True), (bytes(pe), True)]) as reader:
+            result = self.inspector._loaded_pe(None, 7, base)
+        self.assertIsNone(result)
+        self.assertEqual(reader.call_count, 2)
 
     @unittest.skipIf(os.name == "nt", "Non-Windows absence of native APIs")
     def test_linux_never_simulates_windows_observation(self):

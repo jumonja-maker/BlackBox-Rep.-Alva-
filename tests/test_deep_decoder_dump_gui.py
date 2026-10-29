@@ -67,6 +67,18 @@ class OfflineDumpGuiTests(unittest.TestCase):
         for language in ("RU", "EN"):
             self.window._set_language(language)
             self.assertTrue(self.panel.dump_button.text())
+            self.assertEqual(self.panel.export_analysis_button.text(),
+                             "СОХРАНИТЬ МЕТАДАННЫЕ ДАМПА…" if language == "RU" else "SAVE DUMP METADATA…")
+        destination = self.root / "metadata.json"
+        with patch("blackbox_universal.decoder_panel.QFileDialog.getSaveFileName",
+                   return_value=(str(destination), "JSON (*.json)")) as choose:
+            self.panel.save_analysis()
+        self.assertIn("dump metadata", choose.call_args.args[1])
+        self.assertEqual(choose.call_args.args[2], "dump-metadata.json")
+        self.assertNotIn("deadbeef", destination.read_text(encoding="utf-8"))
+        self.panel.analysis_report = {"schema": "blackbox.thread-waits/1"}
+        self.panel.render_status()
+        self.assertEqual(self.panel.export_analysis_button.text(), "SAVE ANALYSIS…")
 
     def test_cancel_offline_dump_worker_preserves_viewer_lifecycle(self):
         def blocked(*args, cancel_event, **kwargs):

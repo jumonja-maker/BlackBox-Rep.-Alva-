@@ -42,22 +42,25 @@ def _write(path,data):
         if temp.exists():temp.unlink()
 
 
-def run(journal):
-    from .research_worker import _streams
+def run(journal, *, capture_factory=None, lease_lost=None):
     from .windows_research import WprCapture
-    inp,_=_streams();path=Path(journal);data=_read(path)
+    path=Path(journal);data=_read(path)
     seconds=data['policy']['duration_s'];max_bytes=data['policy']['max_output_bytes']
     profile=data['policy'].get('profile','GeneralProfile.Light')
     if type(profile) is not str or profile not in WPR_PROFILES:
         raise ValueError('INVALID_WPR_PROFILE')
     if type(seconds) is not int or not 1<=seconds<=60 or type(max_bytes) is not int or not 1024**2<=max_bytes<=1024**3:
         raise ValueError('INVALID_TRACE_POLICY')
-    lease_lost=Event()
-    def lease():
-        # Any command or EOF means finish; there is no arbitrary instruction.
-        inp.readline(64);lease_lost.set()
-    Thread(target=lease,name='blackbox-trace-lease',daemon=True).start()
-    capture=WprCapture(path.parent,profile=profile);capture.instance=data['instance']
+    if lease_lost is None:
+        # The scoped diagnostic owner supplies its own native stdin lease and
+        # avoids importing the recording worker into the isolated helper.
+        from .research_worker import _streams
+        inp,_=_streams();lease_lost=Event()
+        def lease():
+            # Any command or EOF means finish; no arbitrary instruction.
+            inp.readline(64);lease_lost.set()
+        Thread(target=lease,name='blackbox-trace-lease',daemon=True).start()
+    capture=(capture_factory or WprCapture)(path.parent,profile=profile);capture.instance=data['instance']
     if capture.tool:
         tool=Path(capture.tool);digest=hashlib.sha256()
         with tool.open('rb') as stream:

@@ -12,6 +12,7 @@ from pathlib import Path
 import time
 
 from .decoder_index import read_index
+from .decoder_io import validate_io_observation
 from .decoder_modules import module_key, validate_module_frame
 from .decoder_waits import build_wait_report
 from .session_v2 import safe_path
@@ -91,7 +92,7 @@ def _io_projection(row):
     recorded_timings = {key: payload[key] for key in
                         ("ElapsedTime", "HighResResponseTime", "ResponseTime")
                         if key in payload and _number(payload[key])}
-    return {"category": category, "event_id": row["ordinal"],
+    result = {"category": category, "event_id": row["ordinal"],
             "trace_relative_ms": row["time_ms"], "pid": row["pid"],
             "process_instance": row["process_instance"], "tid": row["tid"],
             "provider_guid": row["provider_guid"], "event_name": name,
@@ -102,11 +103,24 @@ def _io_projection(row):
             "transfer_total_bytes": None, "packet_contents": "NOT_COLLECTED",
             "physical_disk_activity": "NOT_ESTABLISHED",
             "thread_lifetime_binding": "NOT_ESTABLISHED"}
+    typed = validate_io_observation(row)
+    if typed is not None:
+        result["typed_observation"] = typed
+        result["event_transfer_bytes"] = typed["transferred_bytes"]
+        if typed["kind"] == "disk":
+            result.update(latency_ms=typed["elapsed_ms"],
+                latency_status="COMPLETION_EVENT_REPORTED_QPC_DURATION_UNVERIFIED",
+                trace_interval_start_ms=row["time_ms"] - typed["elapsed_ms"],
+                trace_interval_end_ms=row["time_ms"],
+                start_boundary_observed=False,
+                physical_disk_activity="REPORTED_DISK_IO_COMPLETION_NOT_DEVICE_BUSY_TOTAL")
+    return result
 
 
 def build_trace_evidence(index_path, target, *, process_instance=None, tid=None,
                          start_ms=None, end_ms=None, limit=200,
-                         cancel_event=None, deadline=None, include_waits=True):
+                         cancel_event=None, deadline=None, include_waits=True,
+                         expected_source_trace_sha256=None):
     """Return an explicit trace-instance view and candidates, with no live join.
 
     ``process_instance=None`` is deliberately discovery-only. Even one matching
@@ -123,6 +137,11 @@ def build_trace_evidence(index_path, target, *, process_instance=None, tid=None,
         raise ValueError("INVALID_HISTORICAL_TRACE_FILTER")
     if deadline is not None and not _number(deadline):
         raise ValueError("INVALID_HISTORICAL_TRACE_DEADLINE")
+    if expected_source_trace_sha256 is not None and (
+            type(expected_source_trace_sha256) is not str or
+            len(expected_source_trace_sha256) != 64 or
+            any(c not in "0123456789abcdef" for c in expected_source_trace_sha256)):
+        raise ValueError("INVALID_EXPECTED_TRACE_SOURCE_HASH")
     stop = min(time.monotonic() + 30, deadline) if deadline is not None else time.monotonic() + 30
 
     def check():
@@ -138,14 +157,17 @@ def build_trace_evidence(index_path, target, *, process_instance=None, tid=None,
     summary = None
     instances = {}
     events, modules, io_rows = [], {}, []
-    examined = selected = unknown = omitted = 0
-    result_bytes = 0
+    examined = selected = unknown = omitted = io_selected = io_omitted = 0
+    result_bytes = io_bytes = 0
     exhausted = False
     while examined < MAX_SCAN_EVENTS:
         check()
         page = read_index(path, pid=target["pid"], after=after, limit=200)
         if summary is None:
             summary = page["summary"]
+            if (expected_source_trace_sha256 is not None and
+                    summary.get("input_sha256") != expected_source_trace_sha256):
+                raise ValueError("HISTORICAL_TRACE_SOURCE_CHANGED")
         elif page["summary"] != summary:
             raise ValueError("HISTORICAL_INDEX_CHANGED_DURING_READ")
         for item in page["rows"]:
@@ -170,6 +192,18 @@ def build_trace_evidence(index_path, target, *, process_instance=None, tid=None,
                     end_ms is not None and row["time_ms"] >= end_ms):
                 continue
             selected += 1
+            # A busy CPU trace can fill the generic event table before the
+            # first I/O completion. Give I/O its own bounded display budget,
+            # while retaining the same explicit instance/time selection.
+            projected = _io_projection(row)
+            if projected is not None:
+                io_selected += 1
+                projected_bytes = len(json.dumps(projected, ensure_ascii=True, allow_nan=False))
+                if len(io_rows) < limit and io_bytes + projected_bytes <= MAX_RESULT_BYTES:
+                    io_rows.append(projected)
+                    io_bytes += projected_bytes
+                else:
+                    io_omitted += 1
             compact = _compact_event(row)
             encoded_size = len(json.dumps(compact, ensure_ascii=True, allow_nan=False))
             if len(events) >= limit or result_bytes + encoded_size > MAX_RESULT_BYTES:
@@ -184,9 +218,6 @@ def build_trace_evidence(index_path, target, *, process_instance=None, tid=None,
                     modules.setdefault(key, {"module_key": key, **module,
                         "association": "RECORDED_FRAME_WITHIN_TRACE_MODULE_LOAD_WINDOW",
                         "local_pe_pdb_match": "NOT_CHECKED"})
-            projected = _io_projection(row)
-            if projected is not None:
-                io_rows.append(projected)
         after = page["next_cursor"]
         if not page["has_more"]:
             exhausted = True
@@ -221,6 +252,8 @@ def build_trace_evidence(index_path, target, *, process_instance=None, tid=None,
         limitations.append("EVENT_SCAN_BUDGET_REACHED")
     if omitted:
         limitations.append("DISPLAY_ROWS_OMITTED_BY_BUDGET")
+    if io_omitted:
+        limitations.append("IO_ROWS_OMITTED_BY_BUDGET")
     if summary["status"] != "DECODED" or summary.get("decoder_reported_lost_events") != 0:
         limitations.append("CAPTURE_LOSS_UNKNOWN_OR_IMPORT_INCOMPLETE")
     if unknown:
@@ -236,6 +269,8 @@ def build_trace_evidence(index_path, target, *, process_instance=None, tid=None,
         "events": events, "modules": list(modules.values()), "io_events": io_rows,
         "waits": waits, "coverage": {"scanned_header_pid_events": examined,
             "selected_events": selected, "shown_events": len(events), "omitted_events": omitted,
+            "selected_io_events": io_selected, "shown_io_events": len(io_rows),
+            "omitted_io_events": io_omitted,
             "events_without_instance": unknown, "scan_complete": exhausted,
             "decode_status": summary["status"],
             "decoder_reported_lost_events": summary.get("decoder_reported_lost_events")}}
@@ -246,7 +281,10 @@ def build_trace_evidence(index_path, target, *, process_instance=None, tid=None,
         if data["modules"]:
             del data["modules"][len(data["modules"]) // 2:]
         elif data["io_events"]:
+            drop = len(data["io_events"]) - len(data["io_events"]) // 2
             del data["io_events"][len(data["io_events"]) // 2:]
+            data["coverage"]["shown_io_events"] -= drop
+            data["coverage"]["omitted_io_events"] += drop
         elif data["events"]:
             drop = len(data["events"]) - len(data["events"]) // 2
             del data["events"][len(data["events"]) // 2:]

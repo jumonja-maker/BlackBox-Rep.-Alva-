@@ -109,17 +109,23 @@ class InspectorService:
         pipe = PipeServer("\\\\.\\pipe\\BLACKBOX-DEEP-" + uuid4().hex)
         self._channel = pipe
         self._recovery_path = self.journal_root / ("recovery-" + uuid4().hex + ".json")
-        self._recovery_stream = self._recovery_path.open("x+b")
         arguments = ["--deep-helper", "--pipe", pipe.name, "--nonce", nonce,
                      "--parent-pid", str(parent.pid), "--parent-created-100ns", str(parent.created_100ns),
                      "--parent-image", parent.image_path]
         try:
+            self._recovery_stream = self._recovery_path.open("x+b")
             check_deadline(time.monotonic() + 1, cancel_event)
             self.helper = self.broker.launch(arguments, elevated=elevated)
+            if not self.helper.alive():
+                raise OSError("DIAGNOSTIC_HELPER_EXITED_DURING_STARTUP")
             deadline = time.monotonic() + 30
             pipe.accept(self.helper.pid, deadline=deadline, cancel_event=cancel_event)
             hello = pipe.receive(deadline=deadline, cancel_event=cancel_event)
+            if not self.helper.alive():
+                raise OSError("DIAGNOSTIC_HELPER_INSTANCE_EXITED")
             actual = self.identity(self.helper.pid)
+            if not self.helper.alive():
+                raise OSError("DIAGNOSTIC_HELPER_INSTANCE_EXITED")
             expected_executable = self.broker.command(arguments)[0]
             verify_helper_hello(hello, nonce, actual, expected_executable)
             permission = hello.get("permission_level")
@@ -195,10 +201,15 @@ class InspectorService:
             return result("session.elevate", "OPERATION_FAILED", error="INVALID_ELEVATED_OPERATION_SCOPE")
         identifier = uuid4().hex
         with self._lock:
-            self.journal.append({"operation_id": identifier + ":requested", "action_id": identifier,
-                                 "operation": "session.elevate", "target": target.to_dict(),
-                                 "parameters": {"operations": scope}, "phase": "REQUESTED",
-                                 "uac": {"requested": True, "result": "PENDING"}, "permission_level": self._permission})
+            try:
+                self.journal.append({"operation_id": identifier + ":requested", "action_id": identifier,
+                                     "operation": "session.elevate", "target": target.to_dict(),
+                                     "parameters": {"operations": scope}, "phase": "REQUESTED",
+                                     "uac": {"requested": True, "result": "PENDING"}, "permission_level": self._permission})
+            except Exception as exc:
+                return result("session.elevate", "OPERATION_FAILED", operation_id=identifier,
+                              error="DURABLE_UAC_INTENT_FAILED: " + str(exc)[:1000],
+                              uac={"requested": False, "result": "NOT_STARTED"})
             cleanup = self.end_admin_session()
             if cleanup["status"] != "COMPLETED":
                 return cleanup
@@ -216,8 +227,16 @@ class InspectorService:
                                 error=str(exc)[:2000], winerror=getattr(exc, "winerror", None),
                                 uac={"requested": True, "result": "FAILED"})
             answer.update(operation="session.elevate", operation_id=identifier)
-            self.journal.append({**answer, "operation_id": identifier + ":result", "action_id": identifier,
-                                 "target": target.to_dict(), "phase": "RESULT"})
+            try:
+                self.journal.append({**answer, "operation_id": identifier + ":result", "action_id": identifier,
+                                     "target": target.to_dict(), "phase": "RESULT"})
+            except Exception as exc:
+                cleanup = self.end_admin_session()
+                answer = result("session.elevate", "RECOVERY_UNCONFIRMED", operation_id=identifier,
+                                error="UAC_RESULT_JOURNAL_FAILED: " + str(exc)[:1000],
+                                data={"reported_status": answer.get("status"), "cleanup": cleanup},
+                                uac=answer.get("uac"),
+                                limitations=["Cleanup of the new elevated session was requested because its durable result could not be recorded; inspect the reported cleanup status."])
             return answer
 
     def _local(self, request: ActionRequest, cancel_event=None) -> dict:
@@ -226,7 +245,10 @@ class InspectorService:
         if request.operation == "timeline":
             return result("timeline", "COMPLETED", data={"entries": self.journal.timeline(limit=p.get("limit", 200))})
         if request.operation == "compare":
-            return result("compare", "COMPLETED", data=self.journal.compare(p["before_id"], p["after_id"]))
+            comparison = self.journal.compare(p["before_id"], p["after_id"])
+            if comparison["target"] != request.target.to_dict():
+                return result("compare", "PROCESS_CHANGED", error="COMPARISON_TARGET_DOES_NOT_MATCH_SELECTED_INSTANCE")
+            return result("compare", "COMPLETED", data=comparison)
         if request.operation == "trace_evidence":
             from .deep_trace import build_trace_evidence
             return build_trace_evidence(p.pop("index_path"), request.target.to_dict(), cancel_event=cancel_event, deadline=deadline, **p)
@@ -242,6 +264,7 @@ class InspectorService:
         raise ValueError("LOCAL_OPERATION_NOT_IMPLEMENTED")
 
     def _cancel_active(self, identifier: str) -> dict:
+        permission = self._permission
         try:
             deadline = time.monotonic() + 5
             self._channel.send({"kind": "cancel", "request_id": identifier}, deadline=deadline)
@@ -258,7 +281,49 @@ class InspectorService:
             return result("unknown", "RECOVERY_UNCONFIRMED", error=str(exc))
         return result("unknown", "RECOVERY_UNCONFIRMED" if self._interventions_started else "CANCELLED",
                       error="HELPER_STOPPED_AFTER_CANCELLATION_GRACE",
+                      permission_level=permission,
                       limitations=["A started native action may have completed before cancellation; inspect recovery evidence."])
+
+    def _artifact_access(self, request: ActionRequest, identifier: str, cancel_event=None) -> dict | None:
+        """Probe before creating a file so a denied attempt leaves no collision.
+
+        This is an observation, not a granted right: native writing still
+        rechecks exact target identity and actual Windows permissions.
+        """
+        probe_id = identifier + ":access"
+        probe = ActionRequest("capabilities", request.target, {"operations": [request.operation]},
+                              timeout_seconds=min(15, request.timeout_seconds))
+        deadline = time.monotonic() + probe.timeout_seconds + 2
+        self._active_request_id = probe_id
+        try:
+            self._channel.send({"kind": "execute", "request_id": probe_id, "request": probe.to_dict()},
+                               deadline=deadline, cancel_event=cancel_event)
+            response = self._channel.receive(deadline=deadline, cancel_event=cancel_event)
+        except InterruptedError:
+            return self._cancel_active(probe_id)
+        except TimeoutError:
+            answer = self._cancel_active(probe_id)
+            answer["deadline_exceeded"] = True
+            if answer.get("status") == "CANCELLED":
+                answer["status"] = "TIMED_OUT"
+            return answer
+        finally:
+            self._active_request_id = None
+        if response.get("kind") != "result" or response.get("request_id") != probe_id:
+            raise ValueError("DIAGNOSTIC_ACCESS_PROBE_IDENTITY_MISMATCH")
+        answer = response["result"]
+        if answer.get("status") != "COMPLETED":
+            return {**answer, "operation": request.operation}
+        rows = answer.get("data", {}).get("operations", [])
+        if len(rows) != 1 or rows[0].get("operation") != request.operation:
+            raise ValueError("DIAGNOSTIC_ACCESS_PROBE_SCOPE_MISMATCH")
+        access = rows[0]
+        if access.get("status") != "AVAILABLE":
+            return result(request.operation, access.get("status", "OPERATION_FAILED"),
+                          data={"access_probe": access}, error=access.get("error", access.get("reason")),
+                          next_action=access.get("next_action", "REVIEW_OPERATION_ACCESS_STATUS"),
+                          limitations=["No output file was created; permissions will be rechecked on retry."])
+        return None
 
     def execute(self, request: ActionRequest | dict, cancel_event=None) -> dict:
         request = request if isinstance(request, ActionRequest) else ActionRequest.from_dict(request)
@@ -283,6 +348,7 @@ class InspectorService:
                               next_action="RESTORE_JOURNAL_STORAGE_BEFORE_RETRYING")
             dump_stream = None
             output_path = None
+            operation_permission = self._permission
             try:
                 check_deadline(time.monotonic() + request.timeout_seconds, cancel_event)
                 if request.operation in LOCAL_OPERATIONS:
@@ -291,18 +357,29 @@ class InspectorService:
                     answer = result(request.operation, "UNSUPPORTED_PLATFORM", next_action="USE_WINDOWS_10_OR_11_X64")
                 else:
                     blocked = self._ensure_session(request, cancel_event)
+                    if (blocked is None and request.operation == "profile.etw"
+                            and self._permission != "ADMINISTRATOR"):
+                        # Refuse before reserving the output file. The UI can
+                        # retry this exact destination after scoped UAC without
+                        # an abandoned empty file or unsafe path-based deletion.
+                        blocked = result("profile.etw", "ADMIN_REQUIRED",
+                                         error="ETW_PROFILE_REQUIRES_SCOPED_ADMINISTRATOR_HELPER",
+                                         next_action="REQUEST_UAC_FOR_THIS_OPERATION")
+                    if blocked is None and request.operation == "dump":
+                        blocked = self._artifact_access(request, identifier, cancel_event)
                     if blocked is not None:
                         answer = blocked
                     else:
+                        operation_permission = self._permission
                         parameters = dict(request.parameters)
                         envelope = {"kind": "execute", "request_id": identifier}
-                        if request.operation == "dump":
+                        if request.operation in ("dump", "profile.etw"):
                             import msvcrt
                             destination = parameters.pop("destination", None)
                             if destination is None:
                                 destination = parameters.pop("path", parameters.pop("output_path", None))
                             if not isinstance(destination, str) or not destination or "\0" in destination:
-                                raise ValueError("EXPLICIT_DUMP_DESTINATION_REQUIRED")
+                                raise ValueError("EXPLICIT_ARTIFACT_DESTINATION_REQUIRED")
                             output_path = Path(destination)
                             dump_stream = output_path.open("x+b")
                             envelope["attachment"] = {"source_file_handle": msvcrt.get_osfhandle(dump_stream.fileno())}
@@ -310,7 +387,7 @@ class InspectorService:
                                                request.confirmed, request.timeout_seconds)
                         envelope["request"] = remote.to_dict()
                         self._active_request_id = identifier
-                        if spec.mode == "INTERVENE" or request.operation == "thread_stacks":
+                        if spec.mode == "INTERVENE" or request.operation in ("thread_stacks", "profile.etw"):
                             self._interventions_started = True
                         deadline = time.monotonic() + request.timeout_seconds + 2
                         try:
@@ -349,7 +426,7 @@ class InspectorService:
                 if dump_stream is not None:
                     dump_stream.close()
             answer.update(operation=request.operation, operation_id=identifier)
-            answer.setdefault("permission_level", self._permission)
+            answer.setdefault("permission_level", operation_permission)
             answer.setdefault("limitations", [])
             # Imported trace payloads and live memory are not ordinary metadata.
             journal_answer = dict(answer)
@@ -384,6 +461,8 @@ class InspectorService:
             if self.helper is None:
                 return result("session.close", "COMPLETED", data={"active": False})
             had_interventions = self._interventions_started
+            closing_target = self._target.to_dict() if self._target is not None else None
+            closing_permission = self._permission
             answer = result("session.close", "RECOVERY_UNCONFIRMED" if had_interventions else "COMPLETED",
                             limitations=["No successful cleanup acknowledgement was received."])
             try:
@@ -403,7 +482,8 @@ class InspectorService:
             self._interventions_started = False
             answer.setdefault("data", {})["recovery"] = self.recovery_status()
             try:
-                self.journal.append({**answer, "operation_id": uuid4().hex, "source": "DIAGNOSTIC_SESSION_CLEANUP"})
+                self.journal.append({**answer, "operation_id": uuid4().hex, "source": "DIAGNOSTIC_SESSION_CLEANUP",
+                                     "target": closing_target, "permission_level": closing_permission})
             except Exception as exc:
                 answer = result("session.close", "RECOVERY_UNCONFIRMED", error="CLEANUP_JOURNAL_FAILED: " + str(exc)[:1000])
             return answer

@@ -352,7 +352,17 @@ class Acceptance:
                               confirmed=True, statuses=("COMPLETED", "INCOMPLETE_EVIDENCE"), timeout=30)
         require(any(row.get("tid") == oracle["wait_tid"] and row.get("frames") for row in rows(stacks)),
                 "LIVE_OWNED_THREAD_STACK_NOT_COLLECTED")
-        wait = self.perform("wait_chains", {"tid": oracle["wait_tid"]},
+        waiting_stack = next(row for row in rows(stacks) if row.get("tid") == oracle["wait_tid"])
+        frames = waiting_stack["frames"]
+        require(len({frame.get("address") for frame in frames}) >= 2,
+                "LIVE_STACK_HAS_ONLY_INITIAL_CONTEXT_NOT_UNWOUND_CALLERS")
+        require(any(module["base"] <= frame.get("address", 0) < module["base"] + module["size"]
+                    for frame in frames for module in own_modules),
+                "LIVE_WAIT_STACK_DID_NOT_REACH_CONTROLLED_NATIVE_CALLER")
+        result["wait_stack"] = {"distinct_frame_addresses": len({frame["address"] for frame in frames}),
+                                "controlled_native_module_frame_observed": True}
+        wait = self.perform("wait_chains", {"tid": oracle["wait_tid"],
+                                            "thread_created_100ns": oracle["wait_thread_created_100ns"]},
                             statuses=("COMPLETED", "INCOMPLETE_EVIDENCE"))
         require(any(row.get("tid") == oracle["wait_tid"] for row in rows(wait)),
                 "OWNED_THREAD_WAIT_CHAIN_NOT_RETURNED")
@@ -407,7 +417,9 @@ class Acceptance:
                 "ONLY_OWNED_HEARTBEAT_THREAD_SUSPENSION_NOT_CONFIRMED")
         resumed = self.perform("thread.resume", thread, confirmed=True)
         self.probe.progress(stopped)
+        preexisting_suspension = self.preserve_external_suspension(thread)
 
+        protection = {"before_attach": self.code_protection()}
         attached = self.perform("debug.attach", confirmed=True, timeout=25)
         from blackbox_core.deep_service import InspectorService
         from blackbox_core.deep_contracts import ActionRequest
@@ -424,6 +436,7 @@ class Acceptance:
         context = self.perform("debug.context")
         require(context.get("data"), "PAUSED_THREAD_CONTEXT_EMPTY")
         bp = self.perform("debug.breakpoint.add", {"address": oracle["function_address"]}, confirmed=True)
+        protection["after_add"] = self.code_protection(protection["before_attach"])
         breakpoint_id = bp["data"]["breakpoint_id"]
         self.perform("debug.continue", confirmed=True)
         self.probe.send("call")
@@ -438,22 +451,143 @@ class Acceptance:
                 break
             threading.Event().wait(.05)
         require(hit, "CONTROLLED_NATIVE_BREAKPOINT_HIT_NOT_OBSERVED")
+        protection["after_hit"] = self.code_protection(protection["before_attach"])
         stepped = self.perform("debug.step", confirmed=True)
         require(stepped.get("data", {}).get("state") == "PAUSED", "NATIVE_SINGLE_STEP_DID_NOT_STOP")
         self.perform("debug.breakpoint.disable", {"breakpoint_id": breakpoint_id}, confirmed=True)
         self.perform("debug.breakpoint.remove", {"breakpoint_id": breakpoint_id}, confirmed=True)
+        protection["after_remove"] = self.code_protection(protection["before_attach"])
         self.perform("debug.continue", confirmed=True)
         called = self.probe.receive("called", timeout=10)
         require(called["result"] == 137 and called["calls"] == 1,
                 "NATIVE_FUNCTION_SEMANTICS_CHANGED_BY_BREAKPOINT_OR_STEP")
         detach = self.perform("debug.detach", confirmed=True)
+        protection["after_detach"] = self.code_protection(protection["before_attach"])
         self.probe.progress(before)
         return {"expected_bytes_rejected": rejected["status"], "unconfirmed_rejected": unconfirmed["status"],
                 "memory_change_id": change_id, "rollback": restored,
                 "thread_suspend": suspended, "thread_resume": resumed,
+                "preexisting_suspension_preserved": preexisting_suspension,
                 "attach": attached, "pause": paused, "breakpoint_hit": hit,
                 "single_step": stepped, "detach": detach, "target_function": called,
+                "code_page_protection": protection,
                 "already_debugged": second_attach, "second_debugger_cleanup": second_cleanup}
+
+    def code_protection(self, expected: dict | None = None) -> dict:
+        """Independent VirtualQueryEx against Popen's still-owned process handle."""
+        import ctypes as C
+        from ctypes import wintypes as W
+
+        class MemoryBasicInformation(C.Structure):
+            _fields_ = [("base", C.c_void_p), ("allocation_base", C.c_void_p),
+                        ("allocation_protect", W.DWORD), ("partition", W.WORD),
+                        ("region_size", C.c_size_t), ("state", W.DWORD),
+                        ("protect", W.DWORD), ("kind", W.DWORD)]
+
+        query = C.WinDLL("kernel32", use_last_error=True).VirtualQueryEx
+        query.argtypes = [W.HANDLE, C.c_void_p, C.POINTER(MemoryBasicInformation), C.c_size_t]
+        query.restype = C.c_size_t
+        info = MemoryBasicInformation()
+        address = self.probe.ready["function_address"]
+        require(C.sizeof(info) == 48 and
+                query(W.HANDLE(int(self.probe.process._handle)), address, C.byref(info), C.sizeof(info)) == C.sizeof(info),
+                "INDEPENDENT_BREAKPOINT_PAGE_PROTECTION_QUERY_FAILED")
+        result = {"base": info.base, "allocation_base": info.allocation_base,
+                  "region_size": info.region_size, "state": info.state,
+                  "protect": info.protect, "kind": info.kind}
+        require(info.base <= address < info.base + info.region_size and info.state == 0x1000,
+                "BREAKPOINT_PAGE_NOT_COMMITTED")
+        if expected is not None:
+            require(result == expected, "BREAKPOINT_PAGE_PROTECTION_NOT_RESTORED_TO_BASELINE")
+        return result
+
+    def profiling(self, permission: str) -> dict:
+        """Capture real fixture activity; lack of privilege is not a trace result."""
+        destination = self.output / "profile-controlled.etl"
+        parameters = {"destination": str(destination), "duration_seconds": 5,
+                      "profile": "GeneralProfile.Light", "systemwide_confirmed": True}
+        before = self.probe.state()
+        result = self.perform("profile.etw", parameters, confirmed=True, timeout=120,
+                              statuses=("COMPLETED",) if permission == "ADMINISTRATOR" else ("ADMIN_REQUIRED",))
+        after = self.probe.progress(before)
+        if permission != "ADMINISTRATOR":
+            require(not destination.exists(), "UNPRIVILEGED_PROFILE_CREATED_OUTPUT_BEFORE_UAC")
+            return {"status": "PASS", "capture_status": "ADMIN_REQUIRED", "operation": result,
+                    "native_capture_executed": False, "interactive_uac": "NOT_TESTED"}
+        require(destination.is_file() and 0 < destination.stat().st_size <= 256 * 1024 * 1024,
+                "REAL_ETW_PROFILE_OUTPUT_MISSING_OR_UNBOUNDED")
+        require(after["created_100ns"] == before["created_100ns"] == self.identity.created_100ns,
+                "PROFILE_FIXTURE_INSTANCE_CHANGED")
+        return {"status": "PASS", "capture_status": "COMPLETED", "operation": result,
+                "native_capture_executed": True, "requested_duration_seconds": 5,
+                "trace": destination.name, "bytes": destination.stat().st_size,
+                "sha256": file_hash(destination), "target_instance": self.identity.to_dict(),
+                "fixture_oracle": "probe/oracle.json",
+                "workload_before": before, "workload_after": after,
+                "decoded_io_oracle": "REQUIRES_SEPARATE_DECODER_VALIDATION",
+                "scope": "SYSTEMWIDE_ETW_METADATA_WITH_OWNED_FIXTURE_ACTIVITY"}
+
+    def preserve_external_suspension(self, thread: dict) -> dict:
+        """An independent native caller owns one increment throughout helper actions."""
+        import ctypes as C
+        from ctypes import wintypes as W
+        kernel = C.WinDLL("kernel32", use_last_error=True)
+        kernel.OpenThread.argtypes = [W.DWORD, W.BOOL, W.DWORD]
+        kernel.OpenThread.restype = W.HANDLE
+        kernel.GetProcessIdOfThread.argtypes = [W.HANDLE]
+        kernel.GetProcessIdOfThread.restype = W.DWORD
+        kernel.GetThreadTimes.argtypes = [W.HANDLE] + [C.POINTER(W.FILETIME)] * 4
+        kernel.GetThreadTimes.restype = W.BOOL
+        kernel.CloseHandle.argtypes = [W.HANDLE]
+        kernel.CloseHandle.restype = W.BOOL
+        for name in ("SuspendThread", "ResumeThread"):
+            getattr(kernel, name).argtypes = [W.HANDLE]
+            getattr(kernel, name).restype = W.DWORD
+        handle = kernel.OpenThread(0x0002 | 0x0800, False, thread["tid"])
+        require(handle, "QA_EXTERNAL_SUSPENSION_THREAD_OPEN_FAILED")
+        increment_owned = False
+        proof = {"source": "INDEPENDENT_QA_WIN32_SUSPEND_RESUME_ON_EXACT_FIXTURE_THREAD"}
+        try:
+            times = [W.FILETIME() for _ in range(4)]
+            require(kernel.GetProcessIdOfThread(handle) == self.probe.ready["pid"] and
+                    kernel.GetThreadTimes(handle, *(C.byref(value) for value in times)),
+                    "QA_EXTERNAL_SUSPENSION_THREAD_IDENTITY_UNAVAILABLE")
+            created = (times[0].dwHighDateTime << 32) | times[0].dwLowDateTime
+            require(created == thread["thread_created_100ns"],
+                    "QA_EXTERNAL_SUSPENSION_THREAD_INSTANCE_CHANGED")
+            previous = kernel.SuspendThread(handle)
+            require(previous != 0xFFFFFFFF, "QA_EXTERNAL_SUSPENSION_FAILED")
+            increment_owned = True
+            proof["qa_initial_count"] = previous
+            require(previous == 0, "CONTROLLED_FIXTURE_ALREADY_SUSPENDED_EXTERNALLY")
+            suspended = self.perform("thread.suspend", thread, confirmed=True)
+            require(suspended["data"]["previous_suspend_count"] == 1,
+                    "HELPER_DID_NOT_OBSERVE_EXISTING_SUSPENSION")
+            resumed = self.perform("thread.resume", thread, confirmed=True)
+            require(resumed["data"]["remaining_suspend_count_observed"] == 1,
+                    "HELPER_DID_NOT_PRESERVE_EXISTING_SUSPENSION")
+            before = self.probe.state()
+            deadline = time.monotonic() + 5
+            after = before
+            while after["io_cycles"] == before["io_cycles"] and time.monotonic() < deadline:
+                threading.Event().wait(.1)
+                after = self.probe.state()
+            require(after["heartbeat"] == before["heartbeat"] and
+                    after["io_cycles"] > before["io_cycles"],
+                    "PREEXISTING_THREAD_SUSPENSION_NOT_INDEPENDENTLY_CONFIRMED")
+            proof.update(helper_increment=suspended, helper_decrement=resumed,
+                         heartbeat_remained_stopped=True, other_threads_progressed=True)
+        finally:
+            try:
+                if increment_owned:
+                    previous = kernel.ResumeThread(handle)
+                    proof["qa_final_previous_count"] = previous
+                    require(previous == 1, "QA_OWN_SUSPENSION_CLEANUP_NOT_CONFIRMED")
+            finally:
+                kernel.CloseHandle(handle)
+        self.probe.progress(after)
+        proof["status"] = "PASS"
+        return proof
 
     def negatives(self) -> dict:
         changed_identity = replace(self.identity, created_100ns=self.identity.created_100ns + 1)
@@ -539,6 +673,7 @@ class Acceptance:
         oracle = self.probe.ready
         expected = oracle["buffer_hex"]
         changed = bytes(i ^ 0xA5 for i in range(64)).hex()
+        protection_before = self.code_protection()
         self.perform("debug.attach", confirmed=True, timeout=25)
         self.perform("debug.breakpoint.add", {"address": oracle["function_address"]}, confirmed=True)
         self.perform("memory.write", {"address": oracle["buffer_address"],
@@ -568,6 +703,7 @@ class Acceptance:
                 break
             threading.Event().wait(.2)
         require(recovered, "CONTROLLED_TARGET_RECOVERY_AFTER_HELPER_CRASH_NOT_CONFIRMED")
+        protection_after = self.code_protection(protection_before)
         # The breakpoint address was not executed during the crash window.
         # Calling it only after guardian restoration proves the selected code
         # byte is usable; it does not generalize to arbitrary crash timing.
@@ -583,6 +719,8 @@ class Acceptance:
                 "target_instance": self.identity.to_dict(),
                 "target_progress_verified": True, "selected_bytes_restored_verified": True,
                 "own_thread_resumed_verified": True, "breakpoint_function_after_crash": called,
+                "code_page_protection_before": protection_before,
+                "code_page_protection_after": protection_after,
                 "service_recovery": closed,
                 "limitation": "CONTROLLED_CRASH_WHILE_BREAKPOINT_NOT_EXECUTING; ARBITRARY_INSTRUCTION_TIMING_NOT_PROVEN"}
 
@@ -629,6 +767,7 @@ def run_acceptance(output: Path, executable: Path, helper: Path | None) -> dict:
                 proof["helper_pid"] != probe.process.pid, "OWNED_DIAGNOSTIC_HELPER_REQUIRED")
         require(proof["helper_session"].get("permission_level") == proof["privilege"]["mode"],
                 "HELPER_TOKEN_LEVEL_DIFFERS_FROM_ACTUAL_PARENT_TOKEN")
+        proof["profiling"] = acceptance.profiling(proof["privilege"]["mode"])
         proof["access_denial"] = (acceptance.access_denial() if proof["privilege"]["mode"] == "STANDARD" else
                                    {"status": "NOT_EXECUTED", "reason": "EXECUTED_BY_RESTRICTED_TOKEN_CHILD"})
         proof["intervention"] = acceptance.intervention()

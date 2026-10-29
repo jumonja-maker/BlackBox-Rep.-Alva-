@@ -73,6 +73,11 @@ def _digest(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
 
 
+def _require_native_amd64(process_machine: int, native_machine: int) -> None:
+    if process_machine != 0 or native_machine != 0x8664:
+        raise DebugError("INCOMPLETE_EVIDENCE", "NATIVE_AMD64_DEBUG_CONTEXT_REQUIRED")
+
+
 def _result(status: str = "COMPLETED", **values: Any) -> dict[str, Any]:
     return {"status": status, "data": {}, "limitations": [], **values}
 
@@ -163,11 +168,15 @@ class _WinAPI:
             self.fail("OPEN_PROCESS")
         try:
             self.verify()
-            wow = w.BOOL()
-            if not self.k.IsWow64Process(self.handle, ctypes.byref(wow)):
-                self.fail("IS_WOW64_PROCESS")
-            if wow.value:
-                raise DebugError("INCOMPLETE_EVIDENCE", "WOW64_CONTEXT_NOT_SUPPORTED")
+            architecture = getattr(self.k, "IsWow64Process2", None)
+            if architecture is None:
+                raise DebugError("INCOMPLETE_EVIDENCE", "EXACT_DEBUG_CONTEXT_ARCHITECTURE_UNAVAILABLE")
+            architecture.argtypes = [w.HANDLE, ctypes.POINTER(w.WORD), ctypes.POINTER(w.WORD)]
+            architecture.restype = w.BOOL
+            machine, native_machine = w.WORD(), w.WORD()
+            if not architecture(self.handle, ctypes.byref(machine), ctypes.byref(native_machine)):
+                self.fail("IS_WOW64_PROCESS2")
+            _require_native_amd64(machine.value, native_machine.value)
         except BaseException:
             self.close()
             raise
@@ -260,14 +269,35 @@ class _WinAPI:
         return buffer.raw
 
     def executable_address(self, address: int) -> bool:
+        return bool(self.executable_protection(address))
+
+    def executable_protection(self, address: int) -> int:
         self.ensure_rights(0x0400)
         info = ctypes.create_string_buffer(48)
         if self.k.VirtualQueryEx(self.handle, address, info, len(info)) != len(info):
             self.fail("VIRTUAL_QUERY_BREAKPOINT")
         state, protection = struct.unpack_from("<II", info.raw, 32)
-        return state == 0x1000 and bool(protection & 0xF0) and not bool(protection & (0x100 | 0x01))
+        if state != 0x1000 or not bool(protection & 0xF0) or protection & (0x100 | 0x01):
+            raise DebugError("OPERATION_FAILED", "BREAKPOINT_ADDRESS_NOT_EXECUTABLE")
+        return protection
 
-    def replace(self, address: int, expected: bytes, value: bytes, *, executable: bool = False) -> None:
+    def restore_executable_protection(self, address: int, original: int) -> None:
+        """Restore only a recorded original protection or our temporary RWX state."""
+        from ctypes import wintypes as w
+        self.ensure_rights(0x0008)
+        current = self.executable_protection(address)
+        if current == original:
+            return
+        if current != 0x40:
+            raise DebugError("RECOVERY_UNCONFIRMED", "BREAKPOINT_PAGE_PROTECTION_CHANGED_EXTERNALLY")
+        ignored = w.DWORD()
+        if not self.k.VirtualProtectEx(self.handle, address, 1, original, ctypes.byref(ignored)):
+            raise DebugError("RECOVERY_UNCONFIRMED", "PAGE_PROTECTION_RESTORE_FAILED", ctypes.get_last_error())
+        if self.executable_protection(address) != original:
+            raise DebugError("RECOVERY_UNCONFIRMED", "PAGE_PROTECTION_RESTORE_READBACK_FAILED")
+
+    def replace(self, address: int, expected: bytes, value: bytes, *, executable: bool = False,
+                original_protection: int | None = None) -> None:
         from ctypes import wintypes as w
         self.ensure_rights(0x0010 | 0x0020 | 0x0008)
         if len(expected) != len(value) or self.read(address, len(expected)) != expected:
@@ -275,6 +305,11 @@ class _WinAPI:
         old_protection = w.DWORD()
         changed_protection = False
         if executable:
+            if len(value) != 1 or original_protection is None:
+                raise DebugError("OPERATION_FAILED", "BREAKPOINT_PROTECTION_INTENT_REQUIRED")
+            current = self.executable_protection(address)
+            if current not in (original_protection, 0x40):
+                raise DebugError("RECOVERY_UNCONFIRMED", "BREAKPOINT_PAGE_PROTECTION_CHANGED_EXTERNALLY")
             if not self.k.VirtualProtectEx(self.handle, address, len(value), 0x40,
                                            ctypes.byref(old_protection)):
                 self.fail("VIRTUAL_PROTECT_BREAKPOINT")
@@ -302,10 +337,7 @@ class _WinAPI:
                 raise DebugError("RECOVERY_UNCONFIRMED", "MEMORY_WRITE_READBACK_MISMATCH")
         finally:
             if changed_protection:
-                ignored = w.DWORD()
-                if not self.k.VirtualProtectEx(self.handle, address, len(value), old_protection.value,
-                                               ctypes.byref(ignored)):
-                    raise DebugError("RECOVERY_UNCONFIRMED", "PAGE_PROTECTION_RESTORE_FAILED")
+                self.restore_executable_protection(address, original_protection)
 
     def context(self, handle: Any) -> _Context:
         result = _Context()
@@ -418,6 +450,8 @@ class DebugSession:
                     try:
                         if command.operation == "_close":
                             command.result = self._cleanup()
+                            if command.result["status"] != "COMPLETED":
+                                self._fatal = command.result
                             self._stopping.set()
                         else:
                             self._check(command)
@@ -562,8 +596,9 @@ class DebugSession:
         self._attached = True
         # Must be called by the thread owning this debug object, immediately after attach.
         if not self._api.k.DebugSetProcessKillOnExit(False):
-            self._api.k.DebugActiveProcessStop(self.identity.pid)
-            self._attached = False
+            # Preserve ownership when the first detach attempt also fails;
+            # normal cleanup must still retry the actual attached debug object.
+            self._attached = not bool(self._api.k.DebugActiveProcessStop(self.identity.pid))
             self.state = "RECOVERY_UNCONFIRMED"
             raise DebugError("RECOVERY_UNCONFIRMED", "DEBUG_KILL_ON_EXIT_CONFIGURATION_FAILED")
         self.state = "ATTACHED"
@@ -644,11 +679,14 @@ class DebugSession:
             self._paused_breakpoint = key
             handle, created = self._api.thread(event.tid)
             try:
-                context = self._api.context(handle)
                 item["hit_context"] = {"tid": event.tid, "created_100ns": created,
-                                       "rip_before": context.get64(248), "phase": "rewind_pending"}
+                                       "rip_before": address + 1, "phase": "rewind_pending"}
                 self._sync_guard()
-                self._api.replace(address, b"\xcc", bytes.fromhex(item["original_hex"]), executable=True)
+                context = self._api.context(handle)
+                if context.get64(248) not in (address, address + 1):
+                    raise DebugError("RECOVERY_UNCONFIRMED", "BREAKPOINT_INSTRUCTION_POINTER_UNEXPECTED")
+                self._api.replace(address, b"\xcc", bytes.fromhex(item["original_hex"]), executable=True,
+                                  original_protection=item["original_protection"])
                 item["installed"] = False
                 context.set64(248, address)
                 self._api.set_context(handle, context)
@@ -678,7 +716,8 @@ class DebugSession:
             if breakpoint and breakpoint["enabled"]:
                 breakpoint.pop("hit_context", None)
                 self._api.replace(breakpoint["address"], bytes.fromhex(breakpoint["original_hex"]),
-                                  b"\xcc", executable=True)
+                                  b"\xcc", executable=True,
+                                  original_protection=breakpoint["original_protection"])
                 breakpoint["installed"] = True
             self._stepping = None
             self._paused_breakpoint = None
@@ -762,17 +801,17 @@ class DebugSession:
         if any(item["address"] == address for item in self._breakpoints.values()):
             raise DebugError("OPERATION_FAILED", "BREAKPOINT_ALREADY_EXISTS")
         original = self._api.read(address, 1)
-        if not self._api.executable_address(address):
-            raise DebugError("OPERATION_FAILED", "BREAKPOINT_ADDRESS_NOT_EXECUTABLE")
+        original_protection = self._api.executable_protection(address)
         if original == b"\xcc":
             raise DebugError("OPERATION_FAILED", "EXISTING_INT3_IS_NOT_OWNED")
         identifier = uuid.uuid4().hex
         item = {"breakpoint_id": identifier, "address": address, "original_hex": original.hex(),
-                "enabled": True, "installed": True}
+                "enabled": True, "installed": True, "original_protection": original_protection}
         self._breakpoints[identifier] = item
         self._sync_guard()  # recovery intent is durable in the separate live guardian first.
         try:
-            self._api.replace(address, original, b"\xcc", executable=True)
+            self._api.replace(address, original, b"\xcc", executable=True,
+                              original_protection=original_protection)
         except BaseException:
             # Keep the intent until cleanup compares actual bytes; partial writes are not assumed absent.
             raise
@@ -791,7 +830,9 @@ class DebugSession:
             raise DebugError("OPERATION_FAILED", "UNKNOWN_BREAKPOINT")
         self._restore_breakpoint_context(item)
         if item["installed"]:
-            self._api.replace(item["address"], b"\xcc", bytes.fromhex(item["original_hex"]), executable=True)
+            self._api.replace(item["address"], b"\xcc", bytes.fromhex(item["original_hex"]), executable=True,
+                              original_protection=item["original_protection"])
+        self._api.restore_executable_protection(item["address"], item["original_protection"])
         item["installed"] = item["enabled"] = False
         if remove:
             del self._breakpoints[identifier]
@@ -929,6 +970,16 @@ class DebugSession:
                     errors.append(f"GUARDIAN_UNAVAILABLE_LOCAL_RECOVERY: {exc}")
                 except BaseException as stop_error:
                     errors.append(f"GUARDIAN_SHUTDOWN_UNCONFIRMED: {stop_error}")
+                    self.state = "RECOVERY_UNCONFIRMED"
+                    # A live guardian may still act on the old acknowledged
+                    # plan. Do not race it with another ResumeThread decrement
+                    # or memory restoration. The helper's owner will terminate
+                    # this failed session; the guardian retains recovery intent.
+                    return _result("RECOVERY_UNCONFIRMED", error="; ".join(errors),
+                                   data={"state": self.state, "attached": self._attached,
+                                         "owned_resources_remaining": len(self._breakpoints) +
+                                         len(self._changes) + len(self._suspensions)},
+                                   limitations=["Local cleanup deferred because guardian shutdown was not confirmed."])
         # If running, an owned debug-break provides a consistent context for RIP/TF cleanup.
         if self._attached and self._event is None:
             try:
@@ -950,6 +1001,8 @@ class DebugSession:
                     if not item["original_tf"]:
                         context.set32(68, context.get32(68) & ~0x100)
                         self._api.set_context(handle, context)
+                        if self._api.context(handle).get32(68) & 0x100:
+                            raise DebugError("RECOVERY_UNCONFIRMED", "TRAP_FLAG_RESTORE_READBACK_FAILED")
                 finally:
                     self._api.k.CloseHandle(handle)
                 self._stepping = None
@@ -961,9 +1014,11 @@ class DebugSession:
                 current = self._api.read(item["address"], 1)
                 original = bytes.fromhex(item["original_hex"])
                 if current == b"\xcc":
-                    self._api.replace(item["address"], current, original, executable=True)
+                    self._api.replace(item["address"], current, original, executable=True,
+                                      original_protection=item["original_protection"])
                 elif current != original:
                     raise DebugError("RECOVERY_UNCONFIRMED", "BREAKPOINT_BYTE_CHANGED_EXTERNALLY")
+                self._api.restore_executable_protection(item["address"], item["original_protection"])
                 del self._breakpoints[identifier]
             except BaseException as exc:
                 errors.append(f"BREAKPOINT: {exc}")

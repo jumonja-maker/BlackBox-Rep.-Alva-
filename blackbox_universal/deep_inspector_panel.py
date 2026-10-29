@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import json
 import hashlib
+import math
+from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
@@ -61,6 +63,7 @@ ACTION_LABELS = {
     "dump_inspect": ("Inspect saved dump…", "Исследовать сохранённый дамп…"),
     "dump_read_memory": ("Read memory from saved dump…", "Прочитать память из сохранённого дампа…"),
     "symbols_verify": ("Verify local PE / PDB…", "Проверить локальные PE / PDB…"),
+    "profile.etw": ("Record system-wide ETW…", "Записать системную ETW-трассу…"),
 }
 
 STATUS_TEXT = {
@@ -106,6 +109,29 @@ FIELD_LABELS = {
     "local": ("Local address", "Локальный адрес"), "remote": ("Remote address", "Удалённый адрес"),
     "process_instance": ("Recorded instance", "Записанный экземпляр"),
     "observed_tree_depth": ("Observed tree depth", "Глубина наблюдаемого дерева"),
+    "allocation_base": ("Allocation base", "База выделения"),
+    "allocation_protection": ("Allocation protection", "Защита выделения"),
+    "handle": ("Handle", "Дескриптор"), "type_index": ("Object type index", "Индекс типа объекта"),
+    "granted_access": ("Granted access mask", "Маска полученного доступа"),
+    "attributes": ("Attributes", "Атрибуты"), "name_status": ("Name lookup status", "Статус получения имени"),
+    "kernel_time_100ns": ("Kernel time, 100 ns", "Время ядра, 100 нс"),
+    "user_time_100ns": ("User time, 100 ns", "Пользовательское время, 100 нс"),
+    "captured_100ns": ("Capture FILETIME", "Время снятия FILETIME"),
+    "frames": ("Stack frames", "Кадры стека"), "context": ("Thread context", "Контекст потока"),
+    "kind": ("Observation type", "Тип наблюдения"),
+    "observed_suspend_count": ("Observed suspend count", "Наблюдаемый счётчик приостановки"),
+    "owned_suspension_count": ("Own suspensions", "Собственные приостановки"),
+    "historical_etw_stack": ("Historical ETW stack", "Исторический стек ETW"),
+    "bytes_sent": ("Sent bytes", "Передано байт"), "bytes_received": ("Received bytes", "Получено байт"),
+    "event_name": ("Recorded event", "Записанное событие"), "event_id": ("Event ordinal", "Номер события"),
+    "trace_relative_ms": ("Trace time, ms", "Время трассы, мс"),
+    "event_transfer_bytes": ("Event transfer, bytes", "Объём события, байт"),
+    "latency_ms": ("Reported duration, ms", "Заявленная длительность, мс"),
+    "latency_status": ("Duration evidence", "Основание длительности"),
+    "trace_interval_start_ms": ("Derived interval start, ms", "Вычисленное начало интервала, мс"),
+    "trace_interval_end_ms": ("Interval end, ms", "Конец интервала, мс"),
+    "fields": ("Recorded fields", "Записанные поля"),
+    "typed_observation": ("Typed observation", "Типизированное наблюдение"),
 }
 
 
@@ -136,7 +162,10 @@ class OverviewInspectorPanel(QWidget):
         self._target_name = ""
         self._row_details = None
         self._trace_request = None
+        self._section_trace_requests = {}
         self._dump_path = None
+        self._captured_trace = None
+        self._debug_state = "IDLE"
         self._request_section = "processes"
         self._build()
         self.bridge.result_ready.connect(self._receive)
@@ -302,12 +331,14 @@ class OverviewInspectorPanel(QWidget):
         elif key == "network":
             self._action(actions, "network")
             self._button(actions, "historical_network", "Read recorded network events…", "Прочитать записанные сетевые события…", self._trace)
+            self._button(actions, "historical_network_interval", "Open selected trace interval", "Открыть выбранный интервал трассы", self._open_trace_interval)
         elif key == "disk":
             self._action(actions, "disk")
             self._button(actions, "historical_disk", "Read recorded file operations…", "Прочитать записанные файловые операции…", self._trace)
+            self._button(actions, "historical_disk_interval", "Open selected trace interval", "Открыть выбранный интервал трассы", self._open_trace_interval)
         elif key == "debug":
             self.debug_state_label = _plain_label()
-            self.debug_state_label.setText("DEBUG: IDLE")
+            self.debug_state_label.setText(self.tr2("DEBUG: ", "ОТЛАДКА: ") + self._debug_state)
             layout.addWidget(self.debug_state_label)
             for operation in ("debug.attach", "debug.pause", "debug.continue", "debug.detach", "debug.breakpoints"):
                 self._action(actions, operation)
@@ -326,6 +357,19 @@ class OverviewInspectorPanel(QWidget):
             self._action(actions, "timeline")
             self._button(actions, "export", "Export action journal…", "Сохранить журнал действий…", self._export)
             self._button(actions, "trace_evidence", *ACTION_LABELS["trace_evidence"], self._trace)
+            fields = QFormLayout()
+            self.profile_seconds = QSpinBox()
+            self.profile_seconds.setRange(1, 30)
+            self.profile_seconds.setValue(5)
+            seconds_label = self._translated(_plain_label(), "ETW duration, seconds", "Длительность ETW, секунд")
+            fields.addRow(seconds_label, self.profile_seconds)
+            self.profile_kind = QComboBox()
+            self.profile_kind.addItem("GeneralProfile.Light", "GeneralProfile.Light")
+            profile_label = self._translated(_plain_label(), "Recording profile", "Профиль записи")
+            fields.addRow(profile_label, self.profile_kind)
+            layout.addLayout(fields)
+            self._button(actions, "profile.etw", *ACTION_LABELS["profile.etw"], self._record_etw)
+            self._button(actions, "captured_trace", "Open captured trace in Decoder", "Открыть записанную трассу в декодере", self._open_captured_trace)
 
     @staticmethod
     def _required(field):
@@ -412,6 +456,10 @@ class OverviewInspectorPanel(QWidget):
         if operation == "dump":
             risk = self.tr2("The dump may contain passwords and documents and may briefly pause the application. It is saved only to the selected file.",
                            "Дамп может содержать пароли и документы; его снятие может кратковременно приостановить программу. Он сохраняется только в выбранный файл.")
+        elif operation == "profile.etw":
+            risk = self.tr2(
+                "WPR records a SYSTEM-WIDE ETW trace, including other processes. Recording adds measurement overhead and can contain sensitive data. It stops automatically after the selected duration and is excluded from ordinary journal export. An existing WPR recording will not be stopped to make room for this capture.",
+                "WPR записывает СИСТЕМНУЮ ETW-трассу, включая другие процессы. Запись создаёт нагрузку и может содержать чувствительные данные. Она автоматически завершится по выбранной длительности и не войдёт в обычный экспорт журнала. Уже идущая запись WPR не будет остановлена ради этого действия.")
         text = f"{self.tr2(en, ru)}\n{identity}\n\n{risk}"
         if parameters:
             preview = dict(parameters)
@@ -465,6 +513,18 @@ class OverviewInspectorPanel(QWidget):
         if path:
             self._request("dump", {"destination": path, "full": selected == choices[1], "max_bytes": 1024 * 1024 * 1024})
 
+    def _record_etw(self):
+        path, _ = QFileDialog.getSaveFileName(
+            self, self.tr2("New system-wide ETW recording", "Новая системная запись ETW"),
+            "BLACKBOX-Diagnostic.etl", "ETW (*.etl)")
+        if path:
+            self._request("profile.etw", {
+                "duration_seconds": self.profile_seconds.value(),
+                "profile": self.profile_kind.currentData(),
+                "destination": path,
+                "systemwide_confirmed": True,
+            })
+
     def _inspect_dump(self):
         path, _ = QFileDialog.getOpenFileName(self, self.tr2("Saved diagnostic dump", "Сохранённый диагностический дамп"), "", "Dump (*.dmp)")
         if path:
@@ -477,7 +537,13 @@ class OverviewInspectorPanel(QWidget):
             path, _ = QFileDialog.getOpenFileName(self, self.tr2("Saved diagnostic dump", "Сохранённый диагностический дамп"), "", "Dump (*.dmp)")
         if path:
             self._dump_path = path
-            self._request("dump_read_memory", lambda: dict(self._memory_read_parameters(), path=path))
+            self._request("dump_read_memory", lambda: self._saved_memory_parameters(path))
+
+    def _saved_memory_parameters(self, path):
+        parameters = self._memory_read_parameters()
+        if parameters["size"] > 4096:
+            raise ValueError("SAVED_DUMP_READ_LIMIT_4096_BYTES")
+        return dict(parameters, path=path)
 
     def _symbols(self):
         pe, _ = QFileDialog.getOpenFileName(self, self.tr2("Local module PE", "Локальный PE модуля"), "", "PE (*.exe *.dll)")
@@ -501,8 +567,9 @@ class OverviewInspectorPanel(QWidget):
         if (not isinstance(candidates, list) or not candidates or self._trace_request is None
                 or self._trace_request.get("process_instance") is not None):
             return
-        choices = [f"Instance {row.get('process_instance', '?')} · PID {row.get('pid', '?')} · "
-                   f"{row.get('first_ms', '?')}–{row.get('last_ms', '?')} ms"
+        choices = [self.tr2("Instance ", "Экземпляр ") +
+                   f"{row.get('process_instance', '?')} · PID {row.get('pid', '?')} · "
+                   f"{row.get('first_ms', '?')}–{row.get('last_ms', '?')} " + self.tr2("ms", "мс")
                    if isinstance(row, dict) else str(row) for row in candidates[:100]]
         selected, ok = QInputDialog.getItem(self, "BLACK.BOX", self.tr2(
             "Select a recorded instance. Matching PID alone does not prove this is the live target.",
@@ -515,6 +582,40 @@ class OverviewInspectorPanel(QWidget):
             return
         self._trace_request = dict(self._trace_request, process_instance=instance)
         self._request("trace_evidence", self._trace_request)
+
+    def _trace_interval_parameters(self):
+        section = self.section.currentData()
+        context = self._section_trace_requests.get(section)
+        if section not in ("network", "disk") or not context:
+            return None
+        table = self._tables[section]
+        item = table.item(table.currentRow(), 0)
+        row = item.data(Qt.ItemDataRole.UserRole) if item is not None else None
+        if not isinstance(row, dict) or row.get("process_instance") != context.get("process_instance"):
+            return None
+        end = row.get("trace_relative_ms")
+        start = row.get("trace_interval_start_ms", end)
+        if (type(start) not in (float, int) or type(end) not in (float, int)
+                or not math.isfinite(start) or not math.isfinite(end) or start > end):
+            return None
+        # Queries use a half-open interval. Include the completion event without
+        # inventing an observed start or a unit conversion for untyped events.
+        end_exclusive = math.nextafter(float(end), math.inf)
+        if not math.isfinite(end_exclusive):
+            return None
+        parameters = dict(context, start_ms=start, end_ms=end_exclusive)
+        tid = row.get("tid")
+        if type(tid) is int and 0 < tid < 2**32:
+            parameters["tid"] = tid
+        return parameters
+
+    def _open_trace_interval(self):
+        parameters = self._trace_interval_parameters()
+        if parameters is None:
+            return
+        self._trace_request = parameters
+        self.section.setCurrentIndex(self.section.findData("timeline"))
+        self._request("trace_evidence", parameters)
 
     def _export(self):
         path, _ = QFileDialog.getSaveFileName(self, self.tr2("Export action journal", "Сохранить журнал действий"), "BLACKBOX-Diagnostic-Journal.json", "JSON (*.json)")
@@ -533,6 +634,13 @@ class OverviewInspectorPanel(QWidget):
             return
         # Opening the decoder does not assign a live instance to an old trace.
         self.window._navigate("decoder")
+
+    def _open_captured_trace(self):
+        panel = getattr(self.window, "decoder_panel", None)
+        if panel is None or self._captured_trace is None:
+            return
+        self.window._navigate("decoder")
+        panel.start_decode(Path(self._captured_trace))
 
     def _open_profiling(self):
         panel = getattr(self.window, "research_panel", None)
@@ -556,7 +664,9 @@ class OverviewInspectorPanel(QWidget):
         self._pending_retry = self._last_request = None
         self._last_result = None
         self._trace_request = None
+        self._section_trace_requests.clear()
         self._dump_path = None
+        self._captured_trace = None
         self._section_results.clear()
         self._row_details = None
         self.elevate_button.hide()
@@ -566,7 +676,8 @@ class OverviewInspectorPanel(QWidget):
                       self.memory_address, self.expected_bytes, self.new_bytes, self.write_id,
                       self.breakpoint_address, self.breakpoint_id, self.stack_module_base, self.stack_pdb):
             field.clear()
-        self.debug_state_label.setText("DEBUG: IDLE")
+        self._debug_state = "IDLE"
+        self.debug_state_label.setText(self.tr2("DEBUG: ", "ОТЛАДКА: ") + self._debug_state)
         self.details.clear()
         self.summary.clear()
         self.status_label.clear()
@@ -576,11 +687,10 @@ class OverviewInspectorPanel(QWidget):
         target = self.bridge.target
         self.target_label.setText((self.tr2("Selected instance: ", "Выбранный экземпляр: ") +
                                    f"{self._target_name} · PID {target[0]} · {target[1]}") if target else
-                                  self.tr2("Select an application in Overview or Processes.", "Выберите программу в Overview или на странице процессов."))
+                                  self.tr2("Select an application in Overview or Processes.", "Выберите программу на странице обзора или процессов."))
         self._refresh_controls()
 
-    def _receive(self, result):
-        self._last_result = result
+    def _render_operation_status(self, result):
         status = str(result.get("status", "OPERATION_FAILED"))
         message = self.tr2(*STATUS_TEXT.get(status, (status, status)))
         error = result.get("error") or result.get("reason")
@@ -588,8 +698,18 @@ class OverviewInspectorPanel(QWidget):
             error = (str(error) + " · " if error else "") + "WinError " + str(result["winerror"])
         self.status_label.setText(f"{status} · {message}" + ("\n" + str(error)[:1000] if error else ""))
         self.status_label.setStyleSheet("color: #a12020; font-weight: bold;" if status == "RECOVERY_UNCONFIRMED" else "")
+
+    def _receive(self, result):
+        self._last_result = result
+        status = str(result.get("status", "OPERATION_FAILED"))
+        self._render_operation_status(result)
         data = result.get("data") or {}
         if isinstance(data, dict):
+            if result.get("operation") == "profile.etw":
+                self._captured_trace = None
+                if (status == "COMPLETED" and data.get("saved_verified") is True
+                        and isinstance(data.get("destination"), str) and data.get("trace_bytes", 0) > 0):
+                    self._captured_trace = data["destination"]
             snapshot_id = data.get("snapshot_id")
             if snapshot_id and result.get("request_tag") == "before":
                 self._before_id = snapshot_id
@@ -599,7 +719,8 @@ class OverviewInspectorPanel(QWidget):
                 if data.get(key) is not None:
                     field.setText(str(data[key]))
             if data.get("state") is not None:
-                self.debug_state_label.setText("DEBUG: " + str(data["state"]))
+                self._debug_state = str(data["state"])
+                self.debug_state_label.setText(self.tr2("DEBUG: ", "ОТЛАДКА: ") + self._debug_state)
             tid = data.get("stopped_tid", data.get("tid"))
             if tid is not None:
                 self.debug_tid.setText(str(tid))
@@ -609,6 +730,18 @@ class OverviewInspectorPanel(QWidget):
                 self._pending_retry = None
         elif result.get("request_kind") != "close":
             section = self._request_section
+            self._section_trace_requests.pop(section, None)
+            if (result.get("operation") == "trace_evidence" and isinstance(data, dict)
+                    and (self._last_request or {}).get("operation") == "trace_evidence"):
+                digest = data.get("source_trace_sha256")
+                selection = data.get("trace_selection", {})
+                if (isinstance(digest, str) and len(digest) == 64
+                        and all(char in "0123456789abcdefABCDEF" for char in digest)
+                        and type(selection.get("process_instance")) is int):
+                    self._section_trace_requests[section] = dict(
+                        self._last_request["parameters"],
+                        process_instance=selection["process_instance"],
+                        expected_source_trace_sha256=digest)
             self._section_results[section] = result
             self._show_result(section, result)
             if section != self.section.currentData():
@@ -640,6 +773,14 @@ class OverviewInspectorPanel(QWidget):
             if isinstance(data.get(key), list) and data[key]:
                 return [row if isinstance(row, dict) else {"value": row} for row in data[key]]
         return [{"field": key, "value": value} for key, value in data.items()]
+
+    def _technical_text(self, value):
+        text = json.dumps(value, ensure_ascii=False, indent=2)
+        if len(text) > 100000:
+            text = text[:100000] + self.tr2(
+                "\n… DISPLAY TRUNCATED: select a smaller range to inspect the remaining fields.",
+                "\n… ПОКАЗ СОКРАЩЁН: выберите меньший диапазон для просмотра остальных полей.")
+        return text
 
     @staticmethod
     def _process_tree_rows(rows):
@@ -677,6 +818,11 @@ class OverviewInspectorPanel(QWidget):
             elif data.get("trace_selection", {}).get("process_instance") is None:
                 rows = data.get("candidate_instances", [])
         columns = []
+        if result.get("operation") == "trace_evidence" and section in ("network", "disk"):
+            preferred = ("event_name", "trace_relative_ms", "pid", "tid", "event_transfer_bytes",
+                         "latency_ms", "trace_interval_start_ms", "trace_interval_end_ms",
+                         "latency_status", "typed_observation", "fields", "process_instance")
+            columns = [key for key in preferred if any(key in row for row in rows[:500])]
         for row in rows[:500]:
             for key in row:
                 if key not in columns and len(columns) < 12:
@@ -692,7 +838,7 @@ class OverviewInspectorPanel(QWidget):
             for j, key in enumerate(columns):
                 value = row.get(key)
                 text = json.dumps(value, ensure_ascii=False) if isinstance(value, (dict, list)) else str(value if value is not None else "—")
-                item = QTableWidgetItem(text[:2000])
+                item = QTableWidgetItem(text[:2000] + ("…" if len(text) > 2000 else ""))
                 item.setData(Qt.ItemDataRole.UserRole, row)
                 table.setItem(i, j, item)
         table.blockSignals(False)
@@ -700,10 +846,19 @@ class OverviewInspectorPanel(QWidget):
         text = self.tr2("Displayed rows: ", "Показано строк: ") + f"{min(len(rows), 500)} / {len(rows)}"
         if limitations:
             text += "\n" + "\n".join(str(item) for item in limitations)[:4000]
+        if result.get("operation") == "trace_evidence" and isinstance(result.get("data"), dict):
+            selected = result["data"].get("trace_selection", {})
+            if selected.get("start_ms") is not None or selected.get("end_ms") is not None:
+                text += self.tr2("\nRecorded interval, ms: ", "\nЗаписанный интервал, мс: ")
+                text += f"[{selected.get('start_ms', '—')}, {selected.get('end_ms', '—')})"
+                text += f" · PID {selected.get('pid', '—')} · TID {selected.get('tid', '—')}"
+                text += self.tr2(" · recorded instance ", " · записанный экземпляр ") + str(selected.get("process_instance", "—"))
+                text += self.tr2("\nHistorical filter only; association with the live process remains unestablished.",
+                                 "\nЭто фильтр исторических событий; связь с живым процессом по-прежнему не установлена.")
         if result.get("next_action"):
             text += "\n" + self.tr2("Next action: ", "Следующее действие: ") + str(result["next_action"])
         self.summary.setText(text)
-        self.details.setPlainText(json.dumps(result, ensure_ascii=False, indent=2)[:100000])
+        self.details.setPlainText(self._technical_text(result))
 
     def _select_row(self, section):
         table = self._tables[section]
@@ -714,7 +869,7 @@ class OverviewInspectorPanel(QWidget):
         if not isinstance(row, dict):
             return
         self._row_details = row
-        self.details.setPlainText(json.dumps(row, ensure_ascii=False, indent=2)[:100000])
+        self.details.setPlainText(self._technical_text(row))
         tid = row.get("tid", row.get("thread_id"))
         created = row.get("thread_created_100ns", row.get("created_100ns"))
         if tid is not None:
@@ -730,6 +885,7 @@ class OverviewInspectorPanel(QWidget):
                 self.stack_module_base.setText(hex(address))
         if row.get("breakpoint_id") is not None:
             self.breakpoint_id.setText(str(row["breakpoint_id"]))
+        self._refresh_controls()
 
     def _section_changed(self):
         section = self.section.currentData()
@@ -739,6 +895,7 @@ class OverviewInspectorPanel(QWidget):
         else:
             self.summary.clear()
             self.details.clear()
+        self._refresh_controls()
 
     def _refresh_controls(self, *_):
         available = self.bridge.target is not None and not self.bridge.busy
@@ -747,10 +904,14 @@ class OverviewInspectorPanel(QWidget):
         self.cancel_button.setEnabled(self.bridge.busy)
         self.end_admin_button.setEnabled(available and self.bridge.admin_active)
         self._action_buttons["compare"].setEnabled(available and self._before_id is not None and self._after_id is not None)
+        self._action_buttons["captured_trace"].setEnabled(available and self._captured_trace is not None)
+        interval_available = available and self._trace_interval_parameters() is not None
+        for key in ("historical_network_interval", "historical_disk_interval"):
+            self._action_buttons[key].setEnabled(interval_available)
         self.elevate_button.setEnabled(available)
         checked = getattr(self.bridge, "admin_checked_at", "")
         self.admin_label.setText(("ADMIN: ACTIVE · " + self.tr2("last checked ", "проверено в ") + checked)
-                                if self.bridge.admin_active else "ADMIN: INACTIVE")
+                                if self.bridge.admin_active else self.tr2("ADMIN: INACTIVE", "ADMIN: INACTIVE · сеанс администратора не активен"))
 
     def retranslate(self):
         for widget, en, ru in self._labels:
@@ -760,9 +921,9 @@ class OverviewInspectorPanel(QWidget):
         for index, (_, en, ru) in enumerate(SECTIONS):
             self.section.setItemText(index, self.tr2(en, ru))
         self._render_target()
+        self.debug_state_label.setText(self.tr2("DEBUG: ", "ОТЛАДКА: ") + self._debug_state)
         if self._last_result:
-            status = str(self._last_result.get("status", "OPERATION_FAILED"))
-            self.status_label.setText(status + " · " + self.tr2(*STATUS_TEXT.get(status, (status, status))))
+            self._render_operation_status(self._last_result)
         self._section_changed()
 
     def shutdown(self):

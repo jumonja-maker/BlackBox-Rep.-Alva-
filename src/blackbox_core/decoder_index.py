@@ -19,6 +19,7 @@ from .decoder_clock import TraceClockAudit
 from .decoder_cpu import validate_cpu_sample, CpuSampleAudit
 from .decoder_modules import ModuleCatalog, read_modules
 from .decoder_waits import validate_schedule_event
+from .decoder_io import validate_io_observation, validate_io_clock
 from .decoder_limits import (DecodeBudget, MAX_INDEX_BYTES, MAX_PAGE_BYTES,
                              MAX_SUMMARY_BYTES, check_json_shape)
 
@@ -107,6 +108,7 @@ def validate_event(row, expected):
             raise ValueError("INVALID_FRAME")
     validate_cpu_sample(row)
     validate_schedule_event(row)
+    validate_io_observation(row)
 
 
 class GCAdapter:
@@ -341,6 +343,7 @@ def build_index(source, output, *, input_sha256, format_name, cancel=None,
                 footer = {"status": "TRUNCATED", "rows": rows}
                 break
             validate_event(row, rows + 1)
+            validate_io_clock(row, engine_header)
             modules.accept(row)
             utc_ns = clock_audit.project(row)
             cpu_audit.accept(row)
@@ -571,6 +574,7 @@ def _read_index_page(path, *, after, mode, pid, limit, search, deadline):
             row = _saved_json(raw)
             if mode != "gc":
                 validate_event(row, identifier)
+                validate_io_clock(row, summary.get("engine"))
                 if (row["pid"], row["time_ms"], row["provider"], row["name"], int(bool(row["frames"]))) != stored[2:]:
                     raise ValueError("INDEX_EVENT_METADATA_MISMATCH")
             elif (type(row.get("kind")) is not str or not _number(row.get("start_ms")) or
