@@ -6,6 +6,7 @@ helper; it does not certify a frozen GUI or interactive Secure Desktop.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 from pathlib import Path
 import sys
@@ -30,6 +31,7 @@ def run(args):
     from blackbox_core.deep_journal import journal_metadata
     from blackbox_core.deep_service import InspectorService
     from blackbox_universal.decoder_window import DecoderWindow
+    from blackbox_universal.provenance import source_identity
     from blackbox_universal.theme import set_retro_theme
 
     output = args.output.resolve()
@@ -56,6 +58,20 @@ def run(args):
         require(predicate(), "GUI_ACTION_OR_CLEANUP_DEADLINE")
 
     try:
+        expected_sha = os.environ.get("BB_QA_SOURCE_SHA", os.environ.get("GITHUB_SHA", ""))
+        proof["source"] = source_identity(expected_sha)
+        require(proof["source"]["source_identity_status"] == "VERIFIED_EXPECTED_HEAD",
+                "GUI_QA_EXACT_SOURCE_CHECKOUT_REQUIRED")
+        proof["source_sha"] = proof["source"]["actual_source_sha"]
+        if helper:
+            manifest = helper.parent / "_internal/blackbox-build.json"
+            require(manifest.is_file() and manifest.stat().st_size <= 4096,
+                    "GUI_QA_PACKAGED_HELPER_BUILD_MANIFEST_REQUIRED")
+            helper_source = json.loads(manifest.read_text(encoding="utf-8"))
+            require(helper_source.get("source_sha") == proof["source_sha"] and
+                    helper_source.get("tracked_worktree_clean") is True,
+                    "GUI_QA_PACKAGED_HELPER_SOURCE_MISMATCH")
+            proof["diagnostic_helper_build_manifest"] = helper_source
         executable = args.probe.resolve(strict=True) if args.probe else build_probe(output / "build")
         probe = Probe(executable, output / "probe")
         oracle = probe.ready

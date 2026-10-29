@@ -12,9 +12,9 @@ from uuid import UUID
 from blackbox_core.deep_dump import inspect_dump, read_dump_memory
 
 
-def dump_bytes(*, overlap=False, memory64=False):
+def dump_bytes(*, overlap=False, memory64=False, unused_streams=0):
     """One AMD64 saved thread/module and four deliberately recognizable bytes."""
-    stream_count = 5
+    stream_count = 5 + unused_streams
     data = bytearray(32 + stream_count * 12)
     entries = []
 
@@ -55,6 +55,7 @@ def dump_bytes(*, overlap=False, memory64=False):
         entries.append((5, 36 if overlap else 20, memory))
     misc = append(struct.pack("<6I", 24, 3, 4321, 1700000000, 1, 2))
     entries.append((15, 24, misc))
+    entries.extend([(0, 0, 0)] * unused_streams)
     struct.pack_into("<6IQ", data, 0, 0x504D444D, 0xA793, len(entries), 32, 0, 1700000100, 0)
     for i, entry in enumerate(entries):
         struct.pack_into("<III", data, 32 + 12 * i, *entry)
@@ -132,6 +133,20 @@ class DeepDumpInspectionTests(unittest.TestCase):
         struct.pack_into("<I", value, 32 + 8, len(value) + 1)
         self.path.write_bytes(value)
         with self.assertRaisesRegex(ValueError, "OUTSIDE"):
+            inspect_dump(self.path)
+
+    def test_real_dbghelp_unused_directory_slots_are_not_duplicate_streams(self):
+        path = self.fixture(memory64=True, unused_streams=4)
+        metadata = inspect_dump(path)["data"]
+        self.assertEqual(metadata["header"]["unused_stream_slots"], 4)
+        self.assertEqual(metadata["header"]["stream_count"], 9)
+        self.assertEqual(read_dump_memory(path, 0x1000, 4)["data"]["value_hex"], "deadbeef")
+
+    def test_unused_slot_cannot_hide_nonempty_data(self):
+        value = dump_bytes(unused_streams=1)
+        struct.pack_into("<III", value, 32 + 5 * 12, 0, 1, 0)
+        self.path.write_bytes(value)
+        with self.assertRaisesRegex(ValueError, "NONEMPTY_UNUSED"):
             inspect_dump(self.path)
 
     def test_bad_signature_and_list_count_fail_without_allocation(self):

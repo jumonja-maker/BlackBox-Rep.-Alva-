@@ -3,7 +3,9 @@
 Uses the same restricted-token mechanism as qa_standard_token.py. That tool's
 launcher is specific to GUI --research-e2e, so it is deliberately unchanged.
 This launcher additionally owns a kill-on-close Windows job before the suspended
-child starts. No accounts, ACLs, policies, capture sessions or services are added.
+child starts. Medium-token QA assigns a usable default DACL only to its new
+ephemeral restricted token. Parent tokens, existing object/file ACLs, accounts,
+system policies, capture sessions and services are not changed.
 """
 from __future__ import annotations
 
@@ -215,6 +217,132 @@ def token_integrity(token=None):
             kernel.CloseHandle(owned)
 
 
+def token_default_dacl(token=None):
+    """Read only the actual token's default DACL, retaining no native pointers."""
+    require(os.name == "nt", "WINDOWS_REQUIRED")
+    kernel = C.WinDLL("kernel32", use_last_error=True, winmode=0x800)
+    adv = C.WinDLL("advapi32", use_last_error=True, winmode=0x800)
+    kernel.GetCurrentProcess.restype = W.HANDLE
+    kernel.CloseHandle.argtypes = [W.HANDLE]
+    kernel.LocalFree.argtypes, kernel.LocalFree.restype = [C.c_void_p], C.c_void_p
+    adv.OpenProcessToken.argtypes = [W.HANDLE, W.DWORD, C.POINTER(W.HANDLE)]
+    adv.OpenProcessToken.restype = W.BOOL
+    adv.GetTokenInformation.argtypes = [W.HANDLE, C.c_int, C.c_void_p, W.DWORD, C.POINTER(W.DWORD)]
+    adv.GetTokenInformation.restype = W.BOOL
+    adv.InitializeSecurityDescriptor.argtypes = [C.c_void_p, W.DWORD]
+    adv.InitializeSecurityDescriptor.restype = W.BOOL
+    adv.SetSecurityDescriptorDacl.argtypes = [C.c_void_p, W.BOOL, C.c_void_p, W.BOOL]
+    adv.SetSecurityDescriptorDacl.restype = W.BOOL
+    adv.ConvertSecurityDescriptorToStringSecurityDescriptorW.argtypes = [
+        C.c_void_p, W.DWORD, W.DWORD, C.POINTER(C.c_void_p), C.POINTER(W.DWORD)]
+    adv.ConvertSecurityDescriptorToStringSecurityDescriptorW.restype = W.BOOL
+    owned, sddl = W.HANDLE(), C.c_void_p()
+    try:
+        if token is None:
+            if not adv.OpenProcessToken(kernel.GetCurrentProcess(), 0x8, C.byref(owned)):
+                raise C.WinError(C.get_last_error())
+            token = owned
+        required = W.DWORD()
+        adv.GetTokenInformation(token, 6, None, 0, C.byref(required))
+        require(C.sizeof(C.c_void_p) <= required.value <= 65536, "TOKEN_DEFAULT_DACL_SIZE_INVALID")
+        buffer = C.create_string_buffer(required.value)
+        if not adv.GetTokenInformation(token, 6, buffer, len(buffer), C.byref(required)):
+            raise C.WinError(C.get_last_error())
+        dacl = C.c_void_p.from_buffer(buffer).value
+        if dacl:
+            first, end = C.addressof(buffer), C.addressof(buffer) + len(buffer)
+            require(first <= dacl <= end - 8, "TOKEN_DEFAULT_DACL_POINTER_OUT_OF_BOUNDS")
+            require(8 <= C.c_uint16.from_address(dacl + 2).value <= end - dacl,
+                    "TOKEN_DEFAULT_DACL_CONTENT_OUT_OF_BOUNDS")
+        class SecurityDescriptor(C.Structure):
+            _fields_ = [("revision", W.BYTE), ("reserved", W.BYTE), ("control", W.WORD),
+                        ("owner", C.c_void_p), ("group", C.c_void_p),
+                        ("sacl", C.c_void_p), ("dacl", C.c_void_p)]
+        descriptor, length = SecurityDescriptor(), W.DWORD()
+        if (not adv.InitializeSecurityDescriptor(C.byref(descriptor), 1) or
+                not adv.SetSecurityDescriptorDacl(C.byref(descriptor), True, dacl, False) or
+                not adv.ConvertSecurityDescriptorToStringSecurityDescriptorW(
+                    C.byref(descriptor), 1, 4, C.byref(sddl), C.byref(length))):
+            raise C.WinError(C.get_last_error())
+        require(sddl.value and 1 <= length.value <= 65536, "TOKEN_DEFAULT_DACL_SDDL_SIZE_INVALID")
+        return {"status": "OBSERVED", "sddl_dacl": C.wstring_at(sddl.value, length.value).rstrip("\0"),
+                "source": "GetTokenInformation(TokenDefaultDacl)", "null_dacl": dacl is None}
+    finally:
+        if sddl:
+            kernel.LocalFree(sddl)
+        if owned:
+            kernel.CloseHandle(owned)
+
+
+def token_user_sid(token):
+    """Read TokenUser rather than infer identity from a username or group SID."""
+    kernel = C.WinDLL("kernel32", use_last_error=True, winmode=0x800)
+    adv = C.WinDLL("advapi32", use_last_error=True, winmode=0x800)
+    kernel.LocalFree.argtypes, kernel.LocalFree.restype = [C.c_void_p], C.c_void_p
+    adv.GetTokenInformation.argtypes = [W.HANDLE, C.c_int, C.c_void_p, W.DWORD, C.POINTER(W.DWORD)]
+    adv.GetTokenInformation.restype = W.BOOL
+    adv.IsValidSid.argtypes, adv.IsValidSid.restype = [C.c_void_p], W.BOOL
+    adv.GetLengthSid.argtypes, adv.GetLengthSid.restype = [C.c_void_p], W.DWORD
+    adv.ConvertSidToStringSidW.argtypes = [C.c_void_p, C.POINTER(C.c_void_p)]
+    adv.ConvertSidToStringSidW.restype = W.BOOL
+    required, text = W.DWORD(), C.c_void_p()
+    try:
+        adv.GetTokenInformation(token, 1, None, 0, C.byref(required))
+        require(C.sizeof(C.c_void_p) + 4 <= required.value <= 65536, "QA_TOKEN_USER_SIZE_INVALID")
+        buffer = C.create_string_buffer(required.value)
+        if not adv.GetTokenInformation(token, 1, buffer, len(buffer), C.byref(required)):
+            raise C.WinError(C.get_last_error())
+        sid = C.c_void_p.from_buffer(buffer).value
+        first, end = C.addressof(buffer), C.addressof(buffer) + len(buffer)
+        require(sid and first <= sid <= end - 8 and adv.IsValidSid(sid), "QA_TOKEN_USER_SID_INVALID")
+        require(8 <= adv.GetLengthSid(sid) <= end - sid, "QA_TOKEN_USER_SID_OUT_OF_BOUNDS")
+        if not adv.ConvertSidToStringSidW(sid, C.byref(text)):
+            raise C.WinError(C.get_last_error())
+        value = C.wstring_at(text)
+        require(value.startswith("S-1-") and all(part.isdigit() for part in value[2:].split("-")),
+                "QA_TOKEN_USER_SDDL_UNSAFE")
+        return value
+    finally:
+        if text:
+            kernel.LocalFree(text)
+
+
+def _set_ephemeral_qa_default_dacl(restricted, user_sid):
+    """Modify only the newly-created QA token, never an existing object's ACL."""
+    require(token_user_sid(restricted) == user_sid, "QA_RESTRICTED_TOKEN_USER_CHANGED")
+    expected = f"D:(A;;GA;;;{user_sid})(A;;GA;;;SY)"
+    kernel = C.WinDLL("kernel32", use_last_error=True, winmode=0x800)
+    adv = C.WinDLL("advapi32", use_last_error=True, winmode=0x800)
+    kernel.LocalFree.argtypes, kernel.LocalFree.restype = [C.c_void_p], C.c_void_p
+    adv.ConvertStringSecurityDescriptorToSecurityDescriptorW.argtypes = [
+        W.LPCWSTR, W.DWORD, C.POINTER(C.c_void_p), C.c_void_p]
+    adv.ConvertStringSecurityDescriptorToSecurityDescriptorW.restype = W.BOOL
+    adv.GetSecurityDescriptorDacl.argtypes = [C.c_void_p, C.POINTER(W.BOOL),
+                                            C.POINTER(C.c_void_p), C.POINTER(W.BOOL)]
+    adv.GetSecurityDescriptorDacl.restype = W.BOOL
+    adv.SetTokenInformation.argtypes = [W.HANDLE, C.c_int, C.c_void_p, W.DWORD]
+    adv.SetTokenInformation.restype = W.BOOL
+    class DefaultDacl(C.Structure):
+        _fields_ = [("dacl", C.c_void_p)]
+    descriptor, dacl = C.c_void_p(), C.c_void_p()
+    present, defaulted = W.BOOL(), W.BOOL()
+    try:
+        if not adv.ConvertStringSecurityDescriptorToSecurityDescriptorW(expected, 1, C.byref(descriptor), None):
+            raise C.WinError(C.get_last_error())
+        if not adv.GetSecurityDescriptorDacl(descriptor, C.byref(present), C.byref(dacl), C.byref(defaulted)):
+            raise C.WinError(C.get_last_error())
+        require(present.value and dacl.value, "QA_TOKEN_DEFAULT_DACL_NOT_PRESENT")
+        replacement = DefaultDacl(dacl.value)
+        if not adv.SetTokenInformation(restricted, 6, C.byref(replacement), C.sizeof(replacement)):
+            raise C.WinError(C.get_last_error())
+        readback = token_default_dacl(restricted)
+        require(readback["sddl_dacl"] == expected, "QA_TOKEN_DEFAULT_DACL_READBACK_MISMATCH")
+        return readback
+    finally:
+        if descriptor:
+            kernel.LocalFree(descriptor)
+
+
 def current_medium_startup_diagnostics():
     """Observe the current token and owned handle creation without changing ACLs.
 
@@ -236,27 +364,14 @@ def current_medium_startup_diagnostics():
 
     try:
         kernel = C.WinDLL("kernel32", use_last_error=True, winmode=0x800)
-        adv = C.WinDLL("advapi32", use_last_error=True, winmode=0x800)
         kernel.GetCurrentProcess.restype = W.HANDLE
         kernel.CloseHandle.argtypes, kernel.CloseHandle.restype = [W.HANDLE], W.BOOL
-        kernel.LocalFree.argtypes, kernel.LocalFree.restype = [C.c_void_p], C.c_void_p
         kernel.CreatePipe.argtypes = [C.POINTER(W.HANDLE), C.POINTER(W.HANDLE), C.c_void_p, W.DWORD]
         kernel.CreatePipe.restype = W.BOOL
         kernel.DuplicateHandle.argtypes = [W.HANDLE, W.HANDLE, W.HANDLE, C.POINTER(W.HANDLE),
                                           W.DWORD, W.BOOL, W.DWORD]
         kernel.DuplicateHandle.restype = W.BOOL
         kernel.GetFileType.argtypes, kernel.GetFileType.restype = [W.HANDLE], W.DWORD
-        adv.OpenProcessToken.argtypes = [W.HANDLE, W.DWORD, C.POINTER(W.HANDLE)]
-        adv.OpenProcessToken.restype = W.BOOL
-        adv.GetTokenInformation.argtypes = [W.HANDLE, C.c_int, C.c_void_p, W.DWORD, C.POINTER(W.DWORD)]
-        adv.GetTokenInformation.restype = W.BOOL
-        adv.InitializeSecurityDescriptor.argtypes = [C.c_void_p, W.DWORD]
-        adv.InitializeSecurityDescriptor.restype = W.BOOL
-        adv.SetSecurityDescriptorDacl.argtypes = [C.c_void_p, W.BOOL, C.c_void_p, W.BOOL]
-        adv.SetSecurityDescriptorDacl.restype = W.BOOL
-        adv.ConvertSecurityDescriptorToStringSecurityDescriptorW.argtypes = [
-            C.c_void_p, W.DWORD, W.DWORD, C.POINTER(C.c_void_p), C.POINTER(W.DWORD)]
-        adv.ConvertSecurityDescriptorToStringSecurityDescriptorW.restype = W.BOOL
     except Exception as error:
         failure("bind_native_diagnostics", error)
         return evidence
@@ -265,51 +380,10 @@ def current_medium_startup_diagnostics():
         if handle and not kernel.CloseHandle(handle):
             evidence["cleanup_errors"].append({"resource": label, "winerror": C.get_last_error()})
 
-    token, sddl = W.HANDLE(), C.c_void_p()
-    token_phase = "OpenProcessToken(TOKEN_QUERY)"
     try:
-        if not adv.OpenProcessToken(kernel.GetCurrentProcess(), 0x8, C.byref(token)):
-            raise C.WinError(C.get_last_error())
-        token_phase = "GetTokenInformation(TokenDefaultDacl)"
-        required = W.DWORD()
-        adv.GetTokenInformation(token, 6, None, 0, C.byref(required))  # TokenDefaultDacl.
-        if not C.sizeof(C.c_void_p) <= required.value <= 65536:
-            raise ValueError("TOKEN_DEFAULT_DACL_SIZE_INVALID")
-        buffer = C.create_string_buffer(required.value)
-        if not adv.GetTokenInformation(token, 6, buffer, len(buffer), C.byref(required)):
-            raise C.WinError(C.get_last_error())
-        dacl = C.c_void_p.from_buffer(buffer).value
-        if dacl:
-            first, end = C.addressof(buffer), C.addressof(buffer) + len(buffer)
-            if not first <= dacl <= end - 8:
-                raise ValueError("TOKEN_DEFAULT_DACL_POINTER_OUT_OF_BOUNDS")
-            acl_size = C.c_uint16.from_address(dacl + 2).value
-            if not 8 <= acl_size <= end - dacl:
-                raise ValueError("TOKEN_DEFAULT_DACL_CONTENT_OUT_OF_BOUNDS")
-        class SecurityDescriptor(C.Structure):
-            _fields_ = [("revision", W.BYTE), ("reserved", W.BYTE), ("control", W.WORD),
-                        ("owner", C.c_void_p), ("group", C.c_void_p),
-                        ("sacl", C.c_void_p), ("dacl", C.c_void_p)]
-        descriptor = SecurityDescriptor()
-        length = W.DWORD()
-        token_phase = "Convert_observed_DACL_to_SDDL_in_local_memory"
-        if (not adv.InitializeSecurityDescriptor(C.byref(descriptor), 1) or
-                not adv.SetSecurityDescriptorDacl(C.byref(descriptor), True, dacl, False) or
-                not adv.ConvertSecurityDescriptorToStringSecurityDescriptorW(
-                    C.byref(descriptor), 1, 4, C.byref(sddl), C.byref(length))):
-            raise C.WinError(C.get_last_error())
-        if not sddl.value or not 1 <= length.value <= 65536:
-            raise ValueError("TOKEN_DEFAULT_DACL_SDDL_SIZE_INVALID")
-        evidence["stages"]["token_default_dacl"] = {
-            "status": "OBSERVED", "sddl_dacl": C.wstring_at(sddl.value, length.value).rstrip("\0"),
-            "source": "GetTokenInformation(TokenDefaultDacl)", "null_dacl": dacl is None}
+        evidence["stages"]["token_default_dacl"] = token_default_dacl()
     except Exception as error:
         failure("token_default_dacl", error)
-        evidence["stages"]["token_default_dacl"]["failed_stage"] = token_phase
-    finally:
-        if sddl:
-            kernel.LocalFree(sddl)
-        close(token, "query_token")
 
     read_handle, write_handle = W.HANDLE(), W.HANDLE()
     pipe_created = False
@@ -402,17 +476,34 @@ def restricted_child(args, *, cwd, timeout_seconds=210, medium_integrity=False):
     original = W.HANDLE(); restricted = W.HANDLE(); admin_sid = C.c_void_p()
     medium_sid = C.c_void_p(); child_token = W.HANDLE()
     integrity = child_integrity = None
+    dacl_adjustment = None
+    parent_token_before = None
     process = Process(); job = None; started = False
     try:
         token_access = 0xB | (0x80 if medium_integrity else 0)
         if not adv.OpenProcessToken(kernel.GetCurrentProcess(), token_access, C.byref(original)):
             raise OSError(C.get_last_error(), "QA_OPEN_TOKEN_FAILED")
+        if medium_integrity:
+            parent_token_before = {"integrity": token_integrity(original),
+                                   "default_dacl": token_default_dacl(original)}
         if not adv.ConvertStringSidToSidW("S-1-5-32-544", C.byref(admin_sid)):
             raise OSError(C.get_last_error(), "QA_ADMIN_SID_FAILED")
         disabled = Sid(admin_sid, 0)
         if not adv.CreateRestrictedToken(original, 1, 1, C.byref(disabled), 0, None, 0, None, C.byref(restricted)):
             raise OSError(C.get_last_error(), "QA_RESTRICT_TOKEN_FAILED")
         if medium_integrity:
+            # The hosted admin token's inherited DefaultDACL can contain BA/SY
+            # full control and only read/execute for the logon SID. After BA is
+            # DENY_ONLY, CreatePipe(NULL) cannot open its own write end (proved
+            # in run 40927531469). Correct only this new QA token's defaults;
+            # do not grant admin rights or change any existing object's ACL.
+            user_sid = token_user_sid(restricted)
+            dacl_adjustment = {"scope": "NEW_EPHEMERAL_RESTRICTED_QA_TOKEN_ONLY",
+                               "token_user_sid": user_sid,
+                               "before": token_default_dacl(restricted),
+                               "existing_object_or_file_acl_changes": False,
+                               "parent_token_modified": False}
+            dacl_adjustment["after"] = _set_ephemeral_qa_default_dacl(restricted, user_sid)
             if not adv.ConvertStringSidToSidW("S-1-16-8192", C.byref(medium_sid)):
                 raise OSError(C.get_last_error(), "QA_MEDIUM_INTEGRITY_SID_FAILED")
             mandatory_label = Sid(medium_sid, 0x20)  # SE_GROUP_INTEGRITY.
@@ -441,6 +532,9 @@ def restricted_child(args, *, cwd, timeout_seconds=210, medium_integrity=False):
                 raise OSError(C.get_last_error(), "QA_CHILD_TOKEN_QUERY_FAILED")
             child_integrity = token_integrity(child_token)
             require(child_integrity["sid"] == "S-1-16-8192", "QA_MEDIUM_INTEGRITY_CHILD_READBACK_FAILED")
+            dacl_adjustment["child_readback"] = token_default_dacl(child_token)
+            require(dacl_adjustment["child_readback"] == dacl_adjustment["after"],
+                    "QA_MEDIUM_CHILD_DEFAULT_DACL_READBACK_FAILED")
         if not kernel.AssignProcessToJobObject(job, process.process):
             raise OSError(C.get_last_error(), "QA_RESTRICTED_JOB_ASSIGNMENT_FAILED")
         if kernel.ResumeThread(process.thread) == 0xFFFFFFFF:
@@ -457,8 +551,15 @@ def restricted_child(args, *, cwd, timeout_seconds=210, medium_integrity=False):
                 "creation_flags": creation_flags,
                 "job_assigned_before_resume": True}
         if medium_integrity:
+            parent_token_after = {"integrity": token_integrity(original),
+                                  "default_dacl": token_default_dacl(original)}
+            require(parent_token_after == parent_token_before, "QA_PARENT_TOKEN_CHANGED_UNEXPECTEDLY")
             result.update(medium_integrity_requested=True, token_integrity=integrity,
                           child_token_integrity=child_integrity,
+                          qa_default_dacl_adjustment=dacl_adjustment,
+                          parent_token_before=parent_token_before,
+                          parent_token_after=parent_token_after,
+                          parent_token_unchanged=True,
                           scope="RESTRICTED_RUNNER_IDENTITY_AT_MEDIUM_IL_NOT_A_SEPARATE_STANDARD_ACCOUNT",
                           interactive_uac_secure_desktop="NOT_TESTED")
         return result

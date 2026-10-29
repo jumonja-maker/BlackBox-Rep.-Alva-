@@ -92,14 +92,22 @@ def _directory(reader):
     _require(1 <= count <= 128 and rva >= 32, "DUMP_DIRECTORY_BUDGET")
     directory = reader.read(rva, count * 12)
     entries = {}
+    unused = 0
     for i in range(count):
         kind, size, offset = struct.unpack_from("<III", directory, i * 12)
         reader.range(offset, size)
+        # DbgHelp leaves multiple UnusedStream slots in real normal/full dumps.
+        # They are directory padding, not duplicate meaningful stream types.
+        if kind == 0:
+            _require(size == 0, "NONEMPTY_UNUSED_MINIDUMP_STREAM")
+            unused += 1
+            continue
         _require(kind not in entries, "DUPLICATE_MINIDUMP_STREAM")
         entries[kind] = (offset, size)
     return entries, {"version": version, "timestamp_unix_s": timestamp,
                      "flags": flags, "checksum_recorded": checksum,
-                     "checksum_verified": False, "stream_count": count}
+                     "checksum_verified": False, "stream_count": count,
+                     "unused_stream_slots": unused}
 
 
 def _array(reader, entry, width):

@@ -654,6 +654,7 @@ class Acceptance:
                 "system_policy_or_account_changed": False}
 
     def dumps(self) -> list[dict]:
+        from blackbox_core.deep_dump import inspect_dump, read_dump_memory
         output = []
         private = self.output / "private-controlled-dumps"
         private.mkdir(exist_ok=False)
@@ -667,6 +668,28 @@ class Acceptance:
                 evidence = minidump_evidence(destination, full=full,
                                              expected_address=self.probe.ready["buffer_address"] if full else None,
                                              expected_hex=self.probe.ready["buffer_hex"] if full else None)
+                inspected = inspect_dump(destination)
+                metadata = inspected["data"]
+                require(metadata["architecture"] == "AMD64" and
+                        metadata["recorded_pid"] == self.identity.pid and
+                        any(row["tid"] == self.probe.ready["main_tid"] for row in metadata["threads"]) and
+                        any(row["base_address"] <= self.probe.ready["function_address"] <
+                            row["base_address"] + row["image_size"] for row in metadata["modules"]),
+                        "PRODUCT_DUMP_READER_DID_NOT_RECOGNIZE_REAL_CAPTURED_STATE")
+                require(self.probe.ready["buffer_hex"] not in json.dumps(inspected),
+                        "PRODUCT_DUMP_METADATA_INCLUDED_MEMORY_BYTES")
+                private_read_verified = False
+                if full:
+                    readback = read_dump_memory(destination, self.probe.ready["buffer_address"], 64)
+                    require(readback["status"] == "COMPLETED" and
+                            readback["data"]["value_hex"] == self.probe.ready["buffer_hex"],
+                            "PRODUCT_DUMP_MEMORY_READER_DIFFERS_FROM_NATIVE_ORACLE")
+                    private_read_verified = True
+                evidence["product_reader"] = {
+                    "status": inspected["status"], "metadata_native_identity_verified": True,
+                    "unused_stream_slots": metadata["header"]["unused_stream_slots"],
+                    "known_buffer_readback_verified": private_read_verified,
+                    "private_read_bytes_retained": False}
                 output.append({"operation_id": result["operation_id"], **evidence})
             finally:
                 # This directory was created exclusively by this QA invocation.
