@@ -161,6 +161,7 @@ class _StableSource:
             _check_wal(path)
             self.stamps[path] = _stamp(path)
             self.hashes[path] = _hash_file(path, budget)
+            _check_wal(path)
             _require(_stamp(path) == self.stamps[path], "SOURCE_CHANGED")
 
     def verify(self):
@@ -172,8 +173,10 @@ class _StableSource:
                 except ValueError as error:
                     raise InvestigationError("SOURCE_CHANGED") from error
                 _check_wal(path)
-                _require(_stamp(path) == self.stamps[path] and _hash_file(path, self.budget) == self.hashes[path],
-                         "SOURCE_CHANGED")
+                _require(_stamp(path) == self.stamps[path], "SOURCE_CHANGED")
+                digest = _hash_file(path, self.budget)
+                _check_wal(path)
+                _require(_stamp(path) == self.stamps[path] and digest == self.hashes[path], "SOURCE_CHANGED")
         except OSError as error:
             raise InvestigationError("SOURCE_CHANGED") from error
 
@@ -384,6 +387,19 @@ def _source(kind, stable, *, selection, extra=None, hash_roles=None):
             **(extra or {})}
 
 
+def _register_source(source, stable, path, out):
+    """Aliases retain path receipts without rescanning identical observations."""
+    old = next((item for item in out.sources if item["source_id"] == source["source_id"]), None)
+    if old is not None:
+        _require(old["selection"] == source["selection"], "DUPLICATE_SOURCE_SELECTION_AMBIGUOUS")
+        stable.verify()
+        out.receipts.append(stable)
+        return False
+    out.sources.append(source)
+    out.source_paths[source["source_id"]] = str(path)
+    return True
+
+
 def _trace(spec, selection, out):
     from .decoder_index import APP_ID, _saved_json, read_index, validate_event
     from .decoder_io import validate_io_clock
@@ -402,13 +418,18 @@ def _trace(spec, selection, out):
     stable = _StableSource([path, *extra_paths], out.budget)
     page = read_index(path, limit=1)
     summary = page["summary"]
+    _require(isinstance(summary, dict) and type(summary.get("input_sha256")) is str and
+             _HASH.fullmatch(summary["input_sha256"]) is not None and _int(summary.get("rows")) and
+             summary.get("status") in ("DECODED", "TRUNCATED") and
+             (summary.get("decoder_reported_lost_events") is None or _int(summary["decoder_reported_lost_events"])),
+             "INVALID_INVESTIGATION_TRACE_SUMMARY")
     trace = summary["input_sha256"]
     source = _source("TRACE_INDEX", stable, selection=selection, hash_roles=["trace_index", *extra_roles],
         extra={"trace_sha256": trace, "trace_input_sha256": trace, "index_sha256": stable.hashes[path],
         "decoded_status": summary.get("status"), "decoder_reported_lost_events": summary.get("decoder_reported_lost_events"),
         "scheduler_complete": False, "time_domain": "TRACE_RELATIVE:" + trace})
-    out.sources.append(source)
-    out.source_paths[source["source_id"]] = str(path)
+    if not _register_source(source, stable, path, out):
+        return
     domain = source["time_domain"]
     alignment = None
     if spec.get("session_path") and spec.get("clock_journal"):
@@ -523,17 +544,29 @@ def _trace(spec, selection, out):
     source.update(events_scanned=count, selected_events=selected, scheduler_nodes_omitted=schedule_omitted,
                   out_of_order_events=out_of_order, decode_errors_observed=errors,
                   event_sequence_gaps=sequence_gaps, scan_complete=count == total and after == 0)
-    for node in out.nodes:
-        if node["source_identity"] == source["source_id"] and node["observation_type"] == "SCHEDULER_EVENT":
-            node["metadata"]["capture_complete"] = source["scheduler_complete"]
     # Existing wait pairing scans all scheduler headers and refuses invented
     # spans when loss/order/decode evidence is incomplete.
     out.budget.check()
-    waits = build_wait_report(path, pid=selection.get("pid", 0), process_instance=selection.get("process_instance"),
-        tid=selection.get("tid"), start_ms=selection.get("start_ms"), end_ms=selection.get("end_ms"),
-        max_intervals=min(10_000, out.budget.max_nodes), cancel=out.budget)
+    if count == total and after == 0:
+        waits = build_wait_report(path, pid=selection.get("pid", 0), process_instance=selection.get("process_instance"),
+            tid=selection.get("tid"), start_ms=selection.get("start_ms"), end_ms=selection.get("end_ms"),
+            max_intervals=min(10_000, out.budget.max_nodes), cancel=out.budget)
+    else:
+        # The existing analyzer needs the entire scheduler inventory. A bounded
+        # prefix or continuation page cannot promise that inventory, and must
+        # not start a second unbounded pass over a large source.
+        waits = {"status": "INCOMPLETE_SOURCE_SCAN", "intervals": [],
+                 "coverage": {"status": "NOT_ANALYZED_INCOMPLETE_SOURCE_SCAN"}}
+        out.limitations.add("WAIT_ANALYSIS_REQUIRES_COMPLETE_SOURCE_SCAN")
     out.budget.check()
     source["wait_coverage"] = _metadata(waits.get("coverage", {}))
+    source["scheduler_complete"] = bool(source["scheduler_complete"] and all(
+        waits.get("coverage", {}).get(key) == 0 for key in ("missing_typed_classification",
+        "unresolved_selected_identities", "events_with_decode_errors", "out_of_order_events",
+        "contradictory_self_switches")))
+    for node in out.nodes:
+        if node["source_identity"] == source["source_id"] and node["observation_type"] == "SCHEDULER_EVENT":
+            node["metadata"]["capture_complete"] = source["scheduler_complete"]
     for index, interval in enumerate(waits.get("intervals", [])):
         process = _trace_process(trace, interval)
         thread = {**(process or {}), "kind": "TRACE_THREAD", "thread_instance": interval["thread_instance"],
@@ -605,8 +638,8 @@ def _events_jsonl(spec, selection, out):
     stable = _StableSource([path], out.budget)
     source = _source("EVENTS_JSONL", stable, selection=selection)
     source["time_domain"] = "APP_SOURCE:" + source["source_id"]
-    out.sources.append(source)
-    out.source_paths[source["source_id"]] = str(path)
+    if not _register_source(source, stable, path, out):
+        return
     after = selection.get("after", 0)
     scanned = selected = 0
     producer_state = {}
@@ -718,12 +751,13 @@ def _deep_rows(source, record, payload, stamp, out, selection=None):
         "error_code": payload.get("winerror"), "record_refs": []})
     if payload.get("phase") == "RESULT" and payload.get("action_id"):
         if action is not None:
-            out.nodes[-1]["metadata"]["record_refs"] = ["actions:" + payload["action_id"] + ":requested"]
-            out.nodes[-1]["metadata"]["record_ref_relation"] = "ACTION_RESULT"
+            action_node = next(node for node in reversed(out.nodes) if node["node_id"] == action)
+            action_node["metadata"]["record_refs"] = ["actions:" + payload["action_id"] + ":requested"]
+            action_node["metadata"]["record_ref_relation"] = "ACTION_RESULT"
             if operation == "snapshot" and isinstance(data.get("snapshot_id"), str):
-                out.nodes[-1]["metadata"]["record_refs"].append("snapshots:" + data["snapshot_id"])
+                action_node["metadata"]["record_refs"].append("snapshots:" + data["snapshot_id"])
             elif operation == "compare":
-                out.nodes[-1]["metadata"]["record_refs"].extend("snapshots:" + data[key] for key in
+                action_node["metadata"]["record_refs"].extend("snapshots:" + data[key] for key in
                     ("before_id", "after_id") if isinstance(data.get(key), str))
     if process is not None:
         out.add(source, "process:" + canonical_json(process), "PROCESS", process_identity=process,
@@ -837,8 +871,8 @@ def _deep_journal(spec, selection, out):
     stable = _StableSource([path], out.budget)
     source = _source("DEEP_JOURNAL", stable, selection=selection)
     source["time_domain"] = "NATIVE_CAPTURE:" + source["source_id"]
-    out.sources.append(source)
-    out.source_paths[source["source_id"]] = str(path)
+    if not _register_source(source, stable, path, out):
+        return
     previous = "0" * 64
     count = selected = snapshot_count = selected_snapshots = 0
     node_omissions_before = out.coverage["nodes_omitted"]
@@ -923,8 +957,8 @@ def _session(spec, selection, out):
     source = _source("SESSION", stable, selection=selection, hash_roles=["session_main", *( ["research"] if len(paths) > 1 else [])])
     domain = "SESSION_MONOTONIC:" + source["source_id"]
     source["time_domain"] = domain
-    out.sources.append(source)
-    out.source_paths[source["source_id"]] = str(folder)
+    if not _register_source(source, stable, folder, out):
+        return
     count = 0
     initial_required = {"sessions", "targets", "samples", "process_instances", "events", "incidents", "thread_samples", "sensor_errors", "capabilities"} if main.name == "session-v2.sqlite3" else {"metadata", "samples"}
     with _readonly(main, out.budget, initial_required):
@@ -1013,7 +1047,14 @@ def _session(spec, selection, out):
         source.update(samples_total=total, events_scanned=count, source_closed=view.metadata.get("recorded_status") in ("CLOSED", "COMPLETED", "STOPPED"),
                       scan_complete=out.coverage["events_examined"] < out.budget.max_events)
     if research.is_file():
-        _research(research, source, process, domain, selection, out)
+        # CaseBook stamps its own saved monotonic clock. Co-location, matching
+        # PID or a repeated floating creation time cannot establish same boot.
+        # The current context has no native boot-binding contract suitable for
+        # projecting those times into the independently saved session domain.
+        research_domain = "RESEARCH_MONOTONIC:" + stable.hashes[research]
+        source.update(research_time_domain=research_domain, research_session_clock_alignment="NOT_ESTABLISHED")
+        out.limitations.add("RESEARCH_SESSION_CLOCK_ALIGNMENT_NOT_ESTABLISHED")
+        _research(research, source, process, research_domain, selection, out)
     out.coverage["source_coverage"].append({"source_id": source["source_id"], "events_scanned": count, "samples_total": total})
     stable.verify()
     out.receipts.append(stable)
@@ -1021,6 +1062,8 @@ def _session(spec, selection, out):
 
 def _research(path, source, process, domain, selection, out):
     fully_scanned = True
+    if selection.get("start_ns") is not None or selection.get("end_ns") is not None:
+        out.limitations.add("RESEARCH_TIME_FILTER_NOT_PROJECTED_FROM_SESSION")
     with _readonly(path, out.budget, {"context", "evidence", "operation_spans"}) as db:
         for row in db.execute("SELECT id,monotonic_ns,pid,process_created,tid,source,quality,kind,operation_id,data FROM evidence ORDER BY id"):
             if not out.scan():
@@ -1028,9 +1071,7 @@ def _research(path, source, process, domain, selection, out):
                 break
             _require(_int(row["id"], 1) and _int(row["monotonic_ns"]), "INVALID_RESEARCH_EVENT_IDENTITY")
             if (row["pid"] is not None and row["pid"] != process["pid"] or
-                    selection.get("tid") and row["tid"] != selection["tid"] or
-                    selection.get("start_ns") is not None and row["monotonic_ns"] < selection["start_ns"] or
-                    selection.get("end_ns") is not None and row["monotonic_ns"] > selection["end_ns"]):
+                    selection.get("tid") and row["tid"] != selection["tid"]):
                 continue
             payload = _json(row["data"])
             meta = _event_metadata(row["kind"], payload, recorded_source=row["source"], operation_id=row["operation_id"])
@@ -1058,8 +1099,8 @@ def _investigation_v2(spec, selection, out):
     source = _source("INVESTIGATION_V2", stable, selection=selection)
     domain = "IMPORTED_INVESTIGATION_V2:" + source["source_id"]
     source["time_domain"] = domain
-    out.sources.append(source)
-    out.source_paths[source["source_id"]] = str(path)
+    if not _register_source(source, stable, path, out):
+        return
     scanned = 0
     for finding in value["findings"]:
         if not out.scan():
@@ -1084,8 +1125,8 @@ def _dump(spec, selection, out):
     report = inspect_dump(path, max_bytes=min(out.budget.max_source_bytes, 2 * 1024**3),
                           cancel_event=out.budget, deadline=out.budget.deadline)
     source = _source("DUMP_METADATA", stable, selection=selection)
-    out.sources.append(source)
-    out.source_paths[source["source_id"]] = str(path)
+    if not _register_source(source, stable, path, out):
+        return
     out.add(source, "minidump:metadata", "ARTIFACT", metadata={"kind": "SAVED_MINIDUMP", "report": report,
         "memory_contents_included": False, "live_process_binding": "NOT_ESTABLISHED"})
     stable.verify()

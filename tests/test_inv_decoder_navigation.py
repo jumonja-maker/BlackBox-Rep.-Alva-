@@ -4,6 +4,7 @@ These synthetic indices test navigation/ownership, not native ETL collection.
 """
 from __future__ import annotations
 
+from contextlib import closing
 import hashlib
 import json
 import os
@@ -112,7 +113,9 @@ class DecoderNavigationCopyContracts(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "SOURCE_NOT_CLOSED"):
             copy_navigation_index(self.source, self.output)
         wal.unlink()
-        with sqlite3.connect(self.source) as connection:
+        # A Connection context manages a transaction, not the file handle.
+        # Close explicitly so Windows can remove the fixture at teardown.
+        with closing(sqlite3.connect(self.source)) as connection, connection:
             raw, = connection.execute("SELECT value FROM metadata WHERE key='summary'").fetchone()
             summary = json.loads(raw)
             del summary["gc"]

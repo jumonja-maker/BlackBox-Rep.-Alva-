@@ -434,9 +434,10 @@ class InvestigationGraphPanel(QWidget):
                 self._set_status("Add a saved source or choose a recorded incident.", "Добавьте сохранённый источник или выберите записанный инцидент.")
                 return False
         self.bridge.invalidate()
-        target = deepcopy(self._live_identity) if self._live_identity else None
         path = Path(self.window._investigation_root) / ("case-" + uuid4().hex + ".sqlite3")
-        accepted = self.bridge.submit("build", sources=deepcopy(self.sources), target_identity=target,
+        # A previous consent for NEW measurements cannot establish the target
+        # of newly imported historical observations.
+        accepted = self.bridge.submit("build", sources=deepcopy(self.sources), target_identity=None,
             selection=self._selection, index_path=str(path))
         if accepted:
             self._set_status("Building from saved sources…", "Построение по сохранённым источникам…")
@@ -455,6 +456,7 @@ class InvestigationGraphPanel(QWidget):
         self._record_queue.clear()
         self._experiment = None
         self._live_identity = self._live_token = self._pending_native = None
+        self._capabilities = None
         self._selected_node_id = self._selected_hypothesis = None
         self._models["sources"].set_rows(case.get("sources", []))
         self.nodes_model.set_rows(case.get("nodes", []))
@@ -484,13 +486,21 @@ class InvestigationGraphPanel(QWidget):
         if not rows:
             return
         record = model.data(model.index(rows[0].row(), 0), Qt.ItemDataRole.UserRole)
-        self.details.setPlainText(json.dumps(record, ensure_ascii=False, indent=2, default=str)[:16000])
+        self._show_details(record)
         if record.get("node_id"):
             self._selected_node_id = record["node_id"]
             self.graph.show_graph(self.case or {}, self._selected_node_id)
         if record.get("hypothesis_id"):
             self._selected_hypothesis = record["hypothesis_id"]
         self._controls()
+
+    def _show_details(self, record):
+        text = json.dumps(record, ensure_ascii=False, indent=2, default=str)
+        if len(text) > 16000:
+            text = text[:16000] + self.tr2(
+                "\n[View excerpt truncated. Export the investigation to retain full bounded evidence.]",
+                "\n[Показан сокращённый фрагмент. Экспорт расследования сохранит полные данные в установленных пределах.]")
+        self.details.setPlainText(text)
 
     def select_node(self, identifier):
         rows = (self.case or {}).get("nodes", [])
@@ -500,7 +510,7 @@ class InvestigationGraphPanel(QWidget):
         self.nodes_model.set_rows(rows, offset=(index // self.nodes_model.page_size) * self.nodes_model.page_size)
         self.node_table.selectRow(index - self.nodes_model.offset)
         self._selected_node_id = identifier
-        self.details.setPlainText(json.dumps(rows[index], ensure_ascii=False, indent=2, default=str)[:16000])
+        self._show_details(rows[index])
         self.graph.show_graph(self.case, identifier)
         self._controls()
         return True
@@ -645,7 +655,8 @@ class InvestigationGraphPanel(QWidget):
         # Independent labelled domain axes: no cross-clock concatenation,
         # interpolated state or sample-count-to-running-time conversion.
         for item in shown:
-            key = str(item.get("time_domain")) + " / " + _value(item.get("thread_identity"), 100)
+            key = (item.get("time_domain"), json.dumps(item.get("thread_identity"),
+                   sort_keys=True, ensure_ascii=True, default=str))
             if key not in lanes:
                 if len(lanes) >= 32:
                     continue
@@ -653,7 +664,8 @@ class InvestigationGraphPanel(QWidget):
                 thread = item.get("thread_identity") or {}
                 if not isinstance(thread, dict):
                     thread = {}
-                label = str(item.get("time_domain", ""))[:28] + " · TID " + str(thread.get("tid", thread.get("thread_instance", "?")))
+                lo, hi = domains[item.get("time_domain")]
+                label = str(item.get("time_domain", ""))[:28] + " · TID " + str(thread.get("tid", thread.get("thread_instance", "?"))) + f" · {lo:g}–{hi:g} ms"
                 text = scene.addText(label)
                 text.setTextWidth(340)
                 text.setPos(0, lanes[key] * 45)
@@ -911,9 +923,11 @@ class InvestigationGraphPanel(QWidget):
     def _target_changed(self):
         self.bridge.invalidate()
         self._live_identity = self._live_token = self._pending_native = self._experiment = None
+        self._capabilities = None
         self._record_queue.clear()
         self._deferred_action_refresh = False
         self._deferred_checkpoint = False
+        self._set_actions((self.case or {}).get("actions", []))
         self._render_binding()
         self._set_status("Live target changed; previous consent/results cannot apply. Saved case remains read-only.",
                          "Живая цель изменена; прежнее согласие и результаты неприменимы. Сохранённое расследование доступно для чтения.")
@@ -1022,7 +1036,7 @@ class InvestigationGraphPanel(QWidget):
                 self.case = packet["case"]
             self.index_path = packet.get("index_path", self.index_path)
         elif operation == "related":
-            self.details.setPlainText(json.dumps(packet["related"], ensure_ascii=False, indent=2, default=str)[:16000])
+            self._show_details(packet["related"])
         elif operation in ("group", "group_change"):
             self._grouping = packet.get("grouping")
             self._group_cases = packet.get("cases", self._group_cases)
@@ -1034,7 +1048,7 @@ class InvestigationGraphPanel(QWidget):
                 (self.experiment_case or self.case)["issue_grouping"] = self._grouping
                 self._deferred_checkpoint = True
         elif operation == "compare_cases":
-            self.details.setPlainText(json.dumps(packet["comparison"], ensure_ascii=False, indent=2, default=str)[:16000])
+            self._show_details(packet["comparison"])
             (self.experiment_case or self.case)["version_comparison"] = packet["comparison"]
             self._deferred_checkpoint = True
         elif operation == "export":

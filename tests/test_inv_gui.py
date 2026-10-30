@@ -300,6 +300,7 @@ class InvestigationGuiContracts(unittest.TestCase):
 
     def test_stale_native_result_cannot_apply_to_new_target_or_replace_history(self):
         self.bind_fixture()
+        self.panel._capabilities = {"operations": [{"operation": "memory.write", "status": "AVAILABLE"}]}
         historical = self.panel.case
         self.panel.capture_before()
         old_tag = self.panel._pending_native["tag"]
@@ -312,6 +313,7 @@ class InvestigationGuiContracts(unittest.TestCase):
         self.assertIsNone(self.panel._experiment)
         self.assertIsNone(self.panel._live_identity)
         self.assertIsNone(self.panel._pending_native)
+        self.assertIsNone(self.panel._capabilities)
         self.assertEqual(self.reader.calls, [])
 
     def test_uac_is_explicit_and_uses_existing_deep_elevation_path(self):

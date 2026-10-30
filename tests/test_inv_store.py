@@ -1,4 +1,5 @@
 """Own-index publication and import contracts; executed by hosted CI only."""
+from contextlib import closing
 import hashlib
 import json
 import os
@@ -55,7 +56,7 @@ class InvestigationStoreContracts(unittest.TestCase):
 
     def test_existing_unrelated_source_is_never_overwritten(self):
         source = self.root / "session.sqlite3"
-        with sqlite3.connect(source) as db:
+        with closing(sqlite3.connect(source)) as db, db:
             db.execute("CREATE TABLE source_events(id INTEGER PRIMARY KEY,value TEXT)")
             db.execute("INSERT INTO source_events VALUES(1,'preserve me')")
         before = digest(source)
@@ -75,13 +76,13 @@ class InvestigationStoreContracts(unittest.TestCase):
     def test_content_hash_and_parallel_graph_records_both_have_to_match(self):
         target = self.root / "case.sqlite3"
         store.save_investigation(graph(), target)
-        with sqlite3.connect(target) as db:
+        with closing(sqlite3.connect(target)) as db, db:
             db.execute("UPDATE nodes SET record_json='{}'")
         with self.assertRaisesRegex(InvestigationError, "GRAPH_MISMATCH"):
             store.load_investigation(target)
         second = self.root / "second.sqlite3"
         store.save_investigation(graph(), second)
-        with sqlite3.connect(second) as db:
+        with closing(sqlite3.connect(second)) as db, db:
             db.execute("UPDATE investigation SET content_json=content_json || ' '")
         with self.assertRaisesRegex(InvestigationError, "CONTENT_HASH"):
             store.load_investigation(second)
@@ -89,13 +90,13 @@ class InvestigationStoreContracts(unittest.TestCase):
     def test_unsupported_schema_and_views_are_not_accepted_as_own_index(self):
         target = self.root / "case.sqlite3"
         store.save_investigation(graph(), target)
-        with sqlite3.connect(target) as db:
+        with closing(sqlite3.connect(target)) as db, db:
             db.execute("PRAGMA user_version=99")
         with self.assertRaisesRegex(InvestigationError, "SCHEMA"):
             store.load_investigation(target)
         second = self.root / "second.sqlite3"
         store.save_investigation(graph(), second)
-        with sqlite3.connect(second) as db:
+        with closing(sqlite3.connect(second)) as db, db:
             db.execute("DROP TABLE edges")
             db.execute("CREATE VIEW edges AS SELECT 1 ordinal,'x' edge_id,'a' from_node,'b' to_node,'{}' record_json")
         with self.assertRaisesRegex(InvestigationError, "TABLES"):

@@ -148,8 +148,10 @@ class NormalizationContracts(unittest.TestCase):
 
     def test_trace_cursor_and_unknown_loss_do_not_claim_complete_scheduling(self):
         path = self.trace(rows=6, lost=None)
-        result = normal.normalize_sources([{"source_type": "TRACE_INDEX", "path": path}],
-                                          budget=InvestigationBudget(max_events=2))
+        with patch("blackbox_core.decoder_waits.build_wait_report") as wait_reader:
+            result = normal.normalize_sources([{"source_type": "TRACE_INDEX", "path": path}],
+                                              budget=InvestigationBudget(max_events=2))
+        wait_reader.assert_not_called()
         source = result["sources"][0]
         self.assertIsNone(source["decoder_reported_lost_events"])
         self.assertFalse(source["scheduler_complete"])
@@ -195,7 +197,9 @@ class NormalizationContracts(unittest.TestCase):
         self.assertNotIn("aabbccdd", json.dumps({key: value for key, value in result.items() if not key.startswith("_")}))
         self.assertTrue(result["sources"][0]["selected_prefix_complete"])
         with closing(sqlite3.connect(journal.path)) as db:
-            db.execute("UPDATE actions SET record_json='{}' WHERE sequence=1")
+            changed = db.execute("UPDATE actions SET record_json='{}' WHERE sequence=1")
+            self.assertEqual(changed.rowcount, 1)
+            db.commit()
         with self.assertRaisesRegex(ValueError, "HASH_CHAIN"):
             normal.normalize_sources([{"source_type": "DEEP_JOURNAL", "path": journal.path}])
 
@@ -254,6 +258,98 @@ class NormalizationContracts(unittest.TestCase):
             normal.revalidate_sources(result)
         with self.assertRaisesRegex(ValueError, "REVALIDATION_RECEIPT"):
             normal.revalidate_sources({"_source_receipts": ({"path": str(path)},)})
+
+    def test_source_change_or_wal_during_final_hash_is_refused(self):
+        path, _ = self.sdk()
+        result = normal.normalize_sources([{"source_type": "EVENTS_JSONL", "path": path}])
+        original = normal._hash_file
+        def changed_after_hash(source_path, budget):
+            digest = original(source_path, budget)
+            source_path.write_bytes(source_path.read_bytes() + b"\n")
+            return digest
+        with patch.object(normal, "_hash_file", changed_after_hash), self.assertRaisesRegex(ValueError, "SOURCE_CHANGED"):
+            normal.revalidate_sources(result)
+        path, _ = self.sdk()
+        result = normal.normalize_sources([{"source_type": "EVENTS_JSONL", "path": path}])
+        def wal_after_hash(source_path, budget):
+            digest = original(source_path, budget)
+            Path(str(source_path) + "-wal").write_bytes(b"NEW_ACTIVE_WAL")
+            return digest
+        with patch.object(normal, "_hash_file", wal_after_hash), self.assertRaisesRegex(ValueError, "WAL_ACTIVE"):
+            normal.revalidate_sources(result)
+
+    def test_trace_summary_scalars_are_validated_before_use(self):
+        path = self.trace()
+        with closing(sqlite3.connect(path)) as db:
+            summary = json.loads(db.execute("SELECT value FROM metadata WHERE key='summary'").fetchone()[0])
+            summary.pop("input_sha256")
+            db.execute("UPDATE metadata SET value=? WHERE key='summary'", (json.dumps(summary),))
+            db.commit()
+        with self.assertRaisesRegex(ValueError, "TRACE_SUMMARY"):
+            normal.normalize_sources([{"source_type": "TRACE_INDEX", "path": path}])
+
+    def test_untyped_middle_switch_withholds_running_completeness(self):
+        from copy import deepcopy
+        from blackbox_core.critical_path import analyze_critical_path
+        from blackbox_core.decoder_waits import SCHEDULE_SCHEMA
+        from blackbox_core.evidence_graph import build_graph
+        first = {"pid": 123, "tid": 7, "process_instance": 4, "thread_instance": 9,
+                 "start_ms": 0., "end_ms": 1000., "attribution": "TRACELOG_THREAD_LIFETIME"}
+        other = {**first, "pid": 124, "tid": 8, "process_instance": 5, "thread_instance": 10}
+        rows = []
+        for ordinal, old, new in ((1, other, first), (2, first, other), (3, first, other)):
+            row = {"type": "event", "ordinal": ordinal, "time_ms": ordinal * 10.,
+                "pid": new["pid"], "tid": new["tid"], "process_instance": new["process_instance"],
+                "provider": "Windows Kernel", "provider_guid": "9e814aad-3204-11d2-9a82-006008a86939",
+                "name": "Thread/CSwitch", "event_id": 65535, "opcode": 36, "version": 2,
+                "payload": {}, "frames": [], "semantic": None, "errors": [],
+                "thread_schedule": {"schema": SCHEDULE_SCHEMA, "source": "ETW_KERNEL_SCHEDULER",
+                    "parser": "TRACEEVENT_CSWITCH", "kind": "switch", "processor_index": 0,
+                    "old_thread": deepcopy(old), "new_thread": deepcopy(new), "old_state_code": 5,
+                    "old_state": "Wait", "wait_reason_code": 4, "wait_reason": "DelayExecution", "wait_mode": 0}}
+            if ordinal == 2:
+                row.pop("thread_schedule")
+            rows.append(row)
+        stream, path = self.root / "mixed.jsonl", self.root / "mixed.sqlite3"
+        stream.write_text("".join(json.dumps(row) + "\n" for row in [
+            {"type": "header", "protocol": PROTOCOL, "input_sha256": "b" * 64}, *rows,
+            {"type": "footer", "protocol": PROTOCOL, "status": "DECODED", "rows": 3,
+             "decoder_reported_lost_events": 0}]))
+        build_index(stream, path, input_sha256="b" * 64, format_name=".etl")
+        result = normal.normalize_sources([{"source_type": "TRACE_INDEX", "path": path}])
+        source = result["sources"][0]
+        self.assertEqual(source["wait_coverage"]["missing_typed_classification"], 1)
+        self.assertFalse(source["scheduler_complete"])
+        self.assertFalse(any(segment["state"] == "RUNNING" for segment in analyze_critical_path(build_graph(result))["segments"]))
+
+    def test_duplicate_deep_alias_never_changes_another_nodes_action_refs(self):
+        journal = EvidenceJournal(self.root / "deep-alias")
+        journal.append({"operation_id": "stack:result", "action_id": "stack", "phase": "RESULT",
+            "operation": "threads", "target": {"pid": 123, "created_100ns": 987654321},
+            "data": {"rows": [{"tid": 7, "created_100ns": 12345}]}})
+        source = {"source_type": "DEEP_JOURNAL", "path": journal.path}
+        once = normal.normalize_sources([source])
+        twice = normal.normalize_sources([source, source])
+        self.assertEqual(once["nodes"], twice["nodes"])
+        self.assertEqual(once["coverage"], twice["coverage"])
+
+    def test_colocated_research_file_does_not_inherit_session_clock(self):
+        from blackbox_core.casebook import CaseBook
+        folder = self.root / "mixed-session"
+        folder.mkdir()
+        writer = SessionV2Writer(folder, pid=123, created=1., name="SYNTHETIC_CLOCK_SCOPE", origin_ns=1_000_000_000)
+        writer.finish("COMPLETED")
+        book = CaseBook(folder, 123, 1., {"origin_monotonic_ns": 1234})
+        try:
+            book.put("user_problem", {"message": "SYNTHETIC_UNRELATED_CLOCK"}, source="USER_MARKER")
+        finally:
+            book.db.close()
+        result = normal.normalize_sources([{"source_type": "SESSION", "path": folder}])
+        process = next(node for node in result["nodes"] if node["observation_type"] == "PROCESS")
+        research = next(node for node in result["nodes"] if node["source_record_id"].startswith("evidence:"))
+        self.assertNotEqual(process["time_domain"], research["time_domain"])
+        self.assertTrue(research["time_domain"].startswith("RESEARCH_MONOTONIC:"))
+        self.assertEqual(result["sources"][0]["research_session_clock_alignment"], "NOT_ESTABLISHED")
 
 
 if __name__ == "__main__":
