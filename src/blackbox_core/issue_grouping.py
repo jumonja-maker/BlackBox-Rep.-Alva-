@@ -3,6 +3,10 @@
 Matching hashes, error codes and stacks are recorded observations, not source
 authentication or proof of a shared root cause. Manual changes preserve their
 USER_REPORTED provenance and never rewrite source events.
+
+An explicit entire-case declaration can enable conditional counts. Hashing a
+user-selected file does not establish its binding to historical source events;
+such results use a separate mode and never become regression or fix evidence.
 """
 from __future__ import annotations
 
@@ -72,7 +76,7 @@ def _case(case, budget):
     return case
 
 
-def _app(case):
+def _application_identity(case, classes):
     value = case.get("app_identity")
     if type(value) is not dict:
         return None
@@ -80,13 +84,36 @@ def _app(case):
     family, version = value.get("application_id"), value.get("version")
     verification = value.get("verification_class")
     if (type(digest) is not str or not _SHA.fullmatch(digest) or
-            type(verification) is not str or verification not in _VERIFIED or
+            type(verification) is not str or verification not in classes or
             type(family) is not str or _NAME.fullmatch(family) is None or
             type(version) is not str or not 1 <= len(version) <= 128 or
             any(ord(ch) < 32 for ch in version) or any(ch in version for ch in "\\/")):
         return None
     return {"sha256": digest.lower(), "application_id": family, "version": version,
             "verification_class": value["verification_class"]}
+
+
+def _app(case):
+    value = _application_identity(case, _VERIFIED)
+    original = case.get("app_identity")
+    if value is not None and original.get("source_binding") in ("USER_REPORTED", "NOT_ESTABLISHED"):
+        return None
+    return value
+
+
+def _declared_app(case):
+    value = _application_identity(case, {"USER_SELECTED_FILE_SHA256"})
+    original = case.get("app_identity")
+    if (value is None or original.get("source_binding") != "USER_REPORTED" or
+            original.get("context_scope") != "ENTIRE_CASE"):
+        return None
+    return value
+
+
+def _declared_context(case):
+    scenario = case.get("scenario")
+    return (_declared_app(case) is not None and _scenario(scenario) and
+            scenario.get("verification_class") == "USER_REPORTED")
 
 
 def _failure(node):
@@ -180,6 +207,9 @@ def _frame_anchor(node):
 
 def _fingerprint(case, node, indexed, direct_refs):
     application, failure = _app(case), _failure(node)
+    declared = application is None and _declared_context(case)
+    if declared:
+        application = _declared_app(case)
     stack = node
     reference = (node.get("metadata") or {}).get("stack_ref")
     if type(reference) is str and reference in indexed:
@@ -189,9 +219,15 @@ def _fingerprint(case, node, indexed, direct_refs):
             stack = candidate
     frames = _frame_anchor(stack)
     if application is None or failure is None and frames is None:
-        return {"status": "CANDIDATE", "fingerprint": None,
+        result = {"status": "CANDIDATE", "fingerprint": None,
                 "missing": ["VERIFIED_APPLICATION_AND_ERROR_OPERATION_OR_NORMALIZED_MODULE_STACK"],
                 "root_cause_established": False}
+        selected = _declared_app(case)
+        if selected is not None:
+            result.update(application_context=selected, source_binding="NOT_ESTABLISHED",
+                          context_provenance="USER_REPORTED")
+            result["missing"].append("COMPLETE_EXPLICIT_ENTIRE_CASE_CONTEXT_OR_RECORDED_ERROR_STACK")
+        return result
     anchors = {"application_id": application["application_id"], "app_sha256": application["sha256"],
                "failure": failure, "stack": frames}
     scenario = case.get("scenario")
@@ -200,9 +236,16 @@ def _fingerprint(case, node, indexed, direct_refs):
                    if type(scenario.get(key)) is str and _NAME.fullmatch(scenario[key])}
         if context:
             anchors["scenario_context"] = context
-    return {"status": "MATCHING_RECORDED_ANCHORS", "fingerprint": stable_id("issue-fingerprint", anchors),
+    result = {"status": "MATCHING_DECLARED_ANCHORS" if declared else "MATCHING_RECORDED_ANCHORS",
+            "fingerprint": stable_id("issue-fingerprint-declared" if declared else "issue-fingerprint", anchors),
             "anchors": anchors, "source_trust": "UNVERIFIED_IMPORT", "root_cause_established": False,
             "limitations": ["MATCHING_ERROR_OR_STACK_DOES_NOT_PROVE_COMMON_ROOT_CAUSE", "SOURCE_HASH_IS_NOT_AUTHENTICATION"]}
+    if declared:
+        result.update(context_provenance="USER_REPORTED", source_binding="NOT_ESTABLISHED",
+                      context_scope="ENTIRE_CASE", conditional=True)
+        result["limitations"].extend(["SELECTED_FILE_HASH_DOES_NOT_ESTABLISH_HISTORICAL_SOURCE_BINARY_IDENTITY",
+            "APPLICATION_VERSION_AND_WORKLOAD_ARE_USER_DECLARATIONS", "NOT_REGRESSION_OR_FIX_EVIDENCE"])
+    return result
 
 
 def issue_fingerprint(case, node, *, budget=None):
@@ -271,7 +314,7 @@ def group_recurrent_issues(cases, *, budget=None):
         indexed = {node["node_id"]: node for node in case["nodes"]}
         direct_refs = {(edge["from_node"], edge["to_node"]) for edge in case["edges"]
                        if edge["relation_type"] == "DIRECT_REFERENCE"}
-        application = _app(case)
+        application = _app(case) or _declared_app(case)
         scenario = case.get("scenario") if type(case.get("scenario")) is dict else {}
         seen_records = set()
         for node in case["nodes"]:
@@ -303,9 +346,15 @@ def group_recurrent_issues(cases, *, budget=None):
     for group in groups.values():
         group["occurrences"].sort(key=lambda item: (item["case_id"], item["source_identity"], item["source_record_id"], item["node_id"]))
         _summarize(group)
-        group["history"] = [{"case_id": key, "application_version": (_app(by_case[key]) or {}).get("version"),
-            "observed_occurrences": count, "verification_class": "DERIVED_FROM_RECORDED_ANCHORS"}
+        declared = group.get("conditional") is True
+        group["history"] = [{"case_id": key,
+            "application_version": (_app(by_case[key]) or _declared_app(by_case[key]) or {}).get("version"),
+            "observed_occurrences": count,
+            "verification_class": "USER_REPORTED" if declared else "DERIVED_FROM_RECORDED_ANCHORS",
+            "conditional": declared,
+            "interpretation": "CONDITIONAL_ON_USER_DECLARED_CONTEXT" if declared else "RECORDED_OBSERVATIONS"}
             for key, count in sorted(Counter(item["case_id"] for item in group["occurrences"]).items())]
+        group["frequency"]["conditional"] = declared
         group["frequency"]["per_case_workload"] = [{"case_id": key,
             "recorded_operation_count": by_case[key]["scenario"]["operation_count"] if readiness[key] else None,
             "observed_issue_count": count,
@@ -410,9 +459,10 @@ def _capture_keys(case):
     return result
 
 
-def _comparison_checks(first, second, budget):
-    app1, app2 = _app(first), _app(second)
-    checks = [("APPLICATION_IDENTITY", bool(app1 and app2 and app1["application_id"] == app2["application_id"])),
+def _comparison_checks(first, second, budget, applications, mode):
+    app1, app2 = applications
+    checks = [("APPLICATION_CONTEXT", mode is not None),
+              ("APPLICATION_IDENTITY", bool(app1 and app2 and app1["application_id"] == app2["application_id"])),
               ("VERSION_BUILD_IDENTITY", bool(app1 and app2 and
                   (app1["version"] == app2["version"] or app1["sha256"] != app2["sha256"]))),
               ("SESSION_IDENTITIES", first["case_id"] != second["case_id"] and
@@ -432,11 +482,24 @@ def compare_investigations(first, second, *, budget=None):
     budget = use_budget(budget)
     _case(first, budget)
     _case(second, budget)
-    checks = _comparison_checks(first, second, budget)
+    applications = _app(first), _app(second)
+    mode = "RECORDED_SOURCE_ANCHORS" if all(applications) else None
+    if mode is None and _declared_context(first) and _declared_context(second):
+        applications = _declared_app(first), _declared_app(second)
+        mode = "DECLARED_ENTIRE_CASE"
+    declared = mode == "DECLARED_ENTIRE_CASE"
+    checks = _comparison_checks(first, second, budget, applications, mode)
     reasons = [item["condition"] for item in checks if not item["passed"]]
-    result = {"status": "NOT_COMPARABLE" if reasons else "COMPARABLE", "checks": checks,
+    result = {"status": "NOT_COMPARABLE" if reasons else
+              "COMPARABLE_WITH_DECLARED_CONTEXT" if declared else "COMPARABLE", "checks": checks,
         "reasons": reasons, "first_case_id": first["case_id"], "second_case_id": second["case_id"],
         "interpretation": "OBSERVED_DIFFERENCES_NOT_PROOF_OF_FIX_OR_CAUSATION", "root_cause_established": False}
+    if declared:
+        result.update(context_provenance="USER_REPORTED", source_binding="NOT_ESTABLISHED",
+                      context_scope="ENTIRE_CASE", conditional=True,
+                      interpretation="CONDITIONAL_OBSERVATIONS_NOT_REGRESSION_OR_FIX_EVIDENCE",
+                      limitations=["SELECTED_FILE_HASH_DOES_NOT_ESTABLISH_HISTORICAL_SOURCE_BINARY_IDENTITY",
+                          "APPLICATION_VERSION_AND_WORKLOAD_ARE_USER_DECLARATIONS"])
     if reasons:
         return budget.result(result)
     def failures(case):
@@ -451,9 +514,11 @@ def compare_investigations(first, second, *, budget=None):
         return counts
     old, new = failures(first), failures(second)
     result["differences"] = [{"recorded_error": json.loads(json_value), "first_count": old[json_value], "second_count": new[json_value],
-        "delta": new[json_value] - old[json_value], "absence_means": "NOT_OBSERVED_IN_THIS_COMPARABLE_RUN"}
+        "delta": new[json_value] - old[json_value],
+        "absence_means": "NOT_OBSERVED_WITH_USER_DECLARED_CONTEXT" if declared else "NOT_OBSERVED_IN_THIS_COMPARABLE_RUN",
+        "conditional": declared}
         for json_value in sorted(old.keys() | new.keys())]
-    result["versions"] = [app["version"] for app in (_app(first), _app(second))]
+    result["versions"] = [app["version"] for app in applications]
     return budget.result(result)
 
 
@@ -528,10 +593,12 @@ def manual_group_change(grouping, *, action, group_ids, reason, case_ids=None, b
         replacement = {"group_id": stable_id("manual-group", action, sorted(group_ids), index, reason, sorted(case_ids or [])),
             "occurrences": rows, "status": "USER_CONFIRMED", "verification_class": "USER_REPORTED",
             "user_confirmation_scope": "GROUP_MEMBERSHIP_ONLY", "root_cause_established": False,
+            "source_binding": "NOT_ESTABLISHED", "conditional": True,
             "source_trust": "UNVERIFIED_IMPORT", "fingerprint": None,
             "original_fingerprints": sorted(fingerprints),
             "history": [entry for history in changes for entry in history], "user_notes": notes}
         replacements.append(_summarize(replacement))
+        replacement["frequency"]["conditional"] = True
     value["groups"] = sorted([group for group in value["groups"] if group["group_id"] not in group_ids] + replacements,
                              key=lambda group: group["group_id"])
     value.setdefault("manual_history", []).append({"change_id": stable_id("group-change", action, sorted(group_ids), sorted(case_ids or []), reason),

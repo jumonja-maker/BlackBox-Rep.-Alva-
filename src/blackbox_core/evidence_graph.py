@@ -230,6 +230,10 @@ def validate_case(case, *, budget=None):
         indexed[node["node_id"]] = node
     if "source_ids" in case and case["source_ids"] != sorted(sources):
         raise InvestigationError("CASE_SOURCE_IDS_MISMATCH")
+    if "source_selections" in case and case["source_selections"] != [
+            {"source_id": identifier, "selection": source.get("selection", {})}
+            for identifier, source in sorted(sources.items())]:
+        raise InvestigationError("CASE_SOURCE_SELECTIONS_MISMATCH")
     if "incident_ids" in case:
         incidents = case["incident_ids"]
         if (type(incidents) is not list or any(type(value) is not str or value not in indexed or
@@ -362,7 +366,13 @@ def build_graph(normalized, *, target_identity=None, scenario=None, app_identity
         clock_relations=clocks, budget=budget)
     selection = normalized.get("selection", {})
     _json_shape(selection, budget)
-    identity = {"sources": sorted(sources), "selection": selection,
+    # The adapters retain the effective, merged filters on each source. The
+    # normalizer's optional shared selection is not their authoritative view:
+    # descriptor-local PID/lifetime/window/cursor filters may override it.
+    # Source/node IDs still identify physical recorded evidence across views.
+    source_selections = [{"source_id": identifier, "selection": source.get("selection", {})}
+                         for identifier, source in sorted(sources.items())]
+    identity = {"sources": source_selections, "selection": selection,
                 "target_identity": target_identity, "scenario": scenario, "app_identity": app_identity,
                 "algorithm": ALGORITHM_VERSION,
                 "graph_parameters": {"max_events": budget.max_events, "max_nodes": budget.max_nodes,
@@ -386,7 +396,8 @@ def build_graph(normalized, *, target_identity=None, scenario=None, app_identity
             "graph_nodes_omitted": omitted, "nodes_omitted": total_omitted,
             "display_graph_complete": not total_omitted and not coverage.get("has_more", False) and
                 not correlations["coverage"]["edges_omitted"] and correlations["coverage"]["edge_candidate_scan_complete"]},
-        "selection": selection, "limitations": limitations, "scenario": scenario,
+        "selection": selection, "source_selections": source_selections,
+        "limitations": limitations, "scenario": scenario,
         "app_identity": app_identity, "hypotheses": [], "actions": [], "issues": [],
         "root_cause": "UNKNOWN", "root_cause_proven": False,
         "file_trust": "UNVERIFIED_IMPORT",

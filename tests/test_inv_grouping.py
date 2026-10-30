@@ -62,6 +62,14 @@ def stack_case(label="stack", **frame_kwargs):
     return value
 
 
+def declared_case(label="one", **kwargs):
+    value = case(label, **kwargs)
+    value["app_identity"].update(verification_class="USER_SELECTED_FILE_SHA256",
+        source_binding="USER_REPORTED", context_scope="ENTIRE_CASE")
+    value["scenario"]["verification_class"] = "USER_REPORTED"
+    return value
+
+
 class IssueFingerprintContracts(unittest.TestCase):
     def fingerprint(self, value):
         return issue_fingerprint(value, value["nodes"][0])
@@ -286,6 +294,75 @@ class InvestigationComparisonContracts(unittest.TestCase):
         result = compare_investigations(first, second)
         self.assertEqual(result["status"], "NOT_COMPARABLE")
         self.assertIn("SESSION_IDENTITIES", result["reasons"])
+
+
+class DeclaredApplicationContextContracts(unittest.TestCase):
+    def test_explicit_entire_case_declaration_allows_only_conditional_comparison(self):
+        first = declared_case()
+        second = declared_case("two", version="B", app_hash="b" * 64, error=0)
+        result = compare_investigations(first, second)
+        self.assertEqual(result["status"], "COMPARABLE_WITH_DECLARED_CONTEXT")
+        self.assertEqual(result["context_provenance"], "USER_REPORTED")
+        self.assertEqual(result["source_binding"], "NOT_ESTABLISHED")
+        self.assertEqual(result["context_scope"], "ENTIRE_CASE")
+        self.assertTrue(result["conditional"])
+        self.assertFalse(result["root_cause_established"])
+        self.assertIn("NOT_REGRESSION_OR_FIX_EVIDENCE", result["interpretation"])
+        self.assertEqual(result["differences"][0]["second_count"], 0)
+        self.assertTrue(result["differences"][0]["conditional"])
+        self.assertEqual(result["differences"][0]["absence_means"], "NOT_OBSERVED_WITH_USER_DECLARED_CONTEXT")
+
+    def test_declared_groups_are_separate_from_recorded_anchors_and_keep_conditional_history(self):
+        declared = declared_case()
+        grouped = group_recurrent_issues([declared, declared_case("two")])
+        group = grouped["groups"][0]
+        recorded = issue_fingerprint(case(), case()["nodes"][0])
+        self.assertEqual(group["status"], "MATCHING_DECLARED_ANCHORS")
+        self.assertNotEqual(group["fingerprint"], recorded["fingerprint"])
+        self.assertEqual(group["occurrence_count"], 2)
+        self.assertEqual(group["source_binding"], "NOT_ESTABLISHED")
+        self.assertEqual(group["source_trust"], "UNVERIFIED_IMPORT")
+        self.assertTrue(group["frequency"]["conditional"])
+        self.assertTrue(all(row["conditional"] and row["verification_class"] == "USER_REPORTED"
+                            for row in group["history"]))
+        self.assertFalse(group["root_cause_established"])
+
+    def test_missing_scope_hash_declared_workload_or_complete_source_is_not_enough(self):
+        for mutation in ("no_hash", "bad_hash", "no_scope", "partial_scope", "no_binding",
+                         "claimed_binding", "no_scenario_provenance", "incomplete_source", "missing_workload"):
+            with self.subTest(mutation=mutation):
+                first, second = declared_case(), declared_case("two")
+                if mutation == "no_hash":
+                    del second["app_identity"]["sha256"]
+                elif mutation == "bad_hash":
+                    second["app_identity"]["sha256"] = "no binary hash"
+                elif mutation == "no_scope":
+                    del second["app_identity"]["context_scope"]
+                elif mutation == "partial_scope":
+                    second["app_identity"]["context_scope"] = "SELECTED_INCIDENT"
+                elif mutation == "no_binding":
+                    del second["app_identity"]["source_binding"]
+                elif mutation == "claimed_binding":
+                    second["app_identity"]["source_binding"] = "OS_OBSERVED"
+                elif mutation == "no_scenario_provenance":
+                    del second["scenario"]["verification_class"]
+                elif mutation == "incomplete_source":
+                    second["sources"][0]["application_events_complete"] = False
+                else:
+                    del second["scenario"]["workload_id"]
+                result = compare_investigations(first, second)
+                self.assertEqual(result["status"], "NOT_COMPARABLE")
+                self.assertNotIn("differences", result)
+                if mutation != "incomplete_source":
+                    fingerprint = issue_fingerprint(second, second["nodes"][0])
+                    self.assertEqual(fingerprint["status"], "CANDIDATE")
+
+    def test_declared_source_binding_cannot_be_promoted_by_changing_only_class(self):
+        first, second = declared_case(), declared_case("two")
+        for value in (first, second):
+            value["app_identity"]["verification_class"] = "OS_OBSERVED"
+        self.assertEqual(compare_investigations(first, second)["status"], "NOT_COMPARABLE")
+        self.assertEqual(issue_fingerprint(first, first["nodes"][0])["status"], "CANDIDATE")
 
 
 class ManualGroupingContracts(unittest.TestCase):

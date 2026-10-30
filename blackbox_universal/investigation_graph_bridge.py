@@ -73,7 +73,19 @@ class InvestigationGraphWorker(QThread):
                 _bounded_group_cases(api, self.arguments.get("case"), [], budget)
             args = deepcopy(self.arguments)  # Potentially large cases are copied here, not on Qt.
             case = args.pop("case", None)
-            if self.operation == "build":
+            if self.operation == "context":
+                from .investigation_context import apply_user_context, prepare_user_context
+                destination = args.pop("index_path", None)
+                context = prepare_user_context(budget=budget, **args)
+                packet = {"context": context}
+                if case is not None:
+                    from blackbox_core.investigation_graph_store import save_investigation
+                    updated = apply_user_context(case, context, budget=budget)
+                    destination = Path(destination)
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    save_investigation(updated, destination, budget=budget)
+                    packet.update(case=updated, index_path=str(destination))
+            elif self.operation == "build":
                 index_path = Path(args.pop("index_path"))
                 index_path.parent.mkdir(parents=True, exist_ok=True)
                 answer = api.create_investigation(index_path=index_path, budget=budget, **args)

@@ -1,5 +1,9 @@
 """Synthetic graph contracts; native evidence is tested separately in hosted CI."""
 from copy import deepcopy
+import json
+from pathlib import Path
+import shutil
+import tempfile
 from threading import Event
 import unittest
 
@@ -43,6 +47,40 @@ class EvidenceGraphContracts(unittest.TestCase):
         self.assertEqual(first, second)
         self.assertEqual(first["root_cause"], "UNKNOWN")
         self.assertFalse(first["root_cause_proven"])
+
+    def test_real_index_adapter_case_identity_binds_effective_source_selection(self):
+        """Controlled decoder interchange is a contract fixture, not native ETW proof."""
+        from blackbox_core.decoder_index import PROTOCOL, build_index
+        from blackbox_core.evidence_normalization import normalize_sources
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            interchange, index = root / "fixture.jsonl", root / "fixture.sqlite3"
+            rows = [{"type": "event", "ordinal": ordinal, "time_ms": stamp, "pid": pid, "tid": tid,
+                     "process_instance": instance, "provider": "SELECTION_CONTRACT_FIXTURE",
+                     "name": "FileIO/Write", "payload": {}, "frames": []}
+                    for ordinal, stamp, pid, tid, instance in ((1, 10, 123, 7, 4), (2, 20, 456, 8, 5))]
+            records = [{"type": "header", "protocol": PROTOCOL, "input_sha256": "a" * 64}, *rows,
+                       {"type": "footer", "protocol": PROTOCOL, "rows": 2, "status": "DECODED",
+                        "decoder_reported_lost_events": 0}]
+            interchange.write_text("".join(json.dumps(row) + "\n" for row in records), encoding="utf-8")
+            build_index(interchange, index, input_sha256="a" * 64, format_name=".etl")
+            first_filter = {"pid": 123, "process_instance": 4, "start_ms": 0, "end_ms": 15}
+            second_filter = {"pid": 456, "process_instance": 5, "start_ms": 15, "end_ms": 30}
+            def selected(path, filters):
+                return build_graph(normalize_sources([{"source_type": "TRACE_INDEX", "path": path,
+                                                       "selection": filters}]))
+            first, second = selected(index, first_filter), selected(index, second_filter)
+            narrower = selected(index, {**first_filter, "end_ms": 12})
+            relocated = root / "relocated.sqlite3"
+            shutil.copyfile(index, relocated)
+            copied = selected(relocated, dict(reversed(list(first_filter.items()))))
+            self.assertEqual(first["source_ids"], second["source_ids"])
+            self.assertNotEqual(first["case_id"], second["case_id"])
+            self.assertNotEqual(first["case_id"], narrower["case_id"])
+            self.assertEqual(first["nodes"], narrower["nodes"])
+            self.assertEqual(first["case_id"], copied["case_id"])
+            self.assertEqual(first["nodes"], copied["nodes"])
+            self.assertEqual(first["source_selections"][0]["selection"], first_filter)
 
     def test_filetime_difference_never_makes_exact_process_link(self):
         raw = self.normalized()

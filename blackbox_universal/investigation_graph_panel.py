@@ -9,7 +9,7 @@ from uuid import uuid4
 from PySide6.QtCore import QAbstractTableModel, QModelIndex, QPointF, Qt, Signal
 from PySide6.QtGui import QColor, QPen, QPolygonF
 from PySide6.QtWidgets import (
-    QAbstractItemView, QComboBox, QFileDialog, QFormLayout, QGraphicsScene,
+    QAbstractItemView, QComboBox, QDialog, QFileDialog, QFormLayout, QGraphicsScene,
     QGraphicsView, QInputDialog, QLabel, QMessageBox,
     QPlainTextEdit, QPushButton, QStackedWidget, QTableView, QVBoxLayout, QWidget,
 )
@@ -178,6 +178,8 @@ class InvestigationGraphPanel(QWidget):
         self._deferred_checkpoint = False
         self._closing = False
         self._closing_for_window = False
+        self._scenario_context, self._app_context = {}, {}
+        self._context_scope_sources = None
         self.setObjectName("investigationGraphWorkspace")
         self._build()
         self.bridge.result_ready.connect(self._received)
@@ -232,6 +234,7 @@ class InvestigationGraphPanel(QWidget):
         self.add_source_button = self._button(common, "invAddSource", "Add saved source…", "Добавить источник…", self.choose_source)
         self.build_button = self._button(common, "invBuildGraph", "Build evidence graph", "Построить граф", self.build_case)
         self.open_button = self._button(common, "invOpenCase", "Open investigation…", "Открыть расследование…", self.choose_case)
+        self.context_button = self._button(common, "invEditContext", "Declare application / workload context…", "Объявить приложение / контекст нагрузки…", self.edit_context)
         self.cancel_button = self._button(common, "invCancel", "Cancel analysis", "Отменить анализ", self.bridge.cancel)
         self.export_button = self._button(common, "invExport", "Export investigation…", "Сохранить расследование…", self.choose_export)
         self.return_button = self._button(common, "invReturnIncident", "Return to incident", "Вернуться к инциденту", self.return_to_incident)
@@ -397,6 +400,7 @@ class InvestigationGraphPanel(QWidget):
         self._incident_id, self._selection = incident_id, selection
         if sources is not None:
             self.sources = deepcopy(sources)
+            self._context_scope_sources = None
         self.show()
         self._render_summary()
         self._controls()
@@ -424,7 +428,29 @@ class InvestigationGraphPanel(QWidget):
                 return
             self.bridge.invalidate()
             self.sources.append({"source_type": source_type, "path": path})
+            self._context_scope_sources = None
             self._render_summary()
+
+    def edit_context(self):
+        if self.bridge.busy or self.deep_panel.bridge.busy or self._pending_native or (self.case is None and not self.sources):
+            return False
+        from .investigation_context_dialog import InvestigationContextDialog
+        active = self.experiment_case or self.case or {}
+        dialog = InvestigationContextDialog(self, language=self.window.language,
+            app_identity=active.get("app_identity") or self._app_context,
+            scenario=active.get("scenario") or self._scenario_context)
+        generation, selected = self.bridge.generation, self.case
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return False
+        if generation != self.bridge.generation or selected is not self.case:
+            return False
+        path = Path(self.window._investigation_root) / ("context-" + uuid4().hex + ".sqlite3")
+        accepted = self.bridge.submit("context", case=self.experiment_case or self.case,
+            index_path=str(path), **dialog.arguments())
+        if accepted:
+            self._set_status("Reading the explicitly selected file and saving user-declared context…",
+                             "Чтение явно выбранного файла и сохранение заявленного пользователем контекста…")
+        return accepted
 
     def build_case(self):
         if not self.sources:
@@ -436,10 +462,12 @@ class InvestigationGraphPanel(QWidget):
                 return False
         self.bridge.invalidate()
         path = Path(self.window._investigation_root) / ("case-" + uuid4().hex + ".sqlite3")
+        declared = self._context_scope_sources == json.dumps(self.sources, sort_keys=True, ensure_ascii=True)
         # A previous consent for NEW measurements cannot establish the target
         # of newly imported historical observations.
         accepted = self.bridge.submit("build", sources=deepcopy(self.sources), target_identity=None,
-            selection=self._selection, index_path=str(path))
+            selection=self._selection, index_path=str(path),
+            scenario=self._scenario_context if declared else None, app_identity=self._app_context if declared else None)
         if accepted:
             self._set_status("Building from saved sources…", "Построение по сохранённым источникам…")
         return accepted
@@ -458,6 +486,9 @@ class InvestigationGraphPanel(QWidget):
         self._experiment = None
         self._live_identity = self._live_token = self._pending_native = None
         self._capabilities = None
+        self._scenario_context = case.get("scenario") or {}
+        self._app_context = case.get("app_identity") or {}
+        self._context_scope_sources = None
         self._selected_node_id = self._selected_hypothesis = None
         self._models["sources"].set_rows(case.get("sources", []))
         self.nodes_model.set_rows(case.get("nodes", []))
@@ -480,7 +511,9 @@ class InvestigationGraphPanel(QWidget):
         self.overview.setText(self.tr2("Case ", "Расследование ") + str(self.case.get("case_id", "")) +
             self.tr2("\nObservations / links: ", "\nНаблюдения / связи: ") +
             str(len(self.case.get("nodes", []))) + " / " + str(len(self.case.get("edges", []))) +
-            "\n" + _value(self.case.get("coverage"), 3000) + "\n" + _value(self.case.get("limitations"), 3000))
+            "\n" + _value(self.case.get("coverage"), 3000) + "\n" + _value(self.case.get("limitations"), 3000) +
+            self.tr2("\nDeclared context: ", "\nЗаявленный контекст: ") +
+            _value({"app_identity": self.case.get("app_identity"), "scenario": self.case.get("scenario")}, 1500))
 
     def _row_selected(self, table, model):
         rows = table.selectionModel().selectedRows()
@@ -1064,6 +1097,16 @@ class InvestigationGraphPanel(QWidget):
             self.index_path = packet.get("index_path")
             self.load_case(packet["case"])
             self._set_status("Evidence graph ready; inspect source identities and gaps.", "Граф готов; проверяйте идентичности источников и разрывы.")
+        elif operation == "context":
+            context = packet["context"]
+            if "case" in packet:
+                self.index_path = packet["index_path"]
+                self.load_case(packet["case"])
+            else:
+                self._app_context, self._scenario_context = context["app_identity"], context["scenario"]
+                self._context_scope_sources = json.dumps(self.sources, sort_keys=True, ensure_ascii=True)
+            self._set_status("Context saved as USER_REPORTED. File SHA-256 does not establish historical process binding; comparisons remain conditional.",
+                             "Контекст сохранён как USER_REPORTED. SHA-256 файла не устанавливает связь с историческим процессом; сравнения остаются условными.")
         elif operation == "actions":
             self._set_actions(packet.get("actions", []))
         elif operation == "fork":
@@ -1108,6 +1151,7 @@ class InvestigationGraphPanel(QWidget):
         self.build_button.setEnabled(can_change_case)
         self.add_source_button.setEnabled(can_change_case)
         self.open_button.setEnabled(can_change_case)
+        self.context_button.setEnabled(can_change_case and bool(self.case is not None or self.sources))
         self.cancel_button.setEnabled(busy)
         self.export_button.setEnabled(active)
         self.bind_button.setEnabled(active and not native_busy and self._pending_native is None and self.deep_panel.bridge.target is not None)

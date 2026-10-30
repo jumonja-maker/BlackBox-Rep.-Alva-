@@ -55,6 +55,7 @@ def run(args):
     app = window = probe = pulse = dialog_timer = executor = None
     deep_closed, graph_closed, native_results, services = [], [], [], []
     dialog_plan = {"operation": None, "decision": None, "answered": False}
+    context_plan = {"pending": False, "answered": False}
     pulse_state = {"ticks": 0, "last": None, "max_gap_seconds": 0.0}
     proof["event_loop"] = pulse_state
     input_hashes = {}
@@ -315,7 +316,39 @@ def run(args):
                 active = QApplication.activeModalWidget()
                 if active is None:
                     return
-                if isinstance(active, QMessageBox) and dialog_plan["operation"] and not dialog_plan["answered"]:
+                if active.objectName() == "invContextDialog" and context_plan["pending"] and not context_plan["answered"]:
+                    # The actual modal editor and file chooser command run;
+                    # only the OS path selection is supplied by the harness.
+                    context_plan["answered"] = True
+                    try:
+                        require(not active.scope.isChecked() and not active.save_button.isEnabled(),
+                                "INV_CONTEXT_SCOPE_CONSENT_NOT_EXPLICIT_OR_SAVE_ALREADY_ENABLED")
+                        values = {"application_id": "BLACKBOX_INV_GUI_OWNED_PROBE", "version": "CONTROLLED_QA_BUILD",
+                            "scenario_id": "INV_GUI_DECLARED_INTERVENTION", "workload_id": "ONE_64_BYTE_WRITE",
+                            "source_profile": "USER_DECLARED_QA", "operation_count": "1", "input_bytes": "64"}
+                        for key, value in values.items():
+                            field = active.fields[key]
+                            field.setFocus()
+                            QTest.keyClick(field, Qt.Key.Key_A, Qt.KeyboardModifier.ControlModifier)
+                            QTest.keyClicks(field, value)
+                        if not active.complete.isChecked():
+                            QTest.mouseClick(active.complete, Qt.MouseButton.LeftButton)
+                        QTest.mouseClick(active.choose_binary, Qt.MouseButton.LeftButton)
+                        require(Path(active.binary.text()).resolve(strict=True) == executable.resolve(strict=True),
+                                "INV_CONTEXT_ACTUAL_FILE_CHOICE_NOT_RETAINED")
+                        QTest.mouseClick(active.scope, Qt.MouseButton.LeftButton)
+                        require(active.scope.isChecked() and active.save_button.isEnabled(),
+                                "INV_CONTEXT_EXPLICIT_SCOPE_DID_NOT_ENABLE_SAVE")
+                        require(active.grab().save(str(output / "actual-context-editor.png"), "PNG"),
+                                "INV_CONTEXT_EDITOR_SCREENSHOT_FAILED")
+                        proof["context_editor"] = {"actual_qt_dialog": True, "actual_typed_fields": values,
+                            "entire_case_consent_default": False, "entire_case_consent_explicitly_selected": True,
+                            "selected_real_file": executable.name, "declaration_is_os_evidence": False}
+                        QTest.mouseClick(active.save_button, Qt.MouseButton.LeftButton)
+                    except BaseException as error:
+                        proof["unexpected_dialogs"].append("CONTEXT_EDITOR:" + str(error)[:500])
+                        active.reject()
+                elif isinstance(active, QMessageBox) and dialog_plan["operation"] and not dialog_plan["answered"]:
                     valid = (re.search(r"\bPID " + str(oracle["pid"]) + r"(?!\d)", active.text()) is not None and
                         active.button(QMessageBox.StandardButton.Yes) is not None and
                         active.button(QMessageBox.StandardButton.Cancel) is not None and
@@ -402,6 +435,37 @@ def run(args):
             exported = json.loads(export_path.read_text())
             require(exported.get("guided_experiments") and exported.get("origin_case_id") == original_case_id,
                     "INV_GUI_EXPORT_LOST_ORIGINAL_ID_OR_GUIDED_EXPERIMENT")
+            phase("ACTUAL_USER_CONTEXT_EDITOR_AND_IMMUTABLE_CHECKPOINT")
+            context_parent = panel.experiment_case
+            context_parent_id = context_parent["case_id"]
+            context_before = json.dumps(context_parent, sort_keys=True)
+            context_plan.update(pending=True, answered=False)
+            with patch("blackbox_universal.investigation_context_dialog.QFileDialog.getOpenFileName",
+                       return_value=(str(executable), "Application (*.exe *.dll)")):
+                click(panel.context_button)
+            context_plan["pending"] = False
+            require(context_plan["answered"], "INV_ACTUAL_CONTEXT_EDITOR_NOT_OBSERVED")
+            pump_until(lambda: idle() and panel.case is not None and panel.case["case_id"] != context_parent_id)
+            declared = panel.case
+            require(declared.get("context_parent_case_id") == context_parent_id and
+                    declared.get("context_provenance") == "USER_REPORTED" and
+                    declared.get("declared_context_source_binding") == "NOT_ESTABLISHED" and
+                    declared["app_identity"]["verification_class"] == "USER_SELECTED_FILE_SHA256" and
+                    declared["app_identity"]["sha256"] == digest(executable) and
+                    declared["scenario"]["verification_class"] == "USER_REPORTED",
+                    "INV_CONTEXT_EDITOR_PROMOTED_DECLARATION_OR_MISIDENTIFIED_SELECTED_FILE")
+            require(json.dumps(context_parent, sort_keys=True) == context_before and
+                    declared["nodes"] == context_parent["nodes"] and declared["edges"] == context_parent["edges"],
+                    "INV_CONTEXT_EDITOR_MODIFIED_ORIGINAL_CASE_OR_RECORDED_OBSERVATIONS")
+            context_export = output / "investigation-with-declared-context.json"
+            with patch("blackbox_universal.investigation_graph_panel.QFileDialog.getSaveFileName",
+                       return_value=(str(context_export), "JSON (*.json)")):
+                click(panel.export_button)
+            pump_until(lambda: idle() and context_export.is_file())
+            proof["context_editor"].update(context_parent_case_id=context_parent_id,
+                declared_case_id=declared["case_id"], original_case_unchanged=True,
+                historical_process_file_binding="NOT_ESTABLISHED",
+                export=validate_export(context_export, forbidden=(oracle["buffer_hex"], changed)))
             require(len(services) == 1 and services[0][1] != threading.get_ident(),
                     "INV_SERVICE_CONSTRUCTED_ON_GUI_THREAD_OR_DUPLICATED")
             helper_process = psutil.Process(services[0][0].helper_pid)

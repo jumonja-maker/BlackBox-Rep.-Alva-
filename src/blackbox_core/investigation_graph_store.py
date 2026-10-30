@@ -275,7 +275,8 @@ def export_investigation(case, destination, *, format="json", budget=None, cance
         Path(temporary).unlink(missing_ok=True)
     return {"status": "COMPLETED", "path": str(target), "case_id": value["case_id"],
             "format": format, "bytes": len(payload), "sha256": hashlib.sha256(payload).hexdigest(),
-            "privacy": "METADATA_ONLY_NO_MEMORY_DUMPS_ENVIRONMENT_OR_SECRETS"}
+            "privacy": "METADATA_ONLY_DEFINED_SENSITIVE_KEYS_AND_RECOGNIZABLE_PATHS_URLS_REDACTED",
+            "universal_secret_detection": False, "source_files_modified": False}
 
 
 class InvestigationGraphStore:

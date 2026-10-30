@@ -297,6 +297,25 @@ class InvestigationGuiContracts(unittest.TestCase):
         self.assertIsNone(arguments["case_ids"])
         self.assertEqual(arguments["reason"], "Explicit user explanation")
 
+    def test_context_editor_requires_explicit_scope_and_defaults_to_no_file_binding(self):
+        from blackbox_universal.investigation_context_dialog import InvestigationContextDialog
+        for language in ("EN", "RU"):
+            dialog = InvestigationContextDialog(self.panel, language=language)
+            self.assertFalse(dialog.save_button.isEnabled())
+            self.assertFalse(dialog.scope.isChecked())
+            self.assertIsNone(dialog.arguments()["binary_path"])
+            dialog.scope.setChecked(True)
+            self.assertTrue(dialog.save_button.isEnabled())
+            self.assertTrue(dialog.arguments()["scope_confirmed"])
+            dialog.deleteLater()
+
+    def test_cancelled_context_editor_does_not_hash_save_or_start_native_work(self):
+        self.panel.load_case(fixture_case())
+        with patch("blackbox_universal.investigation_context_dialog.InvestigationContextDialog.exec", return_value=0):
+            self.assertFalse(self.panel.edit_context())
+        self.assertEqual(self.reader.calls, [])
+        self.assertEqual(self.deep.calls, [])
+
     def test_cancel_live_binding_never_dispatches_or_binds_by_pid(self):
         self.panel.load_case(fixture_case())
         with patch.object(QMessageBox, "exec", return_value=QMessageBox.StandardButton.Cancel):

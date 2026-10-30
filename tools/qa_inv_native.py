@@ -248,11 +248,11 @@ def run(args):
         require(path["end_to_end_established"] is False, "PARTIAL_WAIT_PATH_CLAIMED_FULL_CAUSAL_PATH")
         matched_waits = {}
         with closing(readonly(index)) as db:
-            for phase in waiting["observations"]:
+            for wait_phase in waiting["observations"]:
                 matches = []
                 for segment in path["segments"]:
                     identity = segment.get("thread_identity") or {}
-                    if (identity.get("tid") != phase["tid"] or segment.get("state") != "BLOCKED" or
+                    if (identity.get("tid") != wait_phase["tid"] or segment.get("state") != "BLOCKED" or
                             not segment.get("duration_ms") or segment["duration_ms"] <= 10):
                         continue
                     refs = segment.get("source_event_ids", [])
@@ -263,16 +263,18 @@ def run(args):
                     if first is None or last is None:
                         continue
                     begin, end = json.loads(first[0]), json.loads(last[0])
-                    if (phase["begin_qpc"] <= int(begin["source_ticks"]) <= int(end["source_ticks"])
-                            <= phase["end_qpc"]):
+                    if (wait_phase["begin_qpc"] <= int(begin["source_ticks"]) <= int(end["source_ticks"])
+                            <= wait_phase["end_qpc"]):
                         matches.append(segment["segment_id"])
-                require(matches, "REAL_GRAPH_WAIT_NOT_WITHIN_ACTUAL_QPC_ORACLE_" + phase["role"])
-                matched_waits[phase["role"]] = matches
+                require(matches, "REAL_GRAPH_WAIT_NOT_WITHIN_ACTUAL_QPC_ORACLE_" + wait_phase["role"])
+                matched_waits[wait_phase["role"]] = matches
         proof["graph_wait_oracle_matches"] = matched_waits
         proof["actual_wait_oracle"] = waiting
         case_c = create_investigation([trace_source(index, cpu_pid)], budget=budget,
                                      index_path=output / "case-cpu.sqlite3")
         proof["cases"]["C_cpu"] = inspect_case(case_c)
+        require(case_a["case_id"] != case_c["case_id"],
+                "DISTINCT_SELECTED_PROCESS_INVESTIGATIONS_HAVE_COLLIDING_CASE_IDENTITY")
         require(any(node["observation_type"] == "CPU_SAMPLE" for node in case_c["nodes"]),
                 "REAL_NATIVE_CPU_SAMPLE_NOT_IN_GRAPH")
         require(any(node["observation_type"] == "STACK" for node in case_c["nodes"]),
