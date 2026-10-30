@@ -7,6 +7,7 @@ from blackbox_core.investigation_v2 import QUESTIONS,SORTS
 from blackbox_core.event_stream import SOURCES,SEVERITIES
 class EvidencePanel(QWidget):
  range_requested=Signal(str,object,object)
+ investigate_requested=Signal(object)
  def __init__(self,window,*,events=False):
   super().__init__(window);self.window=window;self.bridge=window.probe;self.events=events
   self.op='events_query' if events else 'investigation';self.folder=None;self.interval=None;self.origin=0
@@ -43,6 +44,9 @@ class EvidencePanel(QWidget):
     (self.card,'Incident card','Карточка инцидента',self.open_card),(self.navigate,'Show interval','Показать интервал',self.show_interval))):
    self.label(b,en,ru);b.clicked.connect(fn);row.addWidget(b,i//2,i%2)
   if events:self.card.hide()
+  self.investigate=QPushButton();self.investigate.setObjectName('investigateSelectedProblem')
+  self.label(self.investigate,'INVESTIGATE PROBLEM','ИССЛЕДОВАТЬ ПРОБЛЕМУ');self.investigate.clicked.connect(self.open_investigation)
+  row.addWidget(self.investigate,2,0,1,2)
   box.addLayout(row);self.raw=QCheckBox();self.label(self.raw,'Technical data','Технические данные');self.raw.toggled.connect(self.render_detail);box.addWidget(self.raw)
   self.details=QPlainTextEdit();self.details.setReadOnly(True);self.details.setMaximumHeight(240);box.addWidget(self.details)
   self.status=QLabel();self.status.setWordWrap(True);box.addWidget(self.status)
@@ -102,6 +106,15 @@ class EvidencePanel(QWidget):
   selected=self.selection();self.load.setEnabled(not self._busy);self.previous.setEnabled(bool(self._history) and not self._busy)
   self.next.setEnabled(self._more and not self._busy);self.navigate.setEnabled(selected is not None and not self._busy)
   self.card.setEnabled(bool(selected and selected.get('detail',{}).get('incident_id')) and not self._busy)
+  self.investigate.setEnabled(selected is not None and not self._busy)
+ def open_investigation(self):
+  row=self.selection();folder=self.folder or self.bridge.session_folder
+  if row is None or folder is None:return
+  lo=row.get('time_ns') if self.events else row.get('start_ns');hi=row.get('time_ns') if self.events else row.get('end_ns') or lo
+  selection={'start_ns':lo,'end_ns':hi} if type(lo) is int and type(hi) is int else None
+  source={'source_type':'SESSION','path':str(folder)}
+  if selection:source['selection']=selection
+  self.investigate_requested.emit({'sources':[source],'incident_id':row.get('detail',{}).get('incident_id'),'selection':selection})
  def selected(self):self.card_packet=None;self.render_detail();self.controls()
  def render_detail(self):
   row=self.card_packet or self.selection()

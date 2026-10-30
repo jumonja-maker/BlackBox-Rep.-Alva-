@@ -28,9 +28,9 @@ permissions:
 
 jobs:
   shell-tests:
-    # This patch has the full source/portable/native gates in bb-deep-qa.yml.
+    # These patches use isolated bb-deep-qa.yml / bb-inv-qa.yml gates.
     # Do not duplicate the complete build on every draft PR synchronization.
-    if: github.event_name != 'pull_request' || github.head_ref != 'patch/bb-deep-001'
+    if: github.event_name != 'pull_request' || (github.head_ref != 'patch/bb-deep-001' && github.head_ref != 'patch/bb-inv-003')
     name: Windows shell / read-only observer
     runs-on: windows-latest
     # BB-DEEP-001 exact-SHA run #40935239740 required 67m37s on a hosted
@@ -106,7 +106,7 @@ jobs:
           if (($helpText -join ' ') -match 'handoff') { throw 'Deprecated command visible' }
 
   linux-tests:
-    if: github.event_name != 'pull_request' || github.head_ref != 'patch/bb-deep-001'
+    if: github.event_name != 'pull_request' || (github.head_ref != 'patch/bb-deep-001' && github.head_ref != 'patch/bb-inv-003')
     name: Linux compatibility check (independent of Windows release)
     runs-on: ubuntu-latest
     # The same full deep suite took 19m06s in exact-SHA acceptance.
@@ -154,7 +154,7 @@ jobs:
         run: python -m blackbox_core --help
 
   windows-portable:
-    if: github.event_name != 'pull_request' || github.head_ref != 'patch/bb-deep-001'
+    if: github.event_name != 'pull_request' || (github.head_ref != 'patch/bb-deep-001' && github.head_ref != 'patch/bb-inv-003')
     name: Windows portable exe
     # Exact-SHA native decoder acceptance accompanies the release candidate.
     # Publication still requires *all* three jobs green.

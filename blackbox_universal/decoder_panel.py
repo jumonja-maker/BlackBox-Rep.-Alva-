@@ -38,8 +38,30 @@ class DecodeWorker(QThread):
                                    (type(exc).__name__ + ": " + str(exc))[:350])
 
 
+class OpenIndexWorker(QThread):
+    result_ready = Signal(object, str)
+    kind = "open_index_interval"
+
+    def __init__(self, source, output, arguments, generation, parent=None):
+        super().__init__(parent)
+        self.source, self.output = source, output
+        self.arguments, self.generation = arguments, generation
+        self.cancel_event = Event()
+
+    def run(self):
+        from .decoder_index_navigation import copy_navigation_index
+        try:
+            result = copy_navigation_index(self.source, self.output,
+                                           cancel_event=self.cancel_event, **self.arguments)
+            self.result_ready.emit(result, "")
+        except Exception as exc:
+            self.result_ready.emit({"failure": failure_details(exc)},
+                                   (type(exc).__name__ + ": " + str(exc))[:350])
+
+
 class DecoderPanel(QWidget):
     idle = Signal()
+    index_interval_opened = Signal(object)
 
     def __init__(self, window):
         super().__init__(window)
@@ -61,6 +83,9 @@ class DecoderPanel(QWidget):
         self._dump_path = None
         self._dump_identity = None
         self._dump_generation = 0
+        self._index_navigation_generation = 0
+        self._pending_index_navigation = None
+        self._navigation_first_page = None
         layout = QVBoxLayout(self)
         layout.setContentsMargins(18, 12, 18, 12)
         self.notice = QLabel()
@@ -81,6 +106,7 @@ class DecoderPanel(QWidget):
             controls.addWidget(button)
         layout.addLayout(controls)
         self.status = QLabel()
+        self.status.setTextFormat(Qt.TextFormat.PlainText)
         self.status.setWordWrap(True)
         layout.addWidget(self.status)
         self.dump_memory_notice = QLabel()
@@ -356,6 +382,112 @@ class DecoderPanel(QWidget):
         if filename:
             self.start_decode(Path(filename))
 
+    def _remove_cached_index(self, path):
+        """Only our private cache owns decoder files; never unlink imports."""
+        if path is not None and Path(path).parent.resolve() == Path(self.cache.name).resolve():
+            for suffix in ("", "-wal", "-shm", "-journal"):
+                Path(str(path) + suffix).unlink(missing_ok=True)
+
+    def open_index_interval(self, index_path, *, expected_trace_sha256=None,
+                            expected_index_sha256=None, process_instance=None, pid=None,
+                            tid=None, start_ms=None, end_ms=None):
+        """Open a private copy and preset recorded-instance analysis filters.
+
+        Opening an interval never binds a live PID or starts a recording. The
+        normal event table keeps its ordinary PID/page filter; CPU/wait actions
+        use the explicit recorded instance, TID and trace-relative interval.
+        """
+        if self.worker is not None:
+            return False
+        if getattr(self.window.probe, "active", False):
+            self.state, self.error = "error", "STOP_RECORDING_BEFORE_OFFLINE_ANALYSIS"
+            self.render_status()
+            return False
+        from .decoder_index_navigation import navigation_filters
+        try:
+            filters = navigation_filters(process_instance=process_instance, pid=pid, tid=tid,
+                                         start_ms=start_ms, end_ms=end_ms)
+        except (TypeError, ValueError) as exc:
+            self.state, self.error = "error", str(exc)
+            self.render_status()
+            return False
+        self._clear_dump_state()
+        self._close_calltree()
+        self._index_navigation_generation += 1
+        self._pending_index_navigation = None
+        self._navigation_first_page = None
+        previous, self.index = self.index, None
+        # A graph may refer to this very cache index. Keep the input until a
+        # complete private copy has committed; failed/cancelled navigation must
+        # never destroy the previous source either.
+        self.summary, self.rows = None, []
+        self.analysis_report = self.alignment_report = self.clock_review = self.pdb_review = None
+        self._analysis_kind = None
+        self.import_failure = None
+        self.cursors, self.next_cursor = [0], 0
+        self.table.clearContents()
+        self.table.setRowCount(0)
+        self.details.clear()
+        self.reset_cpu_scope()
+        for button in (self.open_button, self.session_button, self.dump_button,
+                       self.calltree_button, self.resolve_tree_button, self.resolve_stack_button,
+                       self.waits_button, self.align_session_button, self.export_analysis_button,
+                       self.export_button, self.review_clock_button, self.review_pdb_button,
+                       self.prev_button, self.next_button):
+            button.setEnabled(False)
+        self._enable_cpu_scope(False)
+        self.cancel_button.setEnabled(True)
+        self.state, self.error = "analyzing", ""
+        output = Path(self.cache.name) / (uuid4().hex + ".sqlite3")
+        self.worker = OpenIndexWorker(index_path, output,
+            {"expected_trace_sha256": expected_trace_sha256,
+             "expected_index_sha256": expected_index_sha256, "filters": filters},
+            self._index_navigation_generation, self)
+        self.worker.previous_index = previous
+        self.worker.result_ready.connect(self._index_interval_received)
+        self.worker.finished.connect(self.finished)
+        self.render_status()
+        self.worker.start()
+        return True
+
+    def cancel_index_navigation(self):
+        if getattr(self.worker, "kind", None) == "open_index_interval":
+            self.cancel()
+
+    def _index_interval_received(self, packet, error):
+        worker = self.worker
+        if (getattr(worker, "kind", None) != "open_index_interval" or
+                worker.generation != self._index_navigation_generation or worker.cancel_event.is_set()):
+            if packet and packet.get("path"):
+                self._remove_cached_index(packet["path"])
+            return
+        if not error:
+            # The first bounded page was read in the worker. Preset its base
+            # filter before rendering, without issuing SQLite work on Qt.
+            self.mode.blockSignals(True)
+            self.mode.setCurrentIndex(self.mode.findData("events"))
+            self.mode.blockSignals(False)
+            self.pid.setValue(packet["navigation"].get("pid") or 0)
+            self.search.clear()
+            self._navigation_first_page = packet["initial_page"]
+        self.received(packet, error)
+        if not error and self.index is not None:
+            previous = getattr(worker, "previous_index", None)
+            if previous is not None and Path(previous).resolve() != Path(worker.source).resolve():
+                self._remove_cached_index(previous)
+            scope = packet["navigation"]
+            self.pid.setValue(scope.get("pid") or 0)
+            self.cpu_source.setCurrentIndex(self.cpu_source.findData(
+                "etw" if packet["summary"].get("format") == ".etl" else "dotnet"))
+            for key, field in (("process_instance", self.cpu_instance), ("tid", self.cpu_tid),
+                               ("start_ms", self.cpu_start), ("end_ms", self.cpu_end)):
+                value = scope.get(key)
+                field.setText("" if value is None else str(value))
+            self._pending_index_navigation = packet
+            self.details.setPlainText(self.tr2(
+                "Recorded-instance CPU/wait filters selected below. The event table retains its ordinary page/PID filter. Time is trace-relative; relation to a live process is NOT_ESTABLISHED.",
+                "Ниже выбраны фильтры CPU/ожиданий записанного экземпляра. Таблица событий сохраняет обычный фильтр страницы/PID. Время задано относительно трассы; связь с живым процессом НЕ УСТАНОВЛЕНА."))
+
     def start_decode(self, source):
         if self.worker is not None:
             return
@@ -364,6 +496,9 @@ class DecoderPanel(QWidget):
             self.render_status()
             return
         self._clear_dump_state()
+        self._index_navigation_generation += 1
+        self._pending_index_navigation = None
+        self._navigation_first_page = None
         output = Path(self.cache.name) / (uuid4().hex + ".sqlite3")
         # Never show an old trace as though it belonged to the new input,
         # including while decoding or after a malformed file fails.
@@ -390,7 +525,7 @@ class DecoderPanel(QWidget):
                        self.review_clock_button, self.review_pdb_button):
             button.setEnabled(False)
         if previous is not None:
-            previous.unlink(missing_ok=True)
+            self._remove_cached_index(previous)
         self.state = "decoding"
         self.open_button.setEnabled(False)
         self.session_button.setEnabled(False)
@@ -405,6 +540,23 @@ class DecoderPanel(QWidget):
     def cancel(self):
         if self.worker is not None:
             self.worker.cancel_event.set()
+            if getattr(self.worker, "kind", "") == "open_index_interval":
+                self._index_navigation_generation += 1
+                self._pending_index_navigation = None
+                self._navigation_first_page = None
+                self._remove_cached_index(self.index)
+                self.index, self.summary, self.rows = None, None, []
+                self.table.clearContents()
+                self.table.setRowCount(0)
+                self.details.clear()
+                for button in (self.calltree_button, self.resolve_tree_button, self.resolve_stack_button,
+                               self.waits_button, self.align_session_button, self.export_analysis_button,
+                               self.export_button, self.review_clock_button, self.review_pdb_button,
+                               self.prev_button, self.next_button):
+                    button.setEnabled(False)
+                self.state, self.error = "error", "DECODER_INDEX_NAVIGATION_CANCELLED"
+                self.import_failure = {"state": "CANCELLED"}
+                self.render_status()
             if getattr(self.worker, "kind", "") == "minidump_memory":
                 self._dump_generation += 1
                 self.dump_memory_view.clear()
@@ -426,7 +578,7 @@ class DecoderPanel(QWidget):
             self.summary = packet["summary"]
             self.state = "decoded"
             if old and old != self.index:
-                old.unlink(missing_ok=True)
+                self._remove_cached_index(old)
             self.export_button.setEnabled(True)
             self.review_clock_button.setEnabled(True)
             self.review_pdb_button.setEnabled(True)
@@ -458,6 +610,10 @@ class DecoderPanel(QWidget):
         self._enable_cpu_scope(True)
         self._refresh_dump_controls()
         self.idle.emit()
+        pending, self._pending_index_navigation = self._pending_index_navigation, None
+        if (pending is not None and getattr(worker, "kind", None) == "open_index_interval" and
+                worker.generation == self._index_navigation_generation):
+            self.index_interval_opened.emit(pending)
 
     def _clear_dump_state(self):
         self._dump_generation += 1
@@ -516,8 +672,10 @@ class DecoderPanel(QWidget):
             return
         try:
             mode = self.mode.currentData()
-            page = read_index(self.index, after=self.cursors[-1], mode=mode,
-                              pid=self.pid.value(), search=self.search.text())
+            page, self._navigation_first_page = self._navigation_first_page, None
+            if page is None:
+                page = read_index(self.index, after=self.cursors[-1], mode=mode,
+                                  pid=self.pid.value(), search=self.search.text())
             self._table_headers()
             self.rows = page["rows"]
             self.table.setRowCount(len(self.rows))

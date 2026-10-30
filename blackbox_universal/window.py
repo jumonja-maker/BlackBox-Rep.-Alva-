@@ -22,7 +22,7 @@ from blackbox_investigation import InvestigationError
 from blackbox_core.contracts import ObserverError
 from blackbox_core.report import compare as compare_sessions
 from blackbox_core.sampling_health import BusyTickTracker
-from PySide6.QtCore import Qt, QTimer, QThread, Signal, QSettings, QUrl
+from PySide6.QtCore import Qt, QTimer, QThread, Signal, QSettings, QUrl, QStandardPaths
 from PySide6.QtGui import QAction, QDesktopServices, QIcon
 from PySide6.QtWidgets import (
     QAbstractItemView, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QSpinBox, QFileDialog, QFrame,
@@ -144,6 +144,10 @@ class UniversalWindow(QMainWindow):
         self._investigation_html: Path | None = None
         self._investigation_result: dict | None = None
         self._investigation_busy = False
+        self._investigation_root = (Path(output_root) / "investigations" if output_root is not None else
+            Path(QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppLocalDataLocation) or tempfile.gettempdir()) /
+            "BLACKBOX-Investigations")
+        self._graph_close_pending = False
         self._thread_detail_worker: ThreadDetailWorker | None = None
         self._thread_detail_payload = None
         self._thread_detail_state = "default"
@@ -472,6 +476,8 @@ class UniversalWindow(QMainWindow):
 
         from .deep_inspector_panel import OverviewInspectorPanel
         self.deep_inspector_panel = OverviewInspectorPanel(self)
+        self.investigation_graph_panel = self.deep_inspector_panel.investigation_graph_panel
+        self.investigation_graph_panel.closed.connect(self._investigation_graph_closed)
         self.deep_inspector_toggle = _button("DEEP INSPECTION")
         self.deep_inspector_toggle.setObjectName("deepInspectionToggle")
         self.deep_inspector_toggle.setCheckable(True)
@@ -603,6 +609,7 @@ class UniversalWindow(QMainWindow):
         page, content = _page()
         from .evidence_panels import EvidencePanel
         self.events_panel=EvidencePanel(self,events=True);self.events_panel.range_requested.connect(self._view_evidence_range)
+        self.events_panel.investigate_requested.connect(self._open_graph_investigation)
         content.addWidget(self.events_panel)
         content.addWidget(_label("WINDOWS / EVENT VIEWER", "eyebrow", False))
         frame = WindowPanel("Session timeline", "LATEST FIRST")
@@ -797,6 +804,7 @@ class UniversalWindow(QMainWindow):
         self.marker_panel=MarkerPanel(self);content.addWidget(self.marker_panel)
         from .evidence_panels import EvidencePanel
         self.analysis_panel=EvidencePanel(self);self.analysis_panel.range_requested.connect(self._view_evidence_range)
+        self.analysis_panel.investigate_requested.connect(self._open_graph_investigation)
         content.insertWidget(1,self.analysis_panel)
         self.library_panel=LibraryPanel(self)
         self.library_toggle=_button("SAVED RESEARCH / EXPERIMENT LIBRARY")
@@ -2302,6 +2310,22 @@ class UniversalWindow(QMainWindow):
         if page and page.is_file() and not page.is_symlink():
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(page)))
 
+    def _open_graph_investigation(self, context) -> None:
+        if not isinstance(context, dict):
+            return
+        self.deep_inspector_toggle.setChecked(True)
+        self._navigate("dashboard")
+        self.investigation_graph_panel.open_case_context(context.get("sources"),
+            incident_id=context.get("incident_id"), selection=context.get("selection"))
+        scroll = self.stack.currentWidget()
+        if hasattr(scroll, "ensureWidgetVisible"):
+            scroll.ensureWidgetVisible(self.investigation_graph_panel.heading)
+
+    def _investigation_graph_closed(self):
+        if self._graph_close_pending:
+            self._graph_close_pending = False
+            QTimer.singleShot(0, self.close)
+
     def _update_event_table(self) -> None:
         events = list(reversed(self.probe.events))
         self.event_table.setRowCount(len(events))
@@ -2449,6 +2473,11 @@ class UniversalWindow(QMainWindow):
         QMessageBox.warning(self, "BLACK.BOX — RECOVERY_UNCONFIRMED", message)
 
     def closeEvent(self, event) -> None:
+        if hasattr(self, "investigation_graph_panel") and self.investigation_graph_panel.bridge.busy:
+            self._graph_close_pending = True
+            self.investigation_graph_panel.cancel_for_window_close()
+            event.ignore()
+            return
         if (hasattr(self, 'deep_inspector_panel') and not self._deep_close_complete
                 and self.deep_inspector_panel.bridge.has_session):
             self._pending_close = True

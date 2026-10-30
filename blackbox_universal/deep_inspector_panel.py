@@ -244,6 +244,7 @@ class OverviewInspectorPanel(QWidget):
         self.end_admin_button = self._button(common, "end_admin", "End administrator session", "Завершить сеанс администратора", self.bridge.end_admin)
         self._button(common, "retry_cleanup", "Retry diagnostic cleanup", "Повторить завершение диагностики", self.bridge.retry_cleanup)
         self._button(common, "profiling", "Profiling / EventPipe / ETW…", "Профилирование / EventPipe / ETW…", self._open_profiling)
+        self._button(common, "investigate_problem", "INVESTIGATE PROBLEM", "ИССЛЕДОВАТЬ ПРОБЛЕМУ", self._toggle_investigation)
         layout.addLayout(common)
         self.elevate_button = QPushButton()
         self._translated(self.elevate_button, "REQUEST ADMINISTRATOR PERMISSION…", "ЗАПРОСИТЬ ПРАВА АДМИНИСТРАТОРА…")
@@ -301,6 +302,25 @@ class OverviewInspectorPanel(QWidget):
             "Memory and dump contents stay local and are excluded from the ordinary action-journal export. Historical trace events do not establish a link to a live process by PID alone.",
             "Содержимое памяти и дампов остаётся локальным и не входит в обычный экспорт журнала действий. Один PID не доказывает связь событий старой трассы с живым процессом.")
         layout.addWidget(self.privacy)
+        from .investigation_graph_panel import InvestigationGraphPanel
+        self.investigation_graph_panel = InvestigationGraphPanel(self.window, self)
+        self.investigation_graph_panel.hide()
+        layout.addWidget(self.investigation_graph_panel)
+
+    def _toggle_investigation(self):
+        panel = self.investigation_graph_panel
+        if panel.isVisible():
+            panel.hide()
+        else:
+            panel.open_case_context()
+
+    def request_investigation_action(self, operation, parameters=None, *, tag=""):
+        """Use the original consent/UAC/identity path for a manually chosen step."""
+        return self._request(operation, parameters, tag=tag)
+
+    def request_investigation_elevation(self):
+        """Keep the exact-target scope explanation and real UAC in its original owner."""
+        self._elevate()
 
     def _build_stack_frames(self, layout):
         self.stack_source_label = _plain_label()
@@ -1153,6 +1173,8 @@ class OverviewInspectorPanel(QWidget):
         available = self.bridge.target is not None and not self.bridge.busy
         for key, button in self._action_buttons.items():
             button.setEnabled(available)
+        # Saved evidence does not require a live process or administrator helper.
+        self._action_buttons["investigate_problem"].setEnabled(True)
         cleanup_required = bool(getattr(self.bridge, "cleanup_required", False))
         self.cancel_button.setEnabled(self.bridge.busy and not cleanup_required)
         self._action_buttons["retry_cleanup"].setEnabled(cleanup_required and getattr(self.bridge, "worker", None) is None)
@@ -1186,6 +1208,7 @@ class OverviewInspectorPanel(QWidget):
         if self._last_result:
             self._render_operation_status(self._last_result)
         self._section_changed()
+        self.investigation_graph_panel.retranslate()
 
     def shutdown(self):
         self.bridge.shutdown()
