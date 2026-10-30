@@ -520,9 +520,16 @@ def run(args):
                     "INV_SERVICE_CONSTRUCTED_ON_GUI_THREAD_OR_DUPLICATED")
             helper_process = psutil.Process(services[0][0].helper_pid)
             before_close = oracle_call(probe.state)
+            require(not panel.bridge.busy and panel.bridge.worker is None,
+                    "INV_READ_WORKER_STILL_ACTIVE_BEFORE_NORMAL_CLOSE")
+            phase("NORMAL_CLOSE_NATIVE_RECOVERY_AND_READER_IDLE_POSTCONDITIONS")
             window.close()
-            pump_until(lambda: bool(deep_closed) and bool(graph_closed) and not deep.bridge.has_session and
-                       not window.isVisible(), timeout=60)
+            # MainWindow requests a reader cancellation acknowledgement only
+            # when a read is active. An idle reader owns no native session and
+            # intentionally remains reusable if diagnostic recovery refuses a
+            # close. Verify its finished-worker state, not a nonexistent ack.
+            pump_until(lambda: bool(deep_closed) and panel.bridge.worker is None and
+                       not deep.bridge.has_session and not window.isVisible(), timeout=60)
             require(deep_closed[-1].get("status") == "COMPLETED" and not helper_process.is_running(),
                     "INV_CLOSE_LEFT_HELPER_OR_UNCONFIRMED_RECOVERY")
             require(not window.probe.alive and window.probe.process.exitCode() == 0 and
@@ -533,7 +540,9 @@ def run(args):
             oracle_call(probe.progress, before_close)
             proof["native_close"] = {"diagnostic": journal_metadata(deep_closed[-1]),
                 "helper_exit_verified": True, "observer_normal_exit": True,
-                "own_memory_restored_verified": True, "target_survival_verified": True}
+                "own_memory_restored_verified": True, "target_survival_verified": True,
+                "reader_worker_idle_before_and_after_close": True,
+                "reader_cancel_ack_required": False, "reader_cancel_ack_observed": bool(graph_closed)}
             assert_sources_unchanged(input_hashes)
             require(pulse_state["ticks"] >= 5 and pulse_state["max_gap_seconds"] < 2,
                     "INV_GUI_EVENT_LOOP_RESPONSIVENESS_NOT_CONFIRMED")
