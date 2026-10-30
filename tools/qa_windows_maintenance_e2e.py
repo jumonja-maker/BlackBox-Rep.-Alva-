@@ -1,4 +1,4 @@
-"""Real Windows portable v0.5.2 -> next build -> uninstall acceptance probe.
+"""Real Windows portable pinned official release -> candidate -> uninstall probe.
 
 Only runs on disposable GitHub-hosted Windows runners. Never operates on the
 user's machine or any preexisting installation. Source and old official
@@ -40,6 +40,21 @@ OLD_RELEASE = Release(
     "6b1dff327e33f4b30a2a72b0c904c278b9c28d9e3ab43ada050a3e8b8d707c16",
     "https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/releases/tag/v0.5.2",
 )
+
+
+# Also accept the actual v0.5.3 base of BB-INV-003. Both baseline assets are
+# immutable pins; no latest-release lookup or caller-provided digest is trusted.
+BASELINE_RELEASES = {
+    "v0.5.2": OLD_RELEASE,
+    "v0.5.3": Release(
+        "v0.5.3",
+        "https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/releases/"
+        "download/v0.5.3/BLACK.BOX-Universal-Windows.zip",
+        113750541,
+        "7045b8f0e86b2279e36fd0fe87f9f33956375bb5738c14b7ac4a4aa72f49c543",
+        "https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/releases/tag/v0.5.3",
+    ),
+}
 
 
 class QaFailure(RuntimeError):
@@ -107,7 +122,11 @@ def _terminate_apps(exe_path: Path):
             proc.wait(timeout=10)
 
 
-def acceptance(built_zip: Path, source_sha: str, evidence: Path):
+def acceptance(built_zip: Path, source_sha: str, evidence: Path, *,
+               baseline_release: str = "v0.5.2"):
+    from blackbox_universal import __version__
+    old_release = BASELINE_RELEASES[baseline_release]
+    candidate_version = "v" + __version__
     require(os.name == "nt" and os.environ.get("GITHUB_ACTIONS") == "true"
             and os.environ.get("RUNNER_TEMP"),
             "DISPOSABLE_GITHUB_WINDOWS_RUNNER_REQUIRED")
@@ -122,7 +141,7 @@ def acceptance(built_zip: Path, source_sha: str, evidence: Path):
             "QA_SOURCE_SHA_INVALID")
     report = {
         "result": "RUNNING", "source_sha": source_sha,
-        "old_version": "v0.5.2", "new_version": "v0.5.3",
+        "old_version": old_release.version, "new_version": candidate_version,
         "candidate_sha256": sha256(built_zip),
         "profile": "GITHUB_HOSTED_WINDOWS_ISOLATED_PORTABLE",
         "real_official_old_release_digest_pinned": True,
@@ -135,9 +154,7 @@ def acceptance(built_zip: Path, source_sha: str, evidence: Path):
     desktop_link = None
     new_helper_scratch = None
     try:
-        from blackbox_universal import __version__
-        require(__version__ == "0.5.3", "CANDIDATE_VERSION_NOT_BUMPED")
-        require(version_tuple("v0.5.3") > version_tuple("v0.5.2"),
+        require(version_tuple(candidate_version) > version_tuple(old_release.version),
                 "CANDIDATE_NOT_NEWER_THAN_INSTALLED")
         with tempfile.TemporaryDirectory(prefix="bb-native-maint-", dir=str(runner)) as tmp:
             root = Path(tmp)
@@ -166,7 +183,7 @@ def acceptance(built_zip: Path, source_sha: str, evidence: Path):
 
             # Real published archive: official URL, pinned size, SHA-256,
             # full production ZIP extractor; no mock or invented old install.
-            old_stage = stage_release(OLD_RELEASE, install)
+            old_stage = stage_release(old_release, install)
             require(_safe_install(old_stage) == old_stage,
                     "OLD_STAGED_INSTALL_INVALID")
             old_stage.replace(install)
@@ -185,9 +202,9 @@ def acceptance(built_zip: Path, source_sha: str, evidence: Path):
             (install / "obsolete-application-file.bin").write_bytes(b"old_only")
 
             # Stage THE SAME candidate ZIP that Windows CI would publish.
-            # Offline _open substitution does not imply a published v0.5.3
+            # Offline _open substitution does not imply a published candidate
             # release; the public GitHub metadata/asset does not exist yet.
-            new_release = Release("v0.5.3", "qa://verified-candidate",
+            new_release = Release(candidate_version, "qa://verified-candidate",
                                   built_zip.stat().st_size,
                                   report["candidate_sha256"],
                                   "qa://unpublished-candidate")
@@ -427,8 +444,11 @@ def main(argv=None):
     parser.add_argument("--built-zip", type=Path, required=True)
     parser.add_argument("--expected-sha", required=True)
     parser.add_argument("--evidence", type=Path, required=True)
+    parser.add_argument("--baseline-release", choices=tuple(BASELINE_RELEASES),
+                        default="v0.5.2")
     args = parser.parse_args(argv)
-    acceptance(args.built_zip, args.expected_sha, args.evidence)
+    acceptance(args.built_zip, args.expected_sha, args.evidence,
+               baseline_release=args.baseline_release)
     print("REAL_WINDOWS_PORTABLE_UPDATE_AND_UNINSTALL " +
           json.dumps({"result": "PASS", "source": args.expected_sha},
                      ensure_ascii=True), flush=True)
