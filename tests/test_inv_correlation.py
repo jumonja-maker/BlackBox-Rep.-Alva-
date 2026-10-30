@@ -31,6 +31,47 @@ def make(src, record, kind="MEASUREMENT", *, metadata=None, identity=None,
 
 
 class EvidenceCorrelationContracts(unittest.TestCase):
+    def test_exact_trace_lifetimes_reject_contradictory_pid_and_tid_labels(self):
+        src = source()
+        first = make(src, "first")
+        second = make(src, "second", identity={**trace_process(src), "pid": 456})
+        with self.assertRaisesRegex(InvestigationError, "CONTRADICTORY_TRACE_PROCESS_PID"):
+            build_graph({"sources": [src], "nodes": [first, second]})
+        thread = {**trace_process(src), "kind": "TRACE_THREAD", "thread_instance": 7, "tid": 77}
+        first = make(src, "first", thread=thread)
+        second = make(src, "second", thread={**thread, "tid": 88})
+        with self.assertRaisesRegex(InvestigationError, "CONTRADICTORY_TRACE_THREAD_TID"):
+            build_graph({"sources": [src], "nodes": [first, second]})
+
+    def test_trace_label_types_and_parent_pid_are_checked_without_guessing_unknowns(self):
+        src = source()
+        for label in (True, "123", 1.5, 2**32):
+            with self.subTest(label=label), self.assertRaisesRegex(InvestigationError, "TRACE_PROCESS_PID"):
+                build_graph({"sources": [src], "nodes": [make(src, "one", identity={**trace_process(src), "pid": label})]})
+        thread = {**trace_process(src), "kind": "TRACE_THREAD", "thread_instance": 7, "tid": 0}
+        for label in (True, "7", 1.5, 2**32):
+            with self.subTest(label=label), self.assertRaisesRegex(InvestigationError, "TRACE_THREAD_PID_OR_TID"):
+                build_graph({"sources": [src], "nodes": [make(src, "one", thread={**thread, "tid": label})]})
+        with self.assertRaisesRegex(InvestigationError, "CONFLICTING_THREAD_PROCESS_PID"):
+            build_graph({"sources": [src], "nodes": [make(src, "one", thread={**thread, "pid": 456})]})
+        # -1 denotes an unknown label; zero is retained as an actual Idle label.
+        unknown = make(src, "unknown", identity={**trace_process(src), "pid": -1})
+        idle = make(src, "idle", identity={**trace_process(src), "pid": 0},
+                    thread={**thread, "pid": 0, "tid": 0})
+        build_graph({"sources": [src], "nodes": [unknown, idle]})
+        with self.assertRaisesRegex(InvestigationError, "CONTRADICTORY_TRACE_PROCESS_PID"):
+            build_graph({"sources": [src], "nodes": [idle, make(src, "positive")]})
+
+    def test_scheduler_participants_are_independent_but_keep_consistent_lifetime_labels(self):
+        src = source()
+        participant = {"pid": 456, "tid": 88, "process_instance": 2, "thread_instance": 8,
+                       "attribution": "TRACELOG_THREAD_LIFETIME"}
+        event = make(src, "ready", "SCHEDULER_EVENT", metadata={"thread_schedule": {"kind": "ready", "ready_thread": participant}})
+        build_graph({"sources": [src], "nodes": [event]})
+        contrary = make(src, "contrary", identity={**trace_process(src, 2), "pid": 789})
+        with self.assertRaisesRegex(InvestigationError, "CONTRADICTORY_TRACE_PROCESS_PID"):
+            build_graph({"sources": [src], "nodes": [event, contrary]})
+
     def test_same_pid_and_trace_index_from_other_trace_never_join(self):
         a, b = source(), source("other")
         case = build_graph({"sources": [a, b], "nodes": [make(a, "a", "PROCESS"), make(b, "b", "PROCESS")]})

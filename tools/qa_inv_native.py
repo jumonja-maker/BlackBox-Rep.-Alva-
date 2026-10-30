@@ -392,9 +392,13 @@ def run(args):
         # gap while exercising the independently captured thread/stack path.
         gui_sources = [{"source_type": "EVENTS_JSONL",
             "path": str(file_runs[0][3] / "application-events.jsonl")}, *e_sources]
+        preflight_started, preflight_cpu = time.monotonic(), time.thread_time()
         gui_preflight = create_investigation(gui_sources, budget={**budget, "timeout_seconds": 120},
             index_path=output / "case-gui-preflight.sqlite3")
         proof["cases"]["H_composed_source_preflight"] = inspect_case(gui_preflight)
+        proof["cases"]["H_composed_source_preflight"].update(
+            wall_seconds=time.monotonic() - preflight_started,
+            thread_cpu_seconds=time.thread_time() - preflight_cpu, timeout_seconds=120)
         save(output / "gui-sources.json", {
             "sources": gui_sources,
             "historical_case": case_e, "source_target": target.to_dict(),

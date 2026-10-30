@@ -4,7 +4,7 @@ from __future__ import annotations
 import re
 
 from .evidence_correlation import (bounds, correlate_evidence, process_identity_key,
-                                   thread_identity_key)
+                                   thread_identity_key, validate_trace_identity_consistency)
 from .investigation_graph_contracts import (ALGORITHM_VERSION, HYPOTHESIS_STATUSES, OBSERVATION_TYPES, RELATION_TYPES,
     SCHEMA, SOURCE_TYPES, InvestigationError, finite_number, stable_id, use_budget)
 
@@ -228,6 +228,7 @@ def validate_case(case, *, budget=None):
         if node["node_id"] in indexed:
             raise InvestigationError("DUPLICATE_EVIDENCE_NODE_ID")
         indexed[node["node_id"]] = node
+    validate_trace_identity_consistency(nodes, budget=budget)
     if "source_ids" in case and case["source_ids"] != sorted(sources):
         raise InvestigationError("CASE_SOURCE_IDS_MISMATCH")
     if "source_selections" in case and case["source_selections"] != [
@@ -354,6 +355,7 @@ def build_graph(normalized, *, target_identity=None, scenario=None, app_identity
         if previous is not None and previous != node:
             raise InvestigationError("CONFLICTING_EVIDENCE_NODE_ID")
         unique[node["node_id"]] = node
+    validate_trace_identity_consistency(raw_nodes, budget=budget)
     ordered = sorted(unique.values(), key=lambda node: node["node_id"])
     shown = ordered[:budget.max_nodes]
     omitted = max(0, len(ordered) - len(shown))

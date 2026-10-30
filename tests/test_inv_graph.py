@@ -81,6 +81,14 @@ class EvidenceGraphContracts(unittest.TestCase):
             self.assertEqual(first["case_id"], copied["case_id"])
             self.assertEqual(first["nodes"], copied["nodes"])
             self.assertEqual(first["source_selections"][0]["selection"], first_filter)
+            # Decoder schema validation accepts the rows individually. A
+            # contradictory global lifetime must still refuse graph publication.
+            rows[1]["process_instance"] = rows[0]["process_instance"]
+            interchange.write_text("".join(json.dumps(row) + "\n" for row in records), encoding="utf-8")
+            contradictory = root / "contradictory.sqlite3"
+            build_index(interchange, contradictory, input_sha256="a" * 64, format_name=".etl")
+            with self.assertRaisesRegex(InvestigationError, "CONTRADICTORY_TRACE_PROCESS_PID"):
+                selected(contradictory, {})
 
     def test_filetime_difference_never_makes_exact_process_link(self):
         raw = self.normalized()

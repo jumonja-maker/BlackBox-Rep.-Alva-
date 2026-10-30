@@ -52,7 +52,7 @@ def run(args):
         "requested_dpi_scale": os.environ.get("QT_SCALE_FACTOR", "1"),
         "layout_only": args.layout_only, "confirmations": [], "unexpected_dialogs": [],
         "native_steps": [], "sections": [], "screenshots": []}
-    app = window = probe = pulse = dialog_timer = executor = None
+    app = window = probe = pulse = dialog_timer = executor = worker_measurement_patch = None
     deep_closed, graph_closed, native_results, services = [], [], [], []
     dialog_plan = {"operation": None, "decision": None, "answered": False}
     context_plan = {"pending": False, "answered": False}
@@ -66,13 +66,17 @@ def run(args):
         save(output / "gui-investigation-qa.json", proof)
         print("INV_GUI_PHASE " + name, flush=True)
 
-    def pump_until(predicate, *, timeout=90):
+    def pump_until(predicate, *, timeout=90, check_reader_errors=True):
         deadline = time.monotonic() + timeout
         while not predicate() and time.monotonic() < deadline:
             app.processEvents()
-            QTest.qWait(5)
+            # QtTest.qWait can retain the Python GIL while waiting inside
+            # its C++ binding. A CPU-bound reader needs the same opportunity
+            # to run that QApplication.exec normally gives it. Python sleep
+            # explicitly releases the GIL; the GUI is pumped every 5 ms.
+            time.sleep(.005)
             errors = proof.get("reader_errors", [])
-            if window is None or not window.investigation_graph_panel._closing:
+            if check_reader_errors:
                 require(not errors, "INV_GUI_READ_WORKER_FAILED_" + (errors[-1]["error"] if errors else ""))
         app.processEvents()
         if window is not None:
@@ -178,6 +182,26 @@ def run(args):
         app = QApplication.instance() or QApplication([])
         app.setQuitOnLastWindowClosed(False)
         set_retro_theme(app)
+        from blackbox_universal.investigation_graph_bridge import InvestigationGraphWorker
+        actual_worker_run = InvestigationGraphWorker.run
+        proof["reader_timing"] = []
+        proof["qa_pump"] = "QT_PROCESS_EVENTS_AND_EXPLICIT_PYTHON_GIL_RELEASE_5_MS"
+        def measured_worker_run(worker):
+            started, cpu_started = time.monotonic(), time.thread_time()
+            process_started = time.process_time()
+            try:
+                return actual_worker_run(worker)
+            finally:
+                proof["reader_timing"].append({"operation": worker.operation,
+                    "native_thread_id": threading.get_native_id(),
+                    "wall_seconds": time.monotonic() - started,
+                    "thread_cpu_seconds": time.thread_time() - cpu_started,
+                    "process_cpu_seconds": time.process_time() - process_started,
+                    "actual_worker_delegated_unchanged": True})
+        # Observation only: the original worker opens and analyzes the actual
+        # sources, emits its original results and keeps its original budget.
+        worker_measurement_patch = patch.object(InvestigationGraphWorker, "run", measured_worker_run)
+        worker_measurement_patch.start()
         window = DecoderWindow(isolated=True, output_root=output / "sessions", allow_update_check=False)
         window.resize(1330, 850)
         window._set_language("EN")
@@ -217,8 +241,10 @@ def run(args):
         pulse.timeout.connect(tick)
         pulse.start()
         phase("ACTUAL_QT_BUILD_AND_SOURCE_NAVIGATION")
+        initial_build_started = time.monotonic()
         click(panel.build_button)
         pump_until(lambda: panel.case is not None and panel.bridge.worker is None, timeout=180)
+        proof["initial_build_elapsed_seconds"] = time.monotonic() - initial_build_started
         graph_facts(panel.case)
         proof["graph"] = {"case_id": panel.case["case_id"], "nodes": len(panel.case["nodes"]),
                           "edges": len(panel.case["edges"]), "coverage": panel.case["coverage"]}
@@ -521,7 +547,8 @@ def run(args):
         if window is not None:
             try:
                 window.close()
-                pump_until(lambda: not window.deep_inspector_panel.bridge.has_session and not window.isVisible(), timeout=45)
+                pump_until(lambda: not window.deep_inspector_panel.bridge.has_session and not window.isVisible(),
+                           timeout=45, check_reader_errors=False)
             except BaseException as error:
                 successful = False
                 proof["cleanup_error"] = str(error)[:1000]
@@ -530,6 +557,8 @@ def run(args):
                 timer.stop()
         if executor is not None:
             executor.shutdown(wait=True, cancel_futures=True)
+        if worker_measurement_patch is not None:
+            worker_measurement_patch.stop()
         if probe is not None:
             try:
                 proof["target_cleanup"] = probe.close(kill=not successful)

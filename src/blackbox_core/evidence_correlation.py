@@ -33,6 +33,8 @@ def process_identity_key(identity):
         trace = identity.get("trace_sha256")
         if type(trace) is not str or not _SHA.fullmatch(trace) or not _int(identity.get("process_instance")):
             raise InvestigationError("INVALID_TRACE_PROCESS_IDENTITY")
+        if "pid" in identity and not _int(identity["pid"], -1, 2**32 - 1):
+            raise InvestigationError("INVALID_TRACE_PROCESS_PID_LABEL")
         return kind, trace, identity["process_instance"]
     if kind in ("SESSION_PROCESS", "UNRESOLVED_PROCESS", "APP_PROCESS"):
         if "pid" in identity and not _int(identity["pid"], -1, 2**32 - 1):
@@ -66,15 +68,63 @@ def thread_identity_key(identity, process_identity=None):
         if (type(trace) is not str or not _SHA.fullmatch(trace) or
                 not _int(identity.get("process_instance")) or not _int(identity.get("thread_instance"))):
             raise InvestigationError("INVALID_TRACE_THREAD_IDENTITY")
+        if any(key in identity and not _int(identity[key], -1, 2**32 - 1) for key in ("pid", "tid")):
+            raise InvestigationError("INVALID_TRACE_THREAD_PID_OR_TID_LABEL")
         parent = process_identity_key(process_identity)
         if parent is not None and parent != ("TRACE_PROCESS", trace, identity["process_instance"]):
             raise InvestigationError("CONFLICTING_THREAD_PROCESS_IDENTITY")
+        if (type(process_identity) is dict and _int(process_identity.get("pid"), 0, 2**32 - 1) and
+                _int(identity.get("pid"), 0, 2**32 - 1) and identity["pid"] != process_identity["pid"]):
+            raise InvestigationError("CONFLICTING_THREAD_PROCESS_PID_LABEL")
         return kind, trace, identity["process_instance"], identity["thread_instance"]
     if kind in ("SESSION_THREAD", "UNRESOLVED_THREAD", "APP_THREAD"):
         if "tid" in identity and not _int(identity["tid"], -1, 2**32 - 1):
             raise InvestigationError("INVALID_SCOPED_THREAD_IDENTITY")
         return None
     raise InvestigationError("UNSUPPORTED_THREAD_IDENTITY_KIND")
+
+
+def validate_trace_identity_consistency(nodes, *, budget):
+    """Reject contradictory labels on exact trace lifetime indices in O(n)."""
+    process_labels, thread_labels = {}, {}
+    def register(identity, parent=None):
+        if type(identity) is not dict:
+            return
+        kind = identity.get("kind")
+        if kind not in ("TRACE_PROCESS", "TRACE_THREAD"):
+            return
+        key = process_identity_key(identity) if kind == "TRACE_PROCESS" else thread_identity_key(identity, parent)
+        process_key = key[1:3]
+        if _int(identity.get("pid"), 0, 2**32 - 1):
+            previous = process_labels.setdefault(process_key, identity["pid"])
+            if previous != identity["pid"]:
+                raise InvestigationError("CONTRADICTORY_TRACE_PROCESS_PID_LABELS")
+        if kind == "TRACE_THREAD" and _int(identity.get("tid"), 0, 2**32 - 1):
+            previous = thread_labels.setdefault(key[1:], identity["tid"])
+            if previous != identity["tid"]:
+                raise InvestigationError("CONTRADICTORY_TRACE_THREAD_TID_LABELS")
+    for node in nodes:
+        budget.check()
+        process = node.get("process_identity")
+        register(process)
+        register(node.get("thread_identity"), process)
+        # Scheduler participants include independent waker/old/new processes.
+        # Validate their own lifetime labels; never equate them to the header.
+        domain, metadata = node.get("time_domain", ""), node.get("metadata", {})
+        if node.get("source_type") != "TRACE_INDEX" or not domain.startswith("TRACE_RELATIVE:"):
+            continue
+        trace = domain.split(":", 1)[1]
+        if _SHA.fullmatch(trace) is None:
+            continue
+        schedule = metadata.get("thread_schedule")
+        participants = list(schedule.values()) if type(schedule) is dict else []
+        sample = metadata.get("cpu_sample")
+        if type(sample) is dict:
+            participants.append(sample.get("thread"))
+        for raw in participants:
+            if type(raw) is dict and raw.get("attribution") == "TRACELOG_THREAD_LIFETIME":
+                identity = {**raw, "kind": "TRACE_THREAD", "trace_sha256": trace}
+                register(identity)
 
 
 def _local_process_key(node):
@@ -138,6 +188,7 @@ def computed_clock_relation(first_node, second_node, alignment, event_row, *, ta
 def correlate_evidence(nodes, sources, *, clock_relations=(), budget=None):
     """Build O(n log n) identity/reference indices and bounded neighborhoods."""
     budget = use_budget(budget)
+    validate_trace_identity_consistency(nodes, budget=budget)
     indexed = {node["node_id"]: node for node in nodes}
     sources_by_id = {source["source_id"]: source for source in sources}
     edges, edge_ids, gaps = [], set(), []
