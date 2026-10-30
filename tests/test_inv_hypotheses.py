@@ -1,4 +1,7 @@
 """Deterministic interpretation contracts, distinct from native source tests."""
+import json
+from pathlib import Path
+import tempfile
 import unittest
 
 from blackbox_core.hypothesis_engine import generate_hypotheses, record_hypothesis_verdict
@@ -42,6 +45,37 @@ class HypothesisContracts(unittest.TestCase):
         self.assertEqual(file_error["supporting_nodes"], ["app"])
         self.assertFalse(file_error["root_cause_proven"])
         self.assertNotIn("status", etw["metadata"])
+
+    def test_generic_sdk_profile_failure_remains_error_without_file_hypothesis(self):
+        from blackbox_core.evidence_normalization import normalize_sources
+        row = {"schema_version": 1, "token": "FORMAT_FIXTURE_PROFILE_FAILURE", "pid": 40, "tid": 50,
+               "seq": 1, "source_ns": 1000, "source_clock": "PYTHON_PERF_COUNTER_NS",
+               "kind": "profile.failed", "operation_id": None, "parent_id": None,
+               "client_dropped": 0, "attributes": {"status": "ERROR", "error_code": 5}}
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "events.jsonl"
+            path.write_text(json.dumps(row) + "\n", encoding="utf-8")
+            imported = normalize_sources([{"source_type": "EVENTS_JSONL", "path": str(path)}])
+        errors = [item for item in imported["nodes"] if item["observation_type"] == "ERROR"]
+        self.assertEqual(len(errors), 1)
+        self.assertEqual(errors[0]["metadata"]["event_kind"], "profile.failed")
+        hypotheses = generate_hypotheses({"schema": SCHEMA, "case_id": "profile-format-fixture",
+                                           "nodes": imported["nodes"], "edges": []})
+        self.assertNotIn("FILE_OPERATION_ERROR", {item["category"] for item in hypotheses})
+
+    def test_file_tags_require_boundaries_and_preserve_explicit_file_error_support(self):
+        for code in ("profile.failed", "PROFILE_ERROR", "profile.operation_failed", "nofile.error", "filed.failed"):
+            with self.subTest(non_file_code=code):
+                self.assertEqual(generate_hypotheses(case(node("generic", "ERROR", event_kind=code, status="ERROR"))), [])
+        for code in ("FILE_ERROR", "FILE.ERROR", "FILE/ERROR", "FileIO/Read", "FILEIO_ERROR", "io.operation.end",
+                     "incident.file_error", "APP_FILE_ERROR", "app.io.operation.end"):
+            with self.subTest(file_code=code):
+                kind = "INCIDENT" if code.startswith("incident.") else "ERROR"
+                hypotheses = generate_hypotheses(case(node("file", kind, event_kind=code, status="ERROR", error_code=5)))
+                self.assertEqual(len(hypotheses), 1)
+                self.assertEqual(hypotheses[0]["category"], "FILE_OPERATION_ERROR")
+                self.assertEqual(hypotheses[0]["supporting_nodes"], ["file"])
+                self.assertEqual(hypotheses[0]["status"], "SUPPORTED_BY_OBSERVATION")
 
     def test_rss_growth_needs_comparable_adjacent_scoped_samples(self):
         first = node("a", "MEASUREMENT", metrics={"rss_bytes": 100}, series="STANDARD", series_seq=1)

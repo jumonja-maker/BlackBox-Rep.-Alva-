@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
+import re
 
 from .investigation_graph_contracts import (
     SCHEMA, HYPOTHESIS_STATUSES, InvestigationError, canonical_json, finite_number,
@@ -11,6 +12,8 @@ from .investigation_graph_contracts import (
 CATEGORIES = ("HIGH_CPU", "EXECUTION_DELAY", "WAIT_OR_DEADLOCK", "MEMORY_GROWTH",
               "FILE_OPERATION_ERROR", "NETWORK_PROBLEM", "UNEXPECTED_EXIT",
               "UI_UNRESPONSIVE", "DIAGNOSTIC_ACTION_FAILED")
+
+_FILE_TAG = re.compile(r"(?:^|[._/])(?:FILE|FILEIO|IO\.OPERATION)(?=$|[._/])")
 
 _TEXT = {
     "HIGH_CPU": ("Recorded CPU evidence may identify work contributing to the selected incident.",
@@ -93,6 +96,13 @@ def _suffix(codes, wanted):
     return any(code == item or code.endswith("_" + item) for code in codes for item in wanted)
 
 
+def _file_operation_codes(codes):
+    # Match the producer's explicit file tags, never arbitrary words such as
+    # PROFILE. Namespace delimiters preserve incident.file_error and similar
+    # supported tags without treating a generic failure as file activity.
+    return any(_FILE_TAG.search(code) is not None for code in codes)
+
+
 def _error(node):
     for row in _records(node):
         status = str(row.get("status", row.get("result", ""))).upper()
@@ -170,7 +180,7 @@ def generate_hypotheses(case, *, budget=None):
             groups["WAIT_OR_DEADLOCK"].append(node)
         if _suffix(codes, {"RSS_GROWTH", "PRIVATE_GROWTH", "MEMORY_GROWTH"}):
             groups["MEMORY_GROWTH"].append(node)
-        file_kind = kind == "FILE_OPERATION" or any("IO.OPERATION" in code or "FILE" in code for code in codes)
+        file_kind = kind == "FILE_OPERATION" or _file_operation_codes(codes)
         if file_kind and _error(node):
             groups["FILE_OPERATION_ERROR"].append(node)
         if kind == "NETWORK_OPERATION" or _suffix(codes, {"NETWORK_ERROR", "NETWORK_TIMEOUT"}):
