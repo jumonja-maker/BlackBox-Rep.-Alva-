@@ -1,5 +1,23 @@
 # BLACK.BOX independent engineering rules
 
+## BB-INV-003 patch (2026-10-30)
+
+- Work in `patch/bb-inv-003` from released v0.5.3 commit
+  `dafa9cdb4b0f4766fc8cd2d5fd0d43579459e485`; keep earlier decoder/Deep history.
+- Implement the owner's BB-INV-003 as a bounded read-only correlation layer
+  over existing collectors, Investigation Engine 2 and BB-DEEP-001.
+- Preserve six primary pages and the legacy embedding API. Native actions
+  retain the existing helper, explicit confirmation, UAC scope and lifecycle.
+- Run every application test/build exclusively on GitHub-hosted runners using
+  isolated `bb-inv-qa.yml`. Local source review, edits, Git, document creation
+  and read-only artifact analysis are allowed; no local application/test runs.
+- No mandatory repeat of 5h30 unless actual recording/sampler/helper/resource
+  ownership changes require it. Do not publish, tag or merge main.
+- Deliver one complete technical document with exact patch SHA, PR, actual CI
+  evidence, defects and limitations. No large handoff ZIP is requested.
+- Keep unknown clocks, missing identities, import trust and incomplete sources
+  explicit. Do not infer root cause, lock ownership or a fix from coincidence.
+
 ## BB-DEEP-001 patch (2026-10-29)
 
 - Work in `patch/bb-deep-001`, based on the released v0.5.2 source. Keep the
