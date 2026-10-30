@@ -220,7 +220,7 @@ def run(args):
         QTest.mouseClick(window.deep_inspector_toggle, Qt.MouseButton.LeftButton)
         click(deep._action_buttons["investigate_problem"])
         require(panel.isVisible() and not deep.bridge.has_session, "INV_WORKSPACE_NOT_LAZY")
-        panel.bridge.closed.connect(lambda: graph_closed.append(True))
+        panel.closed.connect(lambda: graph_closed.append(True))
         def reader_result(operation, _packet, error, generation):
             if error:
                 proof.setdefault("reader_errors", []).append({"operation": operation, "error": error,
