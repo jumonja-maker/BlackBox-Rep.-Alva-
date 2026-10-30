@@ -285,7 +285,8 @@ class NormalizationContracts(unittest.TestCase):
             summary.pop("input_sha256")
             db.execute("UPDATE metadata SET value=? WHERE key='summary'", (json.dumps(summary),))
             db.commit()
-        with self.assertRaisesRegex(ValueError, "TRACE_SUMMARY"):
+        # The existing decoder rejects this metadata before adapter projection.
+        with self.assertRaisesRegex(ValueError, "^INVALID_INDEX_SUMMARY$"):
             normal.normalize_sources([{"source_type": "TRACE_INDEX", "path": path}])
 
     def test_untyped_middle_switch_withholds_running_completeness(self):
@@ -350,6 +351,38 @@ class NormalizationContracts(unittest.TestCase):
         self.assertNotEqual(process["time_domain"], research["time_domain"])
         self.assertTrue(research["time_domain"].startswith("RESEARCH_MONOTONIC:"))
         self.assertEqual(result["sources"][0]["research_session_clock_alignment"], "NOT_ESTABLISHED")
+
+    def test_session_reader_is_pinned_and_optional_source_appearance_is_refused(self):
+        from blackbox_core.session_view import SchemaV1Reader
+        folder = self.root / "legacy-race"
+        folder.mkdir()
+        with closing(sqlite3.connect(folder / "session.sqlite3")) as db:
+            db.executescript("""
+                CREATE TABLE metadata(schema_version INTEGER, session_id TEXT, pid INTEGER,
+                    started_utc TEXT, ended_utc TEXT, exit_code TEXT, probe TEXT);
+                CREATE TABLE samples(seq INTEGER PRIMARY KEY,elapsed_ms INTEGER,rss_bytes INTEGER,
+                    cpu_percent REAL,num_threads INTEGER,read_bytes INTEGER,write_bytes INTEGER,children_count INTEGER);
+                INSERT INTO metadata VALUES(1,'SYNTHETIC_LEGACY',123,'2026-01-01',NULL,'COMPLETED','FIXTURE');
+                INSERT INTO samples VALUES(1,0,100,1.,1,0,0,0);
+            """)
+        second = self.root / "valid-v2"
+        second.mkdir()
+        writer = SessionV2Writer(second, pid=456, created=2., name="UNHASHED_NEW_SOURCE", origin_ns=1_000_000_000)
+        writer.finish("COMPLETED")
+        opened = []
+        def late_v2(path, **kwargs):
+            opened.append(path.name)
+            shutil.copyfile(second / "session-v2.sqlite3", folder / "session-v2.sqlite3")
+            return SchemaV1Reader(path, **kwargs)
+        with patch("blackbox_core.session_view.SchemaV1Reader", side_effect=late_v2):
+            with self.assertRaisesRegex(ValueError, "^SOURCE_CHANGED$"):
+                normal.normalize_sources([{"source_type": "SESSION", "path": folder}])
+        self.assertEqual(opened, ["session.sqlite3"])
+        (folder / "session-v2.sqlite3").unlink()
+        normalized = normal.normalize_sources([{"source_type": "SESSION", "path": folder}])
+        (folder / "research.sqlite3").write_bytes(b"NEW_OPTIONAL_SOURCE")
+        with self.assertRaisesRegex(ValueError, "^SOURCE_CHANGED$"):
+            normal.revalidate_sources(normalized)
 
 
 if __name__ == "__main__":

@@ -148,12 +148,14 @@ def _hash_file(path, budget):
 
 
 class _StableSource:
-    def __init__(self, paths, budget):
+    def __init__(self, paths, budget, *, absent_paths=()):
         self._origin = _SOURCE_RECEIPT_ORIGIN
         self.paths = [safe_path(Path(path)) for path in paths]
         self.budget = budget
+        self.absent_paths = [safe_path(Path(path)) for path in absent_paths]
         self.stamps = {}
         self.hashes = {}
+        self._verify_absent()
         for path in self.paths:
             budget.check()
             _require(path.is_file() and 0 < path.stat().st_size <= budget.max_source_bytes,
@@ -163,9 +165,20 @@ class _StableSource:
             self.hashes[path] = _hash_file(path, budget)
             _check_wal(path)
             _require(_stamp(path) == self.stamps[path], "SOURCE_CHANGED")
+        self._verify_absent()
+
+    def _verify_absent(self):
+        for path in self.absent_paths:
+            self.budget.check()
+            try:
+                safe_path(path)
+            except ValueError as error:
+                raise InvestigationError("SOURCE_CHANGED") from error
+            _require(not path.exists(), "SOURCE_CHANGED")
 
     def verify(self):
         try:
+            self._verify_absent()
             for path in self.paths:
                 self.budget.check()
                 try:
@@ -177,6 +190,7 @@ class _StableSource:
                 digest = _hash_file(path, self.budget)
                 _check_wal(path)
                 _require(_stamp(path) == self.stamps[path] and digest == self.hashes[path], "SOURCE_CHANGED")
+            self._verify_absent()
         except OSError as error:
             raise InvestigationError("SOURCE_CHANGED") from error
 
@@ -940,7 +954,7 @@ def _deep_journal(spec, selection, out):
 
 
 def _session(spec, selection, out):
-    from .session_view import SessionView
+    from .session_view import SessionView, SchemaV1Reader, SchemaV2Reader
     from .investigation_v2 import _persisted_findings
     folder = safe_path(Path(spec["path"]))
     if folder.is_file():
@@ -950,10 +964,13 @@ def _session(spec, selection, out):
     if not main.is_file():
         main = folder / "session.sqlite3"
     paths = [main]
+    absent_paths = [folder / "session-v2.sqlite3"] if main.name == "session.sqlite3" else []
     research = folder / "research.sqlite3"
     if research.is_file():
         paths.append(research)
-    stable = _StableSource(paths, out.budget)
+    else:
+        absent_paths.append(research)
+    stable = _StableSource(paths, out.budget, absent_paths=absent_paths)
     source = _source("SESSION", stable, selection=selection, hash_roles=["session_main", *( ["research"] if len(paths) > 1 else [])])
     domain = "SESSION_MONOTONIC:" + source["source_id"]
     source["time_domain"] = domain
@@ -963,7 +980,16 @@ def _session(spec, selection, out):
     initial_required = {"sessions", "targets", "samples", "process_instances", "events", "incidents", "thread_samples", "sensor_errors", "capabilities"} if main.name == "session-v2.sqlite3" else {"metadata", "samples"}
     with _readonly(main, out.budget, initial_required):
         pass
-    with SessionView.open(folder, cancel=lambda: _sql_cancel(out.budget), timeout_s=min(30, out.budget.timeout_seconds)) as view:
+    # Pin the existing reader to the exact main file hashed above. Re-running
+    # SessionView.open(folder)'s legacy/v2 discovery could select an unhashed
+    # v2 file created after selection. Receipts also retain optional absence.
+    reader_type = SchemaV2Reader if main.name == "session-v2.sqlite3" else SchemaV1Reader
+    try:
+        reader = reader_type(main, cancel=lambda: _sql_cancel(out.budget), timeout_s=min(30, out.budget.timeout_seconds))
+    except (sqlite3.Error, OSError, KeyError, TypeError, IndexError) as error:
+        out.budget.check()
+        raise InvestigationError("INVALID_OR_UNSUPPORTED_SESSION") from error
+    with SessionView(reader) as view:
         out.budget.check()
         required = {"sessions", "targets", "samples", "process_instances", "events", "incidents", "thread_samples", "sensor_errors"} if view.is_v2 else {"metadata", "samples"}
         _tables(view.db, required)
@@ -1046,7 +1072,7 @@ def _session(spec, selection, out):
                                   "identity_warning": "TID_REUSE_CANNOT_BE_EXCLUDED"})
         source.update(samples_total=total, events_scanned=count, source_closed=view.metadata.get("recorded_status") in ("CLOSED", "COMPLETED", "STOPPED"),
                       scan_complete=out.coverage["events_examined"] < out.budget.max_events)
-    if research.is_file():
+    if research in stable.hashes:
         # CaseBook stamps its own saved monotonic clock. Co-location, matching
         # PID or a repeated floating creation time cannot establish same boot.
         # The current context has no native boot-binding contract suitable for

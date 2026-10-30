@@ -175,13 +175,14 @@ class InvestigationGuiContracts(unittest.TestCase):
     def test_temporal_coincidence_does_not_create_thread_or_stack_navigation(self):
         case = fixture_case()
         case["edges"] = [{"from_node": "n0", "to_node": "n1", "relation_type": "TEMPORAL_COINCIDENCE"},
-                         {"from_node": "n1", "to_node": "n2", "relation_type": "DIRECT_REFERENCE"}]
+                         {"from_node": "n1", "to_node": "n2", "relation_type": "DIRECT_REFERENCE", "relation": "THREAD_STACK"}]
         self.panel.load_case(case)
         self.panel.select_node("n0")
         self.panel.show_thread()
         self.assertEqual(self.panel._selected_node_id, "n0")
         self.assertIn("NOT_ESTABLISHED", self.panel.status.text())
         case["edges"][0]["relation_type"] = "DIRECT_REFERENCE"
+        case["edges"][0]["relation"] = "THREAD_REFERENCE"
         self.panel.show_thread()
         self.assertEqual(self.panel._selected_node_id, "n1")
         self.panel.show_stack()
@@ -210,14 +211,80 @@ class InvestigationGuiContracts(unittest.TestCase):
         case = fixture_case(5)
         case["nodes"][3]["observation_type"] = "MODULE"
         case["nodes"][4]["observation_type"] = "FUNCTION"
-        case["edges"] = [{"from_node": "n2", "to_node": "n3", "relation_type": "DIRECT_REFERENCE"},
-                         {"from_node": "n3", "to_node": "n4", "relation_type": "DIRECT_REFERENCE"}]
+        case["edges"] = [{"from_node": "n2", "to_node": "n3", "relation_type": "DIRECT_REFERENCE", "relation": "MODULE_REFERENCE"},
+                         {"from_node": "n4", "to_node": "n3", "relation_type": "DIRECT_REFERENCE", "relation": "FUNCTION_MODULE"}]
         self.panel.load_case(case)
         self.panel.select_node("n2")
         self.panel.show_module()
         self.assertEqual(self.panel._selected_node_id, "n3")
         self.panel.show_module()
         self.assertEqual(self.panel._selected_node_id, "n4")
+
+    def test_same_process_other_thread_stack_and_module_never_supply_selected_thread(self):
+        case = fixture_case(6)
+        for row, kind in zip(case["nodes"], ("PROCESS", "THREAD", "THREAD", "STACK", "MODULE", "FUNCTION")):
+            row["observation_type"] = kind
+        case["edges"] = [
+            {"from_node": "n0", "to_node": "n1", "relation_type": "EXACT_IDENTITY", "relation": "PROCESS_EVIDENCE"},
+            {"from_node": "n0", "to_node": "n2", "relation_type": "EXACT_IDENTITY", "relation": "PROCESS_EVIDENCE"},
+            {"from_node": "n2", "to_node": "n3", "relation_type": "DIRECT_REFERENCE", "relation": "STACK_REFERENCE"},
+            {"from_node": "n3", "to_node": "n5", "relation_type": "DIRECT_REFERENCE", "relation": "THREAD_STACK"},
+            {"from_node": "n5", "to_node": "n4", "relation_type": "DIRECT_REFERENCE", "relation": "FUNCTION_MODULE"}]
+        self.panel.load_case(case)
+        self.panel.select_node("n1")
+        self.panel.show_stack()
+        self.assertEqual(self.panel._selected_node_id, "n1")
+        self.panel.show_module()
+        self.assertEqual(self.panel._selected_node_id, "n1")
+        self.assertIn("NOT_ESTABLISHED", self.panel.status.text())
+        self.panel.select_node("n2")
+        self.panel.show_stack()
+        self.assertEqual(self.panel._selected_node_id, "n3")
+        self.panel.show_module()
+        self.assertEqual(self.panel._selected_node_id, "n4")
+
+    def test_same_thread_other_snapshot_does_not_replace_missing_observation_stack(self):
+        case = fixture_case()
+        case["nodes"][0]["observation_type"] = "THREAD"
+        case["edges"] = [
+            {"from_node": "n0", "to_node": "n1", "relation_type": "EXACT_IDENTITY", "relation": "THREAD_EVIDENCE"},
+            {"from_node": "n1", "to_node": "n2", "relation_type": "DIRECT_REFERENCE", "relation": "THREAD_STACK"}]
+        self.panel.load_case(case)
+        self.panel.select_node("n0")
+        self.panel.show_stack()
+        self.assertEqual(self.panel._selected_node_id, "n0")
+
+    def test_aligned_trace_navigation_uses_index_digest_not_composite_source_manifest(self):
+        case = fixture_case(1)
+        node = case["nodes"][0]
+        node.update(source_type="TRACE_INDEX", time_bounds={"start": 10, "end": 20, "unit": "ms"},
+                    process_identity={"pid": 234, "process_instance": 17}, thread_identity={"tid": 8})
+        case["sources"] = [{"source_id": "source-a", "source_type": "TRACE_INDEX", "source_file_count": 3,
+            "index_sha256": "a" * 64, "source_sha256": "b" * 64, "trace_sha256": "c" * 64}]
+        case["_source_paths"] = {"source-a": "/SYNTHETIC/aligned-index.sqlite3"}
+        self.window.decoder_panel = SimpleNamespace(open_index_interval=Mock(return_value=True))
+        self.window._navigate = Mock()
+        self.panel.load_case(case)
+        self.panel.select_node("n0")
+        self.assertTrue(self.panel.open_trace_interval())
+        arguments = self.window.decoder_panel.open_index_interval.call_args.kwargs
+        self.assertEqual(arguments["expected_index_sha256"], "a" * 64)
+        self.assertEqual(arguments["expected_trace_sha256"], "c" * 64)
+        self.assertEqual(arguments["process_instance"], 17)
+        del case["sources"][0]["index_sha256"]
+        self.window.decoder_panel.open_index_interval.reset_mock()
+        self.assertFalse(self.panel.open_trace_interval())
+        self.window.decoder_panel.open_index_interval.assert_not_called()
+
+    def test_minidump_source_picker_requests_real_minidump_bytes_not_json(self):
+        with patch("blackbox_universal.investigation_graph_panel.QInputDialog.getItem",
+                   return_value=("Saved minidump (metadata only)", True)), \
+                patch("blackbox_universal.investigation_graph_panel.QFileDialog.getOpenFileName",
+                      return_value=("SYNTHETIC.dmp", "")) as picker:
+            self.panel.choose_source()
+        self.assertIn("*.dmp", picker.call_args.args[3])
+        self.assertNotIn("*.json", picker.call_args.args[3])
+        self.assertEqual(self.panel.sources[0]["source_type"], "DUMP_METADATA")
 
     def test_manual_merge_requires_reason_without_invalid_empty_split_list(self):
         self.panel.load_case(fixture_case())

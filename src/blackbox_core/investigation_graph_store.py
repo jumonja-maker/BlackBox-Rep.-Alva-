@@ -13,6 +13,7 @@ import tempfile
 from .investigation_graph_contracts import SCHEMA, InvestigationError, canonical_json, use_budget
 from .session_v2 import safe_path
 from .deep_journal import _SENSITIVE as _DEEP_SENSITIVE
+from .package_privacy import _text as _private_text
 
 APPLICATION_ID = 0x42424933
 MAX_INDEX_BYTES = 128 * 1024**2
@@ -37,14 +38,22 @@ def public_metadata(value, depth=0):
             if key.startswith("_"):
                 continue
             lowered = key.lower()
+            public_key = _private_text(key, b"blackbox.investigation-graph/1:metadata")
+            if public_key in result:
+                raise InvestigationError("INVESTIGATION_PRIVACY_KEY_COLLISION")
             if lowered in _SECRETS or lowered.endswith(("_password", "_token", "_secret", "_hex", "_bytes_raw")):
-                result[key] = {"omitted": "SENSITIVE_PAYLOAD"}
+                result[public_key] = {"omitted": "SENSITIVE_PAYLOAD"}
             else:
-                result[key] = public_metadata(item, depth + 1)
+                result[public_key] = public_metadata(item, depth + 1)
         return result
     if type(value) in (list, tuple):
         return [public_metadata(item, depth + 1) for item in value]
-    if value is None or type(value) in (str, int, float, bool):
+    if type(value) is str:
+        # Recognizable URLs may contain credentials even under innocuous keys
+        # (for example an SDK network.request URL). Reuse share-copy policy.
+        # A fixed namespace keeps immutable own-index saves deterministic.
+        return _private_text(value, b"blackbox.investigation-graph/1:metadata")
+    if value is None or type(value) in (int, float, bool):
         return value
     raise InvestigationError("INVALID_INVESTIGATION_METADATA_TYPE")
 

@@ -459,7 +459,7 @@ def main():
     parser.add_argument("--evidence-root", required=True, type=Path)
     parser.add_argument("--diagnostic-helper", type=Path)
     parser.add_argument("--probe", type=Path)
-    parser.add_argument("--dpi-scale", choices=("1", "1.5", "2"))
+    parser.add_argument("--dpi-scale", choices=("1", "1.25", "1.5", "2"))
     parser.add_argument("--layout-only", action="store_true")
     return run(parser.parse_args())
 

@@ -12,6 +12,41 @@ import threading
 from PySide6.QtCore import QObject, QThread, Signal
 
 
+def _group_paths(paths):
+    from blackbox_core.investigation_graph_contracts import InvestigationError
+    if (type(paths) is not list or len(paths) > 32 or
+            any(type(path) is not str or not 1 <= len(path) <= 32768 or "\0" in path for path in paths)):
+        raise InvestigationError("INVESTIGATION_GROUP_PATH_BUDGET")
+    return paths
+
+
+def _bounded_group_cases(api, first, paths, budget):
+    """Bound retained input collectively, before keeping each additional case."""
+    from blackbox_core.investigation_graph_contracts import InvestigationError, canonical_json
+    paths = _group_paths(paths)
+    cases, total_bytes, total_nodes = [], 2, 0
+    def retain(case):
+        nonlocal total_bytes, total_nodes
+        budget.check()
+        if type(case) is not dict or type(case.get("nodes")) is not list:
+            raise InvestigationError("INVALID_INVESTIGATION_GROUP_CASE")
+        count = len(case["nodes"])
+        if count > budget.max_events - total_nodes:
+            raise InvestigationError("INVESTIGATION_GROUP_INPUT_NODE_BUDGET")
+        size = len(canonical_json(case).encode("ascii")) + bool(cases)
+        budget.check()
+        if size > budget.max_result_bytes - total_bytes:
+            raise InvestigationError("INVESTIGATION_GROUP_INPUT_BYTE_BUDGET")
+        total_bytes += size
+        total_nodes += count
+        cases.append(case)
+    retain(first)
+    for path in paths:
+        budget.check()
+        retain(api.load_investigation(path, budget=budget))
+    return cases
+
+
 class InvestigationGraphWorker(QThread):
     result_ready = Signal(str, object, str, int)
 
@@ -32,6 +67,10 @@ class InvestigationGraphWorker(QThread):
                 api = self.api
             from blackbox_core.investigation_graph_contracts import InvestigationBudget
             budget = InvestigationBudget(timeout_seconds=120, cancel_event=self.cancel_event)
+            if self.operation == "group":
+                _group_paths(self.arguments.get("other_paths"))
+                # Validate the known bounded starting case before its worker copy.
+                _bounded_group_cases(api, self.arguments.get("case"), [], budget)
             args = deepcopy(self.arguments)  # Potentially large cases are copied here, not on Qt.
             case = args.pop("case", None)
             if self.operation == "build":
@@ -58,11 +97,8 @@ class InvestigationGraphWorker(QThread):
                 other = api.load_investigation(args["other_path"], budget=budget)
                 packet = {"comparison": api.compare_investigations(case, other, budget=budget)}
             elif self.operation == "group":
-                cases = [case]
-                for path in args["other_paths"]:
-                    budget.check()
-                    cases.append(api.load_investigation(path, budget=budget))
-                packet = {"grouping": api.group_recurrent_issues(cases, budget=budget), "cases": cases}
+                cases = _bounded_group_cases(api, case, args["other_paths"], budget)
+                packet = {"grouping": api.group_recurrent_issues(cases, budget=budget)}
             elif self.operation == "group_change":
                 from blackbox_core.issue_grouping import manual_group_change
                 grouping = args.pop("groups")

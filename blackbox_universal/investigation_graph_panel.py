@@ -407,7 +407,7 @@ class InvestigationGraphPanel(QWidget):
             ("DEEP_JOURNAL", "Diagnostic action journal", "Журнал диагностических действий"),
             ("INVESTIGATION_V2", "Investigation Engine 2 JSON", "JSON Investigation Engine 2"),
             ("EVENTS_JSONL", "Recorded application events JSONL", "События приложения JSONL"),
-            ("DUMP_METADATA", "Saved dump metadata JSON", "JSON метаданных дампа")]
+            ("DUMP_METADATA", "Saved minidump (metadata only)", "Сохранённый минидамп (только метаданные)")]
         labels = [self.tr2(en, ru) for _, en, ru in choices]
         selected, ok = QInputDialog.getItem(self, "BLACK.BOX", self.tr2("Evidence source", "Источник доказательств"), labels, 0, False)
         if not ok:
@@ -416,7 +416,8 @@ class InvestigationGraphPanel(QWidget):
         if source_type == "SESSION":
             path = QFileDialog.getExistingDirectory(self, selected)
         else:
-            path, _ = QFileDialog.getOpenFileName(self, selected, "", "Evidence (*.sqlite3 *.sqlite *.db *.json *.jsonl)")
+            filters = "Minidump (*.dmp *.mdmp)" if source_type == "DUMP_METADATA" else "Evidence (*.sqlite3 *.sqlite *.db *.json *.jsonl)"
+            path, _ = QFileDialog.getOpenFileName(self, selected, "", filters)
         if path:
             if len(self.sources) >= 16:
                 self._set_status("At most 16 source descriptors per case.", "Не более 16 источников в расследовании.")
@@ -530,6 +531,7 @@ class InvestigationGraphPanel(QWidget):
         return False
 
     def _linked_node(self, kinds):
+        """Follow typed provenance; a shared process never supplies a stack."""
         node = self._node()
         if node is None:
             return None
@@ -537,15 +539,49 @@ class InvestigationGraphPanel(QWidget):
             return node
         reached, frontier = {node["node_id"]}, {node["node_id"]}
         index = {item["node_id"]: item for item in self.case.get("nodes", [])}
+        purpose = "thread" if kinds == {"THREAD"} else "stack" if kinds == {"STACK"} else "module"
+
+        def permitted(first, second, edge):
+            current, other = index.get(first), index.get(second)
+            if current is None or other is None:
+                return False
+            a, b = current["observation_type"], other["observation_type"]
+            relation, relation_type = edge.get("relation"), edge.get("relation_type")
+            if purpose == "thread":
+                if relation_type == "EXACT_IDENTITY":
+                    return relation == "THREAD_EVIDENCE"
+                return relation_type == "DIRECT_REFERENCE" and (
+                    relation == "THREAD_REFERENCE" and b == "THREAD" or
+                    relation in ("THREAD_STACK", "STACK_REFERENCE") and {a, b} == {"STACK", "THREAD"})
+            if relation_type != "DIRECT_REFERENCE":
+                return False
+            if purpose == "stack":
+                # Only this observation's stack; never walk another snapshot
+                # of the same thread or another thread in the process.
+                if first != node["node_id"] or b != "STACK" or a in ("FUNCTION", "MODULE"):
+                    return False
+                if relation not in ("STACK_REFERENCE", "EVENT_STACK", "THREAD_STACK"):
+                    return False
+                if a == "THREAD":
+                    from blackbox_core.evidence_correlation import thread_identity_key
+                    left = thread_identity_key(current.get("thread_identity"), current.get("process_identity"))
+                    right = thread_identity_key(other.get("thread_identity"), other.get("process_identity"))
+                    if left is not None or right is not None:
+                        return left is not None and left == right
+                return True
+            # Stack frames and their own module are the only symbol route.
+            return (
+                {a, b} == {"STACK", "FUNCTION"} and relation in ("THREAD_STACK", "EVENT_STACK") or
+                {a, b} == {"FUNCTION", "MODULE"} and relation == "FUNCTION_MODULE" or
+                {a, b} == {"STACK", "MODULE"} and relation == "MODULE_REFERENCE")
+
         for _ in range(4):
             following = set()
             for edge in self.case.get("edges", []):
-                if edge.get("relation_type") not in ("EXACT_IDENTITY", "DIRECT_REFERENCE", "OBSERVED_DEPENDENCY"):
-                    continue
                 first, second = edge.get("from_node"), edge.get("to_node")
-                if first in frontier:
+                if first in frontier and permitted(first, second, edge):
                     following.add(second)
-                if second in frontier:
+                if second in frontier and permitted(second, first, edge):
                     following.add(first)
             following -= reached
             for identifier in sorted(following)[:200]:
@@ -568,7 +604,7 @@ class InvestigationGraphPanel(QWidget):
                              "Связь с потоком NOT_ESTABLISHED; изучите источник и соберите идентичность потока.")
 
     def show_stack(self):
-        node = self._linked_node({"STACK", "MODULE", "FUNCTION"})
+        node = self._linked_node({"STACK"})
         if node:
             self.select_node(node["node_id"])
             self.section.setCurrentIndex(self.section.findData("graph"))
@@ -578,7 +614,7 @@ class InvestigationGraphPanel(QWidget):
 
     def show_module(self):
         current = self._node() or {}
-        kinds = {"FUNCTION"} if current.get("observation_type") == "MODULE" else {"MODULE", "FUNCTION"}
+        kinds = {"FUNCTION"} if current.get("observation_type") == "MODULE" else {"MODULE"}
         node = self._linked_node(kinds)
         if node:
             self.select_node(node["node_id"])
@@ -609,7 +645,14 @@ class InvestigationGraphPanel(QWidget):
             import math
             end = math.nextafter(float(end), math.inf)
         source = next((s for s in self.case.get("sources", []) if s.get("source_id") == node["source_identity"]), {})
-        accepted = decoder.open_index_interval(path, expected_index_sha256=source.get("source_sha256"),
+        index_hash = source.get("index_sha256")
+        if not index_hash and source.get("source_file_count") == 1:
+            index_hash = source.get("source_sha256")
+        if not index_hash:
+            self._set_status("Index file identity is missing. Rebuild from the original Trace Decoder index before navigation.",
+                             "Нет идентичности файла индекса. Перестройте граф из исходного индекса Trace Decoder перед переходом.")
+            return False
+        accepted = decoder.open_index_interval(path, expected_index_sha256=index_hash,
             expected_trace_sha256=source.get("trace_sha256"), process_instance=identity.get("process_instance"),
             pid=identity.get("pid"), tid=thread.get("tid"), start_ms=start, end_ms=end)
         if accepted:

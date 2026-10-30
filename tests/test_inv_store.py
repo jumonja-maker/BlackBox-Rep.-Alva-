@@ -130,6 +130,28 @@ class InvestigationStoreContracts(unittest.TestCase):
         self.assertEqual(receipt["sha256"], digest(target))
         self.assertIn("SECRET_PASSWORD", json.dumps(value))  # Original facts were not mutated.
 
+    def test_saved_and_shared_urls_never_leak_query_or_userinfo_secrets(self):
+        value = graph()
+        metadata = value["nodes"][0]["metadata"]
+        url = "https://user:PRIVATE_URL_PASSWORD@example.invalid/?access_token=PRIVATE_URL_TOKEN"
+        metadata["fields"] = {"url": url, "message": "Request failed at " + url,
+                              "https://example.invalid/?secret=PRIVATE_URL_KEY": "recorded"}
+        original = json.dumps(value, sort_keys=True)
+        index = self.root / "urls.sqlite3"
+        store.save_investigation(value, index)
+        loaded = store.load_investigation(index)
+        self.assertIn("PATH_OR_URL_OMITTED", json.dumps(loaded))
+        # Repeat-save stays an identical immutable index after redaction.
+        self.assertEqual(store.save_investigation(value, index)["publication"], "IDENTICAL_EXISTING_INDEX")
+        for kind in ("json", "html"):
+            destination = self.root / ("urls." + kind)
+            store.export_investigation(value, destination, format=kind)
+            text = destination.read_text()
+            for secret in ("PRIVATE_URL_PASSWORD", "PRIVATE_URL_TOKEN", "PRIVATE_URL_KEY"):
+                self.assertNotIn(secret, text)
+                self.assertNotIn(secret, json.dumps(loaded))
+        self.assertEqual(json.dumps(value, sort_keys=True), original)
+
     def test_cancel_after_fsync_before_publication_removes_only_own_temporary_file(self):
         cancelled = threading.Event()
         target = self.root / "case.sqlite3"
