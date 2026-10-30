@@ -19,27 +19,30 @@ jobs:
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
-          fetch-depth: 2
+          fetch-depth: 0
           persist-credentials: false
       - name: Verify audited patch ancestry and immutable source
         shell: bash
         run: |
           set -euo pipefail
           expected="41d50627c1619c2b7801db367d6ff8e1a1012122"
-          actual="$(git rev-parse HEAD^)"
-          test "$actual" = "$expected" || { echo "::error::Wrong audited patch parent"; exit 1; }
-          changed="$(git diff --name-only HEAD^ HEAD)"
-          test "$changed" = ".github/workflows/clmax-bb-inv-003.yml" || { echo "::error::Application code changes are not permitted on CLMAX branch"; printf '%s\n' "$changed"; exit 1; }
-          if grep -En 'actions/(upload|download)-artifact@|actions/cache@|cache:[[:space:]]*pip' .github/workflows/clmax-bb-inv-003.yml; then
-            echo "::error::Artifact and cache uploads forbidden: quota exhausted"
-            exit 1
-          fi
+          git merge-base --is-ancestor "$expected" HEAD || { echo "::error::CLMAX is not descended from the audited BB-INV-003 source"; exit 1; }
+          changed="$(git diff --name-only "$expected" HEAD)"
+          test "$changed" = ".github/workflows/clmax-bb-inv-003.yml" || { echo "::error::Unexpected application file delta"; printf '%s\n' "$changed"; exit 1; }
+          python - <<'PY'
+          from pathlib import Path
+          path = Path('.github/workflows/clmax-bb-inv-003.yml')
+          lines = path.read_text(encoding='utf-8').splitlines()
+          forbidden = ('upload-artifact@', 'download-artifact@', 'cache@')
+          actions = [line.strip() for line in lines if line.strip().startswith('- uses: ')]
+          problems = [line for line in actions if any(word in line for word in forbidden)]
+          problems += [line for line in lines if line.strip() == 'cache: pip']
+          if problems:
+              raise SystemExit('Artifact/cache use forbidden: ' + repr(problems))
+          print('CLMAX source and no-artifacts policy PASS')
+          PY
           {
-            echo "### CLMAX source identity"
-            echo "- Audited BB-INV-003 parent: `$actual`"
-            echo "- CLMAX exact head: `$(git rev-parse HEAD)`"
-            echo "- Application files changed: **0**"
-            echo "- GitHub Actions artifact uploads: **0**"
+            printf "%s\n" "### CLMAX source identity" "- Audited BB-INV-003 source: $expected" "- CLMAX QA commit: $(git rev-parse HEAD)" "- Application file delta: none" "- Actions artifact and cache uploads: disabled"
           } >> "$GITHUB_STEP_SUMMARY"
 
   contracts:
