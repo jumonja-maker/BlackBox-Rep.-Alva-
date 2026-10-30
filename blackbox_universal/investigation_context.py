@@ -29,23 +29,37 @@ def _read_stable(path, budget, *, collect=False):
     selected = selected.resolve(strict=True)
     limit = 16384 if collect else budget.max_source_bytes
     digest, chunks, total = hashlib.sha256(), [], 0
-    with selected.open("rb") as stream:
-        initial = os.fstat(stream.fileno())
+    before = selected.stat()
+    if not stat.S_ISREG(before.st_mode) or before.st_size > limit:
+        raise InvestigationError("CONTEXT_REGULAR_FILE_BYTE_BUDGET")
+    budget.check()
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(selected, flags)
+    try:
+        initial = os.fstat(descriptor)
         if not stat.S_ISREG(initial.st_mode) or initial.st_size > limit:
             raise InvestigationError("CONTEXT_REGULAR_FILE_BYTE_BUDGET")
-        while True:
-            budget.check()
-            data = stream.read(min(1024 * 1024, limit - total + 1))
-            if not data:
-                break
-            total += len(data)
-            if total > limit:
-                raise InvestigationError("CONTEXT_FILE_BYTE_BUDGET")
-            digest.update(data)
-            if collect:
-                chunks.append(data)
-        if _stamp(initial) != _stamp(os.fstat(stream.fileno())) or _stamp(initial) != _stamp(selected.stat()):
-            raise InvestigationError("CONTEXT_FILE_CHANGED_DURING_READ")
+        if _stamp(before) != _stamp(initial):
+            raise InvestigationError("CONTEXT_FILE_CHANGED_DURING_OPEN")
+        stream = os.fdopen(descriptor, "rb")
+        descriptor = None  # The buffered stream owns and closes this descriptor.
+        with stream:
+            while True:
+                budget.check()
+                data = stream.read(min(1024 * 1024, limit - total + 1))
+                if not data:
+                    break
+                total += len(data)
+                if total > limit:
+                    raise InvestigationError("CONTEXT_FILE_BYTE_BUDGET")
+                digest.update(data)
+                if collect:
+                    chunks.append(data)
+            if _stamp(initial) != _stamp(os.fstat(stream.fileno())) or _stamp(initial) != _stamp(selected.stat()):
+                raise InvestigationError("CONTEXT_FILE_CHANGED_DURING_READ")
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
     budget.check()
     return {"sha256": digest.hexdigest(), "size_bytes": total}, b"".join(chunks)
 

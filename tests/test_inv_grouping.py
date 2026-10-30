@@ -201,6 +201,47 @@ class IssueFingerprintContracts(unittest.TestCase):
         self.assertEqual(len(group["first_observations_by_source"][0]["occurrences"]), 2)
         self.assertEqual(group["observations_without_time"], 1)
 
+    def test_same_source_event_in_revised_case_views_is_one_observation_with_alias_history(self):
+        original = case()
+        narrower = deepcopy(original)
+        narrower["case_id"] = stable_id("narrower-view")
+        narrower["sources"][0]["selection"] = {"start_ns": 1, "end_ns": 2}
+        narrower["nodes"] = narrower["nodes"][:1]
+        narrower["coverage"].update(has_more=True, display_graph_complete=False)
+        revision = deepcopy(original)
+        revision["case_id"] = stable_id("context-revision")
+        revision["app_identity"]["version"] = "A-user-revised-label"
+        grouped = group_recurrent_issues([original, narrower, revision])
+        self.assertEqual(len(grouped["groups"]), 1)
+        group = grouped["groups"][0]
+        self.assertEqual(group["occurrence_count"], 1)
+        self.assertEqual(group["case_membership_count"], 3)
+        self.assertEqual(len(group["occurrences"]), 3)
+        self.assertEqual(group["case_ids"], sorted(value["case_id"] for value in (original, narrower, revision)))
+        self.assertEqual(group["versions"], ["A", "A-user-revised-label"])
+        self.assertEqual(len(group["shared_source_record_aliases"]), 1)
+        self.assertEqual(group["frequency"]["unit"], "OBSERVATIONS_VISIBLE_PER_CASE_VIEW")
+        self.assertFalse(group["frequency"]["counts_are_independent_runs"])
+        self.assertEqual(len(group["first_observations_by_source"][0]["occurrences"]), 1)
+        self.assertTrue(all(len(row["shares_source_records_with_case_ids"]) == 2 for row in group["history"]))
+        self.assertEqual(group["independent_run_count"], "NOT_ESTABLISHED_FROM_CASE_IDS")
+
+    def test_independent_sources_remain_two_observations_after_alias_deduplication(self):
+        first, second = case(), case("independent-capture")
+        alias = deepcopy(first)
+        alias["case_id"] = stable_id("alias")
+        group = group_recurrent_issues([first, second, alias])["groups"][0]
+        self.assertEqual(group["occurrence_count"], 2)
+        self.assertEqual(group["case_membership_count"], 3)
+        self.assertEqual(group["source_identity_count"], 2)
+        self.assertEqual(sum(group["frequency"]["per_source_counts"].values()), 2)
+        split = manual_group_change({"groups": [group]}, action="SPLIT", group_ids=[group["group_id"]],
+            case_ids=[alias["case_id"]], reason="Separate the alias case view without changing source records")
+        self.assertEqual(len(split["groups"]), 2)
+        self.assertEqual(sum(row["case_membership_count"] for row in split["groups"]), 3)
+        self.assertTrue(any(row["occurrence_count"] == 1 and row["case_ids"] == [alias["case_id"]]
+                            for row in split["groups"]))
+
 
 class InvestigationComparisonContracts(unittest.TestCase):
     def test_distinct_actual_build_anchors_with_complete_matching_workload_are_comparable(self):

@@ -2,6 +2,7 @@
 from copy import deepcopy
 import hashlib
 import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -68,12 +69,44 @@ class DeclaredContextContracts(unittest.TestCase):
         def change_during_read():
             native_check()
             calls.append(True)
-            if len(calls) == 2:
+            if len(calls) == 3:
                 with self.binary.open("ab") as stream:
                     stream.write(b"CHANGED")
         with patch.object(budget, "check", side_effect=change_during_read), \
                 self.assertRaisesRegex(ValueError, "CONTEXT_FILE_CHANGED_DURING_READ"):
             self.prepare(budget=budget)
+
+    def test_nonregular_context_is_refused_before_opening_any_descriptor(self):
+        with patch("blackbox_universal.investigation_context.os.open") as opener, \
+                self.assertRaisesRegex(ValueError, "CONTEXT_REGULAR_FILE_BYTE_BUDGET"):
+            self.prepare(binary_path=self.temp.name)
+        opener.assert_not_called()
+
+    @unittest.skipUnless(hasattr(os, "mkfifo") and hasattr(os, "O_NONBLOCK"), "POSIX FIFO contract")
+    def test_fifo_context_is_refused_before_opening_any_descriptor(self):
+        fifo = Path(self.temp.name) / "never-open-pipe"
+        os.mkfifo(fifo)
+        with patch("blackbox_universal.investigation_context.os.open") as opener, \
+                self.assertRaisesRegex(ValueError, "CONTEXT_REGULAR_FILE_BYTE_BUDGET"):
+            self.prepare(binary_path=str(fifo))
+        opener.assert_not_called()
+
+    @unittest.skipUnless(hasattr(os, "mkfifo") and hasattr(os, "O_NONBLOCK"), "POSIX FIFO race contract")
+    def test_regular_file_replaced_by_fifo_is_opened_nonblocking_rejected_and_closed(self):
+        native_open, descriptors = os.open, []
+        def replace_then_open(path, flags):
+            self.assertTrue(flags & os.O_NONBLOCK)
+            self.binary.unlink()
+            os.mkfifo(self.binary)
+            descriptor = native_open(path, flags)
+            descriptors.append(descriptor)
+            return descriptor
+        with patch("blackbox_universal.investigation_context.os.open", side_effect=replace_then_open), \
+                self.assertRaisesRegex(ValueError, "CONTEXT_REGULAR_FILE_BYTE_BUDGET"):
+            self.prepare()
+        self.assertEqual(len(descriptors), 1)
+        with self.assertRaises(OSError):
+            os.fstat(descriptors[0])
 
     def test_worker_prepared_context_enables_only_conditional_comparison_without_mutating_sources(self):
         # Separate typed synthetic captures; this is an API/GUI composition

@@ -269,12 +269,26 @@ def _time(item):
 
 def _summarize(group):
     occurrences = group["occurrences"]
-    group["occurrence_count"] = len(occurrences)
+    # Keep case memberships for manual case-based split/navigation. A view,
+    # selection or declared-context revision is not another source event/run.
+    unique = {}
+    memberships = defaultdict(set)
+    for item in sorted(occurrences, key=lambda row: (row["case_id"], row["node_id"])):
+        key = item["source_identity"], item["source_record_id"]
+        unique.setdefault(key, item)
+        memberships[key].add(item["case_id"])
+    group["occurrence_count"] = len(unique)
+    group["case_membership_count"] = len(occurrences)
     group["case_ids"] = sorted({item["case_id"] for item in occurrences})
+    group["case_view_count"] = len(group["case_ids"])
+    group["source_identity_count"] = len({item["source_identity"] for item in unique.values()})
+    group["independent_run_count"] = "NOT_ESTABLISHED_FROM_CASE_IDS"
+    group["shared_source_record_aliases"] = [{"source_identity": key[0], "source_record_id": key[1],
+        "case_ids": sorted(identifiers)} for key, identifiers in sorted(memberships.items()) if len(identifiers) > 1]
     group["versions"] = sorted({item["application_version"] for item in occurrences
                                 if type(item.get("application_version")) is str})
     domains = defaultdict(list)
-    for item in occurrences:
+    for item in unique.values():
         bounds = _time(item)
         if bounds is not None:
             domains[(item["source_identity"], item.get("time_domain"), bounds["unit"])].append(item)
@@ -287,9 +301,11 @@ def _summarize(group):
                       "occurrences": sorted(candidates, key=lambda row: row["node_id"])})
     group["first_observations_by_source"] = first
     group["first_observation_across_sources"] = "NOT_ESTABLISHED_FOR_INDEPENDENT_CLOCKS"
-    group["observations_without_time"] = sum(_time(item) is None for item in occurrences)
+    group["observations_without_time"] = sum(_time(item) is None for item in unique.values())
     counts = Counter(item["case_id"] for item in occurrences)
-    group["frequency"] = {"unit": "OBSERVATIONS_PER_RECORDED_CASE", "counts": dict(sorted(counts.items())),
+    group["frequency"] = {"unit": "OBSERVATIONS_VISIBLE_PER_CASE_VIEW", "counts": dict(sorted(counts.items())),
+                          "counts_are_independent_runs": False, "unique_source_records": len(unique),
+                          "per_source_counts": dict(sorted(Counter(item["source_identity"] for item in unique.values()).items())),
                           "elapsed_time_rate": "NOT_ESTABLISHED_ACROSS_INDEPENDENT_CLOCKS"}
     return group
 
@@ -350,6 +366,9 @@ def group_recurrent_issues(cases, *, budget=None):
         group["history"] = [{"case_id": key,
             "application_version": (_app(by_case[key]) or _declared_app(by_case[key]) or {}).get("version"),
             "observed_occurrences": count,
+            "count_basis": "CASE_VIEW_MEMBERSHIP_NOT_INDEPENDENT_RUN",
+            "shares_source_records_with_case_ids": sorted({other for alias in group["shared_source_record_aliases"]
+                if key in alias["case_ids"] for other in alias["case_ids"] if other != key}),
             "verification_class": "USER_REPORTED" if declared else "DERIVED_FROM_RECORDED_ANCHORS",
             "conditional": declared,
             "interpretation": "CONDITIONAL_ON_USER_DECLARED_CONTEXT" if declared else "RECORDED_OBSERVATIONS"}
@@ -360,6 +379,7 @@ def group_recurrent_issues(cases, *, budget=None):
             "observed_issue_count": count,
             "issues_per_recorded_operation": count / by_case[key]["scenario"]["operation_count"]
                 if readiness[key] else None,
+            "count_basis": "CASE_VIEW_MEMBERSHIP_NOT_INDEPENDENT_RUN",
             "interpretation": "RECORDED_SCENARIO_DENOMINATOR_NOT_CAUSAL_RATE"}
             for key, count in group["frequency"]["counts"].items()]
     return budget.result({"status": "COMPLETED", "groups": sorted(groups.values(), key=lambda group: group["group_id"]),
