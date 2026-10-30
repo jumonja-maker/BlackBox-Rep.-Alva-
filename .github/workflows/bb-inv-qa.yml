@@ -51,14 +51,6 @@ jobs:
         run: python tools/check_undefined_names.py --report inv-contracts-static.json
       - name: Evidence identity time graph hypotheses grouping storage and GUI contracts
         run: python -m unittest discover -s tests -p 'test_inv*.py' -v
-      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
-        if: always()
-        with:
-          name: BB-INV-003-CONTRACTS-${{ matrix.os }}
-          path: inv-contracts-static.json
-          retention-days: 30
-          if-no-files-found: warn
-
   decoder-api-build:
     name: Compile decoder against pinned TraceEvent API
     if: github.ref == 'refs/heads/patch/bb-inv-003'
@@ -134,25 +126,6 @@ jobs:
           Remove-Item Env:\QT_SCALE_FACTOR -ErrorAction SilentlyContinue
       - name: Existing continuous workload and cleanup short regression
         run: python tools/qa_deep_endurance.py --output deep-endurance-preflight --duration-seconds 90
-      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
-        if: always()
-        with:
-          name: BB-INV-003-ACTUAL-WINDOWS-EVIDENCE
-          path: |
-            inv-native-qa/
-            inv-gui-qa/
-            inv-layout-*/
-            deep-native-qa/
-            deep-profile-policy/
-            deep-gui-e2e/
-            deep-overview-qa/
-            deep-endurance-preflight/
-            decoder/decoder-manifest.json
-            !**/*.dmp
-            !**/*.mdmp
-          retention-days: 30
-          if-no-files-found: warn
-
   graph-stress:
     name: 250k investigation events bounded memory cancellation and atomic indexes (${{ matrix.os }})
     needs: contracts
@@ -185,13 +158,6 @@ jobs:
           python -m pip install --no-build-isolation --no-deps -e .
       - name: Explicit synthetic-format graph stress using the actual public investigation API
         run: python tools/qa_inv_stress.py --output inv-graph-stress --rows 250000
-      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
-        if: always()
-        with:
-          name: BB-INV-003-GRAPH-STRESS-${{ matrix.os }}
-          path: inv-graph-stress/
-          retention-days: 30
-          if-no-files-found: warn
   shell-tests:
     # Run expensive regressions once the native/GUI acceptance gate passes.
     needs: native-investigation
@@ -214,7 +180,6 @@ jobs:
         with:
           python-version: "3.11.9"
           architecture: x64
-          cache: pip
       - name: Install integrated shell and observer core
         run: |
           python -m pip install --require-hashes -r requirements/ci-windows-py311.lock
@@ -229,24 +194,10 @@ jobs:
         run: python app.py --research-e2e source-research-e2e
       - name: Real process action thread incident and selected export (Python)
         run: python app.py --deep-smoke --qa-output deep-smoke-python --qa-commit-sha "${{ github.sha }}"
-      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
-        if: always()
-        with:
-          name: BLACKBOX-REAL-PROCESS-WINDOWS-PYTHON
-          path: deep-smoke-python/
-          if-no-files-found: warn
-          retention-days: 7
       - name: Explicit real WPR guardian TTL on the disposable CI runner
         env:
           BB_QA_SOURCE_SHA: ${{ github.sha }}
         run: python tools/qa_trace_guardian.py trace-guardian-qa
-      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
-        if: always()
-        with:
-          name: BLACKBOX-WPR-GUARDIAN-QA
-          path: trace-guardian-qa/
-          if-no-files-found: warn
-          retention-days: 7
       - name: Offscreen RU/EN screenshots at simulated Windows DPI 100-200%
         shell: pwsh
         run: |
@@ -257,22 +208,6 @@ jobs:
             if ($job.ExitCode -ne 0) { throw "Offscreen DPI capture failed at scale $scale" }
           }
           Remove-Item Env:\QT_SCALE_FACTOR -ErrorAction SilentlyContinue
-      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
-        if: always()
-        with:
-          name: BLACKBOX-OFFSCREEN-DPI-QA
-          path: dpi-offscreen/
-          if-no-files-found: warn
-          retention-days: 7
-      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
-        if: always()
-        with:
-          name: BB-INV-003-WINDOWS-REGRESSION-DIAGNOSTICS
-          path: |
-            undefined-names-windows.json
-            source-research-e2e/
-          if-no-files-found: warn
-          retention-days: 14
       - name: Validate human-first CLI (no platform command)
         shell: pwsh
         run: |
@@ -297,7 +232,6 @@ jobs:
         with:
           python-version: "3.11.14"
           architecture: x64
-          cache: pip
       - name: Install Linux Qt shared-library prerequisites
         run: |
           sudo apt-get update -qq
@@ -316,25 +250,8 @@ jobs:
         run: python app.py --research-e2e source-research-e2e
       - name: Real process action thread incident and selected export (Linux)
         run: python app.py --deep-smoke --qa-output deep-smoke-linux --qa-commit-sha "${{ github.sha }}"
-      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
-        if: always()
-        with:
-          name: BLACKBOX-REAL-PROCESS-LINUX
-          path: deep-smoke-linux/
-          if-no-files-found: warn
-          retention-days: 7
       - name: Decoder 250k-event bounded JSONL stress on Linux
         run: python tools/qa_decoder_reliability.py --output decoder-linux-reliability-qa --rows 250000
-      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
-        if: always()
-        with:
-          name: BB-INV-003-LINUX-REGRESSION-DIAGNOSTICS
-          path: |
-            undefined-names-linux.json
-            decoder-linux-reliability-qa/
-            source-research-e2e/
-          if-no-files-found: warn
-          retention-days: 14
       - name: Validate independent observer CLI
         run: python -m blackbox_core --help
 
@@ -357,7 +274,6 @@ jobs:
         with:
           python-version: "3.11.9"
           architecture: x64
-          cache: pip
       - name: Install release tooling and public observer core
         run: |
           python -m pip install --require-hashes -r requirements/ci-windows-py311.lock
@@ -390,29 +306,6 @@ jobs:
         run: python tools/qa_decoder_waits.py --helper decoder/BLACK.BOX-Decoder.exe --output decoder-waits-qa
       - name: Actual third-party 7-Zip, PowerShell 7 and Notepad++ acceptance
         run: python tools/qa_decoder_apps.py --helper decoder/BLACK.BOX-Decoder.exe --output decoder-apps-qa
-      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
-        if: always()
-        with:
-          name: BLACKBOX-NATIVE-DECODER-ACCEPTANCE
-          path: decoder-native-qa/
-          if-no-files-found: warn
-          retention-days: 14
-      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
-        if: always()
-        with:
-          name: BLACKBOX-TRACEEVENT-DECODER-QA
-          path: |
-            decoder-qa/
-            decoder-reliability-qa/
-            decoder-symbols-qa/
-            decoder-standard-token-qa/
-            decoder-waits-qa/
-            decoder-apps-qa/
-            !decoder-apps-qa/notepad/notepad-portable/**
-            !decoder-apps-qa/notepad/npp.*.zip
-            decoder/decoder-manifest.json
-          if-no-files-found: warn
-          retention-days: 14
       - name: Generate original retro Windows icon
         run: python tools/generate_icon.py
       - name: Record actual source identity for the frozen executable
@@ -467,29 +360,6 @@ jobs:
           if ($proof.status -ne 'PASS' -or $proof.helper_pid -eq $proof.gui_pid) { throw 'Missing isolated research proof' }
       - name: Frozen research with administrator SID and privileges removed
         run: python tools/qa_standard_token.py "dist/BLACK.BOX-Universal/BLACK.BOX-Universal.exe" "frozen-standard-token-e2e"
-      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
-        if: always()
-        with:
-          name: BLACKBOX-FROZEN-QA-DIAGNOSTICS
-          path: |
-            blackbox-qa-error.txt
-            blackbox-smoke-progress.json
-            frozen-research-e2e/*.json
-            frozen-standard-token-e2e/*.json
-          if-no-files-found: warn
-          retention-days: 7
-      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
-        with:
-          name: BLACKBOX-FROZEN-RESEARCH-E2E
-          path: frozen-research-e2e/
-          if-no-files-found: error
-          retention-days: 7
-      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
-        with:
-          name: BLACKBOX-STANDARD-TOKEN-E2E
-          path: frozen-standard-token-e2e/
-          if-no-files-found: error
-          retention-days: 7
       - name: Deep test actual frozen EXE without Python on PATH or source working directory
         shell: pwsh
         run: |
@@ -510,13 +380,6 @@ jobs:
           if ($summary.requested_head_sha -ne '${{ github.sha }}') { throw 'Frozen evidence head mismatch' }
           if ($summary.actual_source_sha -ne '${{ github.sha }}' -or $summary.source_identity_status -ne 'VERIFIED_EXPECTED_HEAD') { throw 'Frozen build provenance mismatch' }
           Get-FileHash -Algorithm SHA256 -LiteralPath $exe | Format-List
-      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
-        if: always()
-        with:
-          name: BLACKBOX-REAL-PROCESS-FROZEN
-          path: deep-smoke-frozen/
-          if-no-files-found: warn
-          retention-days: 14
       - name: Include public source license and distribution notices
         shell: pwsh
         run: |
@@ -536,33 +399,10 @@ jobs:
         run: python tools/qa_deep_gui_e2e.py --output deep-frozen-helper-gui-qa --probe deep-frozen-qa/build/deep-probe.exe --helper dist/BLACK.BOX-Universal/diagnostic/BLACK.BOX-Diagnostic.exe
       - name: Decode actual protected-profile ETL and verify typed disk and network evidence
         run: python tools/qa_deep_trace_io.py --qa-root deep-frozen-qa --helper dist/BLACK.BOX-Universal/decoder/BLACK.BOX-Decoder.exe --output deep-frozen-io-qa
-      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
-        if: always()
-        with:
-          name: BB-INV-003-FROZEN-NATIVE-EVIDENCE
-          path: |
-            deep-frozen-qa/
-            deep-frozen-io-qa/
-            deep-frozen-helper-gui-qa/
-            !**/*.dmp
-            !**/*.mdmp
-          retention-days: 30
-          if-no-files-found: warn
       - name: Actual investigation sources using the packaged decoder and diagnostic helper
         run: python tools/qa_inv_native.py --output inv-frozen-native-qa --decoder dist/BLACK.BOX-Universal/decoder/BLACK.BOX-Decoder.exe --diagnostic-helper dist/BLACK.BOX-Universal/diagnostic/BLACK.BOX-Diagnostic.exe
       - name: Source Qt investigation workflow through packaged diagnostic helper
         run: python tools/qa_inv_gui.py --output inv-frozen-helper-gui-qa --evidence-root inv-frozen-native-qa --probe inv-frozen-native-qa/build/deep-probe.exe --diagnostic-helper dist/BLACK.BOX-Universal/diagnostic/BLACK.BOX-Diagnostic.exe --dpi-scale 1
-      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
-        if: always()
-        with:
-          name: BB-INV-003-PACKAGED-HELPER-INVESTIGATION-EVIDENCE
-          path: |
-            inv-frozen-native-qa/
-            inv-frozen-helper-gui-qa/
-            !**/*.dmp
-            !**/*.mdmp
-          retention-days: 30
-          if-no-files-found: warn
       - name: Bundle investigation contracts and bilingual candidate guides
         shell: pwsh
         run: |
@@ -592,27 +432,6 @@ jobs:
           $tree = (git rev-parse 'HEAD^{tree}').Trim()
           python tools/release_gate.py --archive "BLACK.BOX-Universal-Windows.zip" --source-sha "${{ github.sha }}" --source-tree $tree --report "inv-candidate-release-verification.json"
           if ($LASTEXITCODE -ne 0) { throw 'BB-INV release-gate verification failed' }
-      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
-        if: always()
-        with:
-          name: BB-INV-003-FINAL-ZIP-VERIFICATION
-          path: inv-candidate-release-verification.json
-          retention-days: 30
-          if-no-files-found: error
-      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
-        if: always()
-        with:
-          name: BLACKBOX-NATIVE-UPDATE-UNINSTALL-QA
-          path: portable-maintenance-e2e/
-          if-no-files-found: warn
-          retention-days: 14
-      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
-        with:
-          name: BLACKBOX-BB-INV-003-WINDOWS
-          path: BLACK.BOX-Universal-Windows.zip
-          if-no-files-found: error
-          retention-days: 14
-
   acceptance:
     name: Exact-commit unpublished candidate acceptance
     if: always() && github.ref == 'refs/heads/patch/bb-inv-003'
@@ -644,10 +463,3 @@ jobs:
           print(json.dumps(proof, indent=2))
           raise SystemExit(0 if passed else 1)
           PY
-      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
-        if: always()
-        with:
-          name: BB-INV-003-EXACT-COMMIT-ACCEPTANCE
-          path: investigation-ci-acceptance.json
-          if-no-files-found: error
-          retention-days: 30
