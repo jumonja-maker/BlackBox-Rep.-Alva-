@@ -110,6 +110,8 @@ def main(argv: list[str] | None = None) -> int:
         window._navigate("decoder")
         if not hasattr(window, "decoder_panel"):
             raise RuntimeError("SMOKE_DECODER_PAGE_MISSING")
+        if not hasattr(window, "deep_inspector_panel"):
+            raise RuntimeError("SMOKE_DEEP_INSPECTION_PANEL_MISSING")
         if getattr(sys, "frozen", False):
             import json
             import subprocess
@@ -118,6 +120,9 @@ def main(argv: list[str] | None = None) -> int:
                 text=True, timeout=20, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
             if check.returncode or json.loads(check.stdout).get("protocol") != "blackbox.trace-event/1":
                 raise RuntimeError("SMOKE_PACKAGED_DECODER_FAILED")
+            diagnostic = Path(sys.executable).parent / "diagnostic" / "BLACK.BOX-Diagnostic.exe"
+            if not diagnostic.is_file():
+                raise RuntimeError("SMOKE_DIAGNOSTIC_HELPER_MISSING")
         window._navigate("dashboard")
         with tempfile.TemporaryDirectory(prefix="bb-human-smoke-") as temp:
             from blackbox_universal.qa_fixtures import observer_identity

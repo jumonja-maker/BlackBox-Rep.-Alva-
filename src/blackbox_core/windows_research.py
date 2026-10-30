@@ -15,7 +15,14 @@ import time
 from uuid import uuid4
 
 
-WPR_PROFILES = ("GeneralProfile.Light", "CPU.Verbose")
+WPR_PROFILE_COMPONENTS = {
+    "GeneralProfile.Light": ("GeneralProfile.Light",),
+    "CPU.Verbose": ("CPU.Verbose",),
+}
+WPR_PROFILES = tuple(WPR_PROFILE_COMPONENTS)
+# Reserved for the diagnostic owner's protected immutable WPRP factory.
+# Generic WprCapture and TraceSupervisor.start() must reject this policy.
+SCOPED_WPR_PROFILE = "BLACKBOX.Deep.Light"
 
 def _status(error):
     return "ACCESS_DENIED" if error==5 else "TIMEOUT" if error in (1460,258) else "NOT_OBSERVED"
@@ -212,6 +219,7 @@ class WprCapture:
         if type(profile) is not str or profile not in WPR_PROFILES:
             raise ValueError("INVALID_WPR_PROFILE")
         self.profile=profile
+        self.profiles=WPR_PROFILE_COMPONENTS[profile]
         self.folder=Path(folder);self.instance="BLACKBOX_"+uuid4().hex
         self.tool=wpr_tool()
         self.active=False
@@ -235,7 +243,9 @@ class WprCapture:
         if not self.tool:raise OSError("WPR_TOOL_UNAVAILABLE")
         self.active=True
         try:
-            self._run(["-start",self.profile])
+            # Microsoft WPR supports multiple fixed -start arguments under
+            # one named instance. Never split an arbitrary user expression.
+            self._run([part for profile in self.profiles for part in ("-start",profile)])
         except BaseException:
             # A start timeout leaves ownership uncertain. Cancel only this
             # random named instance, never another profiler's recording.
@@ -243,6 +253,7 @@ class WprCapture:
             except OSError:pass
             raise
         return {"source":"ETW_WPR","status":"RECORDING","instance":self.instance,"profile":self.profile,
+            "profile_components":list(self.profiles),
             "scope":"SYSTEM_WIDE_TRACE_MAY_INCLUDE_OTHER_PROCESSES",
             "retention":"WPR_MEMORY_MODE_CIRCULAR","lost_events":None}
 

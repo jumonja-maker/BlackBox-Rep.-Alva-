@@ -315,7 +315,7 @@ class UniversalWindow(QMainWindow):
         rule.setStyleSheet("background: #837789;")
         side.addWidget(rule)
         side.addWidget(_label("    NO CLOUD · NO INJECTION", "caption"))
-        side.addWidget(_label("    READ-ONLY · OFFLINE", "caption"))
+        side.addWidget(_label("    OBSERVE · INSPECT · INTERVENE", "caption"))
         body_layout.addWidget(sidebar)
 
         self.stack = QStackedWidget()
@@ -469,6 +469,19 @@ class UniversalWindow(QMainWindow):
         status.content.addWidget(self.action_state_label)
         middle.addWidget(status, 4)
         content.addLayout(middle, 1)
+
+        from .deep_inspector_panel import OverviewInspectorPanel
+        self.deep_inspector_panel = OverviewInspectorPanel(self)
+        self.deep_inspector_toggle = _button("DEEP INSPECTION")
+        self.deep_inspector_toggle.setObjectName("deepInspectionToggle")
+        self.deep_inspector_toggle.setCheckable(True)
+        self.deep_inspector_toggle.toggled.connect(self.deep_inspector_panel.setVisible)
+        self.deep_inspector_panel.setVisible(False)
+        self.deep_inspector_panel.closed.connect(self._deep_inspector_closed)
+        self.deep_inspector_panel.recovery_required.connect(self._deep_inspector_recovery_required)
+        self._deep_close_complete = False
+        content.addWidget(self.deep_inspector_toggle)
+        content.addWidget(self.deep_inspector_panel)
 
         notes = WindowPanel("System messages", "LATEST ACTIVITY")
         self.recent_messages = QPlainTextEdit()
@@ -979,6 +992,9 @@ class UniversalWindow(QMainWindow):
         if hasattr(self,'marker_panel'):self.marker_panel.retranslate()
         if hasattr(self,'analysis_panel'):self.analysis_panel.retranslate()
         if hasattr(self,'events_panel'):self.events_panel.retranslate()
+        if hasattr(self, 'deep_inspector_panel'):
+            self.deep_inspector_panel.retranslate()
+            self.deep_inspector_toggle.setText("ГЛУБОКОЕ ИССЛЕДОВАНИЕ" if language == "RU" else "DEEP INSPECTION")
         if self.stack.currentIndex() == self._page_ids["reports"]:
             self._update_report_preview()
 
@@ -1858,6 +1874,11 @@ class UniversalWindow(QMainWindow):
     
     def _update_all(self) -> None:
         selected = self.probe.pid is not None
+        if hasattr(self, 'deep_inspector_panel'):
+            cached = getattr(self.probe, 'data', {})
+            core = getattr(self.probe, '_core', None)
+            created = cached.get('pid_creation_time', getattr(core, 'created', None))
+            self.deep_inspector_panel.set_target(self.probe.pid, created, self.probe.name)
         running = self.probe.active
         stopping = (self._pending_base_stop is not None or
                     self._report_worker is not None or
@@ -2380,17 +2401,61 @@ class UniversalWindow(QMainWindow):
         self._update_report_preview()
 
     def _about(self) -> None:
+        from . import __version__
+        text = ("Локальное наблюдение, глубокое исследование и управляемые диагностические действия.\n"
+                "Сеансы, HTML/JSON-отчёты, ETW/EventPipe и локальный декодер трасс.\n"
+                "В Overview доступны INSPECT и INTERVENE: память, потоки, стеки, ожидания, "
+                "дампы и отладчик. Изменения выполняются после явного подтверждения.\n"
+                "Необходимые права Windows запрашиваются отдельным ограниченным helper через UAC.\n\n"
+                "Неполные данные и неподтверждённое восстановление показываются явно. "
+                "Автоматической загрузки в облако и скрытого внедрения в процессы нет."
+                if self.language == "RU" else
+                "Local observation, deep inspection and controlled diagnostic actions.\n"
+                "Sessions, HTML/JSON reports, ETW/EventPipe and the local Trace Decoder.\n"
+                "Overview provides INSPECT and INTERVENE: memory, threads, stacks, waits, "
+                "dumps and debugging. Changes require explicit confirmation.\n"
+                "Required Windows permissions are requested by a separate scoped helper through UAC.\n\n"
+                "Incomplete evidence and unconfirmed recovery remain explicit. "
+                "No automatic cloud upload or hidden process injection.")
         QMessageBox.about(
             self, "BLACK.BOX Universal",
-            "BLACK.BOX Universal v0.3.6 — reliability and visual fixes.\n\n"
-            "Offline monitoring, human-readable HTML and JSON reports: available.\n"
-            "Diagnostics use local operating-system observations.\n"
-            "Research: action episodes, local instrumentation, Windows HWND/WCT, "
-            "explicit ETW/minidump capture and portable evidence packages.\n"
-            "Source capabilities and access restrictions are reported per session.\n\n"
-            "No background cloud upload or hidden process injection.")
+            f"BLACK.BOX Universal v{__version__} · BB-DEEP-001\n\n" + text)
+
+    def _deep_inspector_closed(self, result) -> None:
+        self._deep_close_complete = True
+        if result.get('status') == 'RECOVERY_UNCONFIRMED':
+            message = ("Завершение диагностических действий не подтверждено. "
+                       "Проверьте исследуемый процесс. Сведения сохранены в журнале." if self.language == "RU" else
+                       "Diagnostic cleanup is not confirmed. Check the inspected process. Evidence is retained in the journal.")
+            QMessageBox.warning(self, "BLACK.BOX — RECOVERY_UNCONFIRMED", message)
+        if self._pending_close:
+            QTimer.singleShot(0, self.close)
+
+    def _deep_inspector_recovery_required(self, result) -> None:
+        # A failed cleanup can still own a held debug event. Keep both the
+        # service and the GUI alive; closed is emitted only after release.
+        self._deep_close_complete = False
+        self.deep_inspector_toggle.setChecked(True)
+        self._navigate("dashboard")
+        scroll = self.stack.currentWidget()
+        if hasattr(scroll, "ensureWidgetVisible"):
+            scroll.ensureWidgetVisible(self.deep_inspector_panel.status_label)
+        message = ("Завершение диагностики не подтверждено. Компонент диагностики сохранён для повторной попытки; "
+                   "окно остаётся открытым. Используйте «Повторить завершение диагностики». "
+                   "Исходный срок сессии не продлевается. Безопасное восстановление цели пока не подтверждено." if self.language == "RU" else
+                   "Diagnostic cleanup is not confirmed. The diagnostic owner is retained for another cleanup attempt; "
+                   "this window remains open. Use Retry diagnostic cleanup. "
+                   "The original session deadline is not extended. Safe target recovery remains unconfirmed.")
+        QMessageBox.warning(self, "BLACK.BOX — RECOVERY_UNCONFIRMED", message)
 
     def closeEvent(self, event) -> None:
+        if (hasattr(self, 'deep_inspector_panel') and not self._deep_close_complete
+                and self.deep_inspector_panel.bridge.has_session):
+            self._pending_close = True
+            self._timer.stop()
+            self.deep_inspector_panel.shutdown()
+            event.ignore()
+            return
         if self._isolated and self.probe.alive:
             self._pending_close = True
             self._timer.stop()

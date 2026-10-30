@@ -662,6 +662,9 @@ class ReadOnlyProbe:
             "evidence_origin": "APP_SUPPLIED_NOT_AUTHENTICATED",
             "root_cause_proven": False,
             "observed_process": {"name": self.name, "pid": self.pid},
+            # Bind optional inspection to the instance selected by this probe,
+            # never to a fresh lookup of a potentially reused numeric PID.
+            "pid_creation_time": self._core.created if self._core else None,
             "started_at_utc": self.started_at, "exported_at_utc": utc_stamp(),
             "observation_active_at_export": self.active,
             "session_state": self.session_state,

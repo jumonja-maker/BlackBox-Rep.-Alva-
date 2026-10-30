@@ -9,8 +9,8 @@ on:
       - main
   workflow_dispatch:
     inputs:
-      publish_v052:
-        description: "Publish tested v0.5.2 from the exact accepted main SHA"
+      publish_v053:
+        description: "Publish tested v0.5.3 from the exact accepted main SHA"
         required: true
         type: boolean
         default: false
@@ -28,13 +28,15 @@ permissions:
 
 jobs:
   shell-tests:
+    # This patch has the full source/portable/native gates in bb-deep-qa.yml.
+    # Do not duplicate the complete build on every draft PR synchronization.
+    if: github.event_name != 'pull_request' || github.head_ref != 'patch/bb-deep-001'
     name: Windows shell / read-only observer
     runs-on: windows-latest
-    # The full 825-test Windows source suite exceeded the previous 30-minute
-    # job cap on run #450. The isolated decoder patch suite took ~34 minutes;
-    # preserve every test and the real WPR/DPI/E2E gates with bounded headroom.
-    # This is a job ceiling, not a waiver for a hung or failing test.
-    timeout-minutes: 65
+    # BB-DEEP-001 exact-SHA run #40935239740 required 67m37s on a hosted
+    # Windows runner for the full suite, before any new releases.
+    # Retain every test and WPR/DPI/E2E gate with bounded scheduling headroom.
+    timeout-minutes: 90
     env:
       QT_QPA_PLATFORM: offscreen
       PYTHONUTF8: "1"
@@ -104,9 +106,11 @@ jobs:
           if (($helpText -join ' ') -match 'handoff') { throw 'Deprecated command visible' }
 
   linux-tests:
+    if: github.event_name != 'pull_request' || github.head_ref != 'patch/bb-deep-001'
     name: Linux compatibility check (independent of Windows release)
     runs-on: ubuntu-latest
-    timeout-minutes: 18
+    # The same full deep suite took 19m06s in exact-SHA acceptance.
+    timeout-minutes: 40
     env:
       QT_QPA_PLATFORM: offscreen
       PYTHONUTF8: "1"
@@ -150,6 +154,7 @@ jobs:
         run: python -m blackbox_core --help
 
   windows-portable:
+    if: github.event_name != 'pull_request' || github.head_ref != 'patch/bb-deep-001'
     name: Windows portable exe
     # Exact-SHA native decoder acceptance accompanies the release candidate.
     # Publication still requires *all* three jobs green.
@@ -228,17 +233,22 @@ jobs:
         run: python tools/write_build_provenance.py "${{ github.event.pull_request.head.sha || github.sha }}"
       - name: Build separate Windows maintenance EXE
         run: python -m PyInstaller --noconfirm --clean --paths src --paths . --onefile --windowed --icon assets/blackbox.ico --name BLACK.BOX-Maintenance maintenance_entry.py
+      - name: Build separate asInvoker diagnostic helper for explicit UAC sessions
+        run: python -m PyInstaller --noconfirm --clean --paths src --paths . --onedir --windowed --collect-submodules blackbox_core --exclude-module PySide6 --exclude-module blackbox_universal --icon assets/blackbox.ico --add-data ".qa-build/blackbox-build.json;." --name BLACK.BOX-Diagnostic diagnostic_entry.py
       - name: Build BLACK.BOX Universal desktop with original icon
         shell: pwsh
         run: |
           python -m PyInstaller --noconfirm --clean --paths src --paths . --onedir --windowed --collect-submodules blackbox_core --collect-submodules blackbox_investigation --collect-submodules blackbox_universal --icon assets/blackbox.ico --add-data "assets/blackbox.png;assets" --add-data "src/blackbox_core/instrumentation.py;blackbox_core" --add-data ".qa-build/blackbox-build.json;." --name BLACK.BOX-Universal app.py
           if ($LASTEXITCODE -ne 0) { throw 'GUI build failed' }
           Copy-Item "dist/BLACK.BOX-Maintenance.exe" "dist/BLACK.BOX-Universal/BLACK.BOX-Maintenance.exe"
+          Copy-Item "dist/BLACK.BOX-Diagnostic" "dist/BLACK.BOX-Universal/diagnostic" -Recurse
           Copy-Item ".blackbox-portable.json" "dist/BLACK.BOX-Universal/.blackbox-portable.json"
           Copy-Item "decoder" "dist/BLACK.BOX-Universal/decoder" -Recurse
           if (-not (Test-Path "dist/BLACK.BOX-Universal/decoder/BLACK.BOX-Decoder.exe")) { throw 'Decoder helper missing' }
           if (-not (Test-Path "dist/BLACK.BOX-Universal/BLACK.BOX-Maintenance.exe")) { throw 'Maintenance helper missing' }
           if (-not (Test-Path "dist/BLACK.BOX-Universal/_internal/assets/blackbox.png")) { throw 'App icon missing' }
+      - name: Verify explicit privilege boundaries in the packaged GUI and diagnostic helper
+        run: python tools/verify_diagnostic_package.py dist/BLACK.BOX-Universal
       - name: Verify real embedded research modules before startup
         run: python tools/verify_frozen_research.py "dist/BLACK.BOX-Universal/BLACK.BOX-Universal.exe"
       - name: Verify Explorer icon is the same as the taskbar icon for both EXEs
@@ -333,7 +343,7 @@ jobs:
           if (-not (Test-Path "$output\INVESTIGATION-LICENSE.txt")) { throw 'Investigation license missing' }
           if (-not (Test-Path "$output\LICENSE")) { throw "Missing public application license" }
           if (-not (Test-Path "$output\README.ru.md")) { throw "Russian README missing from Windows release" }
-          Copy-Item -LiteralPath "docs\RELEASE_v0.5.2.md" -Destination "$output\RELEASE-NOTES.md" -Force
+          Copy-Item -LiteralPath "docs\RELEASE_v0.5.3.md" -Destination "$output\RELEASE-NOTES.md" -Force
       - name: Inventory exact packaged binaries and include runtime license texts
         run: python tools/build_distribution_inventory.py --payload "dist/BLACK.BOX-Universal"
       - name: Package portable folder without installing anything
@@ -341,7 +351,7 @@ jobs:
         run: |
           Compress-Archive -LiteralPath "dist\BLACK.BOX-Universal" -DestinationPath "BLACK.BOX-Universal-Windows.zip" -Force
           if (-not (Test-Path "BLACK.BOX-Universal-Windows.zip")) { throw "ZIP missing" }
-      - name: Native official v0.5.1 to v0.5.2 update and full portable uninstall
+      - name: Native official v0.5.2 to v0.5.3 update and full portable uninstall
         shell: pwsh
         timeout-minutes: 16
         run: |
@@ -365,12 +375,12 @@ jobs:
 # Publication still requires an explicit owner-authorized workflow_dispatch.
 # No push, branch build or pull request can publish a release.
   publish-updater-test:
-    name: Publish verified BLACK.BOX v0.5.2 (exact approved main SHA)
+    name: Publish verified BLACK.BOX v0.5.3 (exact approved main SHA)
     needs: [shell-tests, linux-tests, windows-portable]
     if: >-
       github.event_name == 'workflow_dispatch' &&
       github.ref == 'refs/heads/main' &&
-      inputs.publish_v052 == true &&
+      inputs.publish_v053 == true &&
       needs.shell-tests.result == 'success' &&
       needs.linux-tests.result == 'success' &&
       needs.windows-portable.result == 'success'
@@ -403,7 +413,7 @@ jobs:
           [[ "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq '.object.sha')" == "$GITHUB_SHA" ]]
           VERSION="$(python -c 'from blackbox_universal import __version__; print(__version__)')"
           PACKAGE_VERSION="$(python -c 'import tomllib; print(tomllib.load(open("pyproject.toml","rb"))["project"]["version"])')"
-          [[ "$VERSION" == "0.5.2" && "$PACKAGE_VERSION" == "$VERSION" ]]
+          [[ "$VERSION" == "0.5.3" && "$PACKAGE_VERSION" == "$VERSION" ]]
           ZIP="verified-portable/BLACK.BOX-Universal-Windows.zip"
           python tools/release_gate.py --archive "$ZIP" --source-sha "$GITHUB_SHA" --source-tree "$(git rev-parse HEAD^{tree})" --report release-verification.json
           (cd verified-portable && sha256sum -c BLACK.BOX-Universal-Windows.zip.sha256)
@@ -423,9 +433,9 @@ jobs:
           set -euo pipefail
           ZIP="verified-portable/BLACK.BOX-Universal-Windows.zip"
           python tools/publish_verified_draft.py --preflight --archive "$ZIP"
-          gh release create "v0.5.2" "$ZIP" "$ZIP.sha256" --draft \
-            --target "$GITHUB_SHA" --title "BLACK.BOX Universal v0.5.2 — completed trace decoder" \
-            --notes-file docs/RELEASE_v0.5.2.md
+          gh release create "v0.5.3" "$ZIP" "$ZIP.sha256" --draft \
+            --target "$GITHUB_SHA" --title "BLACK.BOX Universal v0.5.3 — deep process diagnostics" \
+            --notes-file docs/RELEASE_v0.5.3.md
           python tools/publish_verified_draft.py --archive "$ZIP" --report publication-proof.json
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
         with:

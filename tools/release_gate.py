@@ -8,7 +8,7 @@ import re
 import stat
 import zipfile
 
-VERSION = '0.5.2'
+VERSION = '0.5.3'
 PREFIX = 'BLACK.BOX-Universal/'
 MAX_UNCOMPRESSED = 2 * 1024**3
 REQUIRED = (
@@ -17,6 +17,8 @@ REQUIRED = (
     'LICENSING.md', 'INVESTIGATION-LICENSE.txt',
     '_internal/blackbox-build.json', 'decoder/BLACK.BOX-Decoder.exe',
     'decoder/decoder-manifest.json', 'decoder/notices/TraceEvent-LICENSE.txt',
+    'diagnostic/BLACK.BOX-Diagnostic.exe',
+    'diagnostic/_internal/blackbox-build.json', 'DISTRIBUTION-INVENTORY.json',
 )
 
 def require(condition, reason):
@@ -62,6 +64,54 @@ def verify_archive(path, source_sha, source_tree):
                 provenance.get('source_tree_sha') == source_tree and
                 provenance.get('tracked_worktree_clean') is True, 'FROZEN_SOURCE_MISMATCH')
         require(provenance.get('version') == VERSION, 'FROZEN_VERSION_MISMATCH')
+        diagnostic_provenance = json.loads(contents(
+            'diagnostic/_internal/blackbox-build.json', 4096))
+        require(diagnostic_provenance == provenance, 'DIAGNOSTIC_SOURCE_IDENTITY_MISMATCH')
+        # The packaged inventory is constructed *after* all EXEs, third-party
+        # notices and the helper are staged. Revalidate its complete exact
+        # inventory against the final ZIP, rather than just the build folder.
+        inventory = json.loads(contents('DISTRIBUTION-INVENTORY.json', 4*1024*1024))
+        require(isinstance(inventory, dict) and
+                inventory.get('schema') == 'blackbox.distribution-inventory/1' and
+                inventory.get('inventoryExcludes') == ['DISTRIBUTION-INVENTORY.json'],
+                'INVALID_DISTRIBUTION_INVENTORY')
+        inventory_files = inventory.get('files')
+        require(isinstance(inventory_files, list) and 1 <= len(inventory_files) <= 20000,
+                'INVALID_DISTRIBUTION_FILE_LIST')
+        inventoried = set()
+        diagnostic_count = 0
+        for row in inventory_files:
+            require(isinstance(row, dict) and set(row) == {'path', 'bytes', 'sha256'},
+                    'INVALID_DISTRIBUTION_FILE_RECORD')
+            relative = row['path']
+            require(type(relative) is str and relative not in ('', '.') and
+                    not relative.startswith('/') and not relative.endswith('/') and
+                    '\\' not in relative and ':' not in relative and
+                    '..' not in PurePosixPath(relative).parts and
+                    PurePosixPath(relative).as_posix() == relative and
+                    type(row['bytes']) is int and 0 <= row['bytes'] <= MAX_UNCOMPRESSED and
+                    isinstance(row['sha256'], str) and
+                    re.fullmatch('[0-9a-f]{64}', row['sha256']),
+                    'INVALID_DISTRIBUTION_FILE_RECORD')
+            key = (PREFIX + relative).casefold()
+            require(key not in inventoried, 'DUPLICATE_DISTRIBUTION_INVENTORY_ENTRY')
+            inventoried.add(key)
+            item = members.get(key)
+            require(item is not None and not item.is_dir() and
+                    item.filename == PREFIX + relative,
+                    'MISSING_DISTRIBUTION_FILE:' + relative)
+            require(item.file_size == row['bytes'],
+                    'DISTRIBUTION_FILE_SIZE_MISMATCH:' + relative)
+            with archive.open(item) as stream:
+                require(digest(stream) == row['sha256'],
+                        'DISTRIBUTION_FILE_HASH_MISMATCH:' + relative)
+            if relative.startswith('diagnostic/'):
+                diagnostic_count += 1
+        all_payload_files = {key for key, item in members.items()
+                             if not item.is_dir() and
+                             key != (PREFIX + 'DISTRIBUTION-INVENTORY.json').casefold()}
+        require(inventoried == all_payload_files, 'DISTRIBUTION_FILE_LIST_MISMATCH')
+        require(diagnostic_count >= 2, 'DIAGNOSTIC_PAYLOAD_INCOMPLETE')
         manifest = json.loads(contents('decoder/decoder-manifest.json'))
         require(manifest.get('rid') == 'win-x64' and manifest.get('self_contained') is True
                 and manifest.get('traceevent_package') == '4.0.0', 'DECODER_BUILD_NOT_VERIFIED')
@@ -93,7 +143,10 @@ def verify_archive(path, source_sha, source_tree):
     return {'status': 'VERIFIED_RELEASE_ARCHIVE', 'version': VERSION,
             'source_sha': source_sha, 'source_tree_sha': source_tree,
             'archive': path.name, 'bytes': path.stat().st_size, 'sha256': checksum,
-            'decoder_files_verified': len(files), 'release_published': False}
+            'decoder_files_verified': len(files),
+            'diagnostic_files_verified': diagnostic_count,
+            'distribution_files_verified': len(inventoried),
+            'release_published': False}
 
 def main():
     parser = argparse.ArgumentParser()

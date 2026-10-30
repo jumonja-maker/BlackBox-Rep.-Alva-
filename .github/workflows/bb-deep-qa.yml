@@ -1,0 +1,553 @@
+name: BB-DEEP-001 isolated acceptance (no publication)
+
+on:
+  push:
+    branches: [patch/bb-deep-001]
+  workflow_dispatch:
+    inputs:
+      run_endurance:
+        description: Run the full 5h30 continuous workload on this exact commit
+        type: boolean
+        default: false
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bb-deep-001-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  decoder-api-build:
+    name: Compile decoder against pinned TraceEvent API
+    if: github.ref == 'refs/heads/patch/bb-deep-001'
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
+        with:
+          dotnet-version: '10.0.x'
+      - name: Catch managed API incompatibilities before native acceptance completes
+        run: dotnet build tools/decoder-host/BlackBox.Decoder.csproj --configuration Release
+
+  contracts:
+    name: Deep inspection contracts (${{ matrix.os }})
+    if: github.ref == 'refs/heads/patch/bb-deep-001'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            python: '3.11.14'
+            lock: requirements/ci-linux-py311.lock
+          - os: windows-latest
+            python: '3.11.9'
+            lock: requirements/ci-windows-py311.lock
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    env:
+      QT_QPA_PLATFORM: offscreen
+      PYTHONUTF8: '1'
+      BB_QA_SOURCE_SHA: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: ${{ matrix.python }}
+          architecture: x64
+      - name: Linux Qt prerequisites
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -qq && sudo apt-get install -y libegl1 libopengl0 libxcb-cursor0 libxkbcommon-x11-0
+      - name: Install pinned QA dependencies
+        run: |
+          python -m pip install --require-hashes -r ${{ matrix.lock }}
+          python -m pip install --no-build-isolation --no-deps -e .
+      - name: Undefined bindings and syntax gate
+        run: python tools/check_undefined_names.py --report deep-contracts-static.json
+      - name: Diagnostic permissions state machines privacy and GUI contracts
+        run: python -m unittest discover -s tests -p 'test_deep_*.py' -v
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        if: always()
+        with:
+          name: BB-DEEP-001-CONTRACTS-${{ matrix.os }}
+          path: deep-contracts-static.json
+          retention-days: 30
+          if-no-files-found: warn
+
+  native-inspection:
+    name: Controlled native Windows inspection and intervention
+    needs: contracts
+    runs-on: windows-latest
+    timeout-minutes: 35
+    env:
+      QT_QPA_PLATFORM: offscreen
+      PYTHONUTF8: '1'
+      BB_QA_SOURCE_SHA: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.11.9'
+          architecture: x64
+      - name: Install pinned QA dependencies
+        run: |
+          python -m pip install --require-hashes -r requirements/ci-windows-py311.lock
+          python -m pip install --no-build-isolation --no-deps -e .
+      - name: Validate protected immutable file disk and classic TCP UDP WPR policy
+        run: python tools/qa_deep_profile_policy.py --output deep-profile-policy
+      - name: Actual process memory debugger TCP UDP file and restricted-token acceptance
+        run: python tools/qa_deep_inspection.py --output deep-native-qa
+      - name: Real Qt buttons through bridge and helper to the controlled native target
+        run: python tools/qa_deep_gui_e2e.py --output deep-gui-e2e --probe deep-native-qa/build/deep-probe.exe
+      - name: Deep Overview RU EN layout at four DPI scales
+        shell: pwsh
+        run: |
+          foreach ($scale in @('1', '1.25', '1.5', '2')) {
+            $env:QT_SCALE_FACTOR = $scale
+            python tools/qa_deep_overview.py --output deep-overview-qa
+            if ($LASTEXITCODE -ne 0) { throw "Deep Overview geometry failed: $scale" }
+          }
+          Remove-Item Env:\QT_SCALE_FACTOR -ErrorAction SilentlyContinue
+      - name: Short continuous workload preflight
+        run: python tools/qa_deep_endurance.py --output deep-endurance-preflight --duration-seconds 90
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        if: always()
+        with:
+          name: BB-DEEP-001-NATIVE-EVIDENCE
+          path: |
+            deep-native-qa/
+            deep-profile-policy/
+            deep-endurance-preflight/
+            deep-overview-qa/
+            deep-gui-e2e/
+            !**/*.dmp
+            !**/*.mdmp
+          retention-days: 30
+          if-no-files-found: warn
+
+  shell-tests:
+    # Run expensive regressions once the native/GUI acceptance gate passes.
+    needs: native-inspection
+    name: Full Windows source and Overview regressions
+    runs-on: windows-latest
+    # The full 825-test Windows source suite exceeded the previous 30-minute
+    # job cap on run #450. The isolated decoder patch suite took ~34 minutes;
+    # preserve every test and the real WPR/DPI/E2E gates with bounded headroom.
+    # This is a job ceiling, not a waiver for a hung or failing test.
+    timeout-minutes: 90
+    env:
+      QT_QPA_PLATFORM: offscreen
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.11.9"
+          architecture: x64
+          cache: pip
+      - name: Install integrated shell and observer core
+        run: |
+          python -m pip install --require-hashes -r requirements/ci-windows-py311.lock
+          python -m pip install --no-build-isolation --no-deps -e .
+      - name: Undefined name gate
+        run: python tools/check_undefined_names.py --report undefined-names-windows.json
+      - name: Test six-page application, legacy shell and process observer
+        run: python -m unittest discover -s tests -v
+      - name: Real Qt offscreen startup smoke
+        run: python app.py --smoke
+      - name: Real Qt isolated research end-to-end
+        run: python app.py --research-e2e source-research-e2e
+      - name: Real process action thread incident and selected export (Python)
+        run: python app.py --deep-smoke --qa-output deep-smoke-python --qa-commit-sha "${{ github.event.pull_request.head.sha || github.sha }}"
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        if: always()
+        with:
+          name: BLACKBOX-REAL-PROCESS-WINDOWS-PYTHON
+          path: deep-smoke-python/
+          if-no-files-found: warn
+          retention-days: 7
+      - name: Explicit real WPR guardian TTL on the disposable CI runner
+        env:
+          BB_QA_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: python tools/qa_trace_guardian.py trace-guardian-qa
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        if: always()
+        with:
+          name: BLACKBOX-WPR-GUARDIAN-QA
+          path: trace-guardian-qa/
+          if-no-files-found: warn
+          retention-days: 7
+      - name: Offscreen RU/EN screenshots at simulated Windows DPI 100-200%
+        shell: pwsh
+        run: |
+          foreach ($scale in @('1', '1.25', '1.5', '2')) {
+            $env:QT_SCALE_FACTOR = $scale
+            $job = Start-Process -FilePath (Get-Command python).Source -ArgumentList @('tools/qa_dpi_offscreen.py', 'dpi-offscreen') -PassThru
+            if (-not $job.WaitForExit(120000)) { $job.Kill(); throw "DPI capture exceeded deadline at scale $scale" }
+            if ($job.ExitCode -ne 0) { throw "Offscreen DPI capture failed at scale $scale" }
+          }
+          Remove-Item Env:\QT_SCALE_FACTOR -ErrorAction SilentlyContinue
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        if: always()
+        with:
+          name: BLACKBOX-OFFSCREEN-DPI-QA
+          path: dpi-offscreen/
+          if-no-files-found: warn
+          retention-days: 7
+      - name: Validate human-first CLI (no platform command)
+        shell: pwsh
+        run: |
+          $helpText = python -m blackbox_core --help
+          if ($LASTEXITCODE -ne 0) { throw 'CLI help failed' }
+          if (($helpText -join ' ') -match 'handoff') { throw 'Deprecated command visible' }
+
+  linux-tests:
+    needs: native-inspection
+    name: Linux compatibility check (independent of Windows release)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      QT_QPA_PLATFORM: offscreen
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.11.14"
+          architecture: x64
+          cache: pip
+      - name: Install Linux Qt shared-library prerequisites
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y libegl1 libopengl0 libxcb-cursor0 libxkbcommon-x11-0
+      - name: Install integrated shell and observer core
+        run: |
+          python -m pip install --require-hashes -r requirements/ci-linux-py311.lock
+          python -m pip install --no-build-isolation --no-deps -e .
+      - name: Undefined name gate
+        run: python tools/check_undefined_names.py --report undefined-names-linux.json
+      - name: Qt offscreen unit checks
+        run: python -m unittest discover -s tests -v
+      - name: Qt offscreen startup smoke
+        run: python app.py --smoke
+      - name: Real Qt isolated research end-to-end
+        run: python app.py --research-e2e source-research-e2e
+      - name: Real process action thread incident and selected export (Linux)
+        run: python app.py --deep-smoke --qa-output deep-smoke-linux --qa-commit-sha "${{ github.event.pull_request.head.sha || github.sha }}"
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        if: always()
+        with:
+          name: BLACKBOX-REAL-PROCESS-LINUX
+          path: deep-smoke-linux/
+          if-no-files-found: warn
+          retention-days: 7
+      - name: Decoder 250k-event bounded JSONL stress on Linux
+        run: python tools/qa_decoder_reliability.py --output decoder-linux-reliability-qa --rows 250000
+      - name: Validate independent observer CLI
+        run: python -m blackbox_core --help
+
+  windows-portable:
+    needs: [native-inspection, decoder-api-build]
+    name: Full portable EXE including diagnostic helper
+    # Exact-SHA native decoder acceptance accompanies the release candidate.
+    # Publication still requires *all* three jobs green.
+    runs-on: windows-latest
+    timeout-minutes: 100
+    env:
+      QT_QPA_PLATFORM: offscreen
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.11.9"
+          architecture: x64
+          cache: pip
+      - name: Install release tooling and public observer core
+        run: |
+          python -m pip install --require-hashes -r requirements/ci-windows-py311.lock
+          python -m pip install --no-build-isolation --no-deps -e .
+      - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
+        with:
+          dotnet-version: '10.0.x'
+      - name: Build bundled self-contained Microsoft TraceEvent decoder
+        run: python tools/build_decoder.py --rid win-x64
+      - name: Install pinned Microsoft dotnet-trace for owned EventPipe QA
+        shell: pwsh
+        run: |
+          $toolDir = Join-Path $env:RUNNER_TEMP 'blackbox-trace-tools'
+          dotnet tool install dotnet-trace --tool-path $toolDir --version 10.0.750501
+          if ($LASTEXITCODE -ne 0) { throw 'Pinned dotnet-trace installation failed' }
+          Add-Content -Path $env:GITHUB_PATH -Value $toolDir
+          $llvm = Join-Path $env:ProgramFiles 'LLVM\bin'
+          if (Test-Path $llvm) { Add-Content -Path $env:GITHUB_PATH -Value $llvm }
+      - name: Real EventPipe/ETW and guardian capture-clock integration
+        run: python tools/qa_decoder.py --helper decoder/BLACK.BOX-Decoder.exe --output decoder-qa
+      - name: Real native ETW filtered trees and local PE/PDB acceptance
+        run: python tools/qa_decoder_patch.py --output decoder-native-qa --helper decoder/BLACK.BOX-Decoder.exe --trace-index decoder-qa/eventpipe.sqlite3
+      - name: Full 250k-event decoder import, cancellation and deadline budget
+        run: python tools/qa_decoder_reliability.py --output decoder-reliability-qa --rows 250000
+      - name: Compiler-produced native PDB lines, inline and OMAP checks
+        run: python tools/qa_decoder_symbols.py --output decoder-symbols-qa
+      - name: Actual Windows Standard token decodes the same ETL and EventPipe
+        run: python tools/qa_decoder_standard_token.py --helper decoder/BLACK.BOX-Decoder.exe --trace-root decoder-qa --output decoder-standard-token-qa
+      - name: Real owned Windows Sleep, Event and Mutex waits
+        run: python tools/qa_decoder_waits.py --helper decoder/BLACK.BOX-Decoder.exe --output decoder-waits-qa
+      - name: Actual third-party 7-Zip, PowerShell 7 and Notepad++ acceptance
+        run: python tools/qa_decoder_apps.py --helper decoder/BLACK.BOX-Decoder.exe --output decoder-apps-qa
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        if: always()
+        with:
+          name: BLACKBOX-NATIVE-DECODER-ACCEPTANCE
+          path: decoder-native-qa/
+          if-no-files-found: warn
+          retention-days: 14
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        if: always()
+        with:
+          name: BLACKBOX-TRACEEVENT-DECODER-QA
+          path: |
+            decoder-qa/
+            decoder-reliability-qa/
+            decoder-symbols-qa/
+            decoder-standard-token-qa/
+            decoder-waits-qa/
+            decoder-apps-qa/
+            !decoder-apps-qa/notepad/notepad-portable/**
+            !decoder-apps-qa/notepad/npp.*.zip
+            decoder/decoder-manifest.json
+          if-no-files-found: warn
+          retention-days: 14
+      - name: Generate original retro Windows icon
+        run: python tools/generate_icon.py
+      - name: Record actual source identity for the frozen executable
+        run: python tools/write_build_provenance.py "${{ github.event.pull_request.head.sha || github.sha }}"
+      - name: Build separate Windows maintenance EXE
+        run: python -m PyInstaller --noconfirm --clean --paths src --paths . --onefile --windowed --icon assets/blackbox.ico --name BLACK.BOX-Maintenance maintenance_entry.py
+      - name: Build separate asInvoker diagnostic helper for explicit UAC sessions
+        run: python -m PyInstaller --noconfirm --clean --paths src --paths . --onedir --windowed --collect-submodules blackbox_core --exclude-module PySide6 --exclude-module blackbox_universal --icon assets/blackbox.ico --add-data ".qa-build/blackbox-build.json;." --name BLACK.BOX-Diagnostic diagnostic_entry.py
+      - name: Build BLACK.BOX Universal desktop with original icon
+        shell: pwsh
+        run: |
+          python -m PyInstaller --noconfirm --clean --paths src --paths . --onedir --windowed --collect-submodules blackbox_core --collect-submodules blackbox_investigation --collect-submodules blackbox_universal --icon assets/blackbox.ico --add-data "assets/blackbox.png;assets" --add-data "src/blackbox_core/instrumentation.py;blackbox_core" --add-data ".qa-build/blackbox-build.json;." --name BLACK.BOX-Universal app.py
+          if ($LASTEXITCODE -ne 0) { throw 'GUI build failed' }
+          Copy-Item "dist/BLACK.BOX-Maintenance.exe" "dist/BLACK.BOX-Universal/BLACK.BOX-Maintenance.exe"
+          Copy-Item "dist/BLACK.BOX-Diagnostic" "dist/BLACK.BOX-Universal/diagnostic" -Recurse
+          Copy-Item ".blackbox-portable.json" "dist/BLACK.BOX-Universal/.blackbox-portable.json"
+          Copy-Item "decoder" "dist/BLACK.BOX-Universal/decoder" -Recurse
+          if (-not (Test-Path "dist/BLACK.BOX-Universal/decoder/BLACK.BOX-Decoder.exe")) { throw 'Decoder helper missing' }
+          if (-not (Test-Path "dist/BLACK.BOX-Universal/BLACK.BOX-Maintenance.exe")) { throw 'Maintenance helper missing' }
+          if (-not (Test-Path "dist/BLACK.BOX-Universal/_internal/assets/blackbox.png")) { throw 'App icon missing' }
+      - name: Verify explicit privilege boundaries in the packaged GUI and diagnostic helper
+        run: python tools/verify_diagnostic_package.py dist/BLACK.BOX-Universal
+      - name: Verify real embedded research modules before startup
+        run: python tools/verify_frozen_research.py "dist/BLACK.BOX-Universal/BLACK.BOX-Universal.exe"
+      - name: Verify Explorer icon is the same as the taskbar icon for both EXEs
+        shell: pwsh
+        run: |
+          python tools/verify_windows_exe_icons.py assets/blackbox.ico "dist/BLACK.BOX-Universal/BLACK.BOX-Universal.exe" "dist/BLACK.BOX-Universal/BLACK.BOX-Maintenance.exe"
+          if ($LASTEXITCODE -ne 0) { throw 'BLACK.BOX executable icon QA failed' }
+      - name: Smoke-test the actual frozen Windows EXE
+        shell: pwsh
+        run: |
+          $exe = Join-Path $PWD "dist\BLACK.BOX-Universal\BLACK.BOX-Universal.exe"
+          if (-not (Test-Path $exe)) { throw "Missing portable EXE" }
+          $job = Start-Process -FilePath $exe -ArgumentList "--smoke" -PassThru
+          if (-not $job.WaitForExit(120000)) { $job.Kill(); throw 'Frozen startup smoke exceeded deadline' }
+          if ($job.ExitCode -ne 0) { throw "Frozen Windows GUI failed: $($job.ExitCode)" }
+          Write-Host "Portable GUI smoke PASS"
+          $maintenance = Join-Path $PWD "dist\BLACK.BOX-Universal\BLACK.BOX-Maintenance.exe"
+          $check = Start-Process -FilePath $maintenance -ArgumentList "--help" -PassThru
+          if (-not $check.WaitForExit(60000)) { $check.Kill(); throw 'Maintenance startup exceeded deadline' }
+          if ($check.ExitCode -ne 0) { throw "Maintenance EXE failed smoke: $($check.ExitCode)" }
+      - name: Full research roundtrip in the actual frozen EXE
+        shell: pwsh
+        run: |
+          $exe = Join-Path $PWD "dist\BLACK.BOX-Universal\BLACK.BOX-Universal.exe"
+          $evidence = Join-Path $PWD "frozen-research-e2e"
+          $job = Start-Process -FilePath $exe -ArgumentList @('--research-e2e', ('"' + $evidence + '"')) -PassThru
+          if (-not $job.WaitForExit(120000)) { $job.Kill(); throw 'Frozen research E2E exceeded deadline' }
+          if ($job.ExitCode -ne 0) { throw "Frozen research E2E failed: $($job.ExitCode)" }
+          $proof = Get-Content (Join-Path $evidence 'e2e.json') -Raw | ConvertFrom-Json
+          if ($proof.status -ne 'PASS' -or $proof.helper_pid -eq $proof.gui_pid) { throw 'Missing isolated research proof' }
+      - name: Frozen research with administrator SID and privileges removed
+        run: python tools/qa_standard_token.py "dist/BLACK.BOX-Universal/BLACK.BOX-Universal.exe" "frozen-standard-token-e2e"
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        if: always()
+        with:
+          name: BLACKBOX-FROZEN-QA-DIAGNOSTICS
+          path: |
+            blackbox-qa-error.txt
+            blackbox-smoke-progress.json
+            frozen-research-e2e/*.json
+            frozen-standard-token-e2e/*.json
+          if-no-files-found: warn
+          retention-days: 7
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: BLACKBOX-FROZEN-RESEARCH-E2E
+          path: frozen-research-e2e/
+          if-no-files-found: error
+          retention-days: 7
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: BLACKBOX-STANDARD-TOKEN-E2E
+          path: frozen-standard-token-e2e/
+          if-no-files-found: error
+          retention-days: 7
+      - name: Deep test actual frozen EXE without Python on PATH or source working directory
+        shell: pwsh
+        run: |
+          $exe = Join-Path $PWD "dist\BLACK.BOX-Universal\BLACK.BOX-Universal.exe"
+          $evidence = Join-Path $PWD "deep-smoke-frozen"
+          New-Item -ItemType Directory -Path $evidence -Force | Out-Null
+          $savedPath = $env:PATH
+          try {
+            $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot"
+            $job = Start-Process -FilePath $exe -WorkingDirectory $evidence -ArgumentList @('--deep-smoke', '--qa-output', $evidence, '--qa-commit-sha', '${{ github.event.pull_request.head.sha || github.sha }}') -PassThru
+            if (-not $job.WaitForExit(120000)) { throw 'Frozen deep smoke exceeded 120s deadline' }
+            if ($job.ExitCode -ne 0) { throw "Frozen deep smoke failed: $($job.ExitCode)" }
+          } finally { $env:PATH = $savedPath }
+          $summaryFile = Get-ChildItem -Path $evidence -Filter qa-summary.json -Recurse | Select-Object -First 1
+          if (-not $summaryFile) { throw 'Frozen evidence summary missing' }
+          $summary = Get-Content -Raw $summaryFile.FullName | ConvertFrom-Json
+          if ($summary.result -ne 'PASS' -or -not $summary.frozen -or $summary.completed_actions -ne 3 -or $summary.thread_cpu_seconds -le 0 -or $summary.incidents -le 0) { throw 'Frozen vertical evidence incomplete' }
+          if ($summary.requested_head_sha -ne '${{ github.event.pull_request.head.sha || github.sha }}') { throw 'Frozen evidence head mismatch' }
+          if ($summary.actual_source_sha -ne '${{ github.event.pull_request.head.sha || github.sha }}' -or $summary.source_identity_status -ne 'VERIFIED_EXPECTED_HEAD') { throw 'Frozen build provenance mismatch' }
+          Get-FileHash -Algorithm SHA256 -LiteralPath $exe | Format-List
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        if: always()
+        with:
+          name: BLACKBOX-REAL-PROCESS-FROZEN
+          path: deep-smoke-frozen/
+          if-no-files-found: warn
+          retention-days: 14
+      - name: Include public source license and distribution notices
+        shell: pwsh
+        run: |
+          $output = "dist\BLACK.BOX-Universal"
+          Copy-Item -LiteralPath "LICENSE" -Destination "$output\LICENSE" -Force
+          Copy-Item -LiteralPath "README.md" -Destination "$output\README.md" -Force
+          Copy-Item -LiteralPath "README.ru.md" -Destination "$output\README.ru.md" -Force
+          Copy-Item -LiteralPath "docs\LICENSING.md" -Destination "$output\LICENSING.md" -Force
+          Copy-Item -LiteralPath "docs\vendor\investigation-0.1.2-LICENSE" -Destination "$output\INVESTIGATION-LICENSE.txt" -Force
+          if (-not (Test-Path "$output\INVESTIGATION-LICENSE.txt")) { throw 'Investigation license missing' }
+          if (-not (Test-Path "$output\LICENSE")) { throw "Missing public application license" }
+          if (-not (Test-Path "$output\README.ru.md")) { throw "Russian README missing from Windows release" }
+          Copy-Item -LiteralPath "docs\RELEASE_v0.5.2.md" -Destination "$output\RELEASE-NOTES.md" -Force
+      - name: Real native operations through the frozen diagnostic helper
+        run: python tools/qa_deep_inspection.py --output deep-frozen-qa --helper dist/BLACK.BOX-Universal/diagnostic/BLACK.BOX-Diagnostic.exe
+      - name: Source GUI buttons through packaged diagnostic helper to the native target
+        run: python tools/qa_deep_gui_e2e.py --output deep-frozen-helper-gui-qa --probe deep-frozen-qa/build/deep-probe.exe --helper dist/BLACK.BOX-Universal/diagnostic/BLACK.BOX-Diagnostic.exe
+      - name: Decode actual protected-profile ETL and verify typed disk and network evidence
+        run: python tools/qa_deep_trace_io.py --qa-root deep-frozen-qa --helper dist/BLACK.BOX-Universal/decoder/BLACK.BOX-Decoder.exe --output deep-frozen-io-qa
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        if: always()
+        with:
+          name: BB-DEEP-001-FROZEN-NATIVE-EVIDENCE
+          path: |
+            deep-frozen-qa/
+            deep-frozen-io-qa/
+            deep-frozen-helper-gui-qa/
+            !**/*.dmp
+            !**/*.mdmp
+          retention-days: 30
+          if-no-files-found: warn
+      - name: Mark this as an unpublished BB-DEEP-001 candidate
+        shell: pwsh
+        run: |
+          Copy-Item docs/BB_DEEP_001.md dist/BLACK.BOX-Universal/DEEP-INSPECTION.md
+          Copy-Item docs/BB_DEEP_001_RU.md dist/BLACK.BOX-Universal/DEEP-INSPECTION-RU.md
+          @{ source_sha = '${{ github.sha }}'; base_sha = '3d69cc032582529b5b0533d1318279e2ea30cad1'; branch = 'patch/bb-deep-001'; published_release = $false } | ConvertTo-Json | Set-Content -Encoding utf8 dist/BLACK.BOX-Universal/deep-patch-provenance.json
+      - name: Inventory exact packaged binaries and include runtime license texts
+        run: python tools/build_distribution_inventory.py --payload "dist/BLACK.BOX-Universal"
+      - name: Package portable folder without installing anything
+        shell: pwsh
+        run: |
+          Compress-Archive -LiteralPath "dist\BLACK.BOX-Universal" -DestinationPath "BLACK.BOX-Universal-Windows.zip" -Force
+          if (-not (Test-Path "BLACK.BOX-Universal-Windows.zip")) { throw "ZIP missing" }
+      - name: Native official v0.5.2 to v0.5.3 update and full portable uninstall
+        shell: pwsh
+        timeout-minutes: 16
+        run: |
+          python tools/qa_windows_maintenance_e2e.py --built-zip "BLACK.BOX-Universal-Windows.zip" --expected-sha "${{ github.event.pull_request.head.sha || github.sha }}" --evidence "portable-maintenance-e2e"
+          if ($LASTEXITCODE -ne 0) { throw 'Real portable update/uninstall acceptance failed' }
+      - name: Verify final ZIP byte-for-byte against diagnostic helper and full distribution inventory
+        shell: pwsh
+        run: |
+          $tree = (git rev-parse 'HEAD^{tree}').Trim()
+          python tools/release_gate.py --archive "BLACK.BOX-Universal-Windows.zip" --source-sha "${{ github.sha }}" --source-tree $tree --report "deep-candidate-release-verification.json"
+          if ($LASTEXITCODE -ne 0) { throw 'BB-DEEP release-gate verification failed' }
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        if: always()
+        with:
+          name: BB-DEEP-001-FINAL-ZIP-VERIFICATION
+          path: deep-candidate-release-verification.json
+          retention-days: 30
+          if-no-files-found: error
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        if: always()
+        with:
+          name: BLACKBOX-NATIVE-UPDATE-UNINSTALL-QA
+          path: portable-maintenance-e2e/
+          if-no-files-found: warn
+          retention-days: 14
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: BLACKBOX-BB-DEEP-001-WINDOWS
+          path: BLACK.BOX-Universal-Windows.zip
+          if-no-files-found: error
+          retention-days: 14
+
+  endurance:
+    name: 5h30 continuous Windows workload and verified shutdown
+    needs: native-inspection
+    if: >-
+      github.ref == 'refs/heads/patch/bb-deep-001' &&
+      ((github.event_name == 'workflow_dispatch' && inputs.run_endurance) ||
+       contains(github.event.head_commit.message, '[deep-endurance]'))
+    runs-on: windows-latest
+    timeout-minutes: 355
+    env:
+      QT_QPA_PLATFORM: offscreen
+      PYTHONUTF8: '1'
+      BB_QA_SOURCE_SHA: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.11.9'
+          architecture: x64
+      - name: Install pinned QA dependencies
+        run: |
+          python -m pip install --require-hashes -r requirements/ci-windows-py311.lock
+          python -m pip install --no-build-isolation --no-deps -e .
+      - name: Full requested duration with teardown and journal verification
+        timeout-minutes: 342
+        run: python tools/qa_deep_endurance.py --output deep-endurance-5h30 --duration-seconds 19800
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        if: always()
+        with:
+          name: BB-DEEP-001-ENDURANCE-5H30
+          path: |
+            deep-endurance-5h30/
+            !**/*.dmp
+            !**/*.mdmp
+          retention-days: 30
+          if-no-files-found: error

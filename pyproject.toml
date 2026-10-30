@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "blackbox-core"
-version = "0.5.2"
-description = "Local-first, read-only process observation and evidence reports"
+version = "0.5.3"
+description = "Local Windows process observation, deep inspection and explicit diagnostic actions"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"

@@ -26,7 +26,14 @@ def verify(path):
         "blackbox_universal.research_bridge","blackbox_universal.preparation_dialog",
         "blackbox_core.decoder_alignment","blackbox_core.decoder_waits",
         "blackbox_core.decoder_codeview","blackbox_core.decoder_limits",
-        "blackbox_core.decoder_export","blackbox_universal.decoder_analysis")
+        "blackbox_core.decoder_export","blackbox_universal.decoder_analysis",
+        "blackbox_core.deep_contracts","blackbox_core.deep_service",
+        "blackbox_core.deep_elevation","blackbox_core.deep_ipc",
+        "blackbox_core.deep_helper","blackbox_core.deep_journal",
+        "blackbox_core.deep_native","blackbox_core.deep_debug",
+        "blackbox_core.deep_trace","blackbox_core.deep_dump",
+        "blackbox_universal.deep_inspector_panel",
+        "blackbox_universal.deep_inspector_bridge")
     missing=[name for name in required if name not in archive.toc]
     if missing:raise RuntimeError("FROZEN_MODULES_MISSING: "+", ".join(missing))
     source=path.parent/"_internal"/"blackbox_core"/"instrumentation.py"

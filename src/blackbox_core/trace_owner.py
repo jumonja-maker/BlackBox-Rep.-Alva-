@@ -17,7 +17,7 @@ from uuid import uuid4
 from .library_files import replace_owned_status
 from .trace_clock_evidence import (capture_trace_clock_bracket,
                                    new_clock_order_samples, append_clock_order_sample)
-from .windows_research import WPR_PROFILES
+from .windows_research import WPR_PROFILES, SCOPED_WPR_PROFILE
 
 MAX_JOURNAL_BYTES=65536
 
@@ -42,22 +42,26 @@ def _write(path,data):
         if temp.exists():temp.unlink()
 
 
-def run(journal):
-    from .research_worker import _streams
+def run(journal, *, capture_factory=None, lease_lost=None):
     from .windows_research import WprCapture
-    inp,_=_streams();path=Path(journal);data=_read(path)
+    path=Path(journal);data=_read(path)
     seconds=data['policy']['duration_s'];max_bytes=data['policy']['max_output_bytes']
     profile=data['policy'].get('profile','GeneralProfile.Light')
-    if type(profile) is not str or profile not in WPR_PROFILES:
+    if type(profile) is not str or (profile not in WPR_PROFILES and
+            not (profile == SCOPED_WPR_PROFILE and capture_factory is not None)):
         raise ValueError('INVALID_WPR_PROFILE')
     if type(seconds) is not int or not 1<=seconds<=60 or type(max_bytes) is not int or not 1024**2<=max_bytes<=1024**3:
         raise ValueError('INVALID_TRACE_POLICY')
-    lease_lost=Event()
-    def lease():
-        # Any command or EOF means finish; there is no arbitrary instruction.
-        inp.readline(64);lease_lost.set()
-    Thread(target=lease,name='blackbox-trace-lease',daemon=True).start()
-    capture=WprCapture(path.parent,profile=profile);capture.instance=data['instance']
+    if lease_lost is None:
+        # The scoped diagnostic owner supplies its own native stdin lease and
+        # avoids importing the recording worker into the isolated helper.
+        from .research_worker import _streams
+        inp,_=_streams();lease_lost=Event()
+        def lease():
+            # Any command or EOF means finish; no arbitrary instruction.
+            inp.readline(64);lease_lost.set()
+        Thread(target=lease,name='blackbox-trace-lease',daemon=True).start()
+    capture=(capture_factory or WprCapture)(path.parent,profile=profile);capture.instance=data['instance']
     if capture.tool:
         tool=Path(capture.tool);digest=hashlib.sha256()
         with tool.open('rb') as stream:
@@ -114,7 +118,7 @@ def run(journal):
 
 class TraceSupervisor:
     def __init__(self,folder,*,seconds=30,max_output_bytes=256*1024**2,target=None,profile="GeneralProfile.Light",session_path=None):
-        if type(profile) is not str or profile not in WPR_PROFILES:
+        if type(profile) is not str or profile not in (*WPR_PROFILES, SCOPED_WPR_PROFILE):
             raise ValueError("INVALID_WPR_PROFILE")
         if type(seconds) is not int or not 1<=seconds<=60:raise ValueError('INVALID_TRACE_DURATION')
         if type(max_output_bytes) is not int or not 1024**2<=max_output_bytes<=1024**3:raise ValueError('INVALID_TRACE_SIZE_POLICY')
@@ -134,6 +138,8 @@ class TraceSupervisor:
     @property
     def active(self):return self.process is not None and self.process.poll() is None
     def start(self):
+        if self.data['policy']['profile'] == SCOPED_WPR_PROFILE:
+            raise ValueError('SCOPED_PROFILE_REQUIRES_PROTECTED_OWNER')
         if self.path.exists() or self.path.is_symlink():raise ValueError('TRACE_JOURNAL_EXISTS')
         with self.path.open('xb'):pass
         _write(self.path,self.data)

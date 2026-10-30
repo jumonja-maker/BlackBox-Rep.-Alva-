@@ -13,7 +13,8 @@ from pathlib import Path
 import sys
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_PATHS = ('src', 'blackbox_universal', 'tools', 'tests', 'app.py', 'maintenance_entry.py')
+DEFAULT_PATHS = ('src', 'blackbox_universal', 'tools', 'tests', 'app.py',
+                 'maintenance_entry.py', 'diagnostic_entry.py')
 
 
 def check_paths(paths):

@@ -11,6 +11,7 @@ import argparse
 from contextlib import closing
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import sqlite3
@@ -29,6 +30,28 @@ def _digest(path: Path) -> str:
 
 def _read_json(path: Path):
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def verify_sampling_coverage(*, count, span_seconds, max_gap_seconds, nonpositive_gaps,
+                             requested_seconds, boundary_tolerance_seconds,
+                             maximum_gap_seconds, minimum_count_interval_seconds, label):
+    """Validate persisted coverage, independently of the harness wall clock."""
+    minimum_span = max(0, requested_seconds - boundary_tolerance_seconds)
+    if (type(count) is not int or count < 2 or
+            not math.isfinite(span_seconds) or span_seconds < minimum_span):
+        raise RuntimeError(label + "_PERSISTED_SPAN_TOO_SHORT")
+    if (nonpositive_gaps or not math.isfinite(max_gap_seconds) or
+            max_gap_seconds > maximum_gap_seconds):
+        raise RuntimeError(label + "_PERSISTED_SAMPLE_GAP")
+    minimum_count = max(2, math.ceil(minimum_span / minimum_count_interval_seconds) + 1)
+    if count < minimum_count:
+        raise RuntimeError(label + "_PERSISTED_SAMPLE_COVERAGE_TOO_LOW")
+    return {"persisted_span_seconds": span_seconds, "max_sample_gap_seconds": max_gap_seconds,
+            "persisted_samples": count, "minimum_required_samples": minimum_count,
+            "requested_seconds": requested_seconds, "boundary_tolerance_seconds": boundary_tolerance_seconds,
+            "maximum_gap_seconds": maximum_gap_seconds,
+            "minimum_count_interval_seconds": minimum_count_interval_seconds,
+            "nonincreasing_timestamps": nonpositive_gaps}
 
 
 def _evidence(root: Path, profile: str, requested: int, expected_sha: str):
@@ -89,6 +112,11 @@ def _evidence(root: Path, profile: str, requested: int, expected_sha: str):
         first_ns, last_ns = db.execute(
             "SELECT MIN(monotonic_ns),MAX(monotonic_ns) FROM samples "
             "WHERE series='STANDARD'").fetchone()
+        max_gap_ns, nonpositive_gaps = db.execute("""
+            SELECT MAX(gap),COALESCE(SUM(CASE WHEN gap<=0 THEN 1 ELSE 0 END),0)
+            FROM (SELECT monotonic_ns-LAG(monotonic_ns) OVER(ORDER BY series_seq) gap
+                  FROM samples WHERE series='STANDARD')
+        """).fetchone()
     with closing(sqlite3.connect(research_path.as_uri() + "?mode=ro", uri=True)) as db:
         row = db.execute("SELECT data FROM context WHERE key='state'").fetchone()
         research_state = json.loads(row[0]) if row else None
@@ -105,6 +133,14 @@ def _evidence(root: Path, profile: str, requested: int, expected_sha: str):
         raise RuntimeError("QA_V1_V2_STANDARD_PARITY_FAILURE")
     if type(first_ns) is not int or type(last_ns) is not int or first_ns >= last_ns:
         raise RuntimeError("QA_INSUFFICIENT_TIME_SERIES")
+    # The production recorder starts at 2 s and adaptive throttling may use
+    # 5 s. Permit half that worst-case sample density, a 30 s largest gap and
+    # 10 s for the first/last saved sample around recording boundaries. A long
+    # wall-clock phase with a short or sparse persisted recording never passes.
+    sampling = verify_sampling_coverage(count=n, span_seconds=(last_ns - first_ns) / 1e9,
+        max_gap_seconds=(max_gap_ns or 0) / 1e9, nonpositive_gaps=nonpositive_gaps,
+        requested_seconds=requested, boundary_tolerance_seconds=10,
+        maximum_gap_seconds=30, minimum_count_interval_seconds=10, label="QA_OBSERVER")
     if phase.get("recorded_samples", 0) < n:
         raise RuntimeError("QA_BRIDGE_REPORTED_FUZZY_SAMPLE_COUNT")
     # Validate *saved* read-only interval/zoom/export. Open at three distant
@@ -138,6 +174,7 @@ def _evidence(root: Path, profile: str, requested: int, expected_sha: str):
         "result": "PASS", "profile": profile, "requested_seconds": requested,
         "actual_seconds": seconds,
         "v1_base_samples": n, "v2_standard_samples": mirrored,
+        "persisted_recording_coverage": sampling,
         "invalid_source_links": mislinked, "schema2_writer_errors": errors,
         "research_state": research_state,
         "primary_exit_code": original[0][2],

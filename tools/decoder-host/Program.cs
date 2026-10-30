@@ -151,6 +151,12 @@ internal static class Program
         object? schedule = null;
         try { schedule = ThreadSchedule.Project(e, log); }
         catch (Exception ex) { errors.Add("SCHEDULER_CLASSIFICATION:" + ex.GetType().Name); }
+        object? ioObservation = null;
+        try {
+            ioObservation = IoObservations.Project(e,
+                e is DiskIOTraceData ? SourceCounterFrequency(log) : null);
+        }
+        catch (Exception ex) { errors.Add("IO_CLASSIFICATION:" + ex.GetType().Name); }
         // UTC is TraceEvent's reconstruction from the trace clock (QPC), NOT
         // an independently authenticated wall-clock sample or proof that this
         // trace can be aligned to another BLACK.BOX session.
@@ -158,6 +164,7 @@ internal static class Program
         return new { type = "event", ordinal, source_index = e.EventIndex.ToString(),
             time_ms = e.TimeStampRelativeMSec, source_ticks = e.TimeStampQPC.ToString(CultureInfo.InvariantCulture),
             utc_ticks = utcTicks, cpu_sample = cpuSample, thread_schedule = schedule,
+            io_observation = ioObservation,
             pid = e.ProcessID, tid = e.ThreadID, process_instance = processIndex,
             provider = Bounded(e.ProviderName, ref clipped, 256), provider_guid = e.ProviderGuid.ToString(),
             event_id = (int)e.ID, version = e.Version, name = Bounded(e.EventName, ref clipped, 256),
@@ -208,7 +215,7 @@ internal static class Program
                 trace_counter_frequency_hz = SourceCounterFrequency(log),
                 trace_counter_kind = "TRACEEVENT_SOURCE_COUNTER",
                 trace_counter_frequency_provenance = "TRACEEVENT_4_0_PERSISTED_SOURCE_METADATA",
-                thread_schedule_contract = "blackbox.thread-schedule/1",
+                thread_schedule_contract = "blackbox.thread-schedule/1", io_contract = "blackbox.trace-io/1",
                 capture_loss = (int?)null, cpu_sample_contract = "blackbox.cpu-sample/1", symbol_policy = "NO_SYMBOL_SERVER_OR_SOURCE_DOWNLOAD" }, Json));
             long count = 0; bool limited = false;
             foreach (var e in log.Events)

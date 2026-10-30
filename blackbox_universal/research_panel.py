@@ -99,7 +99,7 @@ class ResearchPanel(QWidget):
             ("System failure events","Системные события сбоев",self.crash_events),
             ("Read saved ETL…","Прочитать сохранённый ETL…",self.decode_trace),
             ("Capture minidump","Снять минидамп",self.dump),
-            ("Administrator mode…","Режим администратора…",self.elevate),
+            ("Diagnostic permissions…","Права для диагностики…",self.elevate),
             ("Export investigation…","Сохранить исследование…",self.export),
             ("Compare investigations…","Сравнить исследования…",self.compare),
             ("Verify package…","Проверить пакет…",self.verify),
@@ -272,13 +272,19 @@ class ResearchPanel(QWidget):
         self.details.setPlainText(text)
 
     def elevate(self):
-        if os.name!="nt":self.details.setPlainText("UNSUPPORTED_PLATFORM");return
-        if self.bridge.active or self.bridge.pending:
-            self.details.setPlainText(self.tr("Stop recording first.","Сначала остановите запись."));return
-        args=[] if getattr(sys,"frozen",False) else [str(Path(__file__).resolve().parent.parent/"app.py")]
-        if self.bridge.pid:args.extend(["--attach-pid",str(self.bridge.pid)])
-        shell=ctypes.WinDLL("shell32",use_last_error=True)
-        shell.ShellExecuteW.argtypes=[ctypes.c_void_p,ctypes.c_wchar_p,ctypes.c_wchar_p,ctypes.c_wchar_p,ctypes.c_wchar_p,ctypes.c_int]
-        shell.ShellExecuteW.restype=ctypes.c_void_p
-        result=shell.ShellExecuteW(None,"runas",sys.executable,subprocess.list2cmdline(args),None,1)
-        self.details.setPlainText(self.tr("Elevated instance requested; original evidence retained.","Запрошен отдельный запуск с повышенными правами; исходные данные сохранены.") if result and result>32 else self.tr("Elevation declined or unavailable.","Повышение прав отменено или недоступно."))
+        # Elevation belongs to a scoped diagnostic helper, never the Overview
+        # process or the sampler. The action's own permission check offers UAC.
+        panel = getattr(self.window, "deep_inspector_panel", None)
+        toggle = getattr(self.window, "deep_inspector_toggle", None)
+        if panel is None or toggle is None:
+            self.details.setPlainText(self.tr(
+                "Open Deep Inspection in the desktop application to choose a diagnostic action.",
+                "Откройте Глубокое исследование в основном приложении и выберите действие."))
+            return
+        toggle.setChecked(True)
+        panel.setFocus()
+        self.details.setPlainText(self.tr(
+            "Choose a specific action in Deep Inspection. If Windows requires additional permissions, "
+            "BLACK.BOX offers a scoped helper session through the system UAC prompt.",
+            "Выберите конкретное действие в Глубоком исследовании. Если Windows потребует "
+            "дополнительные права, BLACK.BOX предложит ограниченный сеанс helper через системное окно UAC."))

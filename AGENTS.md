@@ -1,8 +1,24 @@
 # BLACK.BOX independent engineering rules
 
+## BB-DEEP-001 patch (2026-10-29)
+
+- Work in `patch/bb-deep-001`, based on the released v0.5.2 source. Keep the
+  completed decoder patch history intact.
+- Implement the owner's BB-DEEP-001 specification inside Overview; preserve
+  six primary pages and the legacy five-page embedding API.
+- Run **all automated tests exclusively on GitHub-hosted runners**. Local
+  source editing, inspection and Git operations are allowed; do not run local
+  unit tests, GUI/native acceptance, compiler checks or endurance tests.
+- Use isolated `bb-deep-qa.yml`; retain real evidence, exact source identity,
+  skipped checks and unconfirmed recovery. Do not publish a Release or merge
+  main without separate explicit approval.
+- Keep memory contents and dumps out of automatic share exports. Never claim
+  Secure Desktop or physical Windows 10/11 acceptance from a hosted runner.
+
 ## Owner-approved patch workflow (2026-10-28)
 
-- Work in `patch/trace-decoder-phase5`; do not push intermediate feature edits to `main`.
+- The completed decoder work used `patch/trace-decoder-phase5`; do not push
+  intermediate feature edits to `main`.
 - Keep source, UI, failure handling, targeted tests and evidence together as a reviewed patch.
 - Run isolated `decoder-patch-qa.yml` for this branch; it never publishes.
 - Main merge and official Release each require separate explicit owner approval.
