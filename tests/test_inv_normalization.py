@@ -83,6 +83,22 @@ class NormalizationContracts(unittest.TestCase):
         self.assertEqual(error["process_identity"]["kind"], "APP_PROCESS")
         self.assertFalse(error["process_identity"]["exact"])
 
+    def test_sdk_io_classification_requires_explicit_name_boundaries(self):
+        examples = {"profileio.failed": "ERROR", "getcpu.failed": "ERROR",
+            "app.profileio.operation.end": "ERROR", "FileIO/Read": "FILE_OPERATION",
+            "app.io.operation.end": "FILE_OPERATION", "IO.OPERATION": "FILE_OPERATION",
+            "TcpIp/Send": "NETWORK_OPERATION", "UdpIp/Send": "NETWORK_OPERATION",
+            "network.error": "NETWORK_OPERATION", "app_tcp_send": "NETWORK_OPERATION",
+            "app/udp/receive": "NETWORK_OPERATION"}
+        for kind, expected in examples.items():
+            with self.subTest(kind=kind):
+                path, rows = self.sdk(complete=False)
+                row = {**rows[0], "kind": kind, "attributes": {"status": "ERROR", "error_code": 5}}
+                path.write_text(json.dumps(row) + "\n", encoding="utf-8")
+                result = normal.normalize_sources([{"source_type": "EVENTS_JSONL", "path": path}])
+                self.assertEqual(len(result["nodes"]), 1)
+                self.assertEqual(result["nodes"][0]["observation_type"], expected)
+
     def test_eof_alone_missing_loss_counter_and_missing_sequence_never_mean_complete(self):
         path, rows = self.sdk(complete=False)
         spec = [{"source_type": "EVENTS_JSONL", "path": path}]

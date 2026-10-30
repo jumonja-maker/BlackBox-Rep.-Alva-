@@ -27,6 +27,8 @@ MAX_RECORD_BYTES = 512 * 1024
 MAX_JSON_BYTES = 32 * 1024**2
 MAX_METADATA_BYTES = 16 * 1024
 _HASH = re.compile(r"[0-9a-f]{64}\Z")
+_FILE_MARKER = re.compile(r"(?:^|[._/])(?:io[._/]operation|fileio)(?:$|[._/])")
+_NETWORK_MARKER = re.compile(r"(?:^|[._/])(?:network|tcpip|udpip|tcp|udp)(?:$|[._/])")
 _SOURCE_RECEIPT_ORIGIN = object()
 _PRIVATE_KEYS = {"token", "nonce", "password", "secret", "environment", "environ", "cmdline",
     "command_line", "commandline", "bytes", "hex", "value_hex", "expected_hex", "original_hex",
@@ -603,9 +605,9 @@ def _classify(kind, *, status=None, attributes=None):
     name = str(kind).lower()
     if "incident" in name:
         return "INCIDENT"
-    if "io.operation" in name or "fileio" in name:
+    if _FILE_MARKER.search(name):
         return "FILE_OPERATION"
-    if any(x in name for x in ("network", "tcp", "udp")):
+    if _NETWORK_MARKER.search(name):
         return "NETWORK_OPERATION"
     if "error" in name or "failed" in name or status in ("ERROR", "FAILED", "OPERATION_FAILED", "RECOVERY_UNCONFIRMED"):
         return "ERROR"
