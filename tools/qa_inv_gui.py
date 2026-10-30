@@ -256,11 +256,14 @@ def run(args):
         canvas_node = next((item for item in panel.graph.scene().items()
                             if isinstance(item.data(0), str)), None)
         require(canvas_node is not None, "INV_REAL_GRAPH_CANVAS_HAS_NO_SOURCE_NODE")
+        canvas_node_id = canvas_node.data(0)
         panel.graph.ensureVisible(canvas_node)
         app.processEvents()
         QTest.mouseClick(panel.graph.viewport(), Qt.MouseButton.LeftButton,
             pos=panel.graph.mapFromScene(canvas_node.sceneBoundingRect().center()))
-        require(panel._selected_node_id == canvas_node.data(0), "INV_GRAPH_CANVAS_CLICK_NOT_BOUND_TO_EVIDENCE")
+        # Selection legitimately redraws the scene and deletes its old items.
+        # The immutable evidence identifier survives that redraw.
+        require(panel._selected_node_id == canvas_node_id, "INV_GRAPH_CANVAS_CLICK_NOT_BOUND_TO_EVIDENCE")
         proof["graph_canvas_click"] = {"node_id": panel._selected_node_id, "actual_qt_pointer_event": True}
         actual_incident = next((node for node in panel.case["nodes"]
                                 if node["observation_type"] == "INCIDENT" and node["source_type"] == "EVENTS_JSONL"), None)
