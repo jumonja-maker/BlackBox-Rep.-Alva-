@@ -155,6 +155,52 @@ class DeepDebugContracts(unittest.TestCase):
                     self.assertEqual(item._api.memory, {0x1000: b"original", 0x2000: b"\x90"})
                     self.assertFalse(item._guard.plans[-1][ledger])
 
+    def test_cleanup_never_mutates_running_process_without_confirmed_stop(self):
+        # An attached debugger can receive no stop event after a failed
+        # DebugBreakProcess; source recovery MUST NOT write live code or TF.
+        for kind in ("breakpoint", "memory", "suspension", "step"):
+            with self.subTest(kind=kind):
+                item = session()
+                item._attached = True
+                item._event = None
+                item._api.break_process = Mock(
+                    side_effect=DebugError("ACCESS_DENIED", "CONTROLLED_STOP_FAILURE", 5))
+                item._api.replace = Mock()
+                item._api.set_context = Mock()
+                item._api.k.ResumeThread = Mock()
+                item._api.k.ContinueDebugEvent = Mock()
+                item._api.k.DebugActiveProcessStop = Mock()
+                item._guard.finish = Mock()
+                if kind == "breakpoint":
+                    item._breakpoints["bp"] = {
+                        "breakpoint_id": "bp", "address": 0x2000, "original_hex": "90",
+                        "installed": True, "enabled": True, "original_protection": 0x20}
+                    item._api.memory[0x2000] = b"\xcc"
+                elif kind == "memory":
+                    item._changes["ch"] = {"change_id": "ch", "address": 0x1000,
+                                           "original_hex": b"original".hex(),
+                                           "value_hex": b"changed!".hex()}
+                elif kind == "suspension":
+                    item._suspensions["s"] = {"suspension_id": "s", "tid": 7,
+                        "created_100ns": 45678, "phase": "active", "previous_count": 1,
+                        "handle": 100}
+                else:
+                    item._stepping = {"tid": 7, "created_100ns": 45678,
+                                      "original_tf": False, "breakpoint_id": None,
+                                      "pause_after": True}
+                answer = item._cleanup()
+                self.assertEqual(answer["status"], "RECOVERY_UNCONFIRMED")
+                self.assertTrue(answer["data"]["owner_retained"])
+                self.assertIsNone(answer["data"]["held_debug_event"])
+                self.assertIn("NO_CONFIRMED_STOP_OWNED_EFFECTS_LEFT_UNTOUCHED", answer["error"])
+                self.assertEqual(item.state, "RECOVERY_UNCONFIRMED")
+                item._api.replace.assert_not_called()
+                item._api.set_context.assert_not_called()
+                item._api.k.ResumeThread.assert_not_called()
+                item._api.k.ContinueDebugEvent.assert_not_called()
+                item._api.k.DebugActiveProcessStop.assert_not_called()
+                item._guard.finish.assert_not_called()
+
     def test_unverified_int3_cleanup_retains_owner_until_rip_is_repaired(self):
         item = session()
         item._attached = True

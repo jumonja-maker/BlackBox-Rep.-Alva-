@@ -490,6 +490,10 @@ class DeepInspectorGuiTests(unittest.TestCase):
         self.assertEqual(params["destination"], "selected.dmp")
         self.assertTrue(params["full"])
         self.assertTrue(options["confirmed"])
+        from blackbox_core.deep_native import MAX_DUMP_BYTES
+        self.assertEqual(params["max_bytes"], MAX_DUMP_BYTES)
+        # Covers the native validation boundary, not just dialog selection.
+        self.assertEqual(MAX_DUMP_BYTES, 512 * 1024**2)
 
     def test_etw_profile_needs_confirmation_and_actual_captured_file(self):
         self.assertFalse(self.panel._action_buttons["captured_trace"].isEnabled())

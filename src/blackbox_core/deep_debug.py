@@ -599,7 +599,8 @@ class DebugSession:
                              "held_debug_event": {"pid": event.pid, "tid": event.tid, "code": event.code} if event else None,
                              "native_cleanup_failures": native_failures or [],
                              "owned_resources_remaining": len(self._breakpoints) + len(self._changes) + len(self._suspensions)},
-                       limitations=["Unverified owned execution changes remain stopped; retry cleanup before continuing.",
+                       limitations=[("An owned debug event remains held for cleanup retry." if event is not None else
+                                     "No stopped debug event was verified. The target may still execute; restoration and detach were not attempted."),
                                     "Parent loss or the original session deadline can still end the owner; recovery then remains best effort."])
 
     def _ensure_guard(self) -> None:
@@ -1161,6 +1162,17 @@ class DebugSession:
                     errors.append("NO_CONFIRMED_STOP_FOR_CLEANUP")
             except BaseException as exc:
                 record_caught_failure("DEBUG_STOP_FOR_CLEANUP", exc)
+        # A failed stop does not grant permission to modify a running thread's
+        # RIP/TF or executable code. Nor may a speculative recovery write race
+        # the executing program. Retain the original owner, guardian and ledger
+        # for explicit, bounded retry; do not detach with live owned effects.
+        if self._attached and self._event is None and (
+                self._breakpoints or self._stepping or self._changes or self._suspensions):
+            errors.append("NO_CONFIRMED_STOP_OWNED_EFFECTS_LEFT_UNTOUCHED")
+            return self._retain_debug_owner(
+                "; ".join(errors),
+                winerror=native_failures[0]["winerror"] if native_failures else None,
+                native_failures=native_failures)
         if self._stepping:
             try:
                 item = self._stepping

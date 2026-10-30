@@ -480,12 +480,25 @@ jobs:
         run: |
           Compress-Archive -LiteralPath "dist\BLACK.BOX-Universal" -DestinationPath "BLACK.BOX-Universal-Windows.zip" -Force
           if (-not (Test-Path "BLACK.BOX-Universal-Windows.zip")) { throw "ZIP missing" }
-      - name: Native official v0.5.1 to v0.5.2 update and full portable uninstall
+      - name: Native official v0.5.2 to v0.5.3 update and full portable uninstall
         shell: pwsh
         timeout-minutes: 16
         run: |
           python tools/qa_windows_maintenance_e2e.py --built-zip "BLACK.BOX-Universal-Windows.zip" --expected-sha "${{ github.event.pull_request.head.sha || github.sha }}" --evidence "portable-maintenance-e2e"
           if ($LASTEXITCODE -ne 0) { throw 'Real portable update/uninstall acceptance failed' }
+      - name: Verify final ZIP byte-for-byte against diagnostic helper and full distribution inventory
+        shell: pwsh
+        run: |
+          $tree = (git rev-parse 'HEAD^{tree}').Trim()
+          python tools/release_gate.py --archive "BLACK.BOX-Universal-Windows.zip" --source-sha "${{ github.sha }}" --source-tree $tree --report "deep-candidate-release-verification.json"
+          if ($LASTEXITCODE -ne 0) { throw 'BB-DEEP release-gate verification failed' }
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        if: always()
+        with:
+          name: BB-DEEP-001-FINAL-ZIP-VERIFICATION
+          path: deep-candidate-release-verification.json
+          retention-days: 30
+          if-no-files-found: error
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         if: always()
         with:

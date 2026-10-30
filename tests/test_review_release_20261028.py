@@ -14,7 +14,7 @@ class DraftPublicationReview(unittest.TestCase):
         self.archive = Path(self.temp.name)/'BLACK.BOX-Universal-Windows.zip'
         self.archive.write_bytes(b'synthetic archive, not a real release')
         sidecar = Path(str(self.archive)+'.sha256'); sidecar.write_bytes(b'synthetic checksum')
-        self.sha = 'a'*40; self.repo = 'owner/repo'; self.tag = 'v0.5.2'
+        self.sha = 'a'*40; self.repo = 'owner/repo'; self.tag = 'v0.5.3'
         self.draft = {'id':123,'draft':True,'prerelease':False,'tag_name':self.tag,
                       'target_commitish':self.sha,'assets':[]}
         for p in (self.archive,sidecar):
@@ -85,7 +85,7 @@ class DraftPublicationReview(unittest.TestCase):
         from blackbox_universal import __version__
         from tools.release_gate import VERSION
         root=Path(__file__).resolve().parents[1]
-        self.assertEqual(__version__,'0.5.2');self.assertEqual(VERSION,__version__)
+        self.assertEqual(__version__,'0.5.3');self.assertEqual(VERSION,__version__)
         self.assertEqual(tomllib.loads((root/'pyproject.toml').read_text())['project']['version'],VERSION)
         workflow=(root/'.github/workflows/readme-screenshots.yml').read_text()
         self.assertNotIn('git push',workflow);self.assertNotIn('contents: write',workflow)

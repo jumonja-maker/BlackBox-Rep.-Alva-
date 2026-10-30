@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 from concurrent.futures import ThreadPoolExecutor
+from unittest.mock import patch
 import json
 import os
 from pathlib import Path
@@ -19,7 +20,7 @@ import traceback
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT), str(ROOT / "src")]
 
-from tools.qa_deep_inspection import Probe, build_probe, file_hash, require, require_hosted_windows, save
+from tools.qa_deep_inspection import Probe, build_probe, file_hash, minidump_evidence, require, require_hosted_windows, save
 from tools.qa_deep_journal import verify_action_journal
 
 
@@ -236,6 +237,29 @@ def run(args):
                     for column in range(panel._tables["memory"].columnCount())
                     if panel._tables["memory"].item(row, column) is not None),
                 "GUI_MEMORY_BYTES_NOT_RENDERED")
+        # Exercise the REAL Overview dump button (normal and full) through
+        # the Qt bridge and a real native helper, not just the direct API.
+        # Only the OS-owned file picker and dump-type chooser are seeded with
+        # controlled QA paths. The consent QMessageBox and capture are real.
+        dump_root = output / "private-gui-dumps"
+        dump_root.mkdir()
+        proof["gui_dump_oracles"] = []
+        for full in (False, True):
+            selected = "Extended dump with memory" if full else "Minidump"
+            destination = dump_root / ("full.dmp" if full else "normal.dmp")
+            with patch("blackbox_universal.deep_inspector_panel.QInputDialog.getItem",
+                       return_value=(selected, True)), \
+                 patch("blackbox_universal.deep_inspector_panel.QFileDialog.getSaveFileName",
+                       return_value=(str(destination), "Dump (*.dmp)")):
+                obtained = click("dump", "memory", consent=True)
+            require(obtained["data"].get("destination") == str(destination),
+                    "GUI_DUMP_SELECTED_DESTINATION_MISMATCH")
+            evidence = minidump_evidence(destination, full=full,
+                expected_address=oracle["buffer_address"] if full else None,
+                expected_hex=oracle["buffer_hex"] if full else None)
+            require(evidence["status"] == "PASS", "GUI_REAL_DUMP_INVALID")
+            proof["gui_dump_oracles"].append({"full": full, "size": evidence["bytes"],
+                "sha256": evidence["sha256"], "known_native_buffer_verified": evidence["known_native_buffer_verified"]})
         changed = bytes(i ^ 0xA5 for i in range(64)).hex()
         panel.expected_bytes.setText(oracle["buffer_hex"])
         panel.new_bytes.setText(changed)

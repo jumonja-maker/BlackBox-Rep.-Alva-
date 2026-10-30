@@ -721,7 +721,10 @@ class OverviewInspectorPanel(QWidget):
             return
         path, _ = QFileDialog.getSaveFileName(self, self.tr2("New diagnostic dump", "Новый диагностический дамп"), "BLACKBOX-Diagnostic.dmp", "Dump (*.dmp)")
         if path and self._interaction_current(interaction):
-            self._request("dump", {"destination": path, "full": selected == choices[1], "max_bytes": 1024 * 1024 * 1024})
+            # The native writer has a hard 512 MiB cap; never ask it for a
+            # larger budget, even for a full-memory dump.
+            from blackbox_core.deep_native import MAX_DUMP_BYTES
+            self._request("dump", {"destination": path, "full": selected == choices[1], "max_bytes": MAX_DUMP_BYTES})
 
     def _record_etw(self):
         interaction = self._interaction_token()
