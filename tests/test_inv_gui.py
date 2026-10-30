@@ -297,6 +297,103 @@ class InvestigationGuiContracts(unittest.TestCase):
         self.assertIsNone(arguments["case_ids"])
         self.assertEqual(arguments["reason"], "Explicit user explanation")
 
+    def test_loading_another_case_clears_old_groups_and_prevents_cross_case_edit(self):
+        first = fixture_case()
+        first["issue_grouping"] = {"groups": [{"group_id": "group-A", "occurrences": []}], "candidates": []}
+        self.panel.load_case(first)
+        self.panel._group_cases = [first]
+        self.panel._deferred_checkpoint = True
+        second = fixture_case()
+        second["case_id"] = "case-B"
+        self.panel.load_case(second)
+        self.assertIsNone(self.panel._grouping)
+        self.assertEqual(self.panel._group_cases, [])
+        self.assertEqual(self.panel._models["recurrences"].rowCount(), 0)
+        self.assertFalse(self.panel._deferred_checkpoint)
+        with patch("blackbox_universal.investigation_graph_panel.QInputDialog.getText") as dialog:
+            self.panel.manual_group("MERGE")
+        dialog.assert_not_called()
+        self.assertEqual(self.reader.calls, [])
+        self.assertNotIn("issue_grouping", second)
+
+    def test_reopened_case_restores_only_its_own_saved_groups_and_candidates(self):
+        case = fixture_case()
+        grouping = {"groups": [{"group_id": "group-B", "occurrences": []}],
+                    "candidates": [{"group_id": "candidate-B", "status": "CANDIDATE"}]}
+        case["issue_grouping"] = grouping
+        self.panel.load_case(case)
+        self.assertIs(self.panel._grouping, grouping)
+        model = self.panel._models["recurrences"]
+        self.assertEqual(model.rowCount(), 2)
+        self.assertEqual([row["group_id"] for row in model.rows], ["group-B", "candidate-B"])
+        ungrouped = fixture_case()
+        ungrouped["issues"] = [{"group_id": "case-C-candidate", "status": "CANDIDATE"}]
+        self.panel.load_case(ungrouped)
+        self.assertIsNone(self.panel._grouping)
+        self.assertEqual([row["group_id"] for row in model.rows], ["case-C-candidate"])
+
+    def test_malformed_imported_grouping_rows_are_ignored_without_losing_case(self):
+        for grouping in (["bad grouping"], {"groups": ["bad row"]}, {"groups": [], "candidates": [17]},
+                         {"groups": [], "candidates": None}):
+            with self.subTest(grouping=grouping):
+                case = fixture_case()
+                case["issue_grouping"] = grouping
+                self.panel._received("open", {"case": case, "index_path": "case-B.sqlite3"}, "", self.reader.generation)
+                self.assertIs(self.panel.case, case)
+                self.assertIsNone(self.panel._grouping)
+                self.assertEqual(self.panel._models["recurrences"].rowCount(), 0)
+                self.assertIn("ignored", self.panel.status.text())
+
+    def test_saved_case_open_drops_previous_source_filter_and_incident_without_live_fallback(self):
+        sources = [{"source_type": "SESSION", "path": "/SYNTHETIC/case-A-session"}]
+        self.panel.open_case_context(sources, incident_id=17, selection={"start_ns": 10, "end_ns": 20})
+        self.panel._received("build", {"case": fixture_case(), "index_path": "case-A.sqlite3"}, "", self.reader.generation)
+        self.assertEqual(self.panel.sources, sources)
+        self.assertEqual(self.panel._incident_id, 17)
+        second = fixture_case()
+        second["case_id"] = "case-B"
+        self.panel._received("open", {"case": second, "index_path": "case-B.sqlite3"}, "", self.reader.generation)
+        self.window.probe.session_folder = "/SYNTHETIC/unrelated-current-session"
+        self.window._navigate = Mock()
+        self.assertEqual(self.panel.sources, [])
+        self.assertIsNone(self.panel._selection)
+        self.assertIsNone(self.panel._incident_id)
+        self.assertFalse(self.panel.build_case())
+        self.assertFalse(self.panel.return_to_incident())
+        self.assertFalse(self.panel.return_button.isEnabled())
+        self.window._navigate.assert_not_called()
+        self.assertEqual(self.reader.calls, [])
+        self.panel.open_case_context(sources, incident_id=17, selection={"start_ns": 10, "end_ns": 20})
+        self.panel.load_case(second)
+        self.assertEqual(self.panel.sources, [])
+        self.assertIsNone(self.panel._selection)
+        self.assertIsNone(self.panel._incident_id)
+
+    def test_own_build_result_preserves_submitted_sources_filter_and_incident(self):
+        sources, selection = [{"source_type": "SESSION", "path": "/SYNTHETIC/case-A"}], {"start_ns": 10, "end_ns": 20}
+        self.panel.open_case_context(sources, incident_id=17, selection=selection)
+        self.panel._received("build", {"case": fixture_case(), "index_path": "case-A.sqlite3"}, "", self.reader.generation)
+        self.assertEqual(self.panel.sources, sources)
+        self.assertEqual(self.panel._selection, selection)
+        self.assertEqual(self.panel._incident_id, 17)
+        self.assertTrue(self.panel.build_case())
+        self.assertEqual(self.reader.calls[-1][1]["sources"], sources)
+        self.assertEqual(self.reader.calls[-1][1]["selection"], selection)
+
+    def test_group_selection_cannot_cross_a_case_change_inside_modal_dialog(self):
+        first = fixture_case()
+        first["issue_grouping"] = {"groups": [{"group_id": "group-A", "occurrences": []}], "candidates": []}
+        self.panel.load_case(first)
+        answers = iter([("group-A", True), ("User explanation", True)])
+        def change_case(*args, **kwargs):
+            value = next(answers)
+            if value[0] == "User explanation":
+                self.panel.load_case(fixture_case())
+            return value
+        with patch("blackbox_universal.investigation_graph_panel.QInputDialog.getText", side_effect=change_case):
+            self.panel.manual_group("MERGE")
+        self.assertEqual(self.reader.calls, [])
+
     def test_context_editor_requires_explicit_scope_and_defaults_to_no_file_binding(self):
         from blackbox_universal.investigation_context_dialog import InvestigationContextDialog
         for language in ("EN", "RU"):

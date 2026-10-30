@@ -180,6 +180,7 @@ class InvestigationGraphPanel(QWidget):
         self._closing_for_window = False
         self._scenario_context, self._app_context = {}, {}
         self._context_scope_sources = None
+        self._requires_explicit_sources = False
         self.setObjectName("investigationGraphWorkspace")
         self._build()
         self.bridge.result_ready.connect(self._received)
@@ -401,6 +402,7 @@ class InvestigationGraphPanel(QWidget):
         if sources is not None:
             self.sources = deepcopy(sources)
             self._context_scope_sources = None
+            self._requires_explicit_sources = not bool(self.sources)
         self.show()
         self._render_summary()
         self._controls()
@@ -454,6 +456,10 @@ class InvestigationGraphPanel(QWidget):
 
     def build_case(self):
         if not self.sources:
+            if self._requires_explicit_sources:
+                self._set_status("Choose the original saved sources explicitly before rebuilding this investigation.",
+                                 "Явно выберите исходные сохранённые источники перед перестроением расследования.")
+                return False
             folder = getattr(getattr(self.window, "probe", None), "session_folder", None)
             if folder is not None:
                 self.sources = [{"source_type": "SESSION", "path": str(folder)}]
@@ -479,7 +485,11 @@ class InvestigationGraphPanel(QWidget):
             self.bridge.invalidate()
             self.bridge.submit("open", path=path)
 
-    def load_case(self, case):
+    def load_case(self, case, *, preserve_source_context=False):
+        if not preserve_source_context:
+            self.sources = []
+            self._selection = self._incident_id = None
+            self._requires_explicit_sources = True
         self.case = case
         self.experiment_case = None
         self._record_queue.clear()
@@ -489,7 +499,21 @@ class InvestigationGraphPanel(QWidget):
         self._scenario_context = case.get("scenario") or {}
         self._app_context = case.get("app_identity") or {}
         self._context_scope_sources = None
+        self._deferred_action_refresh = self._deferred_checkpoint = False
+        self._group_cases = []
+        grouping = case.get("issue_grouping")
+        self._invalid_saved_grouping = grouping is not None and (
+            not isinstance(grouping, dict) or not isinstance(grouping.get("groups"), list) or
+            not isinstance(grouping.get("candidates", []), list) or
+            any(not isinstance(row, dict) for row in grouping["groups"] + grouping.get("candidates", [])))
+        if grouping is None or self._invalid_saved_grouping:
+            grouping = None
+        self._grouping = grouping
+        recurrences = grouping["groups"] + grouping.get("candidates", []) if grouping is not None else case.get("issues", [])
+        self._models["recurrences"].set_rows([row for row in recurrences if isinstance(row, dict)] if isinstance(recurrences, list) else [])
         self._selected_node_id = self._selected_hypothesis = None
+        self.details.clear()
+        self.verification_status.clear()
         self._models["sources"].set_rows(case.get("sources", []))
         self.nodes_model.set_rows(case.get("nodes", []))
         self._models["edges"].set_rows(case.get("edges", []))
@@ -498,8 +522,15 @@ class InvestigationGraphPanel(QWidget):
         self._render_critical(case.get("critical_path", {}))
         self._set_actions(case.get("actions", []))
         self._render_summary()
+        self._render_binding()
         self._controls()
+        if self._invalid_saved_grouping:
+            self._grouping_import_warning()
         self.case_ready.emit(case)
+
+    def _grouping_import_warning(self):
+        self._set_status("Malformed imported grouping was ignored. The investigation and its source evidence remain available; rebuild grouping explicitly.",
+                         "Некорректные импортированные группы проигнорированы. Расследование и исходные данные доступны; явно постройте группы заново.")
 
     def _render_summary(self):
         self.source_summary.setText(self.tr2("Saved sources: ", "Сохранённые источники: ") +
@@ -1053,6 +1084,7 @@ class InvestigationGraphPanel(QWidget):
     def manual_group(self, action):
         if not self._grouping:
             return
+        selected_case, selected_grouping = self.case, self._grouping
         group_text, ok = QInputDialog.getText(self, "BLACK.BOX", self.tr2("Group IDs, comma separated", "Идентификаторы групп через запятую"))
         if not ok:
             return
@@ -1064,12 +1096,20 @@ class InvestigationGraphPanel(QWidget):
         reason, ok = QInputDialog.getText(self, "BLACK.BOX", self.tr2("Reason (required)", "Причина (обязательна)"))
         if not ok or not reason.strip():
             return
-        self.bridge.submit("group_change", groups=self._grouping, action=action,
+        if self.case is not selected_case or self._grouping is not selected_grouping:
+            self._set_status("Investigation changed while choosing groups. Review this case and start the edit again.",
+                             "Расследование изменилось во время выбора групп. Проверьте это дело и начните изменение заново.")
+            return
+        self.bridge.submit("group_change", groups=selected_grouping, action=action,
             group_ids=[x.strip() for x in group_text.split(",") if x.strip()][:32],
             case_ids=[x.strip() for x in cases_text.split(",") if x.strip()][:64] if action == "SPLIT" else None,
             reason=reason[:2000])
 
     def return_to_incident(self):
+        if self._incident_id is None:
+            self._set_status("Original incident context is unavailable. Choose its original saved source to locate it.",
+                             "Контекст исходного инцидента отсутствует. Выберите его исходный сохранённый источник.")
+            return False
         self.window._navigate("reports")
         panel = getattr(self.window, "analysis_panel", None)
         if panel is not None:
@@ -1095,13 +1135,16 @@ class InvestigationGraphPanel(QWidget):
             return
         if operation in ("build", "open"):
             self.index_path = packet.get("index_path")
-            self.load_case(packet["case"])
-            self._set_status("Evidence graph ready; inspect source identities and gaps.", "Граф готов; проверяйте идентичности источников и разрывы.")
+            self.load_case(packet["case"], preserve_source_context=operation == "build")
+            if self._invalid_saved_grouping:
+                self._grouping_import_warning()
+            else:
+                self._set_status("Evidence graph ready; inspect source identities and gaps.", "Граф готов; проверяйте идентичности источников и разрывы.")
         elif operation == "context":
             context = packet["context"]
             if "case" in packet:
                 self.index_path = packet["index_path"]
-                self.load_case(packet["case"])
+                self.load_case(packet["case"], preserve_source_context=True)
             else:
                 self._app_context, self._scenario_context = context["app_identity"], context["scenario"]
                 self._context_scope_sources = json.dumps(self.sources, sort_keys=True, ensure_ascii=True)
@@ -1154,6 +1197,7 @@ class InvestigationGraphPanel(QWidget):
         self.context_button.setEnabled(can_change_case and bool(self.case is not None or self.sources))
         self.cancel_button.setEnabled(busy)
         self.export_button.setEnabled(active)
+        self.return_button.setEnabled(active and self._incident_id is not None)
         self.bind_button.setEnabled(active and not native_busy and self._pending_native is None and self.deep_panel.bridge.target is not None)
         ready = active and self._live_current() and not native_busy and self._pending_native is None
         experiment = self._experiment or {}
