@@ -390,9 +390,13 @@ def run(args):
         # The actual APP incident has no established identity/clock link to
         # the separate native stack capture. GUI acceptance must show that
         # gap while exercising the independently captured thread/stack path.
+        gui_sources = [{"source_type": "EVENTS_JSONL",
+            "path": str(file_runs[0][3] / "application-events.jsonl")}, *e_sources]
+        gui_preflight = create_investigation(gui_sources, budget={**budget, "timeout_seconds": 120},
+            index_path=output / "case-gui-preflight.sqlite3")
+        proof["cases"]["H_composed_source_preflight"] = inspect_case(gui_preflight)
         save(output / "gui-sources.json", {
-            "sources": [{"source_type": "EVENTS_JSONL",
-                "path": str(file_runs[0][3] / "application-events.jsonl")}, *e_sources],
+            "sources": gui_sources,
             "historical_case": case_e, "source_target": target.to_dict(),
             "new_live_binding_requires_explicit_consent": True,
             "app_incident_to_native_thread_and_stack": "NOT_ESTABLISHED"})

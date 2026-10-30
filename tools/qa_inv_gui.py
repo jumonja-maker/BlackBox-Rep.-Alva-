@@ -71,7 +71,15 @@ def run(args):
         while not predicate() and time.monotonic() < deadline:
             app.processEvents()
             QTest.qWait(5)
+            errors = proof.get("reader_errors", [])
+            if window is None or not window.investigation_graph_panel._closing:
+                require(not errors, "INV_GUI_READ_WORKER_FAILED_" + (errors[-1]["error"] if errors else ""))
         app.processEvents()
+        if window is not None:
+            panel = window.investigation_graph_panel
+            proof["last_gui_state"] = {"status_text": panel.status.text(),
+                "reader_busy": panel.bridge.busy, "reader_generation": panel.bridge.generation,
+                "case_loaded": panel.case is not None, "pending_native": bool(panel._pending_native)}
         require(predicate(), "INV_GUI_ACTION_OR_CLEANUP_DEADLINE_" + proof.get("phase", "UNKNOWN"))
 
     def oracle_call(method, *arguments):
@@ -97,7 +105,15 @@ def run(args):
         require(widget.isEnabled(), "INV_GUI_CONTROL_DISABLED_" + widget.objectName())
         dialog_plan.update(operation=operation if consent is not None else None,
                            decision=consent, answered=False)
-        QTest.mouseClick(widget, Qt.MouseButton.LeftButton)
+        delivered = []
+        def clicked(*_):
+            delivered.append(True)
+        widget.clicked.connect(clicked)
+        try:
+            QTest.mouseClick(widget, Qt.MouseButton.LeftButton)
+        finally:
+            widget.clicked.disconnect(clicked)
+        require(delivered, "INV_QT_POINTER_EVENT_DID_NOT_ACTIVATE_CONTROL_" + widget.objectName())
         if consent is not None:
             require(dialog_plan["answered"], "INV_ACTUAL_CONFIRMATION_NOT_OBSERVED_" + str(operation))
         dialog_plan["operation"] = None
@@ -181,6 +197,11 @@ def run(args):
         click(deep._action_buttons["investigate_problem"])
         require(panel.isVisible() and not deep.bridge.has_session, "INV_WORKSPACE_NOT_LAZY")
         panel.bridge.closed.connect(lambda: graph_closed.append(True))
+        def reader_result(operation, _packet, error, generation):
+            if error:
+                proof.setdefault("reader_errors", []).append({"operation": operation, "error": error,
+                    "generation": generation, "status_text": panel.status.text()})
+        panel.bridge.result_ready.connect(reader_result)
         deep.bridge.closed.connect(deep_closed.append)
         deep.bridge.result_ready.connect(native_results.append)
         panel.open_case_context(sources)
@@ -490,6 +511,12 @@ def run(args):
             successful = True
     except BaseException as error:
         proof.update(error=type(error).__name__, reason=str(error)[:1800], traceback=traceback.format_exc(limit=12))
+        if window is not None:
+            panel = window.investigation_graph_panel
+            proof["last_gui_state"] = {"status_text": panel.status.text(), "reader_busy": panel.bridge.busy,
+                "reader_generation": panel.bridge.generation, "case_loaded": panel.case is not None,
+                "pending_native": bool(panel._pending_native)}
+            window.grab().save(str(output / "failure-state.png"), "PNG")
     finally:
         if window is not None:
             try:
