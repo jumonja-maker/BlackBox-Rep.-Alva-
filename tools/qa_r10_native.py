@@ -362,10 +362,10 @@ class NativeAcceptance:
         finally:
             channel.send = production_send
         require(len(deadline_dispatches) == 1, "R10_NATIVE_TIMEOUT_WAS_NOT_DISPATCHED")
-        self.action(service, ib, "modules", expected=("COMPLETED", "INCOMPLETE_EVIDENCE"))
+        subsequent_modules = self.action(service, ib, "modules", expected=("COMPLETED", "INCOMPLETE_EVIDENCE"))
         self.proof["scenarios"]["cancellation-and-following-observation"] = {"status": "PASS",
             "phases": ["BEFORE_NATIVE_DISPATCH", "LIVE_HELPER_REQUEST_SENT_AND_CANCEL_ACK_RECEIVED"],
-            "real_native_deadline": "TIMED_OUT", "subsequent_real_modules": "COMPLETED"}
+            "real_native_deadline": "TIMED_OUT", "subsequent_real_modules": subsequent_modules["status"]}
         self.heartbeat(service, identity, deadline, launches)
 
         # Repeat B -> A -> B within the same lease.  Leave an owned suspension
@@ -381,9 +381,10 @@ class NativeAcceptance:
                 "R10_REPEAT_TARGET_A_BIND_FAILED")
         b.progress(paused_b)
         self.heartbeat(service, identity, deadline, launches)
+        repeat_change = bytes([0xA9] * 64).hex()
         self.action(service, ia, "memory.write", {"address": a.ready["buffer_address"],
-                    "expected_hex": a.ready["buffer_hex"], "value_hex": "A9" * 64}, confirmed=True)
-        require(a.state()["buffer_hex"] == "A9" * 64, "R10_REPEAT_SWITCH_PENDING_WRITE_NOT_OBSERVED")
+                    "expected_hex": a.ready["buffer_hex"], "value_hex": repeat_change}, confirmed=True)
+        require(a.state()["buffer_hex"] == repeat_change, "R10_REPEAT_SWITCH_PENDING_WRITE_NOT_OBSERVED")
         require(self.record("repeat-bind-B", service.bind_target(ib, SCOPE, confirmed=True)).get("status") == "COMPLETED",
                 "R10_REPEAT_TARGET_B_BIND_FAILED")
         require(a.state()["buffer_hex"] == a.ready["buffer_hex"],
@@ -459,7 +460,7 @@ class NativeAcceptance:
         require(service.start_admin_session(confirmed=True).get("status") == "COMPLETED", "R10_CLEANUP_SESSION_FAILED")
         require(service.bind_target(ia, SCOPE, confirmed=True).get("status") == "COMPLETED", "R10_CLEANUP_BIND_FAILED")
         original = a.ready["buffer_hex"]
-        changed, concurrent = "D3" * 64, bytes.fromhex("E7" * 64)
+        changed, concurrent = bytes([0xD3] * 64).hex(), bytes([0xE7] * 64)
         self.action(service, ia, "memory.write", {"address": a.ready["buffer_address"],
                     "expected_hex": original, "value_hex": changed}, confirmed=True)
         require(a.state()["buffer_hex"] == changed, "R10_CLEANUP_PENDING_NATIVE_CHANGE_MISSING")
