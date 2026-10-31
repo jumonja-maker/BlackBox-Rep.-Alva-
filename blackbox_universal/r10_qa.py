@@ -156,6 +156,58 @@ def run_r10_e2e(app, window, output, probe_executable, expected_sha):
     graph = window.investigation_graph_panel
     initial_helper = None
 
+    def closure_state():
+        # Cached owner state only: diagnostic logging must never take a busy
+        # service lock or send another command on a worker-owned IPC channel.
+        worker = bridge.worker
+        reader = graph.bridge.worker
+        service = services[0] if services else None
+        helper = service.helper if service is not None else None
+        return {"window_visible": window.isVisible(), "pending_close": window._pending_close,
+            "deep_close_complete": window._deep_close_complete, "graph_close_pending": window._graph_close_pending,
+            "bridge": {"has_session": bridge.has_session, "busy": bridge.busy,
+                "closing": bridge._closing, "reset_pending": bridge._reset_pending,
+                "cleanup_required": bridge.cleanup_required, "admin_state": bridge.admin_state,
+                "worker_kind": worker.command.get("kind") if worker is not None else None,
+                "worker_generation": worker.command.get("generation") if worker is not None else None,
+                "generation": bridge.generation,
+                "worker_running": worker.isRunning() if worker is not None else False,
+                "queued_kind": (bridge._queued_command or {}).get("kind"),
+                "last_close_result": journal_metadata(bridge._close_result)},
+            "graph": {"busy": graph.bridge.busy, "worker_operation": reader.operation if reader is not None else None,
+                "closing": graph._closing, "closing_for_window": graph._closing_for_window,
+                "queued_records": len(graph._record_queue), "deferred_checkpoint": graph._deferred_checkpoint,
+                "deferred_actions": graph._deferred_action_refresh},
+            "observer": {"alive": window.probe.alive, "active": window.probe.active,
+                "pending": window.probe.pending, "stopping": window.probe.stopping,
+                "closing": window.probe.closing, "action_state": window.probe.actions.state,
+                "error": window.probe.last_error, "pid": window.probe.pid,
+                "pending_operations": list(window.probe._pending.values())[:64],
+                "stop_deadline": window.probe._stop_deadline, "last_response": window.probe.last_response,
+                "process_state": window.probe.process.state().name,
+                "stderr_tail": window.probe._stderr[-2000:]},
+            "service": {"helper_pid": helper.pid if helper is not None else None,
+                "helper_alive": helper.alive() if helper is not None else False,
+                "admin_state": service._admin_state if service is not None else None,
+                "owner_retained": service._owner_retained if service is not None else None,
+                "cleanup_unconfirmed": service._cleanup_unconfirmed if service is not None else None,
+                "interventions_started": service._interventions_started if service is not None else None},
+            "close_signals": len(closed), "unexpected_dialogs": proof.get("unexpected_dialogs", [])[-4:]}
+
+    def lifecycle_signal(name, result=None):
+        events = proof.setdefault("lifecycle_signals", [])
+        if len(events) < 64:
+            events.append({"signal": name, "monotonic": time.monotonic(), "result": journal_metadata(result)})
+
+    def log_closure_state():
+        if proof.get("phase") != "GUI_CLOSE_HELPER_EXIT_AND_VERIFIED_NATIVE_RESTORE":
+            return
+        snapshot = closure_state()
+        history = proof.setdefault("close_progress", [])
+        if len(history) < 80:
+            history.append(snapshot)
+        print("R10_GUI_CLOSE_STATE " + json.dumps(snapshot, ensure_ascii=False), flush=True)
+
     def pump(predicate, timeout=50):
         deadline = time.monotonic() + timeout
         while not predicate() and time.monotonic() < deadline:
@@ -321,12 +373,21 @@ def run_r10_e2e(app, window, output, probe_executable, expected_sha):
         bridge._factory = service_factory
         bridge.result_ready.connect(results.append)
         bridge.closed.connect(closed.append)
+        bridge.closed.connect(lambda result: lifecycle_signal("diagnostic.closed", result))
+        bridge.recovery_required.connect(lambda result: lifecycle_signal("diagnostic.recovery_required", result))
+        graph.closed.connect(lambda: lifecycle_signal("investigation.closed"))
+        window.probe.terminated.connect(lambda: lifecycle_signal("observer.terminated"))
         graph.bridge.result_ready.connect(lambda *args: graph_results.append(args))
         dialog_timer = QTimer()
         dialog_timer.setInterval(10)
         dialog_timer.timeout.connect(answer_dialog)
         dialog_timer.start()
         timers.append(dialog_timer)
+        close_timer = QTimer()
+        close_timer.setInterval(1000)
+        close_timer.timeout.connect(log_closure_state)
+        close_timer.start()
+        timers.append(close_timer)
         window.resize(1330, 850)
         window.showNormal()
         app.processEvents()
@@ -421,6 +482,7 @@ def run_r10_e2e(app, window, output, probe_executable, expected_sha):
         import psutil
         helper_process = psutil.Process(initial_helper["helper_pid"])
         window.close()
+        log_closure_state()
         pump(lambda: closed and not bridge.has_session and not window.isVisible(), timeout=60)
         _require(closed[-1].get("status") == "COMPLETED" and not helper_process.is_running(), "R10_CLOSE_HELPER_EXIT")
         for fixture in fixtures:
@@ -430,6 +492,7 @@ def run_r10_e2e(app, window, output, probe_executable, expected_sha):
         proof["status"] = "PASS"
     except BaseException as error:
         proof.update(status="FAIL", reason=str(error)[:2000], traceback=traceback.format_exc(limit=12))
+        proof["failure_state"] = closure_state()
     finally:
         if window.isVisible() or bridge.has_session:
             try:
@@ -437,6 +500,7 @@ def run_r10_e2e(app, window, output, probe_executable, expected_sha):
                 pump(lambda: not bridge.has_session and not window.isVisible(), timeout=45)
             except BaseException as error:
                 proof.update(status="FAIL", cleanup_error=str(error)[:1000])
+                proof["final_cleanup_state"] = closure_state()
         for timer in timers:
             timer.stop()
         for fixture in fixtures:
@@ -452,7 +516,10 @@ def run_r10_e2e(app, window, output, probe_executable, expected_sha):
             "elevated_launches": sum(launch["elevated"] for launch in proof["launches"]),
             "targets": proof["targets"], "initial_admin_session": proof.get("initial_admin_session"),
             "final_admin_session": proof.get("final_admin_session"), "close": proof.get("close"),
-            "reason": proof.get("reason"), "secure_desktop": "NOT_TESTED"}
+            "reason": proof.get("reason"), "cleanup_error": proof.get("cleanup_error"),
+            "failure_state": proof.get("failure_state"), "final_cleanup_state": proof.get("final_cleanup_state"),
+            "lifecycle_signals": proof.get("lifecycle_signals"),
+            "secure_desktop": "NOT_TESTED"}
         print("R10_GUI_RECEIPT " + json.dumps(receipt, ensure_ascii=False, allow_nan=False), flush=True)
         summary = os.environ.get("GITHUB_STEP_SUMMARY")
         if summary:

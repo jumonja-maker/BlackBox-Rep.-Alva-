@@ -247,6 +247,54 @@ class AdminEngineExecutionEvidenceTests(unittest.TestCase):
 
 
 class AdminHelperProtocolTests(unittest.TestCase):
+    def test_true_lease_expiry_sends_scoped_cleanup_once_before_closing_authenticated_pipe(self):
+        parent = ProcessIdentity(600, 133000000000000001, "gui.exe")
+        own = ProcessIdentity(700, 133000000000000002, "helper.exe")
+        target = ProcessIdentity(800, 133000000000000003, "target.exe")
+        nonce = "ab" * 32
+        for complete in (True, False):
+            with self.subTest(complete=complete):
+                clock = [0.0]
+                channel, kernel, engine = Mock(), Mock(), Mock()
+                kernel.WaitForSingleObject.return_value = 258
+                engine.target, engine.operations = target, frozenset({"threads"})
+                engine.close.return_value = {"status": "COMPLETED" if complete else "RECOVERY_UNCONFIRMED",
+                                             "data": {} if complete else {"owner_retained": True}}
+                channel.receive.side_effect = [
+                    {"kind": "init", "nonce": nonce, "parent": parent.to_dict(), "target": None,
+                     "operations": ["threads"], "session_mode": "ADMIN_LEASE", "require_admin": True,
+                     "session_seconds": 1, "recovery_source_handle": 100},
+                    {"kind": "target.bind", "nonce": nonce, "request_id": "bind-A", "target": target.to_dict(),
+                     "operations": ["threads"], "confirmed": True}]
+
+                def send(message, **kwargs):
+                    if message["kind"] == "target.bound":
+                        clock[0] = 2.0
+
+                channel.send.side_effect = send
+                with patch("blackbox_core.deep_helper.os", types.SimpleNamespace(name="nt", getpid=lambda: own.pid)), \
+                        patch("blackbox_core.deep_helper.time", types.SimpleNamespace(monotonic=lambda: clock[0])), \
+                        patch("blackbox_core.deep_helper.token_is_elevated", return_value=True), \
+                        patch("blackbox_core.deep_helper.token_authority", return_value={"elevated": True}), \
+                        patch("blackbox_core.deep_helper._parent_handle", return_value=(kernel, 200)), \
+                        patch("blackbox_core.deep_helper._duplicate_parent_file", return_value=300), \
+                        patch("blackbox_core.deep_helper.connect_pipe", return_value=channel), \
+                        patch("blackbox_core.deep_helper.DiagnosticActionEngine", return_value=engine), \
+                        patch("blackbox_core.deep_native.capture_identity", return_value=own), \
+                        patch("blackbox_core.deep_native.verify_identity", return_value=target), \
+                        patch("blackbox_core.windows_research.enable_debug_privilege"):
+                    self.assertEqual(run_helper("pipe", nonce, parent), 0)
+                sent = [call.args[0] for call in channel.send.call_args_list]
+                terminal = sent[-1]
+                self.assertEqual(terminal["kind"], "expired")
+                self.assertEqual(terminal["nonce"], nonce)
+                self.assertEqual(terminal["identity"], own.to_dict())
+                self.assertEqual(terminal["context"], {"target": target.to_dict(), "operations": ["threads"]})
+                self.assertEqual(terminal["context_released"], complete)
+                self.assertEqual(terminal["result"]["status"], "COMPLETED" if complete else "RECOVERY_UNCONFIRMED")
+                engine.close.assert_called_once()
+                channel.close.assert_called_once()
+
     def test_unbound_authenticated_helper_responds_to_status_and_rejects_wrong_nonce(self):
         parent = ProcessIdentity(600, 133000000000000001, "gui.exe")
         own = ProcessIdentity(700, 133000000000000002, "helper.exe")

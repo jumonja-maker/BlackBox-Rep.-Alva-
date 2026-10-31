@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from copy import deepcopy
 import hmac
 import json
 import math
@@ -67,6 +68,8 @@ class InspectorService:
         self._session_nonce = None
         self._session_catalog = frozenset()
         self._cleanup_unconfirmed = False
+        self._expiry_cleanup = None
+        self._pending_close_context = None
 
     @property
     def helper_pid(self):
@@ -87,7 +90,9 @@ class InspectorService:
         # snapshots must not consume a native operation's in-flight reply.
         with self._lock:
             if refresh and self._admin_session_managed and self.helper is not None:
-                if self.helper.alive() and time.monotonic() < self._expires:
+                if time.monotonic() >= self._expires:
+                    self._consume_expiry_cleanup()
+                elif self.helper.alive():
                     try:
                         answer = self._managed_exchange("session.status")
                         data = answer.get("data", {})
@@ -144,6 +149,7 @@ class InspectorService:
                 "allowed_operations": sorted(self._session_catalog or self._scope),
                 "owner_retained": self._owner_retained,
                 "cleanup_required": self._owner_retained or self._cleanup_unconfirmed,
+                "expiry_cleanup": deepcopy(self._expiry_cleanup),
                 "recovery_report": str(self._recovery_path) if self._recovery_path else None,
                 "recovery": self.recovery_status()}
 
@@ -171,6 +177,8 @@ class InspectorService:
 
     def _start_session(self, target: ProcessIdentity | None, operations: list[str], *, elevated: bool,
                        cancel_event=None, admin_lease: bool = False, session_seconds=MAX_SESSION_SECONDS) -> dict:
+        self._expiry_cleanup = None
+        self._pending_close_context = None
         if os.name != "nt":
             return result("session.open", "UNSUPPORTED_PLATFORM", next_action="USE_WINDOWS_10_OR_11_X64")
         parent = self.identity(os.getpid())
@@ -233,6 +241,7 @@ class InspectorService:
             self._interventions_started = False
             self._owner_retained = False
             self._cleanup_unconfirmed = False
+            self._expiry_cleanup = None
             return result("session.open", "COMPLETED", data=self.session_status(), permission_level=permission)
         except BaseException:
             self._discard_helper(force=True)
@@ -272,6 +281,80 @@ class InspectorService:
         if errors:
             raise OSError("; ".join(errors))
 
+    def _accept_expiry_cleanup(self, message: dict) -> dict:
+        expected_context = {"target": self._target.to_dict() if self._target else None,
+                            "operations": sorted(self._scope)}
+        expired = message.get("kind") == "expired" and message.get("reason") == "LEASE_EXPIRED" and time.monotonic() >= self._expires
+        requested_close = (message.get("kind") == "closed" and message.get("reason") == "EXPLICIT_CLOSE"
+                           and self._pending_close_context is not None and message.get("context") == self._pending_close_context)
+        if (not self._admin_session_managed or self._helper_identity is None or not self._session_nonce
+                or not (expired or requested_close)
+                or not hmac.compare_digest(str(message.get("nonce", "")), self._session_nonce)
+                or message.get("identity") != self._helper_identity.to_dict()
+                or message.get("context") != expected_context):
+            raise PermissionError("INVALID_TERMINAL_LEASE_CLEANUP_ACKNOWLEDGEMENT")
+        cleanup = message.get("result")
+        if not isinstance(cleanup, dict) or not isinstance(cleanup.get("data"), dict):
+            raise ValueError("INVALID_TERMINAL_LEASE_CLEANUP_RESULT")
+        data = cleanup["data"]
+        confirmed = bool(cleanup.get("status") == "COMPLETED" and message.get("context_released") is True
+                         and data.get("target") is None and data.get("operations") == []
+                         and not data.get("owner_retained")
+                         and isinstance(data.get("cleanup"), dict) and data["cleanup"].get("status") == "COMPLETED")
+        if cleanup.get("status") == "COMPLETED" and not confirmed:
+            raise PermissionError("TERMINAL_LEASE_CONTEXT_RELEASE_NOT_VERIFIED")
+        proof = {**cleanup, "confirmed": confirmed, "source": "AUTHENTICATED_HELPER_TERMINAL_ACK",
+                 "helper_identity": self._helper_identity.to_dict(), "closed_context": expected_context,
+                 "session_nonce_verified": True, "reason": message["reason"],
+                 "original_deadline_monotonic": self._expires, "ack_received_monotonic": time.monotonic()}
+        self._expiry_cleanup = proof
+        self._pending_close_context = None
+        self._elevated_verified = False
+        if confirmed:
+            self._target, self._scope = None, frozenset()
+            self._interventions_started = self._owner_retained = self._cleanup_unconfirmed = False
+            self._admin_state = "EXPIRED" if time.monotonic() >= self._expires else "INACTIVE"
+        else:
+            self._owner_retained = self._cleanup_unconfirmed = True
+            self._admin_state = "CLEANUP_REQUIRED"
+        try:
+            self.journal.append({**proof, "operation_id": uuid4().hex, "operation": "session.expired",
+                                 "target": expected_context["target"], "permission_level": self._permission})
+            proof["journal_recorded"] = True
+        except Exception:
+            proof["journal_recorded"] = False
+            self._cleanup_unconfirmed = True
+            self._admin_state = "CLEANUP_REQUIRED"
+        return proof
+
+    def _consume_expiry_cleanup(self) -> dict | None:
+        """Read a queued terminal ACK even after the authenticated peer exited."""
+        if self._expiry_cleanup is not None:
+            return self._expiry_cleanup
+        if (not self._admin_session_managed or self._channel is None or self.helper is None
+                or time.monotonic() < self._expires and self._pending_close_context is None):
+            return None
+        try:
+            deadline = time.monotonic() + 25
+            late_results = []
+            for _ in range(4):
+                response = self._channel.receive(deadline=deadline)
+                if response.get("kind") == "result":
+                    late_results.append({"request_id": response.get("request_id"),
+                                         "status": response.get("result", {}).get("status")})
+                    continue
+                proof = self._accept_expiry_cleanup(response)
+                if late_results:
+                    proof["late_result_statuses"] = late_results
+                return proof
+            raise ValueError("TERMINAL_LEASE_CLEANUP_ACKNOWLEDGEMENT_NOT_RECEIVED")
+        except Exception:
+            self._elevated_verified = False
+            if self._interventions_started or self._owner_retained or self._cleanup_unconfirmed:
+                self._owner_retained = self._cleanup_unconfirmed = True
+                self._admin_state = "CLEANUP_REQUIRED"
+            return None
+
     def _managed_exchange(self, kind: str, *, cancel_event=None, **fields) -> dict:
         if not self._admin_session_managed or self._channel is None or not self._session_nonce:
             raise PermissionError("NO_AUTHENTICATED_ADMINISTRATIVE_LEASE")
@@ -284,6 +367,9 @@ class InspectorService:
         late_results = []
         for _ in range(4):
             response = self._channel.receive(deadline=deadline, cancel_event=cancel_event)
+            if response.get("kind") == "expired":
+                self._accept_expiry_cleanup(response)
+                raise TimeoutError("ADMINISTRATIVE_LEASE_EXPIRED")
             if kind == "target.release" and response.get("kind") == "result":
                 late_results.append({"request_id": response.get("request_id"),
                                      "status": response.get("result", {}).get("status")})
@@ -310,6 +396,8 @@ class InspectorService:
                           data={"execution_started": False, "session_seconds": session_seconds},
                           next_action="REVIEW_ADMINISTRATIVE_LEASE_AND_UAC_PROMPT")
         with self._lock:
+            if self._admin_session_managed and self.helper is not None and time.monotonic() >= self._expires:
+                self._consume_expiry_cleanup()
             if self._owner_retained or self._cleanup_unconfirmed:
                 return self._retained_result("session.elevate", "PREVIOUS_OWNER_CLEANUP_REQUIRES_EXPLICIT_RETRY")
             if self._admin_session_managed and self.admin_active:
@@ -417,7 +505,9 @@ class InspectorService:
                     self._elevated_verified = False
                     self._admin_state = "FAILED"
             except Exception as exc:
-                answer = self._retained_result("target.bind", "TARGET_BIND_ACKNOWLEDGEMENT_LOST: " + str(exc)[:1000])
+                answer = (result("target.bind", "SESSION_EXPIRED", data={"expiry_cleanup": deepcopy(self._expiry_cleanup)})
+                          if self._expiry_cleanup and self._expiry_cleanup.get("confirmed") else
+                          self._retained_result("target.bind", "TARGET_BIND_ACKNOWLEDGEMENT_LOST: " + str(exc)[:1000]))
             answer["operation_id"] = identifier
             try:
                 answer["journal"] = self.journal.append({**base, **answer,
@@ -446,7 +536,10 @@ class InspectorService:
                 else:
                     answer = self._retained_result("target.release", "PREVIOUS_CONTEXT_CLEANUP_UNCONFIRMED", cleanup=answer)
             except Exception as exc:
-                answer = self._retained_result("target.release", "TARGET_RELEASE_ACKNOWLEDGEMENT_LOST: " + str(exc)[:1000])
+                answer = (result("target.release", "COMPLETED", data={"target": None, "operations": [],
+                                  "expiry_cleanup": deepcopy(self._expiry_cleanup)})
+                          if self._expiry_cleanup and self._expiry_cleanup.get("confirmed") else
+                          self._retained_result("target.release", "TARGET_RELEASE_ACKNOWLEDGEMENT_LOST: " + str(exc)[:1000]))
             try:
                 answer["journal"] = self.journal.append({**answer, "operation_id": uuid4().hex,
                     "operation": "target.release", "target": closing_target,
@@ -465,6 +558,8 @@ class InspectorService:
 
     def _ensure_session(self, request: ActionRequest, cancel_event=None) -> dict | None:
         managed = self._admin_session_managed
+        if managed and self.helper is not None and time.monotonic() >= self._expires:
+            self._consume_expiry_cleanup()
         if managed and self._admin_state == "FAILED" and not self._owner_retained:
             return result(request.operation, "OPERATION_FAILED", error="ADMINISTRATIVE_HELPER_VERIFICATION_FAILED",
                           next_action="END_SESSION_AND_REVIEW_HELPER_FAILURE")
@@ -630,6 +725,11 @@ class InspectorService:
 
     def _cancel_active(self, identifier: str) -> dict:
         permission = self._permission
+        if self._expiry_cleanup is not None:
+            return result("unknown", "RECOVERY_UNCONFIRMED",
+                          error="OPERATION_RESULT_NOT_OBSERVED_BEFORE_LEASE_EXPIRY",
+                          permission_level=permission, data={"expiry_cleanup": deepcopy(self._expiry_cleanup)},
+                          limitations=["Terminal cleanup does not prove whether the interrupted action committed an effect; do not retry automatically."])
         try:
             deadline = time.monotonic() + 5
             message = {"kind": "cancel", "request_id": identifier}
@@ -637,6 +737,9 @@ class InspectorService:
                 message["nonce"] = self._session_nonce
             self._channel.send(message, deadline=deadline)
             response = self._channel.receive(deadline=deadline)
+            if response.get("kind") == "expired":
+                self._accept_expiry_cleanup(response)
+                return self._cancel_active(identifier)
             if response.get("kind") == "result" and response.get("request_id") == identifier:
                 value = response["result"]
                 value["cancellation_requested"] = True
@@ -682,6 +785,9 @@ class InspectorService:
             self._channel.send(envelope,
                                deadline=deadline, cancel_event=cancel_event)
             response = self._channel.receive(deadline=deadline, cancel_event=cancel_event)
+            if response.get("kind") == "expired":
+                self._accept_expiry_cleanup(response)
+                raise TimeoutError("ADMINISTRATIVE_LEASE_EXPIRED")
         except InterruptedError:
             return self._cancel_active(probe_id)
         except TimeoutError:
@@ -804,6 +910,9 @@ class InspectorService:
                             execution_started = None  # Sending can commit before its acknowledgement is lost.
                             self._channel.send(envelope, deadline=deadline, cancel_event=cancel_event)
                             response = self._channel.receive(deadline=deadline, cancel_event=cancel_event)
+                            if response.get("kind") == "expired":
+                                self._accept_expiry_cleanup(response)
+                                raise TimeoutError("ADMINISTRATIVE_LEASE_EXPIRED")
                             if response.get("kind") != "result" or response.get("request_id") != identifier:
                                 raise ValueError("DIAGNOSTIC_RESPONSE_IDENTITY_MISMATCH")
                             answer = response["result"]
@@ -840,7 +949,8 @@ class InspectorService:
                 if answer.get("data", {}).get("owner_retained"):
                     self._owner_retained = True
                 if (self._admin_session_managed and self.helper is not None
-                        and answer.get("status") == "RECOVERY_UNCONFIRMED"):
+                        and answer.get("status") == "RECOVERY_UNCONFIRMED"
+                        and not (self._expiry_cleanup and self._expiry_cleanup.get("confirmed"))):
                     self._owner_retained = self._cleanup_unconfirmed = True
                     self._admin_state = "CLEANUP_REQUIRED"
                     answer["retains_service"] = True
@@ -976,6 +1086,20 @@ class InspectorService:
         with self._lock:
             if self.helper is None:
                 if self._cleanup_unconfirmed:
+                    if self._expiry_cleanup and self._expiry_cleanup.get("confirmed"):
+                        # An explicit retry may repair the durable cleanup
+                        # record after the verified owner has already exited.
+                        try:
+                            self.journal.append({**self._expiry_cleanup, "operation_id": uuid4().hex,
+                                "operation": "session.close", "source": "TERMINAL_CLEANUP_JOURNAL_RETRY"})
+                            self._expiry_cleanup["journal_recorded"] = True
+                            self._cleanup_unconfirmed = self._owner_retained = False
+                            self._admin_state = "INACTIVE"
+                            return result("session.close", "COMPLETED", data={"active": False,
+                                          "expiry_cleanup": deepcopy(self._expiry_cleanup)})
+                        except Exception as exc:
+                            return result("session.close", "RECOVERY_UNCONFIRMED", error="CLEANUP_JOURNAL_FAILED: " + str(exc)[:1000],
+                                          data={"active": False, "cleanup_required": True})
                     return result("session.close", "RECOVERY_UNCONFIRMED", data={"active": False,
                                   "cleanup_required": True, "recovery": self.recovery_status()},
                                   error="PREVIOUS_OWNER_RECOVERY_NOT_VERIFIED")
@@ -984,20 +1108,39 @@ class InspectorService:
             had_interventions = self._interventions_started or self._cleanup_unconfirmed or self._owner_retained
             closing_target = self._target.to_dict() if self._target is not None else None
             closing_permission = self._permission
+            expired_managed = self._admin_session_managed and time.monotonic() >= self._expires
+            pending_close = self._admin_session_managed and self._pending_close_context is not None
+            terminal = self._consume_expiry_cleanup() if expired_managed or pending_close else None
             answer = result("session.close", "RECOVERY_UNCONFIRMED" if had_interventions else "COMPLETED",
                             limitations=["No successful cleanup acknowledgement was received."])
+            if terminal is not None:
+                answer = result("session.close", "COMPLETED" if terminal.get("confirmed") else "RECOVERY_UNCONFIRMED",
+                                data={"expiry_cleanup": deepcopy(terminal)},
+                                limitations=["Terminal cleanup acknowledges resource release; late operation results remain separate observations."])
             late_results = []
             try:
-                if self.helper.alive() and self._channel is not None:
+                if not expired_managed and not pending_close and self.helper.alive() and self._channel is not None:
                     deadline = time.monotonic() + 20
                     envelope = {"kind": "close"}
                     if self._admin_session_managed:
                         envelope["nonce"] = self._session_nonce
+                        self._expiry_cleanup = None
+                        self._pending_close_context = {"target": closing_target, "operations": sorted(self._scope)}
                     self._channel.send(envelope, deadline=deadline)
                     for _ in range(4):
                         response = self._channel.receive(deadline=deadline)
+                        if response.get("kind") == "expired":
+                            terminal = self._accept_expiry_cleanup(response)
+                            answer = result("session.close", "COMPLETED" if terminal.get("confirmed") else "RECOVERY_UNCONFIRMED",
+                                            data={"expiry_cleanup": deepcopy(terminal)})
+                            break
                         if response.get("kind") == "closed":
-                            answer = response["result"]
+                            if self._admin_session_managed:
+                                terminal = self._accept_expiry_cleanup(response)
+                                answer = result("session.close", "COMPLETED" if terminal.get("confirmed") else "RECOVERY_UNCONFIRMED",
+                                                data={"expiry_cleanup": deepcopy(terminal)})
+                            else:
+                                answer = response["result"]
                             break
                         if response.get("kind") != "result":
                             raise ValueError("UNEXPECTED_SESSION_CLEANUP_REPLY")
@@ -1031,7 +1174,13 @@ class InspectorService:
             try:
                 self.journal.append({**answer, "operation_id": uuid4().hex, "source": "DIAGNOSTIC_SESSION_CLEANUP",
                                      "target": closing_target, "permission_level": closing_permission})
+                if terminal and terminal.get("confirmed") and self.helper is None:
+                    terminal["journal_recorded"] = True
+                    self._owner_retained = self._cleanup_unconfirmed = False
+                    self._admin_state = "INACTIVE"
             except Exception as exc:
+                self._cleanup_unconfirmed = True
+                self._admin_state = "CLEANUP_REQUIRED"
                 answer = (self._retained_result("session.close", "CLEANUP_JOURNAL_FAILED: " + str(exc)[:1000], cleanup=answer)
                           if self._owner_retained and self.helper is not None else
                           result("session.close", "RECOVERY_UNCONFIRMED", error="CLEANUP_JOURNAL_FAILED: " + str(exc)[:1000]))

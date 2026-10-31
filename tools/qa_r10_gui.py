@@ -56,6 +56,10 @@ def main():
         proof_path = output / "r10-gui.json"
         require(proof_path.is_file() and proof_path.stat().st_size <= 2 * 1024 * 1024, "R10_GUI_RECEIPT_REQUIRED")
         proof = json.loads(proof_path.read_text(encoding="utf-8"))
+        if completed.returncode != 0 or proof.get("status") != "PASS":
+            failure = {key: proof.get(key) for key in ("status", "phase", "scale", "reason", "traceback",
+                "cleanup_error", "failure_state", "final_cleanup_state", "close_progress", "unexpected_dialogs", "lifecycle_signals")}
+            print("R10_GUI_CHILD_FAILURE_RECEIPT " + json.dumps(failure, ensure_ascii=False), flush=True)
         require(completed.returncode == 0 and proof.get("status") == "PASS",
                 "R10_GUI_FAILURE:" + str(proof.get("phase")) + ":" + str(proof.get("reason")))
         require(proof.get("actual_source_sha") == args.source_sha and

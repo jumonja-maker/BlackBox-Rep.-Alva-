@@ -60,7 +60,7 @@ class R10InvestigationCompatibility(unittest.TestCase):
         loaded = load_investigation(index)
         self.assertEqual(case["case_id"], loaded["case_id"])
         outcomes = [node for node in loaded["nodes"]
-                    if node["kind"] == "DIAGNOSTIC_ACTION"
+                    if node["observation_type"] == "DIAGNOSTIC_ACTION"
                     and node["metadata"].get("phase") == "RESULT"]
         self.assertEqual(len(outcomes), 2)
         mapped = {node["metadata"]["run_receipt"]["run_id"]:
@@ -95,7 +95,7 @@ class R10InvestigationCompatibility(unittest.TestCase):
                             for source in case["sources"]))
         nodes = {node["node_id"]: node for node in case["nodes"]}
         outcomes = [node for node in nodes.values()
-                    if node["kind"] == "DIAGNOSTIC_ACTION"
+                    if node["observation_type"] == "DIAGNOSTIC_ACTION"
                     and node["metadata"].get("phase") == "RESULT"]
         self.assertEqual(len(outcomes), 2)
         self.assertTrue(all(node["verification_class"] == "UNVERIFIED_IMPORT"

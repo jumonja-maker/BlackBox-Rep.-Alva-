@@ -227,6 +227,157 @@ class AdminLeaseServiceTests(unittest.TestCase):
         self.assertEqual(self.service.session_status()["state"], "DENIED")
         self.assertFalse(self.service.admin_active)
 
+    def terminal_frame(self, *, completed=True):
+        return {"kind": "expired", "reason": "LEASE_EXPIRED", "nonce": self.service._session_nonce,
+                "identity": self.helper_identity.to_dict(),
+                "context": {"target": self.service._target.to_dict() if self.service._target else None,
+                            "operations": sorted(self.service._scope)},
+                "context_released": completed,
+                "result": {"status": "COMPLETED" if completed else "RECOVERY_UNCONFIRMED", "data": (
+                    {"target": None, "operations": [], "cleanup": {"status": "COMPLETED", "data": {}}}
+                    if completed else {"owner_retained": True, "target": self.a.to_dict(),
+                                       "cleanup": {"status": "RECOVERY_UNCONFIRMED"}})}}
+
+    def expired_owner(self):
+        helper = self.lease(self.a, ["memory_read"])
+        self.service._interventions_started = True
+        self.service._expires = time.monotonic() - 1
+        helper.alive.return_value = False
+        return helper
+
+    def test_effectful_expiry_accepts_only_authenticated_terminal_cleanup_after_helper_exit(self):
+        helper = self.expired_owner()
+        frame = self.terminal_frame()
+        self.service._channel.receive = Mock(side_effect=[
+            {"kind": "result", "request_id": "unobserved-action", "result": {"status": "COMPLETED",
+             "data": {"private": "must-not-enter-terminal-proof"}}}, frame])
+        status = self.service.session_status(refresh=True)
+        self.assertEqual(status["state"], "EXPIRED")
+        self.assertFalse(status["cleanup_required"])
+        self.assertFalse(status["admin_active"])
+        proof = status["expiry_cleanup"]
+        self.assertTrue(proof["confirmed"])
+        self.assertEqual(proof["helper_identity"], self.helper_identity.to_dict())
+        self.assertEqual(proof["closed_context"]["target"], self.a.to_dict())
+        self.assertEqual(proof["late_result_statuses"], [{"request_id": "unobserved-action", "status": "COMPLETED"}])
+        self.assertNotIn("nonce", proof)
+        self.assertIsNone(status["target"])
+        proof["confirmed"] = False  # Public metadata cannot mutate the cached authorization evidence.
+        self.assertTrue(self.service._expiry_cleanup["confirmed"])
+        closed = self.service.end_admin_session()
+        self.assertEqual(closed["status"], "COMPLETED")
+        self.assertEqual(self.service.session_status()["state"], "INACTIVE")
+        helper.terminate.assert_not_called()
+
+    def test_expired_cleanup_without_ack_does_not_trust_guardian_recovery_file(self):
+        self.expired_owner()
+        self.service._channel.receive = Mock(side_effect=OSError("pipe closed without terminal ack"))
+        with patch.object(self.service, "recovery_status", return_value={"status": "COMPLETED", "target": self.a.to_dict()}):
+            status = self.service.session_status(refresh=True)
+            closed = self.service.end_admin_session()
+        self.assertEqual(status["state"], "CLEANUP_REQUIRED")
+        self.assertIsNone(status["expiry_cleanup"])
+        self.assertEqual(closed["status"], "RECOVERY_UNCONFIRMED")
+        self.assertEqual(self.service.session_status()["state"], "CLEANUP_REQUIRED")
+
+    def test_wrong_nonce_helper_instance_context_or_release_claim_never_confirms_expiry(self):
+        for field in ("nonce", "identity", "context", "scope", "context_released"):
+            with self.subTest(field=field):
+                self.expired_owner()
+                self.service._owner_retained = self.service._cleanup_unconfirmed = False
+                self.service._expiry_cleanup = None
+                frame = self.terminal_frame()
+                value = {"nonce": "cd" * 32, "identity": ProcessIdentity(430, 133000000000000004, "helper.exe").to_dict(),
+                                "context": {"target": self.b.to_dict(), "operations": ["memory_read"]},
+                                "scope": {"target": self.a.to_dict(), "operations": ["snapshot"]},
+                                "context_released": False}[field]
+                frame["context" if field == "scope" else field] = value
+                self.service._channel.receive = Mock(return_value=frame)
+                status = self.service.session_status(refresh=True)
+                self.assertEqual(status["state"], "CLEANUP_REQUIRED")
+                self.assertIsNone(status["expiry_cleanup"])
+                self.assertEqual(status["target"], self.a.to_dict())
+
+    def test_late_terminal_ack_remains_reachable_through_explicit_cleanup_retry(self):
+        self.expired_owner()
+        frame = self.terminal_frame()
+        self.service._channel.receive = Mock(side_effect=[TimeoutError("cleanup not acknowledged yet"), frame])
+        self.assertEqual(self.service.session_status(refresh=True)["state"], "CLEANUP_REQUIRED")
+        self.assertEqual(self.service.end_admin_session()["status"], "COMPLETED")
+        self.assertEqual(self.service.session_status()["state"], "INACTIVE")
+
+    def test_explicit_close_ack_queued_across_expiry_remains_authenticated_and_reachable(self):
+        helper = self.lease(self.a, ["memory_read"])
+        self.service._interventions_started = True
+        frame = self.terminal_frame()
+        frame.update(kind="closed", reason="EXPLICIT_CLOSE")
+        self.service._channel.receive = Mock(side_effect=[TimeoutError("close acknowledgement delayed"), frame])
+        self.assertEqual(self.service.end_admin_session()["status"], "RECOVERY_UNCONFIRMED")
+        self.assertIsNotNone(self.service._pending_close_context)
+        self.service._expires = time.monotonic() - 1
+        helper.alive.return_value = False
+        closed = self.service.end_admin_session()
+        self.assertEqual(closed["status"], "COMPLETED")
+        self.assertEqual(closed["data"]["expiry_cleanup"]["reason"], "EXPLICIT_CLOSE")
+        self.assertEqual(self.service.session_status()["state"], "INACTIVE")
+        self.assertEqual([message["kind"] for message in self.messages], ["close"])
+
+    def test_failed_terminal_cleanup_retains_exact_previous_target(self):
+        self.expired_owner()
+        self.service._channel.receive = Mock(return_value=self.terminal_frame(completed=False))
+        status = self.service.session_status(refresh=True)
+        self.assertEqual(status["state"], "CLEANUP_REQUIRED")
+        self.assertFalse(status["expiry_cleanup"]["confirmed"])
+        self.assertEqual(status["target"], self.a.to_dict())
+        with patch.object(self.service, "_start_session") as start:
+            refused = self.service.start_admin_session(confirmed=True)
+        self.assertEqual(refused["status"], "RECOVERY_UNCONFIRMED")
+        start.assert_not_called()
+
+    def test_terminal_journal_failure_requires_explicit_durable_cleanup_retry(self):
+        self.expired_owner()
+        self.service._channel.receive = Mock(return_value=self.terminal_frame())
+        with patch.object(self.service.journal, "append", side_effect=OSError("journal unavailable")):
+            status = self.service.session_status(refresh=True)
+            closed = self.service.end_admin_session()
+        self.assertTrue(status["expiry_cleanup"]["confirmed"])
+        self.assertFalse(status["expiry_cleanup"]["journal_recorded"])
+        self.assertEqual(status["state"], "CLEANUP_REQUIRED")
+        self.assertEqual(closed["status"], "RECOVERY_UNCONFIRMED")
+        self.assertIsNone(self.service.helper)
+        self.assertEqual(self.service.end_admin_session()["status"], "COMPLETED")
+        self.assertFalse(self.service.session_status()["cleanup_required"])
+
+    def test_unknown_action_outcome_stays_unknown_after_verified_cleanup_and_explicit_new_lease(self):
+        helper = self.lease(self.a, ["memory.write"])
+        helper.terminate.side_effect = lambda: setattr(helper.alive, "return_value", False)
+        frame = self.terminal_frame()
+        frame.update(kind="closed", reason="EXPLICIT_CLOSE")
+        self.service._channel.receive = Mock(side_effect=[OSError("native action acknowledgement lost"), frame])
+        fake_os = types.SimpleNamespace(name="nt", path=os.path, getpid=os.getpid)
+        with patch("blackbox_core.deep_service.os", fake_os):
+            answer = self.service.execute(ActionRequest("memory.write", self.a,
+                {"address": 4096, "expected_hex": "01", "value_hex": "02"}, confirmed=True))
+        self.assertEqual(answer["status"], "RECOVERY_UNCONFIRMED")
+        self.assertEqual(answer["run_receipt"]["status"], "RECOVERY_UNCONFIRMED")
+        self.assertIsNone(answer["run_receipt"]["execution_started"])
+        self.assertEqual(answer["data"]["cleanup"]["status"], "COMPLETED")
+        self.assertFalse(self.service.session_status()["cleanup_required"])
+        self.assertEqual([message["kind"] for message in self.messages], ["execute", "close"])
+        self.assertIsNone(self.service.helper)
+
+        def authorized_launch(*args, **kwargs):
+            self.lease()
+            self.service._expiry_cleanup = None
+            return {"status": "COMPLETED", "limitations": [], "data": self.service.session_status()}
+
+        with patch.object(self.service, "_start_session", side_effect=authorized_launch) as launch:
+            restarted = self.service.start_admin_session(confirmed=True)
+        launch.assert_called_once()
+        self.assertEqual(restarted["status"], "COMPLETED")
+        self.assertEqual([message["kind"] for message in self.messages], ["execute", "close"])
+        self.assertEqual(answer["run_receipt"]["status"], "RECOVERY_UNCONFIRMED")
+
     def test_lease_input_is_finite_bounded_and_scope_is_allowlisted(self):
         for duration in (True, 0, MAX_SESSION_SECONDS + 1, float("nan"), float("inf")):
             with self.subTest(duration=duration), self.assertRaises(ValueError):

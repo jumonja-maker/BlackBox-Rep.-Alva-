@@ -427,6 +427,8 @@ def run_helper(pipe_name: str, nonce: str, parent: ProcessIdentity) -> int:
     active_id = None
     send_lock = threading.Lock()
     fatal = threading.Event()
+    terminal_cleanup_attempted = False
+    closed_by_request = False
     try:
         channel = connect_pipe(pipe_name, parent.pid, deadline=time.monotonic() + 30)
         own = capture_identity(os.getpid())
@@ -545,16 +547,24 @@ def run_helper(pipe_name: str, nonce: str, parent: ProcessIdentity) -> int:
                     active_cancel.set()
                 continue
             if kind == "close":
+                closing_context = ({"target": managed.engine.target.to_dict() if managed.engine is not None else None,
+                                    "operations": sorted(managed.engine.operations) if managed.engine is not None else []}
+                                   if managed is not None else None)
                 cleanup = (managed.release(active=active, active_cancel=active_cancel) if managed is not None
                            else _close_after_cancel(engine, active, active_cancel))
+                closed = {"kind": "closed", "result": cleanup}
+                if managed is not None:
+                    closed.update(reason="EXPLICIT_CLOSE", nonce=nonce, identity=own,
+                                  context=closing_context, context_released=managed.engine is None)
                 with send_lock:
-                    channel.send({"kind": "closed", "result": cleanup}, deadline=time.monotonic() + 5)
+                    channel.send(closed, deadline=time.monotonic() + 5)
                 if cleanup.get("data", {}).get("owner_retained"):
                     # Keep the owning debug thread/event for an explicit retry.
                     # Do not renew expires: parent death or original TTL is the
                     # finite, explicitly unconfirmed last-resort boundary.
                     continue
                 engine = None if cleanup["status"] == "COMPLETED" else engine
+                closed_by_request = True
                 break
             if managed is not None and kind in ("target.bind", "target.release", "session.status"):
                 identifier = message.get("request_id")
@@ -616,13 +626,28 @@ def run_helper(pipe_name: str, nonce: str, parent: ProcessIdentity) -> int:
             active = threading.Thread(target=execute_message, args=(message, active_cancel), daemon=True,
                                       name="blackbox-diagnostic-operation")
             active.start()
+        if (managed is not None and not closed_by_request and not fatal.is_set()
+                and time.monotonic() >= expires and kernel.WaitForSingleObject(parent_handle, 0) == 258):
+            # The terminal result belongs to this authenticated lease/context,
+            # and is sent before closing the pipe. A recovery file from an old
+            # guardian/context cannot substitute for this acknowledgement.
+            closing_context = {"target": managed.engine.target.to_dict() if managed.engine is not None else None,
+                               "operations": sorted(managed.engine.operations) if managed.engine is not None else []}
+            terminal_cleanup_attempted = True
+            cleanup = managed.release(active=active, active_cancel=active_cancel)
+            with send_lock:
+                channel.send({"kind": "expired", "reason": "LEASE_EXPIRED", "nonce": nonce,
+                              "identity": own, "context": closing_context,
+                              "context_released": managed.engine is None, "result": cleanup},
+                             deadline=time.monotonic() + 5)
         return 0
     finally:
         if active_cancel is not None:
             active_cancel.set()
         if active is not None:
             active.join(timeout=5)
-        if (managed is not None or engine is not None) and (active is None or not active.is_alive()):
+        if (not terminal_cleanup_attempted and (managed is not None or engine is not None)
+                and (active is None or not active.is_alive())):
             try:
                 managed.release() if managed is not None else engine.close()
             except Exception:

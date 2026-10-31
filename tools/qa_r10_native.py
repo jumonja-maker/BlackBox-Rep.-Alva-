@@ -428,31 +428,182 @@ class NativeAcceptance:
                 "switch_A_to_B_cleanup_verified": True, "final_helper_exit_verified": True}
 
     def run_expiry_and_crash(self, probe: Probe) -> dict:
+        def oracle(state):
+            return {key: state[key] for key in ("pid", "created_100ns", "heartbeat", "io_cycles", "network_cycles")} | {
+                "buffer_sha256": hashlib.sha256(bytes.fromhex(state["buffer_hex"])).hexdigest()}
+
+        def pending_effects(service, target, replacement, label):
+            initial = probe.state()
+            require(initial["buffer_hex"] == probe.ready["buffer_hex"],
+                    "R10_" + label + "_INITIAL_FIXTURE_BYTES_NOT_ORIGINAL")
+            write = self.action(service, target, "memory.write", {"address": probe.ready["buffer_address"],
+                "expected_hex": probe.ready["buffer_hex"], "value_hex": replacement}, confirmed=True, timeout=3)
+            require(probe.state()["buffer_hex"] == replacement,
+                    "R10_" + label + "_PENDING_WRITE_NOT_INDEPENDENTLY_OBSERVED")
+            suspension = self.action(service, target, "thread.suspend", {
+                "tid": probe.ready["heartbeat_tid"],
+                "thread_created_100ns": probe.ready["heartbeat_thread_created_100ns"]}, confirmed=True, timeout=3)
+            paused = probe.state()
+            held_deadline = time.monotonic() + 1
+            while True:
+                threading.Event().wait(.1)
+                held = probe.state()
+                require(held["buffer_hex"] == replacement and held["heartbeat"] == paused["heartbeat"],
+                        "R10_" + label + "_PENDING_NATIVE_EFFECT_NOT_RETAINED")
+                if held["io_cycles"] > paused["io_cycles"]:
+                    break
+                require(time.monotonic() < held_deadline,
+                        "R10_" + label + "_PENDING_EXACT_THREAD_SUSPENSION_NOT_OBSERVED")
+            return {"before": oracle(initial), "pending": oracle(held),
+                    "write_run_id": write["operation_id"],
+                    "suspension_run_id": suspension["operation_id"]}, held
+
+        def restored_after_owner_exit(owner, pending, label):
+            started = time.monotonic()
+            last = pending
+            while time.monotonic() - started < 20:
+                last = probe.state()
+                require(last["pid"] == probe.ready["pid"]
+                        and last["created_100ns"] == probe.ready["created_100ns"],
+                        "R10_" + label + "_RESTORATION_ORACLE_IDENTITY_CHANGED")
+                if (not owner.alive() and last["buffer_hex"] == probe.ready["buffer_hex"]
+                        and last["heartbeat"] > pending["heartbeat"]
+                        and last["io_cycles"] > pending["io_cycles"]
+                        and last["network_cycles"] > pending["network_cycles"]):
+                    return {"after": oracle(last), "owner_exit_verified": True,
+                            "original_bytes_restored": True, "owned_heartbeat_resumed": True,
+                            "wait_seconds": round(time.monotonic() - started, 3)}
+                threading.Event().wait(.1)
+            raise AssertionError("R10_" + label + "_OWNER_EXIT_BYTE_RESTORE_OR_THREAD_RESUME_NOT_VERIFIED:" +
+                                 json.dumps(oracle(last), sort_keys=True))
+
         expiry, launches = self.service("short-expiry")
-        opened = self.record("short-lease-start", expiry.start_admin_session(confirmed=True, session_seconds=2))
+        opened = self.record("short-lease-start", expiry.start_admin_session(confirmed=True, session_seconds=5))
         require(opened.get("status") == "COMPLETED", "R10_SHORT_REAL_ADMIN_LEASE_FAILED")
-        owner, identity = expiry.helper, expiry.session_status().get("helper_identity")
-        threading.Event().wait(2.4)
+        initial_status = expiry.session_status(refresh=True)
+        owner, identity = expiry.helper, initial_status.get("helper_identity")
+        deadline, expiry_recovery_path = initial_status.get("session_deadline_monotonic"), expiry._recovery_path
+        target = expiry.identity(probe.process.pid)
+        require(isinstance(identity, dict) and identity.get("created_100ns", 0) > 0
+                and target.created_100ns == probe.ready["created_100ns"]
+                and actual_token(identity["pid"])["elevated"], "R10_SHORT_LEASE_ACTUAL_TOKEN_AND_IDENTITIES_REQUIRED")
+        require(self.record("short-lease-bind-B", expiry.bind_target(target, SCOPE, confirmed=True)).get("status") == "COMPLETED",
+                "R10_SHORT_LEASE_TARGET_BIND_FAILED")
+        expiry_pending, paused = pending_effects(expiry, target, bytes([0xE1] * 64).hex(), "EXPIRY")
+        self.heartbeat(expiry, identity, deadline, launches)
+        expiry_restored = restored_after_owner_exit(owner, paused, "EXPIRY")
         status = self.record("expired-heartbeat", expiry.session_status(refresh=True))
+        terminal = status.get("expiry_cleanup") or {}
         require(status.get("state") == "EXPIRED" and not status.get("admin_active")
-                and not status.get("elevated_verified"), "R10_EXPIRED_LEASE_SHOWN_ACTIVE")
-        expiry.end_admin_session()
-        require(not owner.alive() and len(launches) == 1, "R10_EXPIRED_HELPER_OR_SECOND_RUNAS_REMAINED")
+                and not status.get("elevated_verified") and status.get("cleanup_required") is False,
+                "R10_EXPIRED_LEASE_WITH_VERIFIED_CLEANUP_SHOWN_ACTIVE_OR_UNCONFIRMED")
+        require(terminal.get("status") == "COMPLETED" and terminal.get("confirmed") is True
+                and terminal.get("source") == "AUTHENTICATED_HELPER_TERMINAL_ACK"
+                and terminal.get("session_nonce_verified") is True
+                and terminal.get("helper_identity") == identity
+                and terminal.get("closed_context") == {"target": target.to_dict(), "operations": sorted(SCOPE)}
+                and terminal.get("reason") == "LEASE_EXPIRED"
+                and abs(terminal.get("original_deadline_monotonic", 0) - deadline) < .001
+                and status.get("target") is None and status.get("operations") == [],
+                "R10_EXPIRED_NATIVE_CONTEXT_REQUIRES_EXACT_AUTHENTICATED_CLEANUP_ACK")
+        expiry_closed = self.record("expired-session-close", expiry.end_admin_session())
+        require(expiry_closed.get("status") == "COMPLETED" and not owner.alive()
+                and len(launches) == 1, "R10_EXPIRED_NATIVE_HELPER_CLEANUP_OR_SECOND_RUNAS_REMAINED")
+        restarted = self.record("same-service-new-consent-after-confirmed-expiry",
+                                expiry.start_admin_session(confirmed=True))
+        restart_status = expiry.session_status(refresh=True)
+        restart_owner = expiry.helper
+        require(restarted.get("status") == "COMPLETED" and restart_status.get("state") == "ACTIVE"
+                and restart_status.get("elevated_verified") is True and not restart_status.get("cleanup_required")
+                and restart_status.get("helper_identity") != identity
+                and restart_status.get("helper_identity", {}).get("created_100ns", 0) > 0
+                and restart_status.get("target") is None and not restart_status.get("expiry_cleanup")
+                and len(launches) == 2 and all(row["elevated"] is True for row in launches),
+                "R10_SAME_SERVICE_CANNOT_START_FRESH_CONFIRMED_LEASE_AFTER_VERIFIED_EXPIRY")
+        require(self.record("same-service-restarted-lease-close", expiry.end_admin_session()).get("status") == "COMPLETED"
+                and not restart_owner.alive(), "R10_RESTARTED_LEASE_NORMAL_CLOSE_FAILED")
+
         crashed, crash_launches = self.service("crashed-helper")
         require(self.record("crash-lease-start", crashed.start_admin_session(confirmed=True)).get("status") == "COMPLETED",
                 "R10_CRASH_REAL_ADMIN_LEASE_FAILED")
-        require(crashed.bind_target(crashed.identity(probe.process.pid), SCOPE, confirmed=True).get("status") == "COMPLETED",
+        crash_initial = crashed.session_status(refresh=True)
+        crash_identity, crash_deadline = crash_initial.get("helper_identity"), crash_initial.get("session_deadline_monotonic")
+        crash_target = crashed.identity(probe.process.pid)
+        require(crash_target == target and isinstance(crash_identity, dict)
+                and crash_identity != identity and actual_token(crash_identity["pid"])["elevated"]
+                and crashed._recovery_path != expiry_recovery_path
+                and crashed.recovery_status().get("status") == "NOT_COLLECTED",
+                "R10_CRASH_REQUIRES_FRESH_HELPER_AND_FRESH_EMPTY_RECOVERY_FILE")
+        require(crashed.bind_target(crash_target, SCOPE, confirmed=True).get("status") == "COMPLETED",
                 "R10_CRASH_TARGET_BIND_FAILED")
+
+        # Produce a real earlier successful guardian report in this same lease,
+        # then create a new context. That stale success must never stand in for
+        # an authenticated cleanup acknowledgement for the new native owner.
+        self.action(crashed, crash_target, "memory.write", {"address": probe.ready["buffer_address"],
+            "expected_hex": probe.ready["buffer_hex"], "value_hex": bytes([0xF0] * 64).hex()}, confirmed=True)
+        require(self.record("crash-prior-context-cleanup", crashed.clear_target()).get("status") == "COMPLETED"
+                and probe.state()["buffer_hex"] == probe.ready["buffer_hex"],
+                "R10_CRASH_PRIOR_CONTEXT_CLEANUP_NOT_VERIFIED")
+        stale_recovery = crashed.recovery_status()
+        require(stale_recovery.get("status") == "COMPLETED"
+                and stale_recovery.get("target_identity") == crash_target.to_dict(),
+                "R10_CRASH_STALE_REAL_SUCCESS_REPORT_NOT_CREATED")
+        stale_hash = file_hash(crashed._recovery_path)
+        require(crashed.bind_target(crash_target, SCOPE, confirmed=True).get("status") == "COMPLETED",
+                "R10_CRASH_NEW_CONTEXT_BIND_FAILED")
+        crash_pending, crash_paused = pending_effects(crashed, crash_target, bytes([0xE2] * 64).hex(), "CRASH")
+        require(file_hash(crashed._recovery_path) == stale_hash,
+                "R10_CRASH_NEW_CONTEXT_UNEXPECTEDLY_REPLACED_PRIOR_REPORT_BEFORE_CLEANUP")
+        self.heartbeat(crashed, crash_identity, crash_deadline, crash_launches)
         crash_owner = crashed.helper
         crash_owner.terminate()
-        status_after = self.record("crash-heartbeat", crashed.session_status(refresh=True))
-        require(status_after.get("state") == "FAILED" and not status_after.get("admin_active")
-                and not status_after.get("elevated_verified") and not crash_owner.alive()
-                and len(crash_launches) == 1, "R10_CRASHED_HELPER_SHOWN_ACTIVE_OR_RELAUNCHED")
-        crashed.end_admin_session()
+        immediate_crash = self.record("crash-heartbeat-before-independent-recovery", crashed.session_status(refresh=True))
+        require(immediate_crash.get("state") == "CLEANUP_REQUIRED" and not immediate_crash.get("admin_active")
+                and not immediate_crash.get("elevated_verified") and immediate_crash.get("cleanup_required") is True,
+                "R10_CRASHED_NATIVE_OWNER_WAS_CLEARED_BY_OLD_SUCCESS_REPORT")
+        crash_restored = restored_after_owner_exit(crash_owner, crash_paused, "CRASH")
+        recovery_deadline = time.monotonic() + 5
+        fresh_recovery = crashed.recovery_status()
+        fresh_hash = file_hash(crashed._recovery_path)
+        while (fresh_hash == stale_hash or fresh_recovery.get("status") != "COMPLETED") and time.monotonic() < recovery_deadline:
+            threading.Event().wait(.1)
+            fresh_recovery = crashed.recovery_status()
+            fresh_hash = file_hash(crashed._recovery_path)
+        require(fresh_hash != stale_hash and fresh_recovery.get("status") == "COMPLETED"
+                and fresh_recovery.get("target_identity") == crash_target.to_dict()
+                and fresh_recovery.get("restored", {}).get("memory_changes") == 1
+                and fresh_recovery.get("restored", {}).get("thread_suspensions") == 1,
+                "R10_CRASH_FRESH_GUARDIAN_RECOVERY_WITH_OWNED_EFFECT_COUNTS_REQUIRED")
+        status_after = self.record("crash-heartbeat-after-independent-recovery", crashed.session_status(refresh=True))
+        require(status_after.get("state") == "CLEANUP_REQUIRED" and not status_after.get("admin_active")
+                and not status_after.get("elevated_verified") and status_after.get("cleanup_required") is True
+                and status_after.get("target") == crash_target.to_dict()
+                and not (status_after.get("expiry_cleanup") or {}).get("confirmed") and not crash_owner.alive()
+                and len(crash_launches) == 1, "R10_CRASHED_HELPER_ACK_LOSS_WAS_FALSELY_PROMOTED_OR_RELAUNCHED")
+        crash_closed = self.record("crashed-session-close-unconfirmed", crashed.end_admin_session())
+        require(crash_closed.get("status") == "RECOVERY_UNCONFIRMED" and crashed.helper is None,
+                "R10_CRASHED_HELPER_CLEANUP_ACK_LOSS_MUST_REMAIN_UNCONFIRMED")
+        self.expected_unconfirmed_services.add(id(crashed))
         return {"status": "PASS", "expiry_helper_identity": identity,
-                "expiry_seconds": 2, "expiry_launches": launches, "crash_launches": crash_launches,
-                "independent_fixture_progress_after_crash": probe.progress(probe.state())["heartbeat"]}
+                "expiry_seconds": 5, "expiry_launches": launches, "crash_launches": crash_launches,
+                "expiry": {"status": "PASS", "helper_identity": identity, "target": target.to_dict(),
+                    "fixed_deadline": deadline, "pending_effects": expiry_pending,
+                    "independent_restoration": expiry_restored, "session_state": status["state"],
+                    "cleanup_required": status["cleanup_required"], "expiry_cleanup": journal_metadata(terminal),
+                    "close_status": expiry_closed["status"],
+                    "same_service_restarted_after_new_consent": True,
+                    "restarted_helper_identity": restart_status["helper_identity"],
+                    "new_runas_after_old_lease_expired": True, "restarted_helper_exit_verified": True},
+                "crash": {"status": "PASS", "helper_identity": crash_identity, "target": crash_target.to_dict(),
+                    "fixed_deadline": crash_deadline, "pending_effects": crash_pending,
+                    "independent_restoration": crash_restored,
+                    "stale_recovery": journal_metadata(stale_recovery), "stale_recovery_sha256": stale_hash,
+                    "fresh_recovery": journal_metadata(fresh_recovery), "fresh_recovery_sha256": fresh_hash,
+                    "session_state_before_recovery": immediate_crash["state"],
+                    "session_state_after_recovery": status_after["state"],
+                    "diagnostic_cleanup_status": crash_closed["status"],
+                    "guardian_restoration_does_not_replace_helper_cleanup_ack": True}}
 
     def run_cleanup_failure(self, a: Probe, b: Probe) -> dict:
         service, launches = self.service("real-cleanup-failure")
