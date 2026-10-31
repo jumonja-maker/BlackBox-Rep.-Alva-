@@ -21,12 +21,22 @@ jobs:
     # These patches use isolated bb-deep-qa.yml / bb-inv-qa.yml gates.
     # Do not duplicate the complete build on every draft PR synchronization.
     if: github.event_name != 'pull_request' || (github.head_ref != 'patch/bb-deep-001' && github.head_ref != 'patch/bb-inv-003')
-    name: Windows shell / read-only observer
+    name: Windows source contracts / ${{ matrix.shard }}
     runs-on: windows-latest
-    # BB-DEEP-001 exact-SHA run #40935239740 required 67m37s on a hosted
-    # Windows runner for the full suite, before any new releases.
-    # Retain every test and WPR/DPI/E2E gate with bounded scheduling headroom.
-    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - shard: a-c
+            pattern: 'test_[a-c]*.py'
+          - shard: d-h
+            pattern: 'test_[d-h]*.py'
+          - shard: i-r
+            pattern: 'test_[i-r]*.py'
+          - shard: s-z
+            pattern: 'test_[s-z]*.py'
+    # Four bounded, exhaustive Windows unit partitions (no test exclusions).
+    timeout-minutes: 76
     env:
       QT_QPA_PLATFORM: offscreen
       PYTHONUTF8: "1"
@@ -44,8 +54,32 @@ jobs:
           python -m pip install --no-build-isolation --no-deps -e .
       - name: Undefined name gate
         run: python tools/check_undefined_names.py --report undefined-names-windows.json
-      - name: Test six-page application, legacy shell and process observer
-        run: python -m unittest discover -s tests -v
+      - name: Complete shard ownership and independent source unit checks
+        run: python tools/qa_unittest_shards.py --shard "${{ matrix.shard }}"
+
+  shell-integration:
+    # These patches use isolated bb-deep-qa.yml / bb-inv-qa.yml gates.
+    # Do not duplicate the complete build on every draft PR synchronization.
+    if: github.event_name != 'pull_request' || (github.head_ref != 'patch/bb-deep-001' && github.head_ref != 'patch/bb-inv-003')
+    name: Real Windows GUI / process / ETW integration
+    runs-on: windows-latest
+    # Run native GUI/ETW separately from all unit shards; no tests are skipped.
+    timeout-minutes: 85
+    env:
+      QT_QPA_PLATFORM: offscreen
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.11.9"
+          architecture: x64
+      - name: Install integrated shell and observer core
+        run: |
+          python -m pip install --require-hashes -r requirements/ci-windows-py311.lock
+          python -m pip install --no-build-isolation --no-deps -e .
       - name: Real Qt offscreen startup smoke
         run: python app.py --smoke
       - name: Real Qt isolated research end-to-end
@@ -72,7 +106,6 @@ jobs:
           $helpText = python -m blackbox_core --help
           if ($LASTEXITCODE -ne 0) { throw 'CLI help failed' }
           if (($helpText -join ' ') -match 'handoff') { throw 'Deprecated command visible' }
-
   linux-tests:
     if: github.event_name != 'pull_request' || (github.head_ref != 'patch/bb-deep-001' && github.head_ref != 'patch/bb-inv-003')
     name: Linux compatibility check (independent of Windows release)
@@ -268,3 +301,40 @@ jobs:
 
 # Publication occurs in release-v054.yml after green exact-main hosted QA.
 # No GitHub Actions Artifacts or cache are required for v0.5.4.
+
+  exact-main-acceptance:
+    name: Exact-main complete QA gate (artifactless)
+    if: >-
+      always() &&
+      (github.event_name != 'pull_request' ||
+       (github.head_ref != 'patch/bb-deep-001' && github.head_ref != 'patch/bb-inv-003'))
+    needs: [shell-tests, shell-integration, linux-tests, windows-portable]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      UNIT_SHARDS: ${{ needs.shell-tests.result }}
+      NATIVE_INTEGRATION: ${{ needs.shell-integration.result }}
+      LINUX: ${{ needs.linux-tests.result }}
+      WINDOWS_PORTABLE: ${{ needs.windows-portable.result }}
+      SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - name: Reject cancelled, skipped, or failed mandatory result
+        shell: bash
+        run: |
+          set -euo pipefail
+          for result in "$UNIT_SHARDS" "$NATIVE_INTEGRATION" "$LINUX" "$WINDOWS_PORTABLE"; do
+            if [[ "$result" != "success" ]]; then
+              echo "::error::Mandatory QA status is $result, not success"
+              exit 1
+            fi
+          done
+          echo "All four groups: unit shards, native integration, Linux, portable SUCCESS."
+          {
+            echo "## Exact-source complete BLACK.BOX QA"
+            echo "- Source SHA: $SOURCE_SHA"
+            echo "- Windows source partitions: $UNIT_SHARDS (all 4 shards required)"
+            echo "- Native Qt/ETW/observer integration: $NATIVE_INTEGRATION"
+            echo "- Linux compatibility: $LINUX"
+            echo "- Windows portable EXE: $WINDOWS_PORTABLE"
+            echo "- GitHub Actions Artifacts: none"
+          } >> "$GITHUB_STEP_SUMMARY"
