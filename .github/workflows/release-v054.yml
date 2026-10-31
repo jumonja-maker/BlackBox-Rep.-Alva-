@@ -10,7 +10,7 @@ permissions:
   contents: read
 
 jobs:
-authorize:
+  authorize:
     name: Verify exact approved v0.5.4 recovery merge and green main QA
     if: >-
       github.event.workflow_run.conclusion == 'success' &&
@@ -31,7 +31,7 @@ authorize:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-        run: python tools/publish_v054_after_ci.py --authorize-only
+        run: python -m tools.publish_v054_after_ci --authorize-only
 
   package-and-release:
     needs: authorize
@@ -225,5 +225,5 @@ authorize:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          python tools/publish_v054_after_ci.py --archive "BLACK.BOX-Universal-Windows.zip"
+          python -m tools.publish_v054_after_ci --archive "BLACK.BOX-Universal-Windows.zip"
           if ($LASTEXITCODE -ne 0) { throw "One-time v0.5.4 release was not published" }
