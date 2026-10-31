@@ -75,9 +75,20 @@ class InspectorService:
     def helper_pid(self):
         return self.helper.pid if self.helper is not None else None
 
+    def _helper_liveness(self):
+        if self.helper is None:
+            return False
+        try:
+            return self.helper.alive()
+        except Exception:
+            self._owner_retained = self._cleanup_unconfirmed = True
+            self._elevated_verified = False
+            self._admin_state = "CLEANUP_REQUIRED"
+            return None
+
     @property
     def admin_active(self) -> bool:
-        return bool(self.helper is not None and self.helper.alive() and self._permission == "ADMINISTRATOR"
+        return bool(self.helper is not None and self._helper_liveness() is True and self._permission == "ADMINISTRATOR"
                     and self._elevated_verified and not self._owner_retained and not self._cleanup_unconfirmed
                     and self._admin_state == "ACTIVE" and time.monotonic() < self._expires)
 
@@ -92,7 +103,7 @@ class InspectorService:
             if refresh and self._admin_session_managed and self.helper is not None:
                 if time.monotonic() >= self._expires:
                     self._consume_expiry_cleanup()
-                elif self.helper.alive():
+                elif self._helper_liveness() is True:
                     try:
                         answer = self._managed_exchange("session.status")
                         data = answer.get("data", {})
@@ -118,7 +129,7 @@ class InspectorService:
                         self._admin_state = "FAILED"
                         if self._interventions_started:
                             self._owner_retained = self._cleanup_unconfirmed = True
-            alive = bool(self.helper is not None and self.helper.alive())
+            alive = self._helper_liveness() is True
             remaining = max(0, round(self._expires - time.monotonic(), 3))
             if self._owner_retained or self._cleanup_unconfirmed:
                 state = "CLEANUP_REQUIRED"
@@ -193,15 +204,15 @@ class InspectorService:
             self._recovery_stream = self._recovery_path.open("x+b")
             check_deadline(time.monotonic() + 1, cancel_event)
             self.helper = self.broker.launch(arguments, elevated=elevated)
-            if not self.helper.alive():
+            if self._helper_liveness() is not True:
                 raise OSError("DIAGNOSTIC_HELPER_EXITED_DURING_STARTUP")
             deadline = time.monotonic() + 30
             pipe.accept(self.helper.pid, deadline=deadline, cancel_event=cancel_event)
             hello = pipe.receive(deadline=deadline, cancel_event=cancel_event)
-            if not self.helper.alive():
+            if self._helper_liveness() is not True:
                 raise OSError("DIAGNOSTIC_HELPER_INSTANCE_EXITED")
             actual = self.identity(self.helper.pid)
-            if not self.helper.alive():
+            if self._helper_liveness() is not True:
                 raise OSError("DIAGNOSTIC_HELPER_INSTANCE_EXITED")
             expected_executable = self.broker.command(arguments)[0]
             verify_helper_hello(hello, nonce, actual, expected_executable)
@@ -227,7 +238,7 @@ class InspectorService:
                                 or not isinstance(ready.get("token_authority"), dict)
                                 or ready["token_authority"].get("elevated") is not True):
                 raise PermissionError("ADMINISTRATIVE_HELPER_AUTHORITY_NOT_VERIFIED")
-            if not self.helper.alive() or time.monotonic() >= started + session_seconds:
+            if self._helper_liveness() is not True or time.monotonic() >= started + session_seconds:
                 raise OSError("DIAGNOSTIC_HELPER_EXITED_OR_EXPIRED_DURING_STARTUP")
             self._target, self._scope = target, frozenset() if admin_lease else frozenset(operations)
             self._permission, self._expires = permission, started + session_seconds
@@ -247,7 +258,7 @@ class InspectorService:
             self._discard_helper(force=True)
             raise
 
-    def _discard_helper(self, *, force: bool) -> None:
+    def _discard_helper(self, *, force: bool, cleanup_confirmed: bool = False) -> None:
         errors = []
         if self._channel is not None:
             self._channel.close()
@@ -255,15 +266,28 @@ class InspectorService:
         if self.helper is not None:
             try:
                 if force and self.helper.alive():
-                    self.helper.terminate()
+                    wait = getattr(self.helper, "wait_for_exit", None)
+                    exited = cleanup_confirmed and callable(wait) and wait(timeout_ms=1000) is True
+                    if not exited:
+                        self.helper.terminate()
             except Exception as exc:
                 errors.append(str(exc))
-            if errors and self.helper.alive():
+            try:
+                alive = self.helper.alive()
+            except Exception as exc:
+                errors.append(str(exc))
+                alive = None
+            if alive is not False:
                 # A failed termination must not erase the only held identity
-                # of a still-live privileged owner. Keep it visible/retryable.
-                self._owner_retained = True
-                raise OSError("; ".join(errors))
+                # of a live or unverifiable privileged owner.
+                self._owner_retained = self._cleanup_unconfirmed = True
+                self._admin_state = "CLEANUP_REQUIRED"
+                raise OSError("; ".join(errors) or "HELPER_EXIT_UNCONFIRMED")
             else:
+                # This list contains only termination/wait errors. A strict
+                # subsequent observation of process exit resolves that race;
+                # channel, handle and journal failures are not swallowed here.
+                errors.clear()
                 self.helper.close_handle()
                 self.helper = None
         if self._recovery_stream is not None:
@@ -564,16 +588,18 @@ class InspectorService:
             return result(request.operation, "OPERATION_FAILED", error="ADMINISTRATIVE_HELPER_VERIFICATION_FAILED",
                           next_action="END_SESSION_AND_REVIEW_HELPER_FAILURE")
         if self.helper is not None:
-            if not self.helper.alive() or time.monotonic() >= self._expires:
+            if self._helper_liveness() is None:
+                return self._retained_result(request.operation, "HELPER_PROCESS_WAIT_UNCONFIRMED")
+            if self._helper_liveness() is False or time.monotonic() >= self._expires:
                 unconfirmed = self._interventions_started
                 # Let the helper finish its original finite lease cleanup.
                 # Killing a held INT3 owner immediately could resume unsafe RIP.
-                if unconfirmed and self.helper.alive() and time.monotonic() < self._expires + 30:
+                if unconfirmed and self._helper_liveness() is True and time.monotonic() < self._expires + 30:
                     return self._retained_result(request.operation, "SESSION_EXPIRED_CLEANUP_PENDING")
                 try:
                     self._discard_helper(force=True)
                 except Exception as exc:
-                    if self.helper is not None and self.helper.alive():
+                    if self.helper is not None:
                         return self._retained_result(request.operation, "EXPIRED_HELPER_STOP_UNCONFIRMED: " + str(exc)[:1000])
                     raise
                 if unconfirmed:
@@ -746,7 +772,7 @@ class InspectorService:
                 return value
         except Exception:
             pass
-        if self._interventions_started and self.helper is not None and self.helper.alive():
+        if self._interventions_started and self.helper is not None and self._helper_liveness() is True:
             cleanup = self.end_admin_session()
             if cleanup.get("data", {}).get("owner_retained"):
                 return self._retained_result("unknown", "INTERVENTION_CANCELLATION_ACKNOWLEDGEMENT_LOST", cleanup=cleanup)
@@ -982,7 +1008,7 @@ class InspectorService:
                                         data={"cleanup": cleanup},
                                         limitations=["A native action may have completed; subsequent cleanup does not prove it never ran. Do not retry automatically."])
                 else:
-                    if self._interventions_started and self.helper is not None and not self.helper.alive():
+                    if self._interventions_started and self.helper is not None and self._helper_liveness() is not True:
                         status = "RECOVERY_UNCONFIRMED"
                     answer = result(request.operation, status, error=str(exc)[:2000], winerror=getattr(exc, "winerror", None))
             finally:
@@ -1110,7 +1136,8 @@ class InspectorService:
             closing_permission = self._permission
             expired_managed = self._admin_session_managed and time.monotonic() >= self._expires
             pending_close = self._admin_session_managed and self._pending_close_context is not None
-            terminal = self._consume_expiry_cleanup() if expired_managed or pending_close else None
+            confirmed_terminal = self._expiry_cleanup and self._expiry_cleanup.get("confirmed")
+            terminal = self._consume_expiry_cleanup() if expired_managed or pending_close or confirmed_terminal else None
             answer = result("session.close", "RECOVERY_UNCONFIRMED" if had_interventions else "COMPLETED",
                             limitations=["No successful cleanup acknowledgement was received."])
             if terminal is not None:
@@ -1119,7 +1146,8 @@ class InspectorService:
                                 limitations=["Terminal cleanup acknowledges resource release; late operation results remain separate observations."])
             late_results = []
             try:
-                if not expired_managed and not pending_close and self.helper.alive() and self._channel is not None:
+                if (terminal is None and not expired_managed and not pending_close
+                        and self._helper_liveness() is True and self._channel is not None):
                     deadline = time.monotonic() + 20
                     envelope = {"kind": "close"}
                     if self._admin_session_managed:
@@ -1151,18 +1179,18 @@ class InspectorService:
                                              "status": response.get("result", {}).get("status")})
             except Exception as exc:
                 answer["error"] = str(exc)[:2000]
-            alive = self.helper is not None and self.helper.alive()
+            alive = self._helper_liveness()
             retained = bool(answer.get("data", {}).get("owner_retained"))
-            if (alive and (retained or had_interventions and answer.get("status") != "COMPLETED")
+            if (alive is not False and (alive is None or retained or had_interventions and answer.get("status") != "COMPLETED")
                     and time.monotonic() < self._expires + 30):
                 answer = self._retained_result("session.close", answer.get("error") or "OWNED_DEBUG_CONTEXT_CLEANUP_UNCONFIRMED",
                                                cleanup=answer)
             else:
                 try:
-                    self._discard_helper(force=True)
+                    self._discard_helper(force=True, cleanup_confirmed=answer.get("status") == "COMPLETED")
                 except Exception as exc:
                     answer = (self._retained_result("session.close", str(exc)[:2000], cleanup=answer)
-                              if self.helper is not None and self.helper.alive() else
+                              if self.helper is not None else
                               result("session.close", "RECOVERY_UNCONFIRMED", error=str(exc)[:2000]))
                 if self.helper is None:
                     self._interventions_started = False

@@ -10,7 +10,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 from blackbox_core.deep_contracts import ActionRequest, MAX_SESSION_SECONDS, ProcessIdentity
-from blackbox_core.deep_elevation import ElevationCancelled
+from blackbox_core.deep_elevation import ElevationCancelled, HelperProcess
 from blackbox_core.deep_service import InspectorService
 
 
@@ -360,6 +360,7 @@ class AdminLeaseServiceTests(unittest.TestCase):
                 {"address": 4096, "expected_hex": "01", "value_hex": "02"}, confirmed=True))
         self.assertEqual(answer["status"], "RECOVERY_UNCONFIRMED")
         self.assertEqual(answer["run_receipt"]["status"], "RECOVERY_UNCONFIRMED")
+
         self.assertIsNone(answer["run_receipt"]["execution_started"])
         self.assertEqual(answer["data"]["cleanup"]["status"], "COMPLETED")
         self.assertFalse(self.service.session_status()["cleanup_required"])
@@ -377,6 +378,20 @@ class AdminLeaseServiceTests(unittest.TestCase):
         self.assertEqual(restarted["status"], "COMPLETED")
         self.assertEqual([message["kind"] for message in self.messages], ["execute", "close"])
         self.assertEqual(answer["run_receipt"]["status"], "RECOVERY_UNCONFIRMED")
+
+    def test_confirmed_close_with_initial_unknown_exit_can_finish_on_later_exact_exit_proof(self):
+        helper = self.lease(self.a, ["memory_read"])
+        frame = self.terminal_frame()
+        frame.update(kind="closed", reason="EXPLICIT_CLOSE")
+        self.service._channel.receive = Mock(return_value=frame)
+        helper.alive.side_effect = [True, OSError("WAIT_FAILED"), False, False, False]
+        first = self.service.end_admin_session()
+        self.assertEqual(first["status"], "RECOVERY_UNCONFIRMED")
+        self.assertTrue(self.service._expiry_cleanup["confirmed"])
+        second = self.service.end_admin_session()
+        self.assertEqual(second["status"], "COMPLETED")
+        self.assertFalse(self.service.session_status()["cleanup_required"])
+        self.assertEqual([message["kind"] for message in self.messages], ["close"])
 
     def test_lease_input_is_finite_bounded_and_scope_is_allowlisted(self):
         for duration in (True, 0, MAX_SESSION_SECONDS + 1, float("nan"), float("inf")):
@@ -403,6 +418,104 @@ class AdminLeaseServiceTests(unittest.TestCase):
         self.assertTrue(receipt["source"]["verified"])
         self.assertEqual(receipt["source"]["helper_pid"], self.helper_identity.pid)
         self.assertEqual(self.service.journal.timeline()[0]["run_receipt"]["run_id"], answer["operation_id"])
+
+
+class HelperProcessExitProofTests(unittest.TestCase):
+    def native(self, waits, *, terminate=False):
+        kernel = Mock()
+        kernel.WaitForSingleObject.side_effect = waits
+        kernel.TerminateProcess.return_value = terminate
+        return HelperProcess(handle=123, pid=456), kernel
+
+    def test_termination_denied_after_natural_exit_requires_same_handle_signal(self):
+        helper, kernel = self.native([258, 0])
+        with patch("blackbox_core.deep_elevation.C.WinDLL", return_value=kernel, create=True), \
+                patch("blackbox_core.deep_elevation.C.get_last_error", return_value=5, create=True):
+            helper.terminate()
+        kernel.TerminateProcess.assert_called_once_with(123, 1)
+        self.assertEqual([call.args for call in kernel.WaitForSingleObject.call_args_list], [(123, 0), (123, 0)])
+        self.assertEqual(helper.handle, 123)
+
+    def test_termination_denied_while_alive_remains_an_error(self):
+        helper, kernel = self.native([258, 258])
+        with patch("blackbox_core.deep_elevation.C.WinDLL", return_value=kernel, create=True), \
+                patch("blackbox_core.deep_elevation.C.get_last_error", return_value=5, create=True):
+            with self.assertRaisesRegex(OSError, "HELPER_TERMINATION_UNCONFIRMED") as raised:
+                helper.terminate()
+        self.assertEqual(raised.exception.errno, 5)
+        self.assertEqual(helper.handle, 123)
+        kernel.CloseHandle.assert_not_called()
+
+    def test_failed_or_unrecognized_wait_is_neither_exit_nor_liveness_proof(self):
+        for observed in (0xFFFFFFFF, 128, 12345):
+            with self.subTest(observed=observed):
+                helper, kernel = self.native([observed])
+                with patch("blackbox_core.deep_elevation.C.WinDLL", return_value=kernel, create=True), \
+                        patch("blackbox_core.deep_elevation.C.get_last_error", return_value=6, create=True):
+                    with self.assertRaisesRegex(OSError, "HELPER_PROCESS_WAIT_UNCONFIRMED"):
+                        helper.alive()
+                self.assertEqual(helper.handle, 123)
+                kernel.CloseHandle.assert_not_called()
+
+    def test_discard_clears_termination_error_only_after_independent_exit_proof(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            service = InspectorService(temporary)
+            helper, kernel = self.native([258, 258, 258, 0])
+            service.helper = helper
+            with patch("blackbox_core.deep_elevation.C.WinDLL", return_value=kernel, create=True), \
+                    patch("blackbox_core.deep_elevation.C.get_last_error", return_value=5, create=True):
+                service._discard_helper(force=True)
+            self.assertIsNone(service.helper)
+            kernel.CloseHandle.assert_called_once_with(123)
+            self.assertFalse(service._owner_retained)
+
+    def test_discard_keeps_exact_owner_handle_for_denied_live_or_failed_wait(self):
+        for observed in (258, 0xFFFFFFFF):
+            with self.subTest(observed=observed), tempfile.TemporaryDirectory() as temporary:
+                service = InspectorService(temporary)
+                helper, kernel = self.native(None)
+                kernel.WaitForSingleObject.side_effect = None
+                kernel.WaitForSingleObject.return_value = observed
+                service.helper = helper
+                with patch("blackbox_core.deep_elevation.C.WinDLL", return_value=kernel, create=True), \
+                        patch("blackbox_core.deep_elevation.C.get_last_error", return_value=5, create=True):
+                    with self.assertRaises(OSError):
+                        service._discard_helper(force=True)
+                self.assertIs(service.helper, helper)
+                self.assertEqual(helper.handle, 123)
+                self.assertTrue(service._owner_retained)
+                self.assertTrue(service._cleanup_unconfirmed)
+                kernel.CloseHandle.assert_not_called()
+
+    def test_verified_cleanup_allows_bounded_graceful_exit_before_termination(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            service = InspectorService(temporary)
+            helper, kernel = self.native([258, 0, 0])
+            service.helper = helper
+            with patch("blackbox_core.deep_elevation.C.WinDLL", return_value=kernel, create=True):
+                service._discard_helper(force=True, cleanup_confirmed=True)
+            self.assertEqual([call.args[1] for call in kernel.WaitForSingleObject.call_args_list], [0, 1000, 0])
+            kernel.TerminateProcess.assert_not_called()
+            kernel.CloseHandle.assert_called_once_with(123)
+            self.assertIsNone(service.helper)
+
+    def test_end_session_with_failed_wait_returns_typed_uncertainty_and_retains_owner(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            service = InspectorService(temporary)
+            helper, kernel = self.native(None)
+            kernel.WaitForSingleObject.side_effect = None
+            kernel.WaitForSingleObject.return_value = 0xFFFFFFFF
+            service.helper = helper
+            service._expires = time.monotonic() - 31
+            with patch("blackbox_core.deep_elevation.C.WinDLL", return_value=kernel, create=True), \
+                    patch("blackbox_core.deep_elevation.C.get_last_error", return_value=6, create=True):
+                answer = service.end_admin_session()
+                status = service.session_status()
+            self.assertEqual(answer["status"], "RECOVERY_UNCONFIRMED")
+            self.assertEqual(status["state"], "CLEANUP_REQUIRED")
+            self.assertFalse(status["elevated_verified"])
+            self.assertIs(service.helper, helper)
+            kernel.CloseHandle.assert_not_called()
 
 
 if __name__ == "__main__":

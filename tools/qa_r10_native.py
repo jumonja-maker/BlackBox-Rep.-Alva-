@@ -16,7 +16,9 @@ import json
 import os
 from pathlib import Path
 import re
+import subprocess
 import sys
+import tempfile
 import threading
 import time
 import traceback
@@ -31,7 +33,7 @@ from blackbox_core.deep_service import InspectorService
 
 SCOPE = ["capabilities", "modules", "threads", "handles", "memory_read", "memory_map",
          "thread_stacks", "snapshot", "memory.write", "memory.rollback",
-         "thread.suspend", "thread.resume", "debug.attach", "debug.detach"]
+         "thread.suspend", "thread.resume", "debug.attach", "debug.detach", "profile.etw"]
 
 
 def actual_token(pid: int) -> dict:
@@ -394,6 +396,7 @@ class NativeAcceptance:
             "order": ["A", "B", "A", "B"], "pending_B_thread_resumed_on_switch": True,
             "pending_A_write_restored_on_switch": True, "same_helper_and_deadline": True,
             "runas_count": len(launches)}
+        self.run_etw_resource_conflict(service, ib, identity, deadline, launches)
 
         destination = self.output / "journal-export.jsonl"
         exported = self.record("journal-export", service.export_journal(destination))
@@ -426,6 +429,136 @@ class NativeAcceptance:
         return {"status": "PASS", "helper_identity": identity, "independent_token": token,
                 "broker_launches": launches, "runas_count": len(launches), "fixed_deadline": deadline,
                 "switch_A_to_B_cleanup_verified": True, "final_helper_exit_verified": True}
+
+    def run_etw_resource_conflict(self, service, target, helper_identity, lease_deadline, launches):
+        from blackbox_core import deep_profiling as profiling
+        from blackbox_core.trace_owner import TraceSupervisor, _read
+        folder = self.output / "owned-foreign-wpr"
+        folder.mkdir()
+        foreign = TraceSupervisor(folder, seconds=30, max_output_bytes=256 * 1024**2,
+            target=target.to_dict(), profile="GeneralProfile.Light")
+        tool = profiling._trusted_wpr()
+        scenario = {"status": "FAIL", "foreign_profile": "GeneralProfile.Light",
+            "foreign_profile_origin": "FIXED_INSTALLED_MICROSOFT_BUILTIN_VALIDATED_BY_REAL_START",
+            "foreign_instance": foreign.instance, "foreign_finite_lease_seconds": 30,
+            "wpr_sha256": file_hash(Path(tool)), "global_cancel_used": False}
+        self.proof["scenarios"]["real-etw-resource-conflict"] = scenario
+
+        def command(arguments):
+            # This deliberately bypasses WprCapture.start's own-instance
+            # failure cleanup: a duplicate probe must never cancel its owner.
+            with tempfile.TemporaryFile() as log:
+                completed = subprocess.run([tool, *arguments, "-instancename", foreign.instance],
+                    stdout=log, stderr=subprocess.STDOUT, timeout=20,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+                log.seek(0)
+                text = log.read(16384).decode("utf-8", errors="replace")
+            return {"exit_code": completed.returncode, "output": text[:4096],
+                    "output_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest()}
+
+        def stable_fields(journal):
+            return {key: journal.get(key) for key in ("instance", "target", "policy", "start_result",
+                "clock_anchors", "started_monotonic_ns", "owner_pid", "owner_created",
+                "guardian_pid", "guardian_created")}
+
+        def resource_refusal(text):
+            # Positive installed-tool wording is required. A generic HRESULT
+            # or any nonzero exit alone does not identify a resource conflict.
+            return re.search(r"\balready\b.{0,120}\b(?:running|recording|started|exists|enabled)\b|"
+                r"\b(?:recording|session|profile)\b.{0,120}\b(?:already|in use)\b|"
+                r"\b(?:resource|object)\b.{0,120}\b(?:in use|already exists)\b",
+                text.lower()) is not None
+
+        def verify_survival(original, owner_identity):
+            current = _read(foreign.path)
+            require(foreign.active and current.get("state") == "RECORDING"
+                    and stable_fields(current) == original
+                    and service.identity(foreign.process.pid).to_dict() == owner_identity,
+                    "R10_FOREIGN_WPR_OWNER_IDENTITY_OR_START_ANCHORS_CHANGED")
+            actual = command(["-status"])
+            require(actual["exit_code"] == 0 and "generalprofile" in actual["output"].lower(),
+                    "R10_FOREIGN_WPR_NOT_PRESENT_IN_ACTUAL_NAMED_STATUS:" + actual["output"][:1000])
+            return {"owner_identity": owner_identity, "state": current["state"],
+                "start_fields_sha256": hashlib.sha256(json.dumps(original, sort_keys=True).encode("utf-8")).hexdigest(),
+                "actual_wpr_status": actual}
+
+        try:
+            foreign.start()
+            ready_deadline = time.monotonic() + 25
+            while True:
+                journal = _read(foreign.path)
+                if journal.get("state") == "RECORDING":
+                    break
+                require(foreign.active and time.monotonic() < ready_deadline,
+                        "R10_OWNED_FOREIGN_WPR_NEVER_RECORDED")
+                threading.Event().wait(.05)
+            require(journal.get("start_result", {}).get("profile") == "GeneralProfile.Light",
+                    "R10_FOREIGN_WPR_FIXED_PROFILE_NOT_VALIDATED")
+            owner_identity = service.identity(foreign.process.pid).to_dict()
+            original = stable_fields(journal)
+            scenario["before_duplicate"] = verify_survival(original, owner_identity)
+            duplicate = command(["-start", "GeneralProfile.Light"])
+            require(duplicate["exit_code"] != 0 and resource_refusal(duplicate["output"]),
+                    "R10_DUPLICATE_WPR_RESOURCE_REFUSAL_NOT_ESTABLISHED:" + duplicate["output"][:1500])
+            scenario["duplicate_same_instance"] = {"status": "OS_REFUSAL", **duplicate,
+                "auto_cancel_invoked": False}
+            scenario["after_duplicate"] = verify_survival(original, owner_identity)
+            destination = self.output / "r10-etw-coexistence.etl"
+            response = self.action(service, target, "profile.etw", {"destination": str(destination),
+                "duration_seconds": 1, "profile": profiling.PROFILE, "systemwide_confirmed": True},
+                confirmed=True, timeout=90, expected=("COMPLETED", "OPERATION_FAILED"))
+            if response["status"] == "COMPLETED":
+                data = response.get("data", {})
+                require(data.get("saved_verified") is True and destination.is_file()
+                        and 0 < destination.stat().st_size <= profiling.MAX_TRACE_BYTES
+                        and data.get("trace_bytes") == destination.stat().st_size
+                        and data.get("sha256") == file_hash(destination)
+                        and data.get("profile_sha256") == profiling.PROFILE_SHA256
+                        and data.get("cleanup") == "CONFIRMED",
+                        "R10_ETW_COEXISTENCE_CAPTURE_OR_NATIVE_CLEANUP_UNVERIFIED")
+                scenario["r10_branch"] = "COEXISTENCE"
+                scenario["r10_capture"] = {"bytes": destination.stat().st_size, "sha256": file_hash(destination),
+                    "profile_sha256": data["profile_sha256"], "cleanup": data["cleanup"]}
+            else:
+                error = str(response.get("error") or "")
+                require("wpr_command_failed" in error.lower() and
+                        resource_refusal(error) and
+                        (not destination.exists() or destination.stat().st_size == 0),
+                        "R10_ETW_REFUSAL_RESOURCE_CAUSE_NOT_ESTABLISHED:" + error[:1000])
+                scenario["r10_branch"] = "RESOURCE_CONFLICT_REFUSAL"
+                scenario["r10_refusal"] = {"status": response["status"], "error": error[:1000]}
+            scenario["after_r10_request"] = verify_survival(original, owner_identity)
+            self.heartbeat(service, helper_identity, lease_deadline, launches)
+        finally:
+            # EOF stops only this fixture's guarded named instance. No direct
+            # WPR cancel, second owner's cancellation route, or global stop.
+            cleanup = foreign.stop() if foreign.process is not None else None
+            scenario["fixture_cleanup_status"] = cleanup.get("status") if cleanup else "NOT_STARTED"
+            if cleanup is not None:
+                final = _read(foreign.path)
+                source = folder / final.get("result", {}).get("path", "missing.etl")
+                require(cleanup.get("status") == "COMPLETED" and foreign.process.returncode == 0
+                        and final.get("instance") == foreign.instance
+                        and final.get("stop_reason") == "LEASE_EOF_OR_EXPLICIT_STOP"
+                        and source.is_file() and 0 < source.stat().st_size <= 256 * 1024**2
+                        and file_hash(source) == final.get("result", {}).get("sha256"),
+                        "R10_FOREIGN_WPR_OWNED_ETL_OR_CLEANUP_NOT_VERIFIED")
+                scenario["fixture_cleanup"] = {"owner_exit_verified": True, "exit_code": foreign.process.returncode,
+                    "stop_reason": final["stop_reason"], "etl_bytes": source.stat().st_size,
+                    "etl_sha256": file_hash(source), "only_fixture_named_instance_stopped": True}
+        scenario["status"] = "PASS"
+        receipt_path = self.output / "r10-etw-resource.json"
+        save(receipt_path, scenario)
+        print("R10_ETW_RESOURCE_RECEIPT " + json.dumps({"status": scenario["status"],
+            "source_sha": self.source_sha, "receipt_sha256": file_hash(receipt_path),
+            "foreign_profile": scenario["foreign_profile"], "foreign_instance": foreign.instance,
+            "owner_identity": owner_identity, "duplicate_start_exit_code": duplicate["exit_code"],
+            "duplicate_start_output": duplicate["output"][:1500],
+            "duplicate_start_auto_cancel": False, "r10_branch": scenario["r10_branch"],
+            "r10_capture": scenario.get("r10_capture"), "r10_refusal": scenario.get("r10_refusal"),
+            "foreign_survived_both_requests": True, "fixture_cleanup": scenario["fixture_cleanup"],
+            "diagnostic_helper_identity": helper_identity, "runas_count": len(launches)},
+            ensure_ascii=True), flush=True)
 
     def run_expiry_and_crash(self, probe: Probe) -> dict:
         def oracle(state):
