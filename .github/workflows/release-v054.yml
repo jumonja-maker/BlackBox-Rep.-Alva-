@@ -11,44 +11,34 @@ permissions:
 
 jobs:
   authorize:
-    name: Verify owner-approved PR27 merge and green main CI
+    name: Verify exact approved v0.5.4 recovery merge and green main QA
     if: >-
       github.event.workflow_run.conclusion == 'success' &&
       github.event.workflow_run.event == 'push' &&
       github.event.workflow_run.head_branch == 'main' &&
       github.event.workflow_run.head_repository.full_name == github.repository
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 8
     outputs:
       approved: ${{ steps.guard.outputs.approved }}
     steps:
-      - name: Authorize exact PR27 merge SHA for one-time release
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          persist-credentials: false
+      - name: Verify actual two-parent owner-approved recovery merge
         id: guard
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-          SOURCE_SHA: ${{ github.event.workflow_run.head_sha }}
-        run: |
-          set -euo pipefail
-          [[ "$SOURCE_SHA" =~ ^[a-f0-9]{40}$ ]]
-          CURRENT="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq '.object.sha')"
-          MERGED="$(gh api "repos/$GITHUB_REPOSITORY/pulls/27" --jq '.merged')"
-          MERGE_SHA="$(gh api "repos/$GITHUB_REPOSITORY/pulls/27" --jq '.merge_commit_sha')"
-          RELEASE_COUNT="$(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" --jq '[.[]|select(.tag_name=="v0.5.4")]|length')"
-          if [[ "$SOURCE_SHA" == "$CURRENT" && "$SOURCE_SHA" == "$GITHUB_SHA" && "$MERGED" == "true" && "$SOURCE_SHA" == "$MERGE_SHA" && "$RELEASE_COUNT" == "0" ]]; then
-            echo "approved=true" >> "$GITHUB_OUTPUT"
-            echo "Authorized owner-approved PR27 merge: $SOURCE_SHA"
-          else
-            echo "approved=false" >> "$GITHUB_OUTPUT"
-            echo "Not the one-time owner-approved PR27 merge; no release."
-          fi
+        run: python -m tools.publish_v054_after_ci --authorize-only
 
   package-and-release:
     needs: authorize
     if: needs.authorize.outputs.approved == 'true'
     name: Rebuild and release verified v0.5.4 Windows ZIP
     # Exact-SHA native decoder acceptance accompanies the release candidate.
-    # The candidate remains unpublished even when every gate passes.
+    # All native and frozen checks must complete before publication.
     runs-on: windows-latest
     permissions:
       contents: write
@@ -235,5 +225,5 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          python tools/publish_v054_after_ci.py --archive "BLACK.BOX-Universal-Windows.zip"
+          python -m tools.publish_v054_after_ci --archive "BLACK.BOX-Universal-Windows.zip"
           if ($LASTEXITCODE -ne 0) { throw "One-time v0.5.4 release was not published" }
