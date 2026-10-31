@@ -31,6 +31,7 @@ SECTIONS = (
 )
 
 ACTION_LABELS = {
+    "capabilities": ("Check available operations", "Проверить доступные операции"),
     "processes": ("Refresh process tree", "Обновить дерево процессов"),
     "modules": ("Inspect loaded modules", "Исследовать загруженные модули"),
     "threads": ("Inspect threads", "Исследовать потоки"),
@@ -189,6 +190,8 @@ class OverviewInspectorPanel(QWidget):
         self.bridge.idle.connect(self._idle)
         self.bridge.closed.connect(self.closed.emit)
         self.bridge.recovery_required.connect(self.recovery_required.emit)
+        if hasattr(self.bridge, "admin_status_changed"):
+            self.bridge.admin_status_changed.connect(self._refresh_controls)
         self.retranslate()
 
     def tr2(self, en, ru):
@@ -711,24 +714,39 @@ class OverviewInspectorPanel(QWidget):
             operations = ["memory.write", "memory.rollback", "memory_read"]
         elif operation == "thread.suspend":
             operations = ["thread.suspend", "thread.resume"]
+        authorize_only = (self._last_result or {}).get("next_action") == "AUTHORIZE_TARGET_AND_OPERATION_SCOPE"
         labels = [self.tr2(*ACTION_LABELS.get(name, (name, name))) for name in operations]
-        text = self.tr2(
-            "Windows administrator permission is required for the requested diagnostic operation. BLACK.BOX will open the system UAC prompt and authorize only this process and the operations listed below. Each intervention still requires confirmation.",
-            "Для запрошенного диагностического действия необходимы дополнительные права Windows. BLACK.BOX вызовет системное окно UAC и разрешит работу только с этим процессом и перечисленными операциями. Каждое вмешательство по-прежнему требует подтверждения.")
-        text += f"\n\n{self._target_name} · PID {self.bridge.target[0]}\n" + "\n".join(labels)
+        if authorize_only:
+            text = self.tr2(
+                "Authorize this exact process instance and the operations below for the existing administrator session. The current helper is reused within its original remaining lease; this does not extend the 900-second limit. Each intervention still requires its own confirmation.",
+                "Разрешите перечисленные операции для этого экземпляра процесса в действующей административной сессии. Используется текущий Helper в пределах оставшегося срока; предел 900 секунд не продлевается. Каждое вмешательство по-прежнему требует отдельного подтверждения.")
+        else:
+            text = self.tr2(
+                "BLACK.BOX will open the Windows UAC prompt for a separate limited Diagnostic Helper, for at most 900 seconds (15 minutes), and authorize only this process and the operations below. Additional inspection, debugging, memory changes, thread control and ETW remain limited by Windows permissions. Each intervention still requires confirmation. Ordinary observation remains available if UAC is declined.",
+                "BLACK.BOX вызовет системное окно UAC для отдельного ограниченного Diagnostic Helper не более чем на 900 секунд (15 минут) и разрешит работу только с этим процессом и перечисленными операциями. Исследование, отладка, изменение памяти, управление потоками и ETW ограничены правами Windows. Каждое вмешательство требует подтверждения. При отказе UAC обычное наблюдение остаётся доступным.")
+        if operation == "capabilities":
+            text += "\n\n" + self.tr2(
+                "This authorization only checks access for known diagnostic operations. It does not authorize executing those operations; an available capability still requires its own scope and action confirmation.",
+                "Это разрешение позволяет только проверить доступ для известных диагностических операций. Оно не разрешает выполнение этих операций: доступная возможность по-прежнему требует собственного разрешения и подтверждения действия.")
+        native_target = (self._last_result or {}).get("target") or {}
+        text += (f"\n\n{self._target_name} · PID {self.bridge.target[0]}"
+                 f"\n{self.tr2('Selected creation time', 'Время создания выбранного процесса')}: {self.bridge.target[1]}"
+                 f"\nCreation FILETIME: {native_target.get('created_100ns', '—')}\n" + "\n".join(labels))
         dialog = QMessageBox(QMessageBox.Icon.Warning,
                              self.tr2("BLACK.BOX — Administrator permission", "BLACK.BOX — Права администратора"),
                              text, QMessageBox.StandardButton.Cancel, self)
         dialog.setTextFormat(Qt.TextFormat.PlainText)
         dialog.button(QMessageBox.StandardButton.Cancel).setText(self.tr2("CANCEL", "ОТМЕНА"))
-        grant = dialog.addButton(self.tr2("GRANT ADMINISTRATOR PERMISSION", "ПРЕДОСТАВИТЬ ПРАВА АДМИНИСТРАТОРА"), QMessageBox.ButtonRole.AcceptRole)
+        grant = dialog.addButton(self.tr2("AUTHORIZE THIS TARGET", "РАЗРЕШИТЬ ЭТУ ЦЕЛЬ") if authorize_only else
+                                 self.tr2("GRANT ADMINISTRATOR PERMISSION", "ПРЕДОСТАВИТЬ ПРАВА АДМИНИСТРАТОРА"), QMessageBox.ButtonRole.AcceptRole)
         dialog.setDefaultButton(QMessageBox.StandardButton.Cancel)
         dialog.exec()
         if dialog.clickedButton() is grant:
             if not self._interaction_current(interaction):
                 return
             self._pending_retry = dict(request)
-            if not self.bridge.elevate(operations):
+            dispatch = self.bridge.authorize_target if authorize_only else self.bridge.elevate
+            if not dispatch(operations):
                 self._pending_retry = None
 
     def _dump(self):
@@ -871,8 +889,7 @@ class OverviewInspectorPanel(QWidget):
             self.bridge.export(path)
 
     def _capabilities(self):
-        self._request_section = self.section.currentData()
-        self.bridge.capabilities()
+        self._request("capabilities")
 
     def _open_decoder(self):
         panel = getattr(self.window, "decoder_panel", None)
@@ -949,11 +966,21 @@ class OverviewInspectorPanel(QWidget):
 
     def _receive(self, result):
         if (result.get("generation", self.bridge.generation) != self.bridge.generation
-                and result.get("request_kind") != "close"):
+                and result.get("request_kind") not in ("close", "clear_target")):
+            return
+        if result.get("request_kind") in ("start_admin", "end_admin", "clear_target"):
+            self._render_operation_status(result)
+            self._refresh_controls()
             return
         self._last_result = result
         status = str(result.get("status", "OPERATION_FAILED"))
         self._render_operation_status(result)
+        if result.get("request_kind") in ("elevate", "authorize_target"):
+            if status != "COMPLETED":
+                self._pending_retry = None
+            self.elevate_button.setVisible(status == "ADMIN_REQUIRED" and self._last_request is not None)
+            self._refresh_controls()
+            return
         data = result.get("data") or {}
         if isinstance(data, dict):
             if result.get("operation") == "profile.etw":
@@ -976,10 +1003,7 @@ class OverviewInspectorPanel(QWidget):
             if tid is not None:
                 self.debug_tid.setText(str(tid))
                 self.debug_created.setText(str(data.get("thread_created_100ns") or ""))
-        if result.get("request_kind") == "elevate":
-            if status != "COMPLETED":
-                self._pending_retry = None
-        elif result.get("request_kind") != "close":
+        if result.get("request_kind") != "close":
             section = self._request_section
             self._section_trace_requests.pop(section, None)
             if (result.get("operation") == "trace_evidence" and isinstance(data, dict)
@@ -997,12 +1021,16 @@ class OverviewInspectorPanel(QWidget):
             self._show_result(section, result)
             if section != self.section.currentData():
                 self._section_changed()
-        self.elevate_button.setVisible(status == "ADMIN_REQUIRED" and self._last_request is not None)
+        authorize_scope = status == "CONFIRMATION_REQUIRED" and result.get("next_action") == "AUTHORIZE_TARGET_AND_OPERATION_SCOPE"
+        self.elevate_button.setText(self.tr2("AUTHORIZE THIS TARGET…", "РАЗРЕШИТЬ ЭТУ ЦЕЛЬ…") if authorize_scope else
+                                   self.tr2("REQUEST ADMINISTRATOR PERMISSION…", "ЗАПРОСИТЬ ПРАВА АДМИНИСТРАТОРА…"))
+        self.elevate_button.setAccessibleName(self.elevate_button.text())
+        self.elevate_button.setVisible((status == "ADMIN_REQUIRED" or authorize_scope) and self._last_request is not None)
         self._refresh_controls()
 
     def _idle(self):
         request = self._pending_retry
-        if request and self._last_result and self._last_result.get("request_kind") == "elevate":
+        if request and self._last_result and self._last_result.get("request_kind") in ("elevate", "authorize_target"):
             self._pending_retry = None
             if self._last_result.get("status") == "COMPLETED":
                 if not self._interaction_current(request.get("interaction")):
@@ -1178,7 +1206,7 @@ class OverviewInspectorPanel(QWidget):
         cleanup_required = bool(getattr(self.bridge, "cleanup_required", False))
         self.cancel_button.setEnabled(self.bridge.busy and not cleanup_required)
         self._action_buttons["retry_cleanup"].setEnabled(cleanup_required and getattr(self.bridge, "worker", None) is None)
-        self.end_admin_button.setEnabled(available and self.bridge.admin_active)
+        self.end_admin_button.setEnabled(not self.bridge.busy and self.bridge.admin_active)
         self._action_buttons["compare"].setEnabled(available and self._before_id is not None and self._after_id is not None)
         self._action_buttons["captured_trace"].setEnabled(available and self._captured_trace is not None)
         self._action_buttons["stack_frame_module"].setEnabled(available and self._stack_module() is not None)
@@ -1186,9 +1214,17 @@ class OverviewInspectorPanel(QWidget):
         for key in ("historical_network_interval", "historical_disk_interval"):
             self._action_buttons[key].setEnabled(interval_available)
         self.elevate_button.setEnabled(available)
+        authorize_scope = ((self._last_result or {}).get("status") == "CONFIRMATION_REQUIRED" and
+                           (self._last_result or {}).get("next_action") == "AUTHORIZE_TARGET_AND_OPERATION_SCOPE")
+        self.elevate_button.setText(self.tr2("AUTHORIZE THIS TARGET…", "РАЗРЕШИТЬ ЭТУ ЦЕЛЬ…") if authorize_scope else
+                                   self.tr2("REQUEST ADMINISTRATOR PERMISSION…", "ЗАПРОСИТЬ ПРАВА АДМИНИСТРАТОРА…"))
+        self.elevate_button.setAccessibleName(self.elevate_button.text())
         checked = getattr(self.bridge, "admin_checked_at", "")
-        self.admin_label.setText(("ADMIN: ACTIVE · " + self.tr2("last checked ", "проверено в ") + checked)
-                                if self.bridge.admin_active else self.tr2("ADMIN: INACTIVE", "ADMIN: INACTIVE · сеанс администратора не активен"))
+        state = getattr(self.bridge, "admin_state", "INACTIVE")
+        remaining = getattr(self.bridge, "admin_remaining_seconds", 0)
+        self.admin_label.setText((self.tr2("Administrator session active", "Административная сессия активна") +
+            f" · {self.tr2('Remaining', 'Осталось')}: {remaining // 60:02d}:{remaining % 60:02d} · " +
+            self.tr2("last checked ", "проверено в ") + checked) if self.bridge.admin_active else "ADMIN: " + state)
 
     def retranslate(self):
         for widget, en, ru in self._labels:
