@@ -20,6 +20,9 @@ _SENSITIVE = {"bytes", "bytes_hex", "hex", "data_hex", "expected_hex", "value_he
               "replacement_hex", "old_bytes", "new_bytes", "original_bytes", "expected_bytes",
               "password", "token", "nonce", "file_handle", "handle", "payload", "raw"}
 _SENSITIVE.update({"command_line", "commandline", "cmdline", "environment", "environ"})
+_SENSITIVE.update({"secret", "secrets", "api_key", "apikey", "access_token", "refresh_token",
+                   "client_secret", "authorization", "credentials", "credential", "passwd",
+                   "private_key", "cookie", "set-cookie", "source_file_handle", "recovery_handle"})
 
 
 def journal_metadata(value, *, depth=0):
@@ -29,7 +32,7 @@ def journal_metadata(value, *, depth=0):
     if isinstance(value, dict):
         output = {}
         for key, item in list(value.items())[:256]:
-            if str(key).lower() in _SENSITIVE or str(key).lower().endswith(("_hex", "_bytes_raw")):
+            if str(key).lower() in _SENSITIVE or str(key).lower().endswith(("_hex", "_bytes_raw", "_password", "_secret", "_token")):
                 encoded = json.dumps(item, ensure_ascii=False, default=str).encode("utf-8")
                 output[str(key)] = {"redacted": "SENSITIVE_PAYLOAD", "serialized_bytes": len(encoded),
                                     "sha256": hashlib.sha256(encoded).hexdigest()}

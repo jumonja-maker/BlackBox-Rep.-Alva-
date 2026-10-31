@@ -1,0 +1,867 @@
+"""Real R10 one-run​as, two-target acceptance on GitHub-hosted Windows.
+
+Every successful native claim is checked against the compiled owned process's
+separate control pipe.  Error injection changes only owned QA resources.  The
+production broker, helper, token verification and native operations are used;
+physical Secure Desktop consent is explicitly outside hosted acceptance.
+"""
+from __future__ import annotations
+
+import argparse
+import ctypes as C
+from ctypes import wintypes as W
+from dataclasses import replace
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+import traceback
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path[:0] = [str(ROOT), str(ROOT / "src")]
+
+from tools.qa_deep_inspection import Probe, file_hash, require, require_hosted_windows, save
+from blackbox_core.deep_contracts import ActionRequest, MAX_MEMORY_BYTES
+from blackbox_core.deep_journal import journal_metadata
+from blackbox_core.deep_service import InspectorService
+
+SCOPE = ["capabilities", "modules", "threads", "handles", "memory_read", "memory_map",
+         "thread_stacks", "snapshot", "memory.write", "memory.rollback",
+         "thread.suspend", "thread.resume", "debug.attach", "debug.detach", "profile.etw"]
+
+
+def actual_token(pid: int) -> dict:
+    """Independently query the actual process token held by Windows."""
+    kernel = C.WinDLL("kernel32", use_last_error=True, winmode=0x800)
+    advapi = C.WinDLL("advapi32", use_last_error=True, winmode=0x800)
+    kernel.OpenProcess.argtypes = [W.DWORD, W.BOOL, W.DWORD]
+    kernel.OpenProcess.restype = W.HANDLE
+    kernel.CloseHandle.argtypes = [W.HANDLE]
+    kernel.CloseHandle.restype = W.BOOL
+    advapi.OpenProcessToken.argtypes = [W.HANDLE, W.DWORD, C.POINTER(W.HANDLE)]
+    advapi.OpenProcessToken.restype = W.BOOL
+    advapi.GetTokenInformation.argtypes = [W.HANDLE, C.c_int, C.c_void_p, W.DWORD,
+                                          C.POINTER(W.DWORD)]
+    advapi.GetTokenInformation.restype = W.BOOL
+    process, token = kernel.OpenProcess(0x1000, False, pid), W.HANDLE()
+    require(bool(process), "HELPER_TOKEN_PROCESS_HANDLE_REQUIRED")
+    try:
+        require(bool(advapi.OpenProcessToken(process, 8, C.byref(token))),
+                "HELPER_ACTUAL_TOKEN_QUERY_REQUIRED")
+        elevated, elevation_type, needed = W.DWORD(), W.DWORD(), W.DWORD()
+        require(bool(advapi.GetTokenInformation(token, 20, C.byref(elevated),
+                                               C.sizeof(elevated), C.byref(needed))),
+                "HELPER_ACTUAL_TOKEN_ELEVATION_REQUIRED")
+        require(bool(advapi.GetTokenInformation(token, 18, C.byref(elevation_type),
+                                               C.sizeof(elevation_type), C.byref(needed))),
+                "HELPER_ACTUAL_TOKEN_ELEVATION_TYPE_REQUIRED")
+        return {"source": "INDEPENDENT_OPEN_PROCESS_TOKEN_GET_TOKEN_INFORMATION",
+                "pid": pid, "elevated": elevated.value != 0,
+                "elevation_type": elevation_type.value}
+    finally:
+        if token:
+            kernel.CloseHandle(token)
+        kernel.CloseHandle(process)
+
+
+def controlled_external_write(identity, address: int, raw: bytes) -> None:
+    """Simulate a concurrent writer to our own fixture, never another process."""
+    from blackbox_core.deep_native import verify_identity
+    verify_identity(identity)
+    kernel = C.WinDLL("kernel32", use_last_error=True, winmode=0x800)
+    kernel.OpenProcess.argtypes = [W.DWORD, W.BOOL, W.DWORD]
+    kernel.OpenProcess.restype = W.HANDLE
+    kernel.WriteProcessMemory.argtypes = [W.HANDLE, C.c_void_p, C.c_void_p,
+                                          C.c_size_t, C.POINTER(C.c_size_t)]
+    kernel.WriteProcessMemory.restype = W.BOOL
+    kernel.CloseHandle.argtypes = [W.HANDLE]
+    kernel.CloseHandle.restype = W.BOOL
+    process = kernel.OpenProcess(0x8 | 0x10 | 0x20 | 0x1000, False, identity.pid)
+    require(bool(process), "CONTROLLED_EXTERNAL_WRITER_HANDLE_REQUIRED")
+    try:
+        verify_identity(identity)
+        buffer, written = C.create_string_buffer(raw), C.c_size_t()
+        require(bool(kernel.WriteProcessMemory(process, address, buffer, len(raw), C.byref(written)))
+                and written.value == len(raw), "CONTROLLED_EXTERNAL_WRITE_FAILED")
+    finally:
+        kernel.CloseHandle(process)
+
+
+class NativeAcceptance:
+    def __init__(self, output: Path, probe_path: Path, source_sha: str, helper: Path | None):
+        self.output, self.probe_path, self.source_sha, self.helper_path = output, probe_path, source_sha, helper
+        self.events: list[dict] = []
+        self.services: list[InspectorService] = []
+        self.probes: list[Probe] = []
+        self.expected_unconfirmed_services: set[int] = set()
+        from blackbox_universal.provenance import source_identity
+        identity = source_identity(source_sha)
+        require(identity.get("source_identity_status") == "VERIFIED_EXPECTED_HEAD",
+                "R10_NATIVE_ACTUAL_CHECKOUT_IDENTITY_MISMATCH")
+        self.proof = {"schema": "blackbox.r10.native.v1", "status": "RUNNING",
+                      "source_sha": source_sha, "probe_sha256": file_hash(probe_path),
+                      "source_identity": identity,
+                      "physical_interactive_uac": "NOT_TESTED",
+                      "uac_coverage": "REAL_PRODUCTION_SHELLEXECUTEEXW_RUNAS_AND_ACTUAL_WINDOWS_TOKEN",
+                      "denial_coverage": "CONTRACT_TESTS_SEPARATE_FROM_REAL_TOKEN_NATIVE_EVIDENCE",
+                      "scenarios": {}, "events": self.events}
+
+    def record(self, label: str, value: dict) -> dict:
+        row = {"label": label, "result": journal_metadata(value)}
+        self.events.append(row)
+        save(self.output / "r10-native.json", self.proof)
+        print("R10_NATIVE_EVENT " + json.dumps({"label": label,
+              "operation": value.get("operation"), "status": value.get("status"),
+              "error": str(value.get("error") or "")[:500],
+              "helper_pid": value.get("helper_pid", value.get("data", {}).get("helper_pid"))},
+              sort_keys=True), flush=True)
+        return value
+
+    def service(self, name: str) -> tuple[InspectorService, list[dict]]:
+        service = InspectorService(self.output / name / "journal", helper_executable=self.helper_path)
+        launches: list[dict] = []
+        production_launch = service.broker.launch
+
+        def observed_launch(arguments, *, elevated=False):
+            # Measurement delegates to the unmodified production runas broker.
+            process = production_launch(arguments, elevated=elevated)
+            launches.append({"elevated": elevated, "pid": process.pid,
+                             "identity": service.identity(process.pid).to_dict(),
+                             "broker": "PRODUCTION_ELEVATION_BROKER",
+                             "launch_api": "ShellExecuteExW/runas" if elevated else "CreateProcess"})
+            return process
+
+        service.broker.launch = observed_launch
+        self.services.append(service)
+        return service, launches
+
+    def probe(self, label: str) -> Probe:
+        probe = Probe(self.probe_path, self.output / ("target-" + label))
+        self.probes.append(probe)
+        return probe
+
+    def action(self, service, target, name, parameters=None, *, confirmed=False,
+               expected=("COMPLETED",), cancel=None, timeout=15):
+        value = service.execute(ActionRequest(name, target, parameters or {}, confirmed=confirmed,
+                                              timeout_seconds=timeout), cancel_event=cancel)
+        self.record(name, value)
+        require(value.get("status") in expected,
+                "R10_UNEXPECTED_" + name + "_" + str(value.get("status")) + ":" +
+                str(value.get("error") or "")[:700])
+        require(bool(value.get("operation_id")), "R10_ACTION_OPERATION_ID_REQUIRED")
+        receipt = value.get("run_receipt", {})
+        require(receipt.get("contract_version") == 1 and receipt.get("status") == value.get("status")
+                and receipt.get("operation") == name and receipt.get("run_id") == value.get("operation_id"),
+                "R10_V1_RUN_RECEIPT_STATUS_AND_IDENTITY_REQUIRED")
+        if value.get("status") in ("COMPLETED", "INCOMPLETE_EVIDENCE"):
+            require(receipt.get("execution_started") is True and receipt.get("source", {}).get("verified") is True
+                    and receipt.get("source", {}).get("helper_pid") == service.helper_pid
+                    and receipt.get("target", {}).get("verified") is True
+                    and receipt.get("target", {}).get("identity") == target.to_dict(),
+                    "R10_REAL_HELPER_RUN_RECEIPT_EXECUTION_PROOF_REQUIRED")
+        return value
+
+    def heartbeat(self, service, identity, deadline, launches):
+        status = service.session_status(refresh=True)
+        require(status.get("state") == "ACTIVE" and status.get("elevated_verified") is True
+                and status.get("admin_active") is True, "R10_HELPER_MUST_BE_VERIFIED_ACTIVE")
+        require(status.get("helper_identity") == identity, "R10_HELPER_IDENTITY_CHANGED_WITHIN_LEASE")
+        require(abs(status.get("session_deadline_monotonic", 0) - deadline) < .001,
+                "R10_HELPER_LEASE_WAS_EXTENDED")
+        require(len(launches) == 1 and launches[0]["elevated"] is True,
+                "R10_SECOND_HELPER_OR_SECOND_RUNAS_IN_ACTIVE_LEASE")
+        return status
+
+    def run_primary(self, a: Probe, b: Probe) -> dict:
+        service, launches = self.service("one-lease")
+        ia, ib = service.identity(a.process.pid), service.identity(b.process.pid)
+        require(ia.created_100ns == a.ready["created_100ns"] and ib.created_100ns == b.ready["created_100ns"]
+                and ia.pid != ib.pid, "R10_TWO_EXACT_OWNED_PROCESS_IDENTITIES_REQUIRED")
+        denied = self.record("unconfirmed-session", service.start_admin_session(confirmed=False))
+        require(denied.get("status") == "CONFIRMATION_REQUIRED" and not launches,
+                "R10_UNCONFIRMED_SESSION_LAUNCHED_HELPER")
+        opened = self.record("start-before-target", service.start_admin_session(confirmed=True))
+        require(opened.get("status") == "COMPLETED", "R10_PRODUCTION_RUNAS_START_FAILED")
+        status = service.session_status(refresh=True)
+        identity, deadline = status.get("helper_identity"), status.get("session_deadline_monotonic")
+        require(isinstance(identity, dict) and identity.get("created_100ns", 0) > 0
+                and identity.get("pid") != os.getpid() and status.get("target") is None,
+                "R10_VERIFIED_SEPARATE_HELPER_BEFORE_TARGET_REQUIRED")
+        token = actual_token(identity["pid"])
+        require(token["elevated"] and status.get("helper_token_authority", {}).get("elevated") is True,
+                "R10_ACTUAL_HELPER_ADMINISTRATOR_TOKEN_REQUIRED")
+        duplicate = self.record("active-session-request-reuses-existing-helper", service.start_admin_session(confirmed=True))
+        require(duplicate.get("status") == "COMPLETED" and duplicate.get("uac", {}).get("requested") is False,
+                "R10_ACTIVE_SESSION_REQUEST_REQUESTED_SECOND_UAC")
+        self.heartbeat(service, identity, deadline, launches)
+        self.action(service, ia, "modules", expected=("CONFIRMATION_REQUIRED",))
+        unbound = self.record("unconfirmed-target-A", service.bind_target(ia, SCOPE, confirmed=False))
+        require(unbound.get("status") == "CONFIRMATION_REQUIRED", "R10_TARGET_CONSENT_REQUIRED")
+        require(self.record("bind-A", service.bind_target(ia, SCOPE, confirmed=True)).get("status") == "COMPLETED",
+                "R10_TARGET_A_BIND_FAILED")
+        self.heartbeat(service, identity, deadline, launches)
+
+        for probe, target, label in ((a, ia, "A"), (b, ib, "B")):
+            if label == "B":
+                refused = self.record("unconfirmed-target-B", service.bind_target(ib, SCOPE, confirmed=False))
+                require(refused.get("status") == "CONFIRMATION_REQUIRED", "R10_B_INHERITED_A_CONSENT")
+                require(service.session_status(refresh=True).get("target") == ia.to_dict(),
+                        "R10_REFUSED_TARGET_SWITCH_CHANGED_SCOPE")
+                self.action(service, ib, "memory_read", {"address": b.ready["buffer_address"], "length": 64},
+                            expected=("CONFIRMATION_REQUIRED", "PROCESS_CHANGED"))
+                require(self.record("bind-B", service.bind_target(ib, SCOPE, confirmed=True)).get("status") == "COMPLETED",
+                        "R10_TARGET_B_BIND_FAILED")
+                require(a.state()["buffer_hex"] == a.ready["buffer_hex"],
+                        "R10_SWITCH_DID_NOT_RESTORE_A_MEMORY")
+                a.progress(a.state())
+            self.heartbeat(service, identity, deadline, launches)
+            known, address = probe.ready["buffer_hex"], probe.ready["buffer_address"]
+            read = self.action(service, target, "memory_read", {"address": address, "length": 64})
+            require(read.get("data", {}).get("hex") == known and probe.state()["buffer_hex"] == known,
+                    "R10_READ_ONLY_NATIVE_MEMORY_ORACLE_MISMATCH")
+            require(read.get("diagnostic_execution", {}).get("source_verified") is True
+                    and read.get("diagnostic_execution", {}).get("target_verified") is True,
+                    "R10_HELPER_NATIVE_TARGET_EVIDENCE_REQUIRED")
+            modules = self.action(service, target, "modules", expected=("COMPLETED", "INCOMPLETE_EVIDENCE"))
+            require(bool(modules.get("data", {}).get("rows")), "R10_REAL_MODULES_EMPTY")
+            changed = bytes(i ^ (0xA5 if label == "A" else 0x3C) for i in range(64)).hex()
+            params = {"address": address, "expected_hex": known, "value_hex": changed}
+            self.action(service, target, "memory.write", params, expected=("CONFIRMATION_REQUIRED",))
+            require(probe.state()["buffer_hex"] == known, "R10_UNCONFIRMED_WRITE_CHANGED_MEMORY")
+            written = self.action(service, target, "memory.write", params, confirmed=True)
+            require(written.get("data", {}).get("readback_verified") is True
+                    and probe.state()["buffer_hex"] == changed,
+                    "R10_HELPER_MEMORY_WRITE_EFFECT_NOT_INDEPENDENTLY_OBSERVED")
+            self.action(service, target, "memory.rollback", {"change_id": written["data"]["change_id"]}, confirmed=True)
+            require(probe.state()["buffer_hex"] == known, "R10_ROLLBACK_EFFECT_NOT_INDEPENDENTLY_OBSERVED")
+            thread = {"tid": probe.ready["heartbeat_tid"],
+                      "thread_created_100ns": probe.ready["heartbeat_thread_created_100ns"]}
+            suspended = self.action(service, target, "thread.suspend", thread, confirmed=True)
+            before = probe.state()
+            stop_deadline = time.monotonic() + 3
+            while True:
+                threading.Event().wait(.1)
+                stopped = probe.state()
+                require(stopped["heartbeat"] == before["heartbeat"], "R10_SUSPENDED_THREAD_STILL_PROGRESSED")
+                if stopped["io_cycles"] > before["io_cycles"]:
+                    break
+                require(time.monotonic() < stop_deadline, "R10_EXACT_THREAD_SUSPENSION_EFFECT_NOT_OBSERVED")
+            self.action(service, target, "thread.resume", {"suspension_id": suspended["data"]["suspension_id"]},
+                        confirmed=True)
+            probe.progress(stopped)
+            self.heartbeat(service, identity, deadline, launches)
+            if label == "A":
+                # Leave one owned change for the real A -> B cleanup path.
+                self.action(service, target, "memory.write", params, confirmed=True)
+                require(probe.state()["buffer_hex"] == changed, "R10_PENDING_SWITCH_CHANGE_NOT_OBSERVED")
+            self.proof["scenarios"]["target-" + label] = {"status": "PASS", "identity": target.to_dict(),
+                "read_only_memory_verified": True, "native_write_rollback_verified": True,
+                "exact_thread_suspend_resume_verified": True}
+
+        wrong = replace(ib, created_100ns=ib.created_100ns + 1)
+        self.action(service, wrong, "memory_read", {"address": b.ready["buffer_address"], "length": 64},
+                    expected=("CONFIRMATION_REQUIRED", "PROCESS_CHANGED"))
+        mismatch = self.record("bind-wrong-FILETIME", service.bind_target(wrong, SCOPE, confirmed=True))
+        require(mismatch.get("status") in ("PROCESS_CHANGED", "OPERATION_FAILED"),
+                "R10_WRONG_CREATION_FILETIME_ACCEPTED")
+        scope_refusal = self.action(service, ib, "processes", expected=("CONFIRMATION_REQUIRED", "ACCESS_DENIED"))
+        require(scope_refusal.get("run_receipt", {}).get("execution_started") is False
+                and service.session_status().get("operations") == sorted(SCOPE),
+                "R10_OUTSIDE_SCOPE_ACTION_EXECUTED_OR_CHANGED_AUTHORIZATION")
+        self.action(service, ib, "memory_read", {"address": b.ready["buffer_address"], "length": MAX_MEMORY_BYTES + 1},
+                    expected=("OPERATION_FAILED", "LIMIT_REACHED"))
+        try:
+            ActionRequest("not-a-supported-tool", ib)
+        except ValueError as error:
+            require("OPERATION_NOT_ALLOWED" in str(error), "R10_UNEXPECTED_OPERATION_REFUSAL")
+        else:
+            raise AssertionError("R10_UNSUPPORTED_OPERATION_ACCEPTED")
+        try:
+            service.execute(ActionRequest("memory_read", ib, {"command": "not-executed"}))
+        except ValueError as error:
+            require("UNTRUSTED_NATIVE_HANDLE_OR_COMMAND" in str(error), "R10_UNEXPECTED_PARAMETER_REFUSAL")
+        else:
+            raise AssertionError("R10_ARBITRARY_COMMAND_PARAMETER_ACCEPTED")
+        self.proof["scenarios"]["identity-scope-budget-invalid-input"] = {"status": "PASS"}
+
+        # A real filesystem obstruction prevents a durable intent; no effect is allowed.
+        journal_path, backup = service.journal.path, service.journal.path.with_suffix(".qa-held")
+        journal_path.rename(backup)
+        journal_path.mkdir()
+        try:
+            self.action(service, ib, "memory.write", {"address": b.ready["buffer_address"],
+                "expected_hex": b.ready["buffer_hex"], "value_hex": "CC" * 64}, confirmed=True,
+                expected=("OPERATION_FAILED",))
+            require(b.state()["buffer_hex"] == b.ready["buffer_hex"], "R10_JOURNAL_FAILURE_ALLOWED_EFFECT")
+        finally:
+            journal_path.rmdir()
+            backup.rename(journal_path)
+        self.proof["scenarios"]["real-journal-storage-failure"] = {"status": "PASS", "injection": "OWNED_SQLITE_PATH_IS_DIRECTORY"}
+        self.heartbeat(service, identity, deadline, launches)
+
+        # The competing debugger is this QA process's own real Windows debug
+        # context.  No second diagnostic helper or runas is launched.
+        from blackbox_core.deep_debug import DebugSession
+        competing_debugger = DebugSession(ib)
+        try:
+            attached = competing_debugger.execute("debug.attach", {"_confirmed": True},
+                                                   deadline=time.monotonic() + 20)
+            require(attached.get("status") == "COMPLETED", "R10_OWNED_COMPETING_DEBUGGER_ATTACH_FAILED")
+            self.action(service, ib, "debug.attach", confirmed=True, expected=("ALREADY_DEBUGGED",))
+        finally:
+            debugger_cleanup = competing_debugger.close()
+            require(debugger_cleanup.get("status") == "COMPLETED", "R10_COMPETING_DEBUGGER_CLEANUP_FAILED")
+        b.progress(b.state())
+        self.proof["scenarios"]["real-debugger-resource-conflict"] = {"status": "PASS",
+            "source": "OWNED_NATIVE_DEBUG_SESSION_IN_QA_CONTROLLER", "second_diagnostic_helper": False,
+            "cleanup": journal_metadata(debugger_cleanup)}
+        self.heartbeat(service, identity, deadline, launches)
+
+        cancelled = threading.Event()
+        cancelled.set()
+        self.action(service, ib, "modules", cancel=cancelled, expected=("CANCELLED",))
+        cancelled.clear()
+        channel, timers = service._channel, []
+        production_send = channel.send
+
+        def observed_send(message, **kwargs):
+            production_send(message, **kwargs)
+            if message.get("kind") == "execute" and message.get("request", {}).get("operation") == "handles":
+                timer = threading.Timer(.025, cancelled.set)
+                timers.append(timer)
+                timer.start()
+
+        channel.send = observed_send
+        try:
+            interrupted = self.action(service, ib, "handles", {"limit": 1024, "name_limit": 64},
+                                      cancel=cancelled, expected=("CANCELLED",), timeout=15)
+            require(interrupted.get("cancellation_requested") is True,
+                    "R10_LIVE_HELPER_CANCEL_ACK_REQUIRED")
+        finally:
+            channel.send = production_send
+            for timer in timers:
+                timer.join(timeout=1)
+        # Querying each handle name starts a bounded owned query process. Allow
+        # enough budget to reach the real helper, then verify native dispatch
+        # before accepting the deadline outcome (100ms is a pre-dispatch floor).
+        deadline_dispatches = []
+
+        def observed_deadline_send(message, **kwargs):
+            production_send(message, **kwargs)
+            if message.get("kind") == "execute" and message.get("request", {}).get("operation") == "handles":
+                deadline_dispatches.append(message["request_id"])
+
+        channel.send = observed_deadline_send
+        try:
+            self.action(service, ib, "handles", {"limit": 1024, "name_limit": 64},
+                        expected=("TIMED_OUT",), timeout=.5)
+        finally:
+            channel.send = production_send
+        require(len(deadline_dispatches) == 1, "R10_NATIVE_TIMEOUT_WAS_NOT_DISPATCHED")
+        subsequent_modules = self.action(service, ib, "modules", expected=("COMPLETED", "INCOMPLETE_EVIDENCE"))
+        self.proof["scenarios"]["cancellation-and-following-observation"] = {"status": "PASS",
+            "phases": ["BEFORE_NATIVE_DISPATCH", "LIVE_HELPER_REQUEST_SENT_AND_CANCEL_ACK_RECEIVED"],
+            "real_native_deadline": "TIMED_OUT", "subsequent_real_modules": subsequent_modules["status"]}
+        self.heartbeat(service, identity, deadline, launches)
+
+        # Repeat B -> A -> B within the same lease.  Leave an owned suspension
+        # and then an owned write for the actual target-release paths to undo.
+        thread_b = {"tid": b.ready["heartbeat_tid"],
+                    "thread_created_100ns": b.ready["heartbeat_thread_created_100ns"]}
+        self.action(service, ib, "thread.suspend", thread_b, confirmed=True)
+        paused_b = b.state()
+        threading.Event().wait(.12)
+        require(b.state()["heartbeat"] == paused_b["heartbeat"],
+                "R10_REPEAT_SWITCH_PENDING_SUSPENSION_NOT_OBSERVED")
+        require(self.record("repeat-bind-A", service.bind_target(ia, SCOPE, confirmed=True)).get("status") == "COMPLETED",
+                "R10_REPEAT_TARGET_A_BIND_FAILED")
+        b.progress(paused_b)
+        self.heartbeat(service, identity, deadline, launches)
+        repeat_change = bytes([0xA9] * 64).hex()
+        self.action(service, ia, "memory.write", {"address": a.ready["buffer_address"],
+                    "expected_hex": a.ready["buffer_hex"], "value_hex": repeat_change}, confirmed=True)
+        require(a.state()["buffer_hex"] == repeat_change, "R10_REPEAT_SWITCH_PENDING_WRITE_NOT_OBSERVED")
+        require(self.record("repeat-bind-B", service.bind_target(ib, SCOPE, confirmed=True)).get("status") == "COMPLETED",
+                "R10_REPEAT_TARGET_B_BIND_FAILED")
+        require(a.state()["buffer_hex"] == a.ready["buffer_hex"],
+                "R10_REPEAT_SWITCH_NATIVE_MEMORY_NOT_RESTORED")
+        self.heartbeat(service, identity, deadline, launches)
+        self.proof["scenarios"]["repeat-switch-resource-lifecycle"] = {"status": "PASS",
+            "order": ["A", "B", "A", "B"], "pending_B_thread_resumed_on_switch": True,
+            "pending_A_write_restored_on_switch": True, "same_helper_and_deadline": True,
+            "runas_count": len(launches)}
+        self.run_etw_resource_conflict(service, ib, identity, deadline, launches)
+
+        destination = self.output / "journal-export.jsonl"
+        exported = self.record("journal-export", service.export_journal(destination))
+        require(exported.get("status") == "COMPLETED", "R10_JOURNAL_EXPORT_FAILED")
+        lines = [json.loads(line) for line in destination.read_text(encoding="utf-8").splitlines()]
+        require(len(lines) > 10 and all(isinstance(row, dict) for row in lines), "R10_EXPORT_READBACK_EMPTY")
+        previous = "0" * 64
+        for row in lines:
+            raw = json.dumps(row["record"], ensure_ascii=False, allow_nan=False,
+                             separators=(",", ":")).encode("utf-8")
+            digest = hashlib.sha256(previous.encode("ascii") + raw).hexdigest()
+            require(row.get("previous_sha256") == previous and row.get("record_sha256") == digest,
+                    "R10_INDEPENDENT_EXPORT_HASH_CHAIN_READBACK_FAILED")
+            previous = digest
+        require(exported.get("data", {}).get("exported_chain_head_sha256") == previous,
+                "R10_EXPORT_CHAIN_HEAD_RECEIPT_DIFFERS_FROM_READBACK")
+        self.proof["scenarios"]["independent-jsonl-readback"] = {"status": "PASS", "records": len(lines),
+            "sha256": file_hash(destination), "hash_chain_independently_verified": True}
+        old_hash = file_hash(destination)
+        failed_export = self.record("export-existing-refused", service.export_journal(destination))
+        require(failed_export.get("status") == "OPERATION_FAILED" and file_hash(destination) == old_hash,
+                "R10_FAILED_EXPORT_OVERWROTE_EXISTING_REPORT")
+        self.heartbeat(service, identity, deadline, launches)
+        helper_owner = service.helper
+        closed = self.record("primary-session-close", service.end_admin_session())
+        require(closed.get("status") == "COMPLETED" and not helper_owner.alive()
+                and service.session_status().get("state") == "INACTIVE", "R10_PRIMARY_HELPER_CLOSE_NOT_VERIFIED")
+        require(a.state()["buffer_hex"] == a.ready["buffer_hex"] and b.state()["buffer_hex"] == b.ready["buffer_hex"],
+                "R10_NATIVE_BYTES_NOT_RESTORED_AFTER_CLOSE")
+        return {"status": "PASS", "helper_identity": identity, "independent_token": token,
+                "broker_launches": launches, "runas_count": len(launches), "fixed_deadline": deadline,
+                "switch_A_to_B_cleanup_verified": True, "final_helper_exit_verified": True}
+
+    def run_etw_resource_conflict(self, service, target, helper_identity, lease_deadline, launches):
+        from blackbox_core import deep_profiling as profiling
+        from blackbox_core.trace_owner import TraceSupervisor, _read
+        folder = self.output / "owned-foreign-wpr"
+        folder.mkdir()
+        foreign = TraceSupervisor(folder, seconds=30, max_output_bytes=256 * 1024**2,
+            target=target.to_dict(), profile="GeneralProfile.Light")
+        tool = profiling._trusted_wpr()
+        scenario = {"status": "FAIL", "foreign_profile": "GeneralProfile.Light",
+            "foreign_profile_origin": "FIXED_INSTALLED_MICROSOFT_BUILTIN_VALIDATED_BY_REAL_START",
+            "foreign_instance": foreign.instance, "foreign_finite_lease_seconds": 30,
+            "wpr_sha256": file_hash(Path(tool)), "global_cancel_used": False}
+        self.proof["scenarios"]["real-etw-resource-conflict"] = scenario
+
+        def command(arguments):
+            # This deliberately bypasses WprCapture.start's own-instance
+            # failure cleanup: a duplicate probe must never cancel its owner.
+            with tempfile.TemporaryFile() as log:
+                completed = subprocess.run([tool, *arguments, "-instancename", foreign.instance],
+                    stdout=log, stderr=subprocess.STDOUT, timeout=20,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+                log.seek(0)
+                text = log.read(16384).decode("utf-8", errors="replace")
+            return {"exit_code": completed.returncode, "output": text[:4096],
+                    "output_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest()}
+
+        def stable_fields(journal):
+            return {key: journal.get(key) for key in ("instance", "target", "policy", "start_result",
+                "clock_anchors", "started_monotonic_ns", "owner_pid", "owner_created",
+                "guardian_pid", "guardian_created")}
+
+        def resource_refusal(text):
+            # Positive installed-tool wording is required. A generic HRESULT
+            # or any nonzero exit alone does not identify a resource conflict.
+            return re.search(r"\balready\b.{0,120}\b(?:running|recording|started|exists|enabled)\b|"
+                r"\b(?:recording|session|profile)\b.{0,120}\b(?:already|in use)\b|"
+                r"\b(?:resource|object)\b.{0,120}\b(?:in use|already exists)\b",
+                text.lower()) is not None
+
+        def verify_survival(original, owner_identity):
+            current = _read(foreign.path)
+            require(foreign.active and current.get("state") == "RECORDING"
+                    and stable_fields(current) == original
+                    and service.identity(foreign.process.pid).to_dict() == owner_identity,
+                    "R10_FOREIGN_WPR_OWNER_IDENTITY_OR_START_ANCHORS_CHANGED")
+            actual = command(["-status"])
+            require(actual["exit_code"] == 0 and "generalprofile" in actual["output"].lower(),
+                    "R10_FOREIGN_WPR_NOT_PRESENT_IN_ACTUAL_NAMED_STATUS:" + actual["output"][:1000])
+            return {"owner_identity": owner_identity, "state": current["state"],
+                "start_fields_sha256": hashlib.sha256(json.dumps(original, sort_keys=True).encode("utf-8")).hexdigest(),
+                "actual_wpr_status": actual}
+
+        try:
+            foreign.start()
+            ready_deadline = time.monotonic() + 25
+            while True:
+                journal = _read(foreign.path)
+                if journal.get("state") == "RECORDING":
+                    break
+                require(foreign.active and time.monotonic() < ready_deadline,
+                        "R10_OWNED_FOREIGN_WPR_NEVER_RECORDED")
+                threading.Event().wait(.05)
+            require(journal.get("start_result", {}).get("profile") == "GeneralProfile.Light",
+                    "R10_FOREIGN_WPR_FIXED_PROFILE_NOT_VALIDATED")
+            owner_identity = service.identity(foreign.process.pid).to_dict()
+            original = stable_fields(journal)
+            scenario["before_duplicate"] = verify_survival(original, owner_identity)
+            duplicate = command(["-start", "GeneralProfile.Light"])
+            require(duplicate["exit_code"] != 0 and resource_refusal(duplicate["output"]),
+                    "R10_DUPLICATE_WPR_RESOURCE_REFUSAL_NOT_ESTABLISHED:" + duplicate["output"][:1500])
+            scenario["duplicate_same_instance"] = {"status": "OS_REFUSAL", **duplicate,
+                "auto_cancel_invoked": False}
+            scenario["after_duplicate"] = verify_survival(original, owner_identity)
+            destination = self.output / "r10-etw-coexistence.etl"
+            response = self.action(service, target, "profile.etw", {"destination": str(destination),
+                "duration_seconds": 1, "profile": profiling.PROFILE, "systemwide_confirmed": True},
+                confirmed=True, timeout=90, expected=("COMPLETED", "OPERATION_FAILED"))
+            if response["status"] == "COMPLETED":
+                data = response.get("data", {})
+                require(data.get("saved_verified") is True and destination.is_file()
+                        and 0 < destination.stat().st_size <= profiling.MAX_TRACE_BYTES
+                        and data.get("trace_bytes") == destination.stat().st_size
+                        and data.get("sha256") == file_hash(destination)
+                        and data.get("profile_sha256") == profiling.PROFILE_SHA256
+                        and data.get("cleanup") == "CONFIRMED",
+                        "R10_ETW_COEXISTENCE_CAPTURE_OR_NATIVE_CLEANUP_UNVERIFIED")
+                scenario["r10_branch"] = "COEXISTENCE"
+                scenario["r10_capture"] = {"bytes": destination.stat().st_size, "sha256": file_hash(destination),
+                    "profile_sha256": data["profile_sha256"], "cleanup": data["cleanup"]}
+            else:
+                error = str(response.get("error") or "")
+                require("wpr_command_failed" in error.lower() and
+                        resource_refusal(error) and
+                        (not destination.exists() or destination.stat().st_size == 0),
+                        "R10_ETW_REFUSAL_RESOURCE_CAUSE_NOT_ESTABLISHED:" + error[:1000])
+                scenario["r10_branch"] = "RESOURCE_CONFLICT_REFUSAL"
+                scenario["r10_refusal"] = {"status": response["status"], "error": error[:1000]}
+            scenario["after_r10_request"] = verify_survival(original, owner_identity)
+            self.heartbeat(service, helper_identity, lease_deadline, launches)
+        finally:
+            # EOF stops only this fixture's guarded named instance. No direct
+            # WPR cancel, second owner's cancellation route, or global stop.
+            cleanup = foreign.stop() if foreign.process is not None else None
+            scenario["fixture_cleanup_status"] = cleanup.get("status") if cleanup else "NOT_STARTED"
+            if cleanup is not None:
+                final = _read(foreign.path)
+                source = folder / final.get("result", {}).get("path", "missing.etl")
+                require(cleanup.get("status") == "COMPLETED" and foreign.process.returncode == 0
+                        and final.get("instance") == foreign.instance
+                        and final.get("stop_reason") == "LEASE_EOF_OR_EXPLICIT_STOP"
+                        and source.is_file() and 0 < source.stat().st_size <= 256 * 1024**2
+                        and file_hash(source) == final.get("result", {}).get("sha256"),
+                        "R10_FOREIGN_WPR_OWNED_ETL_OR_CLEANUP_NOT_VERIFIED")
+                scenario["fixture_cleanup"] = {"owner_exit_verified": True, "exit_code": foreign.process.returncode,
+                    "stop_reason": final["stop_reason"], "etl_bytes": source.stat().st_size,
+                    "etl_sha256": file_hash(source), "only_fixture_named_instance_stopped": True}
+        scenario["status"] = "PASS"
+        receipt_path = self.output / "r10-etw-resource.json"
+        save(receipt_path, scenario)
+        print("R10_ETW_RESOURCE_RECEIPT " + json.dumps({"status": scenario["status"],
+            "source_sha": self.source_sha, "receipt_sha256": file_hash(receipt_path),
+            "foreign_profile": scenario["foreign_profile"], "foreign_instance": foreign.instance,
+            "owner_identity": owner_identity, "duplicate_start_exit_code": duplicate["exit_code"],
+            "duplicate_start_output": duplicate["output"][:1500],
+            "duplicate_start_auto_cancel": False, "r10_branch": scenario["r10_branch"],
+            "r10_capture": scenario.get("r10_capture"), "r10_refusal": scenario.get("r10_refusal"),
+            "foreign_survived_both_requests": True, "fixture_cleanup": scenario["fixture_cleanup"],
+            "diagnostic_helper_identity": helper_identity, "runas_count": len(launches)},
+            ensure_ascii=True), flush=True)
+
+    def run_expiry_and_crash(self, probe: Probe) -> dict:
+        def oracle(state):
+            return {key: state[key] for key in ("pid", "created_100ns", "heartbeat", "io_cycles", "network_cycles")} | {
+                "buffer_sha256": hashlib.sha256(bytes.fromhex(state["buffer_hex"])).hexdigest()}
+
+        def pending_effects(service, target, replacement, label):
+            initial = probe.state()
+            require(initial["buffer_hex"] == probe.ready["buffer_hex"],
+                    "R10_" + label + "_INITIAL_FIXTURE_BYTES_NOT_ORIGINAL")
+            write = self.action(service, target, "memory.write", {"address": probe.ready["buffer_address"],
+                "expected_hex": probe.ready["buffer_hex"], "value_hex": replacement}, confirmed=True, timeout=3)
+            require(probe.state()["buffer_hex"] == replacement,
+                    "R10_" + label + "_PENDING_WRITE_NOT_INDEPENDENTLY_OBSERVED")
+            suspension = self.action(service, target, "thread.suspend", {
+                "tid": probe.ready["heartbeat_tid"],
+                "thread_created_100ns": probe.ready["heartbeat_thread_created_100ns"]}, confirmed=True, timeout=3)
+            paused = probe.state()
+            held_deadline = time.monotonic() + 1
+            while True:
+                threading.Event().wait(.1)
+                held = probe.state()
+                require(held["buffer_hex"] == replacement and held["heartbeat"] == paused["heartbeat"],
+                        "R10_" + label + "_PENDING_NATIVE_EFFECT_NOT_RETAINED")
+                if held["io_cycles"] > paused["io_cycles"]:
+                    break
+                require(time.monotonic() < held_deadline,
+                        "R10_" + label + "_PENDING_EXACT_THREAD_SUSPENSION_NOT_OBSERVED")
+            return {"before": oracle(initial), "pending": oracle(held),
+                    "write_run_id": write["operation_id"],
+                    "suspension_run_id": suspension["operation_id"]}, held
+
+        def restored_after_owner_exit(owner, pending, label):
+            started = time.monotonic()
+            last = pending
+            while time.monotonic() - started < 20:
+                last = probe.state()
+                require(last["pid"] == probe.ready["pid"]
+                        and last["created_100ns"] == probe.ready["created_100ns"],
+                        "R10_" + label + "_RESTORATION_ORACLE_IDENTITY_CHANGED")
+                if (not owner.alive() and last["buffer_hex"] == probe.ready["buffer_hex"]
+                        and last["heartbeat"] > pending["heartbeat"]
+                        and last["io_cycles"] > pending["io_cycles"]
+                        and last["network_cycles"] > pending["network_cycles"]):
+                    return {"after": oracle(last), "owner_exit_verified": True,
+                            "original_bytes_restored": True, "owned_heartbeat_resumed": True,
+                            "wait_seconds": round(time.monotonic() - started, 3)}
+                threading.Event().wait(.1)
+            raise AssertionError("R10_" + label + "_OWNER_EXIT_BYTE_RESTORE_OR_THREAD_RESUME_NOT_VERIFIED:" +
+                                 json.dumps(oracle(last), sort_keys=True))
+
+        expiry, launches = self.service("short-expiry")
+        opened = self.record("short-lease-start", expiry.start_admin_session(confirmed=True, session_seconds=5))
+        require(opened.get("status") == "COMPLETED", "R10_SHORT_REAL_ADMIN_LEASE_FAILED")
+        initial_status = expiry.session_status(refresh=True)
+        owner, identity = expiry.helper, initial_status.get("helper_identity")
+        deadline, expiry_recovery_path = initial_status.get("session_deadline_monotonic"), expiry._recovery_path
+        target = expiry.identity(probe.process.pid)
+        require(isinstance(identity, dict) and identity.get("created_100ns", 0) > 0
+                and target.created_100ns == probe.ready["created_100ns"]
+                and actual_token(identity["pid"])["elevated"], "R10_SHORT_LEASE_ACTUAL_TOKEN_AND_IDENTITIES_REQUIRED")
+        require(self.record("short-lease-bind-B", expiry.bind_target(target, SCOPE, confirmed=True)).get("status") == "COMPLETED",
+                "R10_SHORT_LEASE_TARGET_BIND_FAILED")
+        expiry_pending, paused = pending_effects(expiry, target, bytes([0xE1] * 64).hex(), "EXPIRY")
+        self.heartbeat(expiry, identity, deadline, launches)
+        expiry_restored = restored_after_owner_exit(owner, paused, "EXPIRY")
+        status = self.record("expired-heartbeat", expiry.session_status(refresh=True))
+        terminal = status.get("expiry_cleanup") or {}
+        require(status.get("state") == "EXPIRED" and not status.get("admin_active")
+                and not status.get("elevated_verified") and status.get("cleanup_required") is False,
+                "R10_EXPIRED_LEASE_WITH_VERIFIED_CLEANUP_SHOWN_ACTIVE_OR_UNCONFIRMED")
+        require(terminal.get("status") == "COMPLETED" and terminal.get("confirmed") is True
+                and terminal.get("source") == "AUTHENTICATED_HELPER_TERMINAL_ACK"
+                and terminal.get("session_nonce_verified") is True
+                and terminal.get("helper_identity") == identity
+                and terminal.get("closed_context") == {"target": target.to_dict(), "operations": sorted(SCOPE)}
+                and terminal.get("reason") == "LEASE_EXPIRED"
+                and abs(terminal.get("original_deadline_monotonic", 0) - deadline) < .001
+                and status.get("target") is None and status.get("operations") == [],
+                "R10_EXPIRED_NATIVE_CONTEXT_REQUIRES_EXACT_AUTHENTICATED_CLEANUP_ACK")
+        expiry_closed = self.record("expired-session-close", expiry.end_admin_session())
+        require(expiry_closed.get("status") == "COMPLETED" and not owner.alive()
+                and len(launches) == 1, "R10_EXPIRED_NATIVE_HELPER_CLEANUP_OR_SECOND_RUNAS_REMAINED")
+        restarted = self.record("same-service-new-consent-after-confirmed-expiry",
+                                expiry.start_admin_session(confirmed=True))
+        restart_status = expiry.session_status(refresh=True)
+        restart_owner = expiry.helper
+        require(restarted.get("status") == "COMPLETED" and restart_status.get("state") == "ACTIVE"
+                and restart_status.get("elevated_verified") is True and not restart_status.get("cleanup_required")
+                and restart_status.get("helper_identity") != identity
+                and restart_status.get("helper_identity", {}).get("created_100ns", 0) > 0
+                and restart_status.get("target") is None and not restart_status.get("expiry_cleanup")
+                and len(launches) == 2 and all(row["elevated"] is True for row in launches),
+                "R10_SAME_SERVICE_CANNOT_START_FRESH_CONFIRMED_LEASE_AFTER_VERIFIED_EXPIRY")
+        require(self.record("same-service-restarted-lease-close", expiry.end_admin_session()).get("status") == "COMPLETED"
+                and not restart_owner.alive(), "R10_RESTARTED_LEASE_NORMAL_CLOSE_FAILED")
+
+        crashed, crash_launches = self.service("crashed-helper")
+        require(self.record("crash-lease-start", crashed.start_admin_session(confirmed=True)).get("status") == "COMPLETED",
+                "R10_CRASH_REAL_ADMIN_LEASE_FAILED")
+        crash_initial = crashed.session_status(refresh=True)
+        crash_identity, crash_deadline = crash_initial.get("helper_identity"), crash_initial.get("session_deadline_monotonic")
+        crash_target = crashed.identity(probe.process.pid)
+        require(crash_target == target and isinstance(crash_identity, dict)
+                and crash_identity != identity and actual_token(crash_identity["pid"])["elevated"]
+                and crashed._recovery_path != expiry_recovery_path
+                and crashed.recovery_status().get("status") == "NOT_COLLECTED",
+                "R10_CRASH_REQUIRES_FRESH_HELPER_AND_FRESH_EMPTY_RECOVERY_FILE")
+        require(crashed.bind_target(crash_target, SCOPE, confirmed=True).get("status") == "COMPLETED",
+                "R10_CRASH_TARGET_BIND_FAILED")
+
+        # Produce a real earlier successful guardian report in this same lease,
+        # then create a new context. That stale success must never stand in for
+        # an authenticated cleanup acknowledgement for the new native owner.
+        self.action(crashed, crash_target, "memory.write", {"address": probe.ready["buffer_address"],
+            "expected_hex": probe.ready["buffer_hex"], "value_hex": bytes([0xF0] * 64).hex()}, confirmed=True)
+        require(self.record("crash-prior-context-cleanup", crashed.clear_target()).get("status") == "COMPLETED"
+                and probe.state()["buffer_hex"] == probe.ready["buffer_hex"],
+                "R10_CRASH_PRIOR_CONTEXT_CLEANUP_NOT_VERIFIED")
+        stale_recovery = crashed.recovery_status()
+        require(stale_recovery.get("status") == "COMPLETED"
+                and stale_recovery.get("target_identity") == crash_target.to_dict(),
+                "R10_CRASH_STALE_REAL_SUCCESS_REPORT_NOT_CREATED")
+        stale_hash = file_hash(crashed._recovery_path)
+        require(crashed.bind_target(crash_target, SCOPE, confirmed=True).get("status") == "COMPLETED",
+                "R10_CRASH_NEW_CONTEXT_BIND_FAILED")
+        crash_pending, crash_paused = pending_effects(crashed, crash_target, bytes([0xE2] * 64).hex(), "CRASH")
+        require(file_hash(crashed._recovery_path) == stale_hash,
+                "R10_CRASH_NEW_CONTEXT_UNEXPECTEDLY_REPLACED_PRIOR_REPORT_BEFORE_CLEANUP")
+        self.heartbeat(crashed, crash_identity, crash_deadline, crash_launches)
+        crash_owner = crashed.helper
+        crash_owner.terminate()
+        immediate_crash = self.record("crash-heartbeat-before-independent-recovery", crashed.session_status(refresh=True))
+        require(immediate_crash.get("state") == "CLEANUP_REQUIRED" and not immediate_crash.get("admin_active")
+                and not immediate_crash.get("elevated_verified") and immediate_crash.get("cleanup_required") is True,
+                "R10_CRASHED_NATIVE_OWNER_WAS_CLEARED_BY_OLD_SUCCESS_REPORT")
+        crash_restored = restored_after_owner_exit(crash_owner, crash_paused, "CRASH")
+        recovery_deadline = time.monotonic() + 5
+        fresh_recovery = crashed.recovery_status()
+        fresh_hash = file_hash(crashed._recovery_path)
+        while (fresh_hash == stale_hash or fresh_recovery.get("status") != "COMPLETED") and time.monotonic() < recovery_deadline:
+            threading.Event().wait(.1)
+            fresh_recovery = crashed.recovery_status()
+            fresh_hash = file_hash(crashed._recovery_path)
+        require(fresh_hash != stale_hash and fresh_recovery.get("status") == "COMPLETED"
+                and fresh_recovery.get("target_identity") == crash_target.to_dict()
+                and fresh_recovery.get("restored", {}).get("memory_changes") == 1
+                and fresh_recovery.get("restored", {}).get("thread_suspensions") == 1,
+                "R10_CRASH_FRESH_GUARDIAN_RECOVERY_WITH_OWNED_EFFECT_COUNTS_REQUIRED")
+        status_after = self.record("crash-heartbeat-after-independent-recovery", crashed.session_status(refresh=True))
+        require(status_after.get("state") == "CLEANUP_REQUIRED" and not status_after.get("admin_active")
+                and not status_after.get("elevated_verified") and status_after.get("cleanup_required") is True
+                and status_after.get("target") == crash_target.to_dict()
+                and not (status_after.get("expiry_cleanup") or {}).get("confirmed") and not crash_owner.alive()
+                and len(crash_launches) == 1, "R10_CRASHED_HELPER_ACK_LOSS_WAS_FALSELY_PROMOTED_OR_RELAUNCHED")
+        crash_closed = self.record("crashed-session-close-unconfirmed", crashed.end_admin_session())
+        require(crash_closed.get("status") == "RECOVERY_UNCONFIRMED" and crashed.helper is None,
+                "R10_CRASHED_HELPER_CLEANUP_ACK_LOSS_MUST_REMAIN_UNCONFIRMED")
+        self.expected_unconfirmed_services.add(id(crashed))
+        return {"status": "PASS", "expiry_helper_identity": identity,
+                "expiry_seconds": 5, "expiry_launches": launches, "crash_launches": crash_launches,
+                "expiry": {"status": "PASS", "helper_identity": identity, "target": target.to_dict(),
+                    "fixed_deadline": deadline, "pending_effects": expiry_pending,
+                    "independent_restoration": expiry_restored, "session_state": status["state"],
+                    "cleanup_required": status["cleanup_required"], "expiry_cleanup": journal_metadata(terminal),
+                    "close_status": expiry_closed["status"],
+                    "same_service_restarted_after_new_consent": True,
+                    "restarted_helper_identity": restart_status["helper_identity"],
+                    "new_runas_after_old_lease_expired": True, "restarted_helper_exit_verified": True},
+                "crash": {"status": "PASS", "helper_identity": crash_identity, "target": crash_target.to_dict(),
+                    "fixed_deadline": crash_deadline, "pending_effects": crash_pending,
+                    "independent_restoration": crash_restored,
+                    "stale_recovery": journal_metadata(stale_recovery), "stale_recovery_sha256": stale_hash,
+                    "fresh_recovery": journal_metadata(fresh_recovery), "fresh_recovery_sha256": fresh_hash,
+                    "session_state_before_recovery": immediate_crash["state"],
+                    "session_state_after_recovery": status_after["state"],
+                    "diagnostic_cleanup_status": crash_closed["status"],
+                    "guardian_restoration_does_not_replace_helper_cleanup_ack": True}}
+
+    def run_cleanup_failure(self, a: Probe, b: Probe) -> dict:
+        service, launches = self.service("real-cleanup-failure")
+        ia, ib = service.identity(a.process.pid), service.identity(b.process.pid)
+        require(service.start_admin_session(confirmed=True).get("status") == "COMPLETED", "R10_CLEANUP_SESSION_FAILED")
+        require(service.bind_target(ia, SCOPE, confirmed=True).get("status") == "COMPLETED", "R10_CLEANUP_BIND_FAILED")
+        original = a.ready["buffer_hex"]
+        changed, concurrent = bytes([0xD3] * 64).hex(), bytes([0xE7] * 64)
+        self.action(service, ia, "memory.write", {"address": a.ready["buffer_address"],
+                    "expected_hex": original, "value_hex": changed}, confirmed=True)
+        require(a.state()["buffer_hex"] == changed, "R10_CLEANUP_PENDING_NATIVE_CHANGE_MISSING")
+        controlled_external_write(ia, a.ready["buffer_address"], concurrent)
+        require(a.state()["buffer_hex"] == concurrent.hex(), "R10_CONCURRENT_NATIVE_WRITER_NOT_OBSERVED")
+        failed = self.record("real-cleanup-failure-target-switch", service.bind_target(ib, SCOPE, confirmed=True))
+        status = self.record("cleanup-required-heartbeat", service.session_status(refresh=True))
+        require(failed.get("status") == "RECOVERY_UNCONFIRMED" and status.get("state") == "CLEANUP_REQUIRED"
+                and status.get("target") == ia.to_dict() and not status.get("admin_active"),
+                "R10_UNCONFIRMED_CLEANUP_DID_NOT_BLOCK_RETARGET_OR_ACTIVE_BADGE")
+        require(a.state()["buffer_hex"] == concurrent.hex() and b.state()["buffer_hex"] == b.ready["buffer_hex"],
+                "R10_CLEANUP_FAILURE_CORRUPTED_OR_NEW_TARGET_WAS_TOUCHED")
+        again = self.record("cleanup-blocks-B-consent", service.bind_target(ib, SCOPE, confirmed=True))
+        require(again.get("status") == "RECOVERY_UNCONFIRMED" and len(launches) == 1,
+                "R10_CLEANUP_FAILURE_RETRIED_EFFECT_OR_LAUNCHED_SECOND_HELPER")
+        # The external QA writer restores its own concurrent bytes explicitly.
+        controlled_external_write(ia, a.ready["buffer_address"], bytes.fromhex(original))
+        require(a.state()["buffer_hex"] == original, "R10_EXTERNAL_QA_MUTATION_RESTORATION_FAILED")
+        close = self.record("unconfirmed-session-close", service.end_admin_session())
+        require(close.get("status") == "RECOVERY_UNCONFIRMED", "R10_CLEANUP_FAILURE_WAS_REPORTED_AS_SUCCESS")
+        self.expected_unconfirmed_services.add(id(service))
+        # Preserve receipt, then stop only this no-debug-attachment helper to avoid
+        # leaving elevated QA processes on the disposable runner.  This is not a
+        # product success claim: the failed cleanup receipt remains unconfirmed.
+        if service.helper is not None:
+            service.helper.terminate()
+            service._discard_helper(force=True)
+        return {"status": "PASS", "actual_operation_status": "RECOVERY_UNCONFIRMED",
+                "injection": "INDEPENDENT_WRITER_CHANGED_OWNED_BUFFER_AFTER_HELPER_WRITE",
+                "target_B_refused": True, "concurrent_bytes_preserved": True,
+                "elevated_helper_stopped_for_disposable_runner_cleanup": service.helper is None,
+                "broker_launches": launches}
+
+    def run(self) -> dict:
+        a, b = self.probe("A"), self.probe("B")
+        # Prove ordinary observation before any elevated session is requested.
+        ordinary, launches = self.service("ordinary-observation")
+        identity = ordinary.identity(a.process.pid)
+        read = self.action(ordinary, identity, "memory_read", {"address": a.ready["buffer_address"], "length": 64})
+        require(read.get("data", {}).get("hex") == a.ready["buffer_hex"]
+                and launches and all(not row["elevated"] for row in launches),
+                "R10_ORDINARY_DIAGNOSTICS_UNEXPECTEDLY_REQUESTED_RUNAS")
+        require(ordinary.close().get("status") == "COMPLETED", "R10_ORDINARY_HELPER_CLOSE_FAILED")
+        self.proof["scenarios"]["ordinary-without-elevation"] = {"status": "PASS", "launches": launches}
+        self.proof["one_helper_two_targets"] = self.run_primary(a, b)
+        self.proof["scenarios"]["actual-expiry-and-crash"] = self.run_expiry_and_crash(b)
+        self.proof["scenarios"]["actual-cleanup-failure"] = self.run_cleanup_failure(a, b)
+        self.proof["status"] = "PASS"
+        return self.proof
+
+    def cleanup(self) -> None:
+        cleanup = []
+        for service in reversed(self.services):
+            try:
+                response = service.close()
+                if service.helper is not None:
+                    # A failed acceptance must still stop its disposable helper.
+                    service.helper.terminate()
+                    service._discard_helper(force=True)
+                cleanup.append({"kind": "service",
+                    "status": "COMPLETED" if id(service) in self.expected_unconfirmed_services
+                              and service.helper is None else response.get("status"),
+                    "diagnostic_cleanup_status": response.get("status"),
+                    "expected_negative_cleanup_branch": id(service) in self.expected_unconfirmed_services,
+                    "runner_owned_helper_stopped": service.helper is None, "helper_pid": service.helper_pid})
+            except Exception as error:
+                cleanup.append({"kind": "service", "status": "RECOVERY_UNCONFIRMED", "error": str(error)[:500]})
+        for probe in reversed(self.probes):
+            try:
+                cleanup.append({"kind": "owned-probe", **probe.close()})
+            except Exception as error:
+                cleanup.append({"kind": "owned-probe", "status": "RECOVERY_UNCONFIRMED", "error": str(error)[:500]})
+        self.proof["runner_cleanup"] = journal_metadata(cleanup)
+        if any(row.get("status") == "RECOVERY_UNCONFIRMED" for row in cleanup):
+            self.proof["status"] = "FAIL"
+
+
+def publish_receipt(path: Path, proof: dict) -> None:
+    save(path, proof)
+    digest = file_hash(path)
+    compact = {"status": proof["status"], "source_sha": proof["source_sha"], "receipt_sha256": digest,
+               "receipt_bytes": path.stat().st_size, "scenario_statuses": {
+                   key: value.get("status") for key, value in proof.get("scenarios", {}).items()},
+               "one_helper_two_targets": proof.get("one_helper_two_targets"),
+               "physical_interactive_uac": "NOT_TESTED"}
+    require(path.stat().st_size <= 2 * 1024 * 1024, "R10_QA_RECEIPT_BUDGET_EXCEEDED")
+    print("R10_NATIVE_RECEIPT " + json.dumps(compact, sort_keys=True), flush=True)
+    summary = os.environ.get("GITHUB_STEP_SUMMARY")
+    if summary:
+        with Path(summary).open("a", encoding="utf-8") as stream:
+            stream.write("\n### R10 real Windows helper/native acceptance\n\n")
+            stream.write("```json\n" + json.dumps(compact, indent=2, sort_keys=True) + "\n```\n")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--probe", type=Path, required=True)
+    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--source-sha", required=True)
+    parser.add_argument("--helper", type=Path)
+    args = parser.parse_args()
+    require_hosted_windows()
+    require(bool(re.fullmatch(r"[0-9a-f]{40}", args.source_sha)), "EXACT_SOURCE_SHA_REQUIRED")
+    args.output.mkdir(parents=True, exist_ok=False)
+    acceptance = NativeAcceptance(args.output.resolve(), args.probe.resolve(strict=True), args.source_sha, args.helper)
+    try:
+        acceptance.run()
+    except BaseException as error:
+        acceptance.proof["status"] = "FAIL"
+        acceptance.proof["error"] = {"type": type(error).__name__, "message": str(error)[:2000],
+                                      "traceback": traceback.format_exc()[-8000:]}
+        raise
+    finally:
+        acceptance.cleanup()
+        publish_receipt(args.output / "r10-native.json", acceptance.proof)
+    require(acceptance.proof["status"] == "PASS", "R10_RUNNER_CLEANUP_NOT_VERIFIED")
+
+
+if __name__ == "__main__":
+    main()
