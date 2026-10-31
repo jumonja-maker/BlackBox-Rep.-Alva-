@@ -17,7 +17,7 @@ BLACK.BOX Universal lets you **select a running process or choose an application
 
 > **Important:** BLACK.BOX provides observational evidence, not proof of an application's internal root cause. High CPU, rising memory, or a process exiting do not, on their own, establish why it failed.
 
-**Investigation Engine 3 — v0.5.4:** Overview → Deep Inspection → **INVESTIGATE PROBLEM** links saved evidence, partial wait paths and testable hypotheses. BEFORE/ACTION/AFTER steps require individual user confirmation. Incomplete identity, clocks and coverage remain explicit. [Guide](docs/BB_INV_003_EN.md) · [Русская инструкция](docs/BB_INV_003_RU.md) · [Specification](docs/specifications/BB-INV-003.md).
+**Investigation Engine 3 — v0.5.4:** Overview → Deep Inspection → **INVESTIGATE PROBLEM** links saved evidence, partial wait paths and testable hypotheses. BEFORE/ACTION/AFTER steps require individual user confirmation. Incomplete identity, clocks and coverage remain explicit. [Guide](docs/BB_INV_003_EN.md) · [Русская инструкция](docs/BB_INV_003_RU.md) · [Specification](docs/specifications/BB-INV-003.md). [Visual step-by-step walkthrough](#investigation-engine-3-v054-visual-walkthrough).
 
 **BB-DEEP-001 — available since v0.5.3:** The expandable **Deep Inspection** block stays inside Overview and provides Processes, Modules, Threads, Handles, Memory, Network, Disk, Debug and Timeline panels. Operation-specific access checks can offer a standard Windows UAC prompt for a scoped diagnostic helper; the GUI remains unelevated. Sensitive memory and dumps are excluded from ordinary sharing. Historical trace instance IDs are not silently equated with current process creation times. See the [English guide and supported boundaries](docs/BB_DEEP_001.md), [Russian guide](docs/BB_DEEP_001_RU.md) and [original specification](docs/specifications/BB-DEEP-001.md). The v0.5.3 release was verified on exact-SHA GitHub-hosted CI.
 
@@ -134,6 +134,56 @@ See [Updates and maintenance](docs/UPDATES_FEEDBACK_UNINSTALL.md).
 - Automated RU/EN Qt offscreen screenshots at 100/125/150/200% scaling supplement, but do not replace, manual physical Windows DPI and update/rollback checks.
 
 [Independent review and remaining acceptance limitations](docs/DEEP_HARDENING_REVIEW.md).
+
+
+## Investigation Engine 3 (v0.5.4): visual walkthrough
+
+![Authentic Windows CI screenshot of Investigation Engine 3 showing the Critical Path section, BLOCKED/READY thread intervals and detail table](docs/screenshots/ru-investigation-v3-critical-path.png)
+
+*Authentic **Russian-language** Qt screenshot captured during [BB-INV-003 Windows CI](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/actions/runs/41085704991), source commit `41d50627` (1024 × 720). The workspace is scrolled to **Critical Path**, not showing all seven sections at once. Orange **BLOCKED** marks an observed wait interval; blue **READY** marks a ready-to-run thread. Neither proves lock ownership or root cause. This is not an AI mockup or a measurement from your application.*
+
+**Quick start:** **Overview → Deep Inspection → INVESTIGATE PROBLEM → add recorded sources → Build evidence graph → inspect links and hypotheses → optionally verify manually → export**.
+
+### Step 1. Open the workspace and select evidence
+
+1. Open **Overview**, expand **Deep Inspection**, then choose **INVESTIGATE PROBLEM**. This is a workspace *within Overview*, not a seventh main page. Opening it does not record, debug, or request UAC.
+2. Add one or more **previously recorded** sources: a BLACK.BOX session folder, Trace Decoder SQLite index, Deep Inspection journal, Investigation Engine 2 JSON, recorded JSONL events, or saved minidump metadata. For raw **ETL** or **EventPipe**, first import through **Trace Decoder**, then select the resulting index.
+3. Select **Build evidence graph**. Wait for the result and examine its source list, coverage, truncation warnings and missing evidence. Original input files are not overwritten.
+
+### Step 2. Read the seven internal sections
+
+| Section | What to inspect |
+| --- | --- |
+| **Problem overview** | Sources, incident context, coverage and limits. |
+| **Related observations** | Original events and recorded references supporting a claim. |
+| **Evidence graph** | Nodes and classified links such as `DIRECT_REFERENCE`, `TEMPORAL_COINCIDENCE` or `NOT_ESTABLISHED`. |
+| **Critical path** | Thread intervals: `RUNNING`, `BLOCKED`, `READY`, plus `UNKNOWN` / `INCOMPLETE` gaps. |
+| **Hypotheses** | Supporting and contradicting facts, alternatives, missing measurements and proposed next checks. |
+| **Verification** | A newly confirmed live target, BEFORE/AFTER snapshots and separately authorized diagnostic actions. |
+| **Recurrences** | Related cases, declared application/workload context and compatible capture comparisons. |
+
+**Interpreting the screenshot:** a shared timestamp, PID or image name does not establish a relation. `BLOCKED` does not identify a lock owner; `READY` alone does not explain why a thread has not run. If source identity, clock evidence or stack links are missing, the engine displays an explicit gap. Select a row to inspect its original reference; navigation to threads, stacks, modules or the decoder requires a recorded link.
+
+### Step 3. Manually test a hypothesis
+
+1. In **Hypotheses**, read the selected proposal's **supporting, contradicting and missing evidence**. It is not a proven root cause.
+2. In **Verification**, explicitly select and confirm a **current live process for new measurements**; this does not relabel historical observations.
+3. Select **Capture BEFORE** and wait for its snapshot ID.
+4. If intervention is necessary, choose an existing **manual Deep action**, review rights, impact, timeout, recovery and cleanup, then provide the **explicit parameters** and select **Confirm chosen action**. Only the scoped Diagnostic Helper may request UAC; declining does not discard saved evidence.
+5. Select **Capture AFTER**, then **Compare BEFORE / AFTER**. An observed difference does not by itself prove a fix; a causal conclusion can remain `INCONCLUSIVE`.
+
+**Important:** this feature is not an automatic workflow builder. Changing targets invalidates prior consent; a failed step ends that experiment. On `RECOVERY_UNCONFIRMED`, inspect the outcome and existing Deep Inspection cleanup before attempting anything else.
+
+### Step 4. Save, revisit and compare
+
+- Select **Export investigation** and choose a **new JSON or standalone HTML filename**. Both are local and readable without internet; source sessions and trace files remain separate.
+- Use **Recurrences** only for sufficiently comparable captures. If needed, select **Declare application / workload context**, and separately choose the application binary for its locally computed SHA-256. User-entered version/workload metadata remains user-reported rather than OS-attested.
+- Review any personally entered text before sharing an export. **Export does not upload** evidence to a cloud service.
+- Large investigations can be deliberately partial. Paging the GUI does **not** automatically continue reading the complete original trace.
+
+**Example:** when an application intermittently stops responding, add the saved session and an ETW-derived index, inspect **Critical path**, examine recorded waits and supported thread references, then review a **UI_UNRESPONSIVE** hypothesis. Preserve uncertainty when links are missing; use new manual snapshots only if you need further evidence.
+
+[Complete technical/user guide](docs/BB_INV_003_EN.md) · [Русская инструкция](docs/BB_INV_003_RU.md) · [Specification](docs/specifications/BB-INV-003.md)
 
 ## Investigation Engine 0.1.2
 
