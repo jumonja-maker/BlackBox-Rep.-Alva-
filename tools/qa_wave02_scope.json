@@ -1,6 +1,6 @@
 {
   "schema": "blackbox.wave02.qa-scope/1",
-  "container": "r20",
-  "required_containers": ["R20"],
+  "container": "r30",
+  "required_containers": ["R20", "R30"],
   "endurance_required": false
 }
