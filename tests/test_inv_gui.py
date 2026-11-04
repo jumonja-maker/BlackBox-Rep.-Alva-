@@ -129,11 +129,16 @@ class InvestigationGuiContracts(unittest.TestCase):
             "operation_id": "synthetic-operation-" + phase, "status": status, "target": deepcopy(TARGET),
             "data": data or {}})
 
-    def test_open_has_seven_local_sections_and_never_starts_helper_or_reader(self):
+    def test_open_retains_legacy_sections_and_source_integrity_without_starting_work(self):
         self.panel.open_case_context([], incident_id=9)
-        self.assertEqual(self.panel.section.count(), 7)
-        self.assertEqual(self.panel.pages.count(), 7)
-        for i in range(7):
+        keys = tuple(self.panel.section.itemData(i) for i in range(self.panel.section.count()))
+        self.assertEqual(keys[:8], ('overview', 'events', 'graph', 'critical_path', 'hypotheses',
+                                    'verification', 'recurrences', 'integrity'))
+        self.assertEqual(len(keys), len(set(keys)))
+        self.assertLessEqual(set(keys), {'overview', 'events', 'graph', 'critical_path', 'hypotheses',
+                                        'verification', 'recurrences', 'integrity', 'delays', 'crash'})
+        self.assertEqual(self.panel.pages.count(), len(keys))
+        for i in range(len(keys)):
             self.panel.section.setCurrentIndex(i)
             self.assertEqual(self.panel.pages.currentIndex(), i)
         self.assertEqual(self.reader.calls, [])

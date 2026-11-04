@@ -180,6 +180,7 @@ class ProcessInspector:
     def __init__(self, identity):
         self.identity = ProcessIdentity.from_dict(identity)
         self.closed = False
+        self._owned_query_processes = []
 
     @contextmanager
     def _open(self, rights):
@@ -206,10 +207,24 @@ class ProcessInspector:
             raise NativeError("PROCESS_CHANGED", "PROCESS_INSTANCE_CHANGED")
 
     def close(self):
+        from .optional_jobs import OwnedProcessCleanupUnconfirmed
+        failures = []
+        for owner in tuple(self._owned_query_processes):
+            try:
+                owner.close(kill=True)
+            except OwnedProcessCleanupUnconfirmed:
+                failures.append(dict(owner.cleanup_evidence))
+            else:
+                self._owned_query_processes.remove(owner)
+        if failures:
+            return {"status": "RECOVERY_UNCONFIRMED", "source": "INSPECTOR_CLEANUP",
+                "data": {"owner_retained": True, "retry_cleanup_required": True,
+                         "query_cleanup": failures}, "owned_suspensions": 0}
         self.closed = True
         return {"status": "COMPLETED", "source": "INSPECTOR_CLEANUP", "owned_suspensions": 0}
 
     def execute(self, operation, parameters=None, *, deadline=None, cancel_event=None):
+        from .optional_jobs import OwnedProcessCleanupUnconfirmed
         started = time.monotonic_ns()
         parameters = dict(parameters or {})
         try:
@@ -232,6 +247,11 @@ class ProcessInspector:
             return {"status": error.status, "source": "WINDOWS_LIVE_INSPECTION",
                     "target": self.identity.to_dict(), "reason": error.reason,
                     "winerror": error.winerror, "data": {}, "limitations": []}
+        except OwnedProcessCleanupUnconfirmed as error:
+            return {"status": "RECOVERY_UNCONFIRMED", "source": "WINDOWS_LIVE_INSPECTION",
+                "target": self.identity.to_dict(), "reason": "OWNED_QUERY_PROCESS_CLEANUP_UNCONFIRMED",
+                "data": {"owner_retained": True, "retry_cleanup_required": True,
+                         "query_cleanup": dict(error.owner.cleanup_evidence)}, "limitations": []}
         except (OSError, ValueError, OverflowError) as error:
             return {"status": "OPERATION_FAILED", "source": "WINDOWS_LIVE_INSPECTION",
                     "target": self.identity.to_dict(), "reason": str(error)[:400],
@@ -567,7 +587,8 @@ class ProcessInspector:
             for index, row in enumerate(rows):
                 _check(deadline, cancel)
                 if index < name_limit:
-                    row.update(query_bounded(self.identity, row["handle"], deadline, cancel))
+                    row.update(query_bounded(self.identity, row["handle"], deadline, cancel,
+                                             owned_processes=self._owned_query_processes))
                 else:
                     row.update(name=None, type_name=None, name_status="NOT_COLLECTED_NAME_BUDGET")
         return {"rows": rows, "omitted": omitted, "_source": "WINDOWS_SYSTEM_EXTENDED_HANDLE_INFORMATION",

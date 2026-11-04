@@ -166,7 +166,7 @@ class ResearchSession:
 
     def _recording_resources_closed(self):
         p=self.probe
-        return (not p.active and p._store is None and
+        return (not self.jobs.busy and not p.active and p._store is None and
             not any(cap and cap.thread.is_alive() for cap in
                 (p._pending_detailed,p._pending_windows,p._pending_v2)) and
             not (self.wpr and self.wpr.active) and
@@ -482,6 +482,8 @@ class ResearchSession:
     def stop(self, reason="USER_STOPPED"):
         p=self.probe;errors=[]
         self._cancelled_operations.extend(self.jobs.cancel())
+        if self.jobs.health().get('cleanup_required'):
+            errors.append('OPTIONAL_RESOURCE_CLEANUP_UNCONFIRMED')
         if self.sensors:self.sensors.stop()
         self._burst_until=None
         if self.book and (not p.active or p._store is None):self.book.on_evidence=None
@@ -526,11 +528,14 @@ class ResearchSession:
                 self.research_state="FINALIZATION_UNCONFIRMED"
                 self.research_error="RESEARCH_FINALIZATION_UNCONFIRMED"
                 book.db.close();raise
-        return {"state":self.research_state,"base_recording_state":p.session_state,"errors":errors}
+        return {"state":self.research_state,"base_recording_state":p.session_state,"errors":errors,
+                "cleanup_required":not self._recording_resources_closed()}
 
     def command(self, command):
         op=command.get("op");a=command.get("args",{})
         if type(a) is not dict:raise ValueError("INVALID_COMMAND_ARGUMENTS")
+        if op in ('attach', 'start') and self.jobs.health().get('cleanup_required'):
+            raise ValueError('OPTIONAL_RESOURCE_CLEANUP_UNCONFIRMED')
         issued=self._receive_command(command)
         if op=='capture_profile':
             if self.probe.active:raise ValueError('STOP_BEFORE_RECONFIGURING')
@@ -807,6 +812,7 @@ def main(output_root=None):
             try:command=commands.get(timeout=0.1)
             except queue.Empty:command=None
             if command:
+                quit_confirmed = False
                 try:
                     if command.get("op") in OPERATIONS:
                         session.submit_optional(command)
@@ -816,13 +822,16 @@ def main(output_root=None):
                         for pending in session.jobs.cancel():
                             acknowledge(pending["command"],None,pending["error"])
                     result=session.command(command)
+                    quit_confirmed = (command.get('op') == 'quit' and
+                                      not result.get('cleanup_required', True))
                     if session.book:session.book.sync_legacy()
                     emit({"type":"result","id":command.get("id"),"op":command.get("op"),"result":result,"error":None})
                 except Exception as exc:
                     emit({"type":"result","id":command.get("id"),"op":command.get("op"),"result":None,
                           "error":getattr(exc,"code",None) or (type(exc).__name__+": "+str(exc))[:512]})
                 emit({"type":"snapshot","snapshot":session.snapshot()})
-                if command.get("op")=="quit":break
+                if command.get("op")=="quit" and (quit_confirmed or command.get('id') in ('eof','invalid')):
+                    break
             if session.probe.active and time.monotonic()>=next_tick:
                 try:session.tick()
                 except Exception as exc:
@@ -837,7 +846,7 @@ def main(output_root=None):
     finally:
         session.jobs.cancel()
         session.stop("UI_CLOSED")
-    return 0
+    return 3 if not session._recording_resources_closed() else 0
 
 
 if __name__=="__main__":raise SystemExit(main())

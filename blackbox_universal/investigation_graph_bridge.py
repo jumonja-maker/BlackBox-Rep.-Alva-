@@ -96,6 +96,14 @@ class InvestigationGraphWorker(QThread):
             elif self.operation == "export":
                 answer = api.export_investigation(case, args["destination"], format=args["format"], budget=budget)
                 packet = {"export": str(answer) if isinstance(answer, Path) else answer}
+            elif self.operation == 'cleanup_owned':
+                from blackbox_core.optional_jobs import OwnedProcess
+                before = OwnedProcess.pending_cleanup()
+                results = OwnedProcess.retry_pending_cleanup(check=budget.check)
+                remaining = OwnedProcess.pending_cleanup()
+                packet = {'owned_cleanup': {'status': 'RECOVERY_UNCONFIRMED' if remaining else 'COMPLETED',
+                    'scope': 'CURRENT_PROCESS_OWNED_CHILDREN_ONLY',
+                    'before': before, 'remaining': remaining, 'results': results}}
             elif self.operation == "actions":
                 recommended = api.suggest_diagnostic_actions(case, budget=budget, **args)
                 from blackbox_core.investigation_planner import describe_diagnostic_actions

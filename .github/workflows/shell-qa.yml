@@ -167,6 +167,9 @@ jobs:
     # Exact-SHA native decoder acceptance accompanies the release candidate.
     # Publication still requires *all* three jobs green.
     runs-on: windows-latest
+    outputs:
+      wave02_endurance_required: ${{ steps.wave02-scope.outputs.endurance_required }}
+      wave02_container: ${{ steps.wave02-scope.outputs.container }}
     timeout-minutes: 100
     env:
       QT_QPA_PLATFORM: offscreen
@@ -183,6 +186,9 @@ jobs:
         run: |
           python -m pip install --require-hashes -r requirements/ci-windows-py311.lock
           python -m pip install --no-build-isolation --no-deps -e .
+      - name: Validate explicit required BB-WAVE-02 container scope
+        id: wave02-scope
+        run: python tools/qa_wave02_scope.py
       - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
         with:
           dotnet-version: '10.0.x'
@@ -211,6 +217,19 @@ jobs:
         run: python tools/qa_decoder_waits.py --helper decoder/BLACK.BOX-Decoder.exe --output decoder-waits-qa
       - name: Actual third-party 7-Zip, PowerShell 7 and Notepad++ acceptance
         run: python tools/qa_decoder_apps.py --helper decoder/BLACK.BOX-Decoder.exe --output decoder-apps-qa
+      - name: BB-WAVE-02 actual native evidence, provenance, requested domain routes and read-back
+        timeout-minutes: 18
+        run: python tools/qa_wave02.py --output wave02-native-qa --decoder decoder/BLACK.BOX-Decoder.exe --source-sha "${{ github.event.pull_request.head.sha || github.sha }}"
+      - name: BB-WAVE-02 real source GUI evidence routes in RU EN at four simulated DPI scales
+        timeout-minutes: 24
+        shell: pwsh
+        run: |
+          foreach ($scale in @('1', '1.25', '1.5', '2')) {
+            $env:QT_SCALE_FACTOR = $scale
+            python tools/qa_wave02_gui.py --evidence-root wave02-native-qa --output "wave02-source-gui-$scale" --source-sha '${{ github.event.pull_request.head.sha || github.sha }}'
+            if ($LASTEXITCODE -ne 0) { throw "Wave02 source GUI failed at scale $scale" }
+          }
+          Remove-Item Env:\QT_SCALE_FACTOR -ErrorAction SilentlyContinue
       - name: Generate original retro Windows icon
         run: python tools/generate_icon.py
       - name: Record actual source identity for the frozen executable
@@ -290,6 +309,9 @@ jobs:
       - name: R10 full frozen GUI, packaged elevated helper, two native targets and Investigation export
         timeout-minutes: 8
         run: python tools/qa_r10_gui.py --exe dist/BLACK.BOX-Universal/BLACK.BOX-Universal.exe --probe r10-frozen-probe-build/deep-probe.exe --output "${{ runner.temp }}/r10-frozen-gui" --source-sha "${{ github.event.pull_request.head.sha || github.sha }}"
+      - name: BB-WAVE-02 actual frozen GUI domain evidence, exports and resource exit
+        timeout-minutes: 8
+        run: python tools/qa_wave02_gui.py --exe dist/BLACK.BOX-Universal/BLACK.BOX-Universal.exe --evidence-root wave02-native-qa --output "${{ runner.temp }}/wave02-frozen-gui" --source-sha "${{ github.event.pull_request.head.sha || github.sha }}"
       - name: Include public source license and distribution notices
         shell: pwsh
         run: |

@@ -2667,6 +2667,16 @@ class UniversalWindow(QMainWindow):
             QTimer.singleShot(0, self.close)
 
     def _research_result(self, op: str, payload: object, error: str) -> None:
+        if op == 'quit' and (error or not isinstance(payload, dict) or payload.get('cleanup_required') is not False):
+            self._pending_close = False
+            self._timer.start()
+            message = ('Очистка наблюдения не подтверждена. Окно остаётся открытым для проверки. '
+                       'Повторите завершение наблюдения; диагностическая операция не запускается заново.'
+                       if self.language == 'RU' else
+                       'Recording cleanup is not confirmed. This window remains open for review. '
+                       'Retry cleanup before closing; the diagnostic operation will not be repeated.')
+            QMessageBox.warning(self, 'BLACK.BOX — RECOVERY_UNCONFIRMED', message)
+            return
         if error:
             return
         if op == "processes" and isinstance(payload, list):

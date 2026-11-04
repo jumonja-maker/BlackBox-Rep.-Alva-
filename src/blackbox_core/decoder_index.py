@@ -273,7 +273,7 @@ def own_events(path, cancel=None, *, budget=None):
 
 
 def build_index(source, output, *, input_sha256, format_name, cancel=None,
-                budget=None, before_publish=None):
+                budget=None, before_publish=None, metadata_adapter=None):
     """Build privately; missing footer, corrupt records or cancellation cannot publish a DB."""
     from .session_v2 import safe_path
     budget = budget or DecodeBudget(cancel)
@@ -413,6 +413,20 @@ def build_index(source, output, *, input_sha256, format_name, cancel=None,
             raise ValueError("INDEX_DISK_BUDGET")
         db.close()
         db = None
+        if metadata_adapter is not None:
+            # The actual supervisor can acknowledge its finished private input
+            # stage now that every parser handle is closed. Persist the same
+            # additive receipt returned to callers, before create-new publication.
+            meta = metadata_adapter(meta)
+            budget.check("FINALIZE_RECEIPT")
+            if type(meta) is not dict or len(json.dumps(meta, allow_nan=False)) > MAX_SUMMARY_BYTES:
+                raise ValueError("INVALID_DECODER_RECEIPT_METADATA")
+            with closing(sqlite3.connect(part, timeout=1)) as receipt_db:
+                receipt_db.execute("UPDATE metadata SET value=? WHERE key='summary'",
+                                   (json.dumps(meta, allow_nan=False),))
+                receipt_db.commit()
+            if part.stat().st_size > MAX_INDEX_BYTES:
+                raise ValueError("INDEX_DISK_BUDGET")
         if before_publish is not None:
             before_publish()
         budget.check("PUBLISH")
