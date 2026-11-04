@@ -92,7 +92,16 @@ internal static class Program
         }
         if (names.Length > 32) clipped = true;
         int? processIndex = null;
-        try { var process = e.Process(); if (process != null && (int)process.ProcessIndex >= 0) processIndex = (int)process.ProcessIndex; }
+        try
+        {
+            var process = e.Process();
+            // TraceLog can give PID -1 an UNKNOWN_PROCESS index. That index
+            // does not identify the known process of a separately resolved
+            // event thread, so never publish it as a header process instance.
+            if (process != null && process.ProcessID >= 0 && process.ProcessID == e.ProcessID &&
+                (int)process.ProcessIndex >= 0)
+                processIndex = (int)process.ProcessIndex;
+        }
         catch (Exception ex) { errors.Add("PROCESS_IDENTITY:" + ex.GetType().Name); }
         var frames = new List<object>();
         string stackStatus = "NOT_RECORDED_OR_UNAVAILABLE";

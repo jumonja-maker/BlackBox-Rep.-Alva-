@@ -331,7 +331,7 @@ def run(args):
         require(not broken_path.exists() and file_hash(corrupt) == corrupt_hash,
                 'WAVE02_CORRUPT_SOURCE_OR_PARTIAL_DESTINATION_CHANGED')
         proof['writer_fault'] = writer_failure(output, target)
-        require(all(file_hash(path) == before for path, before in sources_before.items()),
+        require(all(file_hash(Path(path)) == before for path, before in sources_before.items()),
                 'WAVE02_USER_SOURCE_CHANGED_BY_ANALYSIS_OR_EXPORT')
         proof['container_results']['R20'] = {'status': 'PASS', 'case_id': case['case_id'],
             'source_count': len(case['sources']), 'source_hashes_unchanged': True,
