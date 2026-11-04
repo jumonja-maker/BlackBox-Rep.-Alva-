@@ -9,9 +9,11 @@
 [**Скачать последний опубликованный релиз Windows x64**](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/releases/latest) · [Все версии](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/releases) · [English README](README.md)
 
 [![Проверка Windows/Linux](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/actions/workflows/shell-qa.yml/badge.svg?branch=main)](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/actions/workflows/shell-qa.yml)
-![Разработка](https://img.shields.io/badge/source-0.5.4-40766c) ![Windows](https://img.shields.io/badge/platform-Windows%20x64-40766c) ![MIT](https://img.shields.io/badge/license-MIT-40766c)
+![Разработка](https://img.shields.io/badge/source-0.5.5-40766c) ![Windows](https://img.shields.io/badge/platform-Windows%20x64-40766c) ![MIT](https://img.shields.io/badge/license-MIT-40766c)
 
-**Версия исходного кода: v0.5.4.** Доступная для скачивания версия определяется только [официальным GitHub Release](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/releases/latest); зелёный CI сам по себе не публикует обновление.
+**Версия исходного кода: v0.5.5.** Доступная для скачивания версия определяется только [официальным GitHub Release](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/releases/latest); зелёный CI сам по себе не публикует обновление.
+
+**R10 — единый режим администратора (кандидат выпуска v0.5.5):** В верхней панели есть кнопка **«Включить права администратора»**. Один проверенный ограниченный Diagnostic Helper может обслуживать несколько отдельно разрешённых экземпляров процессов (PID + время создания) без повторного UAC в рамках действующей сессии. Каждое вмешательство подтверждается отдельно; обычное наблюдение не требует повышения прав. Проверяются токен, срок, очистка и квитанция реального выполнения; физический Secure Desktop UAC не испытан. [Руководство R10](docs/R10_RU.md) · [Технические границы](docs/specifications/R10.md) · [Описание v0.5.5](docs/RELEASE_v0.5.5.md).
 
 BLACK.BOX Universal позволяет **выбрать запущенный процесс либо указать файл приложения**. Режим OBSERVE измеряет системные показатели и сохраняет SQLite, JSON и HTML, не изменяя исследуемую программу. Выбор файла сам по себе ничего не запускает. В отдельном патче BB-DEEP-001 явные действия INSPECT и INTERVENE позволяют снимать состояние, приостанавливать и отлаживать процесс, менять выбранные байты после подтверждения. Обычный sampler эти действия не запускает. Программа не требует регистрации, подписки, собственного сервера, фоновой службы или отдельной установки Python.
 

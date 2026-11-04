@@ -1,10 +1,7 @@
 name: BLACK.BOX v0.5.4 - authorized artifactless release after main QA
 
 on:
-  workflow_run:
-    workflows:
-      - BLACK.BOX Universal - independent Windows build and release
-    types: [completed]
+  workflow_dispatch: # historical one-time v0.5.4 release is archived, not automatic
 
 permissions:
   contents: read

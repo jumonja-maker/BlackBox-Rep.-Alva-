@@ -9,9 +9,11 @@
 [**Download latest published Windows x64 release**](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/releases/latest) · [Releases](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/releases) · [Русская версия](README.ru.md)
 
 [![Windows/Linux QA](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/actions/workflows/shell-qa.yml/badge.svg?branch=main)](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/actions/workflows/shell-qa.yml)
-![Development version](https://img.shields.io/badge/source-0.5.4-40766c) ![Windows](https://img.shields.io/badge/platform-Windows%20x64-40766c) ![MIT](https://img.shields.io/badge/license-MIT-40766c)
+![Development version](https://img.shields.io/badge/source-0.5.5-40766c) ![Windows](https://img.shields.io/badge/platform-Windows%20x64-40766c) ![MIT](https://img.shields.io/badge/license-MIT-40766c)
 
-**Source version: v0.5.4.** Downloads and updater availability are determined only by the [official GitHub Release](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/releases/latest). Green CI and a source branch do not themselves publish an update.
+**Source version: v0.5.5.** Downloads and updater availability are determined only by the [official GitHub Release](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/releases/latest). Green CI and a source branch do not themselves publish an update.
+
+**R10 — One administrator session (v0.5.5 release candidate):** The top toolbar offers an explicit **Enable administrator rights** control. One verified, time-limited Diagnostic Helper can serve multiple individually authorized process instances (PID + creation FILETIME) without another Windows elevation request within the same active lease. Each intervention still requires individual confirmation; ordinary observation never requests UAC. Token, lifetime, cleanup and a real execution receipt are verified. Physical Secure Desktop UAC is NOT_TESTED. [R10 guide (RU)](docs/R10_RU.md) · [Technical scope](docs/specifications/R10.md) · [v0.5.5 release notes](docs/RELEASE_v0.5.5.md).
 
 BLACK.BOX Universal lets you **select a running process or choose an application file**. OBSERVE records operating-system measurements and saves local SQLite, JSON and HTML sessions without changing the target. File selection itself only reads metadata. In the separate BB-DEEP-001 patch, explicit INSPECT and INTERVENE actions can snapshot, pause, debug and modify selected memory after confirmation. They are not started by ordinary sampling. The portable application requires no service, account, cloud server, subscription or separately installed Python.
 
