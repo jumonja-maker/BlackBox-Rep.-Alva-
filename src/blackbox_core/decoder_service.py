@@ -36,6 +36,42 @@ def _local_file(path):
     return path
 
 
+def _check_work_bytes(root, budget):
+    """Count a changing private workspace, tolerating only vanished children.
+
+    TraceEvent removes its .etlx scratch directory before the helper exits.
+    pathlib.rglob can raise while advancing the iterator, outside a per-file
+    stat guard. Check each scandir advancement and each entry while preserving
+    permission and other I/O failures as import failures.
+    """
+    root = Path(root)
+    budget.check("NATIVE_DECODE")
+    pending = [root]
+    size = 0
+    while pending:
+        budget.check("NATIVE_DECODE")
+        directory = pending.pop()
+        try:
+            with os.scandir(directory) as entries:
+                for entry in entries:
+                    budget.check("NATIVE_DECODE")
+                    try:
+                        # As with rglob, never traverse directory symlinks.
+                        if entry.is_dir(follow_symlinks=False):
+                            pending.append(Path(entry.path))
+                        elif entry.is_file():
+                            size += entry.stat().st_size
+                    except FileNotFoundError:
+                        continue
+                    if size > MAX_WORK_BYTES:
+                        raise ValueError("DECODER_DISK_BUDGET")
+        except FileNotFoundError:
+            if directory == root:
+                raise  # Loss of our staging root is not ordinary scratch cleanup.
+            budget.check("NATIVE_DECODE")
+    return size
+
+
 @contextmanager
 def _private_decode_stage():
     stage = tempfile.TemporaryDirectory(prefix="blackbox-decode-")
@@ -121,22 +157,14 @@ def _decode_file(path, destination, *, cancel, timeout, context):
                             if process.memory_info().rss > 1536 * 1024**2:
                                 raise MemoryError("DECODER_RSS_BUDGET")
                         except psutil.NoSuchProcess: pass
-                        size = 0
-                        for item in root.rglob("*"):
-                            try:
-                                if item.is_file(): size += item.stat().st_size
-                            except FileNotFoundError: pass
-                        if size > MAX_WORK_BYTES:
-                            raise ValueError("DECODER_DISK_BUDGET")
+                        _check_work_bytes(root, budget)
                         time.sleep(.1)
                     if owner.process.returncode != 0:
                         raise OSError("DECODER_FAILED_EXIT_" + str(owner.process.returncode))
                     budget.check("NATIVE_DECODE")
                     # A fast helper can finish between polls. Enforce its
                     # final disk budget as well, before indexing any output.
-                    if sum(item.stat().st_size for item in root.rglob("*")
-                           if item.is_file()) > MAX_WORK_BYTES:
-                        raise ValueError("DECODER_DISK_BUDGET")
+                    _check_work_bytes(root, budget)
                 finally:
                     if owner is not None:
                         owner.close(kill=True)
