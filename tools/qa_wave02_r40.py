@@ -121,6 +121,8 @@ def check_r40(executable, output, args):
                     if type(symbol.get('name')) is str and name in symbol['name']),None)})
         from blackbox_core import deep_native_win as native_win
         selected_metadata=next(q for q in data['threads'] if q['tid']==ready['control_tid'])
+        image_metadata=thread.get('local_image_metadata') or {}
+        image_hash=image_metadata.get('sha256')
         print('WAVE02_R40_UNWIND_DIAGNOSTICS '+json.dumps({
             'scope':'BOUNDED_STATUS_COUNTS_ONLY_NO_ADDRESSES_MEMORY_PATHS_OR_DUMP_BYTES',
             'inspection_status':fixed_code(metadata.get('status')),
@@ -140,8 +142,25 @@ def check_r40(executable, output, args):
                             'dbghelp_module_base_matches_selected_image')},
             'memory_read_contract':fixed_code(thread.get('memory_read_contract')),
             'unwind_read_counters':{key:value if type(value) is int and 0<=value<2**63 else None
-                for key in ('stackwalk_requests','symbol_handler_requests','successful_reads','failed_reads','copied_bytes')
+                for key in ('stackwalk_requests','symbol_handler_requests','successful_reads','failed_reads','copied_bytes',
+                            'captured_memory_reads','local_image_metadata_reads','local_image_metadata_bytes')
                 for value in [(thread.get('unwind_read_counters') or {}).get(key)]},
+            'typed_local_image_metadata':{
+                'source':fixed_code(image_metadata.get('source')),'scope':fixed_code(image_metadata.get('scope')),
+                'sha256':image_hash if type(image_hash) is str and re.fullmatch(r'[0-9a-f]{64}',image_hash) else None,
+                'runtime_function_count':image_metadata.get('runtime_function_count')
+                    if type(image_metadata.get('runtime_function_count')) is int and
+                        0<=image_metadata['runtime_function_count']<2**63 else None,
+                'unwind_info_count':image_metadata.get('unwind_info_count')
+                    if type(image_metadata.get('unwind_info_count')) is int and
+                        0<=image_metadata['unwind_info_count']<2**63 else None,
+                'memory_contents_included':image_metadata.get('memory_contents_included')
+                    if type(image_metadata.get('memory_contents_included')) is bool else None},
+            'failed_read_classes':{key:value if type(value) is int and 0<=value<2**63 else None
+                for key in ('OUTSIDE_SELECTED_IMAGE_OR_INVALID_SIZE','AMBIGUOUS_METADATA_RANGE',
+                            'IMAGE_GAP_OR_METADATA_CROSSING','WRITABLE_IMAGE_DATA',
+                            'EXECUTABLE_IMAGE_CODE','READONLY_IMAGE_BYTES_OUTSIDE_TYPED_METADATA')
+                for value in [(thread.get('failed_read_classes') or {}).get(key)]},
             'unwind_winerror':thread.get('unwind_winerror') if type(thread.get('unwind_winerror')) is int else None,
             'recorded_frame_count':len(thread['frames']),'matched_own_frame_count':len(own),
             'matched_unwound_callers':sum(q['origin']=='DBGHELP_UNWOUND_CALLER' for q in own),
@@ -150,6 +169,16 @@ def check_r40(executable, output, args):
             },sort_keys=True),flush=True)
         require(len(own) >= 3 and sum(q['origin'] == 'DBGHELP_UNWOUND_CALLER' for q in own) >= 2,
                 'R40_ACTUAL_OWNED_AMD64_CALL_CHAIN_NOT_UNWOUND')
+        counters=thread['unwind_read_counters']
+        require(image_metadata.get('source')=='LOCAL_PINNED_PE_UNWIND_METADATA' and
+                image_metadata.get('scope')=='FILE_BACKED_HEADERS_RUNTIME_FUNCTION_AND_UNWIND_INFO_ONLY' and
+                image_hash==file_hash(executable) and image_metadata.get('memory_contents_included') is False and
+                image_metadata.get('runtime_function_count',0)>0 and image_metadata.get('unwind_info_count',0)>0,
+                'R40_TYPED_LOCAL_UNWIND_METADATA_NOT_BOUND_TO_SELECTED_IMAGE')
+        require(counters['captured_memory_reads']>0 and counters['local_image_metadata_reads']>0 and
+                0<counters['local_image_metadata_bytes']<=counters['copied_bytes'] and
+                counters['captured_memory_reads']+counters['local_image_metadata_reads']==counters['successful_reads'],
+                'R40_CAPTURED_STACK_AND_TYPED_PE_METADATA_READ_COUNTS_NOT_CONFIRMED')
         names = {q.get('symbol', {}).get('name') for q in own}
         require(all(any(value and name in value for value in names) for name in
                     ('wave_crash_leaf', 'wave_crash_middle', 'wave_crash_entry')),

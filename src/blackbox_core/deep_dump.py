@@ -395,7 +395,7 @@ def inspect_dump(path, *, max_bytes=MAX_DUMP_BYTES, limit=200, cancel_event=None
 
 def unwind_dump(path, image_path, *, pdb_path=None, max_frames=64,
                 max_bytes=MAX_DUMP_BYTES, cancel_event=None, deadline=None):
-    """Explicit offline Windows AMD64 StackWalk64 using captured memory only.
+    """Offline AMD64 StackWalk64 with captured memory and typed pinned PE data.
 
     Only the selected local image is loaded, after matching the saved RSDS,
     timestamp and layout. Missing frames/modules remain partial evidence.
@@ -422,22 +422,28 @@ def unwind_dump(path, image_path, *, pdb_path=None, max_frames=64,
             _require(_int(address) and _int(size, 1, 65536) and address + size <= 2**64,
                      "DUMP_UNWIND_READ_BUDGET")
             matches = [(a, n, rva) for a, n, rva in ranges if a <= address and address + size <= a + n]
+            overlaps = [(a, n, rva) for a, n, rva in ranges if a < address + size and address < a + n]
             # Identical descriptors may appear in ThreadList and MemoryList.
             locations = {rva + address - a for a, n, rva in matches}
-            _require(len(locations) == 1, "DUMP_UNWIND_MEMORY_MISSING_OR_AMBIGUOUS")
+            _require(len({rva - a for a, n, rva in overlaps}) <= 1, "DUMP_UNWIND_MEMORY_AMBIGUOUS")
+            if not locations:
+                _require(not overlaps, "DUMP_UNWIND_MEMORY_PARTIAL_CAPTURE")
+                raise ValueError("DUMP_UNWIND_MEMORY_NOT_CAPTURED")
             return reader.read(next(iter(locations)), size)
 
+        image_metadata = {}
         rows = unwind_saved_contexts(contexts, memory, metadata["data"]["modules"], image_path,
                                      pdb_path=pdb_path, max_frames=max_frames,
-                                     deadline=reader.deadline, cancel=cancel_event)
+                                     deadline=reader.deadline, cancel=cancel_event, metadata_result=image_metadata)
     return {"status": "INCOMPLETE_EVIDENCE", "data": {"source_id": metadata["data"]["source_id"],
             "source_sha256": metadata["data"]["sha256"], "threads": rows,
+            "local_image_metadata": image_metadata,
             "cleanup": {"status": "COMPLETED", "confirmed": True, "offline_owner_retained": False,
                         "resource_owner": "SAVED_DBGHELP_SESSION",
                         "checked_resources": ["SYMBOL_SESSION", "PINNED_LOCAL_IMAGE", "UNIQUE_EVENT_HANDLE"]},
             "memory_contents_included": False, "live_process_binding": "NOT_ESTABLISHED"},
             "error": None, "limitations": ["ONLY_EXPLICIT_MATCHED_LOCAL_IMAGE_UNWIND_METADATA",
-                "CAPTURED_MEMORY_ONLY_MISSING_RANGES_STOP_UNWIND",
+                "TARGET_STACK_AND_DATA_CAPTURED_ONLY_TYPED_PE_METADATA_SEPARATELY_IDENTIFIED",
                 "IMPORTED_DUMP_IS_UNVERIFIED_AND_NOT_CURRENT_PROCESS_STATE",
                 "MANAGED_HEAP_ANALYSIS_NOT_PERFORMED"]}
 

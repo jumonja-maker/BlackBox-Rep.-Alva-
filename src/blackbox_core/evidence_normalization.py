@@ -1193,15 +1193,22 @@ def _dump(spec, selection, out):
         cancel_event=out.budget, deadline=out.budget.deadline, **options)
     data = report.get("data", {})
     _require(data.get("sha256") == stable.hashes[path], "SOURCE_CHANGED_BETWEEN_HASH_AND_DUMP_INSPECTION")
+    native_started = data.get("stack_unwind_status") not in (None, "UNSUPPORTED_PLATFORM")
+    image_metadata = data.get("stack_unwind", {}).get("local_image_metadata", {})
+    if native_started:
+        chosen_image = next((value for key, value in related if key == "image_path"), None)
+        _require(chosen_image is not None and image_metadata.get("source") == "LOCAL_PINNED_PE_UNWIND_METADATA" and
+                 image_metadata.get("sha256") == stable.hashes[chosen_image],
+                 "PINNED_PE_METADATA_SOURCE_HASH_MISMATCH")
     source = _source("DUMP_METADATA", stable, selection=selection,
                      hash_roles=["minidump", *["local_image" if key == "image_path" else "local_pdb" for key, _ in related]])
     if not _register_source(source, stable, path, out):
         return
     out.add(source, "minidump:metadata", "ARTIFACT", metadata={"kind": "SAVED_MINIDUMP", "report": report,
         "memory_contents_included": False, "live_process_binding": "NOT_ESTABLISHED"})
-    native_started = data.get("stack_unwind_status") not in (None, "UNSUPPORTED_PLATFORM")
     source["native_resources_started"] = native_started
     if native_started:
+        source["local_image_metadata"] = _metadata(image_metadata)
         source["native_resource_cleanup"] = _metadata(data.get("cleanup", {
             "status": "NOT_COLLECTED", "confirmed": False, "resource_owner": "SAVED_DBGHELP_SESSION"}))
     domain = "MINIDUMP_RECORDED:" + stable.hashes[path]

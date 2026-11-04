@@ -2,6 +2,7 @@
 from contextlib import closing
 import ctypes as C
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
@@ -207,6 +208,9 @@ class R40DumpContracts(unittest.TestCase):
         report["data"].update(stack_unwind_status="INCOMPLETE_EVIDENCE", cleanup={
             "status": "COMPLETED", "confirmed": True, "offline_owner_retained": False,
             "resource_owner": "SAVED_DBGHELP_SESSION"})
+        report["data"]["stack_unwind"] = {"local_image_metadata": {
+            "source": "LOCAL_PINNED_PE_UNWIND_METADATA",
+            "sha256": hashlib.sha256(image.read_bytes()).hexdigest()}}
         with patch("blackbox_core.deep_dump.inspect_dump", return_value=report) as inspection:
             case = create_investigation([{"source_type": "DUMP_METADATA", "path": str(self.path),
                                          "image_path": str(image), "pdb_path": str(pdb)}])
@@ -224,6 +228,12 @@ class R40DumpContracts(unittest.TestCase):
         cleanup = case["run_receipt"]["cleanup"]
         self.assertTrue(cleanup["confirmed"])
         self.assertEqual(cleanup["scope"], "NORMALIZATION_SOURCE_READ_HANDLES_AND_OFFLINE_UNWIND")
+        report["data"]["stack_unwind"]["local_image_metadata"]["sha256"] = "0" * 64
+        with patch("blackbox_core.deep_dump.inspect_dump", return_value=report):
+            with self.assertRaisesRegex(InvestigationError, "PE_METADATA_SOURCE_HASH_MISMATCH"):
+                create_investigation([{"source_type": "DUMP_METADATA", "path": str(self.path),
+                                       "image_path": str(image), "pdb_path": str(pdb)}])
+        report["data"]["stack_unwind"]["local_image_metadata"]["sha256"] = hashlib.sha256(image.read_bytes()).hexdigest()
 
         def mutate_image(*args, **kwargs):
             image.write_bytes(b"MUTATED_DURING_CONTRACT_INSPECTION")
@@ -579,6 +589,122 @@ class R40SymbolReadCallbackContracts(unittest.TestCase):
         self.assertFalse(self.callbacks[0](1234, 4096, C.addressof(self.destination), 8, self.received))
         self.assertEqual(self.received[0], 0)
         self.assertEqual(adapter.reason, "DUMP_MEMORY_CALLBACK_READ_BUDGET")
+
+
+def typed_pe_fixture():
+    """Synthetic PE64 framing only, never native unwind acceptance."""
+    data = bytearray(0xA00)
+    data[:2] = b"MZ"
+    struct.pack_into("<I", data, 60, 0x80)
+    data[0x80:0x84] = b"PE\0\0"
+    struct.pack_into("<HHIIIHH", data, 0x84, 0x8664, 3, 123, 0, 0, 240, 0)
+    opt = 0x98
+    struct.pack_into("<H", data, opt, 0x20B)
+    struct.pack_into("<II", data, opt + 56, 0x4000, 0x200)
+    struct.pack_into("<I", data, opt + 108, 16)
+    struct.pack_into("<II", data, opt + 112 + 3 * 8, 0x2100, 12)
+    struct.pack_into("<II", data, opt + 112 + 6 * 8, 0x2000, 28)
+    for index, (va, vs, count, offset, flags) in enumerate((
+        (0x1000, 0x200, 0x200, 0x200, 0x60000020),
+        (0x2000, 0x800, 0x400, 0x400, 0x40000040),
+        (0x3000, 0x200, 0x200, 0x800, 0xC0000040))):
+        at = opt + 240 + index * 40
+        struct.pack_into("<4I", data, at + 8, vs, va, count, offset)
+        struct.pack_into("<I", data, at + 36, flags)
+    record = b"RSDS" + bytes(range(1, 17)) + struct.pack("<I", 7) + b"fixture.pdb\0"
+    struct.pack_into("<I", data, 0x400 + 12, 2)
+    struct.pack_into("<III", data, 0x400 + 16, len(record), 0x2040, 0x440)
+    data[0x440:0x440 + len(record)] = record
+    struct.pack_into("<III", data, 0x500, 0x1000, 0x1010, 0x2120)
+    data[0x520:0x524] = b"\x01\0\0\0"
+    return data
+
+
+class R40TypedPEMetadataContracts(unittest.TestCase):
+    def provider(self, raw=None, check=None):
+        from blackbox_core.deep_pe_unwind import PinnedPEUnwindMetadata
+        from blackbox_core.decoder_native_symbols import _pe_layout
+        raw = bytes(typed_pe_fixture() if raw is None else raw)
+        self.raw = raw
+        stream = io.BytesIO(raw)
+        pe = _pe_layout(stream, len(raw))
+        return PinnedPEUnwindMetadata(stream, len(raw), pe, 0x140000000, check or (lambda: None))
+
+    def test_only_typed_headers_runtime_function_and_unwind_info_are_file_backed(self):
+        provider = self.provider()
+        for rva, size, role in ((0, 64, "PE_HEADERS"), (0x2100, 12, "RUNTIME_FUNCTION_TABLE"),
+                                (0x2120, 4, "UNWIND_INFO")):
+            value, actual = provider.read(0x140000000 + rva, size)
+            self.assertEqual(actual, role)
+            self.assertEqual(len(value), size)
+        self.assertEqual(provider.sha256, hashlib.sha256(self.raw).hexdigest())
+        self.assertEqual(provider.facts()["source"], "LOCAL_PINNED_PE_UNWIND_METADATA")
+
+    def test_code_mutable_data_other_readonly_bytes_virtual_tail_and_overflow_are_refused(self):
+        provider = self.provider()
+        for rva, size in ((0x1000, 8), (0x3000, 8), (0x2040, 8), (0x2500, 8),
+                          (0x2120, 8), (0x3FFF, 8), (0x4000, 8)):
+            with self.assertRaises(ValueError):
+                provider.read(0x140000000 + rva, size)
+        with self.assertRaises(ValueError):
+            provider.read(2**64 - 1, 8)
+
+    def test_overlap_writable_metadata_unknown_version_and_chain_cycle_are_refused(self):
+        for mutate in (
+            lambda raw: struct.pack_into("<I", raw, 0x98 + 240 + 40 + 12, 0x1000),
+            lambda raw: struct.pack_into("<I", raw, 0x98 + 240 + 40 + 36, 0xC0000040),
+            lambda raw: raw.__setitem__(0x520, 3),
+            lambda raw: (raw.__setitem__(0x520, 0x21), struct.pack_into("<III", raw, 0x524, 0x1000, 0x1010, 0x2120))):
+            raw = typed_pe_fixture()
+            mutate(raw)
+            with self.assertRaises(ValueError):
+                self.provider(raw)
+
+    def test_captured_bytes_win_and_ambiguous_or_partial_capture_never_uses_pe(self):
+        from blackbox_core.deep_native_stacks import _SavedMemoryAdapter, _saved_memory_callbacks
+        from blackbox_core import deep_native_win as win
+        provider = self.provider()
+        destination = C.create_string_buffer(8)
+        received = C.pointer(win.U32())
+        for missing in (None, "DUMP_UNWIND_MEMORY_AMBIGUOUS", "DUMP_UNWIND_MEMORY_PARTIAL_CAPTURE",
+                        "DUMP_UNWIND_MEMORY_NOT_CAPTURED"):
+            def captured(*_):
+                if missing:
+                    raise ValueError(missing)
+                return b"CAPTURED"
+            adapter = _SavedMemoryAdapter(1234, captured, lambda: None)
+            adapter.metadata_provider = provider
+            callbacks = _saved_memory_callbacks(adapter, C.CFUNCTYPE)
+            answer = callbacks[0](1234, 0x140000000, C.addressof(destination), 8, received)
+            self.assertEqual(bool(answer), missing in (None, "DUMP_UNWIND_MEMORY_NOT_CAPTURED"))
+            if missing is None:
+                self.assertEqual(destination.raw, b"CAPTURED")
+                self.assertEqual(adapter.counters["local_image_metadata_reads"], 0)
+            elif missing == "DUMP_UNWIND_MEMORY_NOT_CAPTURED":
+                self.assertEqual(destination.raw, self.raw[:8])
+                self.assertEqual(adapter.counters["local_image_metadata_reads"], 1)
+            else:
+                self.assertEqual(received[0], 0)
+                self.assertEqual(adapter.counters["local_image_metadata_reads"], 0)
+
+    def test_distinct_unwind_records_cannot_partially_overlap(self):
+        raw = typed_pe_fixture()
+        struct.pack_into("<I", raw, 0x98 + 112 + 3 * 8 + 4, 24)
+        struct.pack_into("<III", raw, 0x50C, 0x1020, 0x1030, 0x2124)
+        raw[0x520:0x524] = b"\x01\0\x04\0"
+        raw[0x524:0x528] = b"\x01\0\0\0"
+        with self.assertRaisesRegex(ValueError, "TYPED_METADATA_OVERLAP"):
+            self.provider(raw)
+
+    def test_cancellation_and_metadata_read_budget_are_enforced(self):
+        def cancelled():
+            raise InterruptedError("CANCELLED")
+        with self.assertRaises(InterruptedError):
+            self.provider(check=cancelled)
+        provider = self.provider()
+        provider.read_bytes = 8 * 1024**2
+        with self.assertRaisesRegex(ValueError, "METADATA_READ_BUDGET"):
+            provider.read(0x140000000, 8)
 
 
 class R40ServiceOwnerIsolation(unittest.TestCase):
