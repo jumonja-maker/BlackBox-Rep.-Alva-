@@ -27,6 +27,7 @@ SECTIONS = (
     ("verification", "Verification", "Проверка"),
     ("recurrences", "Recurrences", "Повторения"),
     ("integrity", "Source integrity and cleanup", "Источники и очистка"),
+    ("crash", "Crash and saved dump evidence", "Данные сбоя и сохранённого дампа"),
 )
 RELATION_COLORS = {"EXACT_IDENTITY": "#087b76", "DIRECT_REFERENCE": "#087b76",
     "BOUNDED_TIME_CORRELATION": "#416a9a", "OBSERVED_DEPENDENCY": "#416a9a",
@@ -182,6 +183,9 @@ class InvestigationGraphPanel(QWidget):
         self._scenario_context, self._app_context = {}, {}
         self._context_scope_sources = None
         self._requires_explicit_sources = False
+        # Only an explicit local selection can authorize this process's offline
+        # cleanup retry. Imported cases never supply a resource owner or path.
+        self._offline_dump_path = None
         self.setObjectName("investigationGraphWorkspace")
         self._build()
         self.bridge.result_ready.connect(self._received)
@@ -381,6 +385,39 @@ class InvestigationGraphPanel(QWidget):
             'Retry owned cleanup', 'Повторить очистку своих ресурсов', self.retry_owned_cleanup)
         integrity_page.addLayout(integrity_actions)
         self._add_page(integrity_page)
+        crash_page = QVBoxLayout()
+        self.crash_summary = _plain()
+        self.crash_summary.setObjectName('invCrashSummary')
+        crash_page.addWidget(self.crash_summary)
+        crash_actions = ActionGrid(max_columns=2)
+        self.saved_dump_button = self._button(crash_actions, 'invOpenSavedDump',
+            'Inspect saved dump with built-in reader…', 'Открыть дамп встроенным анализатором…', self.choose_saved_dump)
+        self.retry_offline_dump_button = self._button(crash_actions, 'invRetryOfflineDumpCleanup',
+            'Retry this process’s offline symbol cleanup', 'Повторить очистку офлайн-символов этого процесса', self.retry_offline_dump_cleanup)
+        crash_page.addLayout(crash_actions)
+        self.crash_kind = QComboBox()
+        self.crash_kind.setObjectName('invCrashKind')
+        for key, en, ru in (('events', 'Recorded failure events / WER candidates', 'События сбоев / кандидаты WER'),
+                ('dumps', 'Saved dump metadata', 'Метаданные дампов'), ('modules', 'Recorded modules', 'Записанные модули'),
+                ('threads', 'Saved thread contexts', 'Сохранённые контексты потоков'), ('frames', 'Saved stack frames', 'Кадры сохранённого стека')):
+            self.crash_kind.addItem(self.tr2(en, ru), key)
+        crash_page.addWidget(self.crash_kind)
+        table, model = self._table(crash_page, 'invCrashEvidenceTable', [
+            ('kind_label', 'Kind', 'Тип'), ('description', 'Recorded observation', 'Записанное наблюдение'),
+            ('evidence_status', 'Scope / status', 'Область / статус'), ('source_record_id', 'Source record', 'Запись источника')])
+        self._models['crash'], self._tables['crash'] = model, table
+        self.crash_kind.currentIndexChanged.connect(self._render_crash_rows)
+        crash_links = ActionGrid(max_columns=3)
+        self.crash_previous_button = self._button(crash_links, 'invCrashPrevious', 'Previous records', 'Предыдущие записи', lambda: self._page_crash(-1))
+        self.crash_next_button = self._button(crash_links, 'invCrashNext', 'Next records', 'Следующие записи', lambda: self._page_crash(1))
+        self.crash_graph_button = self._button(crash_links, 'invCrashOpenEvidence', 'Show recorded source in graph', 'Показать записанный источник в графе', self.open_crash_evidence)
+        crash_page.addLayout(crash_links)
+        self.crash_report = QPlainTextEdit()
+        self.crash_report.setObjectName('invCrashReport')
+        self.crash_report.setReadOnly(True)
+        self.crash_report.setMaximumHeight(220)
+        crash_page.addWidget(self.crash_report)
+        self._add_page(crash_page)
         links = ActionGrid(max_columns=3)
         self.thread_button = self._button(links, "invOpenThread", "Show thread evidence", "Показать доказательства потока", self.show_thread)
         self.stack_button = self._button(links, "invOpenStack", "Show stack / module", "Показать стек / модуль", self.show_stack)
@@ -407,6 +444,10 @@ class InvestigationGraphPanel(QWidget):
             widget.setText(self.tr2(en, ru))
         for i, (_, en, ru) in enumerate(SECTIONS):
             self.section.setItemText(i, self.tr2(en, ru))
+        for i, (en, ru) in enumerate((('Recorded failure events / WER candidates', 'События сбоев / кандидаты WER'),
+                ('Saved dump metadata', 'Метаданные дампов'), ('Recorded modules', 'Записанные модули'),
+                ('Saved thread contexts', 'Сохранённые контексты потоков'), ('Saved stack frames', 'Кадры сохранённого стека'))):
+            self.crash_kind.setItemText(i, self.tr2(en, ru))
         for model in self._models.values():
             model.language = self.window.language
             model.headerDataChanged.emit(Qt.Orientation.Horizontal, 0, len(model.columns) - 1)
@@ -421,6 +462,7 @@ class InvestigationGraphPanel(QWidget):
             self.action_combo.setItemText(i, basis + self.tr2(en, ru) + " · " + str(descriptor.get("availability", "NOT_ESTABLISHED")))
         self._render_summary()
         self._render_integrity()
+        self._render_crash()
         self._render_binding()
         self._controls()
 
@@ -463,6 +505,52 @@ class InvestigationGraphPanel(QWidget):
             self.sources.append({"source_type": source_type, "path": path})
             self._context_scope_sources = None
             self._render_summary()
+
+    def choose_saved_dump(self):
+        if self._closing or self.bridge.busy or self.deep_panel.bridge.busy or self._pending_native:
+            return False
+        generation = self.bridge.generation
+        path, _ = QFileDialog.getOpenFileName(self, self.tr2('Saved minidump', 'Сохранённый минидамп'), '', 'Minidump (*.dmp *.mdmp)')
+        if not path:
+            return False
+        modes = [self.tr2('Metadata and captured context only', 'Только метаданные и записанный контекст'),
+                 self.tr2('Unwind using an explicitly selected local PE / optional PDB', 'Разобрать стек с явно выбранным локальным PE / необязательным PDB')]
+        mode, ok = QInputDialog.getItem(self, 'BLACK.BOX', self.tr2('Local analysis', 'Локальный анализ'), modes, 0, False)
+        if not ok:
+            return False
+        image_path = pdb_path = None
+        if mode == modes[1]:
+            image_path, _ = QFileDialog.getOpenFileName(self, self.tr2('Matching local PE image', 'Подходящий локальный PE-файл'), '', 'PE image (*.exe *.dll *.sys)')
+            if not image_path:
+                return False
+            pdb_path, _ = QFileDialog.getOpenFileName(self,
+                self.tr2('Matching local PDB (Cancel: no symbols)', 'Подходящий локальный PDB (Отмена: без символов)'), '', 'PDB (*.pdb)')
+        if generation != self.bridge.generation:
+            return False
+        return self.open_saved_dump(path, image_path=image_path, pdb_path=pdb_path or None)
+
+    def open_saved_dump(self, path, *, image_path=None, pdb_path=None):
+        """Read an explicitly chosen saved file, without binding a live PID."""
+        if self._closing or self.bridge.busy or self.deep_panel.bridge.busy or self._pending_native:
+            return False
+        if not isinstance(path, str) or not path or (pdb_path and not image_path):
+            return False
+        descriptor = {'source_type': 'DUMP_METADATA', 'path': path}
+        if image_path:
+            descriptor['image_path'] = image_path
+        if pdb_path:
+            descriptor['pdb_path'] = pdb_path
+        self._offline_dump_path = path
+        self.open_case_context([descriptor])
+        self.section.setCurrentIndex(self.section.findData('crash'))
+        return self.build_case()
+
+    def retry_offline_dump_cleanup(self):
+        if self._closing or self.bridge.busy or not self._offline_dump_path:
+            return False
+        # Neither this path nor any imported claim identifies an admin helper.
+        # The native API retries only its own current-process DbgHelp owner.
+        return self.bridge.submit('cleanup_offline_dump', path=self._offline_dump_path)
 
     def edit_context(self):
         if self.bridge.busy or self.deep_panel.bridge.busy or self._pending_native or (self.case is None and not self.sources):
@@ -557,6 +645,7 @@ class InvestigationGraphPanel(QWidget):
         self._set_actions(case.get("actions", []))
         self._render_summary()
         self._render_integrity()
+        self._render_crash(select_first=True)
         self._render_binding()
         self._controls()
         if self._invalid_saved_grouping:
@@ -588,6 +677,98 @@ class InvestigationGraphPanel(QWidget):
             self.tr2('Producer authentication: ', 'Подлинность производителя: ') + _value(source.get('producer_authentication', 'NOT_ESTABLISHED')),
             self.tr2('Cleanup: ', 'Очистка: ') + _value(cleanup, 1200)]
         self.integrity_receipt.setPlainText('\n'.join(lines))
+
+    def _render_crash(self, *, select_first=False):
+        if not hasattr(self, 'crash_summary'):
+            return
+        report = (self.case or {}).get('crash_investigation')
+        if not isinstance(report, dict):
+            self.crash_summary.setText(self.tr2('Crash projection was not recorded for this investigation.',
+                'Проекция данных сбоя для этого расследования не записана.'))
+            self.crash_report.setPlainText(self.tr2('Cause: UNKNOWN. Choose saved evidence explicitly.',
+                'Причина: UNKNOWN. Явно выберите сохранённые данные.'))
+        else:
+            if select_first:
+                first = next((i for i in range(self.crash_kind.count())
+                    if isinstance(report.get(self.crash_kind.itemData(i)), list) and report[self.crash_kind.itemData(i)]), 0)
+                self.crash_kind.setCurrentIndex(first)
+            summary = report.get('summary') or {}
+            coverage = report.get('coverage') or {}
+            status = {'INCOMPLETE_EVIDENCE': self.tr2('Incomplete evidence', 'Неполные данные'),
+                      'NOT_COLLECTED': self.tr2('No crash data collected', 'Данные сбоя не собраны')}.get(report.get('status'), _value(report.get('status')))
+            self.crash_summary.setText(status + self.tr2(' · Events / dumps / threads / frames: ', ' · События / дампы / потоки / кадры: ') +
+                ' / '.join(str(summary.get(key, 0)) for key in ('failure_events', 'saved_dumps', 'threads', 'frames')))
+            self.crash_report.setPlainText(self.tr2(
+                'Cause: UNKNOWN. A recorded exception, module or process exit does not prove the internal cause. '
+                'WER image/time candidates remain unattributed to a process instance. Dump PID and second-resolution creation time do not bind a live process.\n'
+                'The captured PC is separate from DbgHelp-unwound callers; missing callers are not invented. Local PE/PDB verification and source line status remain explicit. '
+                'Source lines are metadata; source code is not read. Full paths and memory bytes are excluded from this projection. At most 2000 records per kind, 100 per page, are shown.\n',
+                'Причина: UNKNOWN. Записанное исключение, модуль или завершение процесса не доказывает внутреннюю причину. '
+                'Кандидаты WER по имени/времени не привязаны к экземпляру процесса. PID дампа и время создания с точностью до секунды не привязывают живой процесс.\n'
+                'Записанный PC отделён от вызывающих кадров, полученных DbgHelp; отсутствующие кадры не восстанавливаются догадками. Проверка локального PE/PDB и статус строки исходников указаны явно. '
+                'Строки — метаданные; исходный код не читается. Полные пути и байты памяти исключены из этой проекции. Показано не более 2000 записей каждого типа, по 100 на странице.\n') +
+                self.tr2('Coverage: ', 'Полнота: ') + _value(coverage, 1800) + '\n' +
+                self.tr2('Recorded limits: ', 'Записанные ограничения: ') + _value(report.get('limitations'), 2400))
+        self._render_crash_rows()
+
+    def _render_crash_rows(self, *_):
+        if 'crash' not in self._models:
+            return
+        report = (self.case or {}).get('crash_investigation') or {}
+        kind = self.crash_kind.currentData()
+        raw = report.get(kind, []) if isinstance(report, dict) else []
+        rows = []
+        for value in raw[:2000] if isinstance(raw, list) else []:
+            if not isinstance(value, dict):
+                continue
+            row = dict(value)
+            if kind == 'events':
+                candidate = row.get('classification') == 'UNATTRIBUTED_WER_REPORT_CANDIDATE_NOT_TARGET_CRASH_PROOF'
+                description = _value(row.get('provider')) + ' · ' + _value(row.get('event_id')) + ' · ' + _value(row.get('exception_code'))
+                status = self.tr2('Unattributed WER candidate; not target crash proof', 'Непривязанный кандидат WER; сбой цели не доказан') if candidate else self.tr2('Recorded failure event; internal cause unknown', 'Записанное событие сбоя; внутренняя причина неизвестна')
+            elif kind == 'dumps':
+                description = _value(row.get('file')) + ' · ' + _value(row.get('architecture'))
+                status = self.tr2('Exception recorded: ', 'Исключение записано: ') + str(row.get('exception_stream_recorded')) + ' · ' + _value(row.get('exception_code'))
+            elif kind == 'modules':
+                description = _value(row.get('name')) + ' · ' + _value(row.get('base_address'))
+                status = _value(row.get('module_binding'))
+            elif kind == 'threads':
+                description = 'TID ' + _value(row.get('tid')) + ' · ' + _value(row.get('context_status'))
+                status = _value(row.get('unwind_status')) + self.tr2(' · completeness not proven', ' · полнота не доказана')
+            else:
+                description = 'TID ' + _value(row.get('tid')) + ' #' + _value(row.get('ordinal')) + ' · ' + _value(row.get('recorded_symbol') or row.get('address'))
+                if row.get('recorded_source_file'):
+                    description += ' · ' + _value(row.get('recorded_source_file')) + ':' + _value(row.get('recorded_source_line'))
+                status = _value(row.get('origin')) + ' · ' + _value(row.get('recorded_symbol_status')) + ' · ' + _value(row.get('recorded_source_status'))
+            row.update(kind_label=self.crash_kind.currentText(), description=description, evidence_status=status)
+            rows.append(row)
+        self._models['crash'].set_rows(rows)
+        self._controls()
+
+    def _selected_crash_node(self):
+        table, model = self._tables['crash'], self._models['crash']
+        selected = table.selectionModel().selectedRows()
+        if not selected:
+            return None
+        row = model.data(model.index(selected[0].row(), 0), Qt.ItemDataRole.UserRole)
+        identifier = row.get('node_id') if isinstance(row, dict) else None
+        return identifier if any(node.get('node_id') == identifier and
+            all(row.get(key) == node.get(target) for key, target in (
+                ('source_id', 'source_identity'), ('source_record_id', 'source_record_id'), ('source_sha256', 'source_sha256')))
+            for node in (self.case or {}).get('nodes', [])) else None
+
+    def open_crash_evidence(self):
+        identifier = self._selected_crash_node()
+        if identifier is None or not self.select_node(identifier):
+            return False
+        self.section.setCurrentIndex(self.section.findData('graph'))
+        return True
+
+    def _page_crash(self, direction):
+        model = self._models['crash']
+        last = max(0, (len(model.rows) - 1) // model.page_size) * model.page_size
+        model.set_rows(model.rows, offset=min(last, max(0, model.offset + direction * model.page_size)))
+        self._controls()
 
     def _owned_cleanup_pending(self):
         from blackbox_core.optional_jobs import OwnedProcess
@@ -634,7 +815,8 @@ class InvestigationGraphPanel(QWidget):
             return
         record = model.data(model.index(rows[0].row(), 0), Qt.ItemDataRole.UserRole)
         self._show_details(record)
-        if record.get("node_id"):
+        linked = model is not self._models['crash'] or self._selected_crash_node() is not None
+        if linked and record.get("node_id") and any(node.get('node_id') == record['node_id'] for node in (self.case or {}).get('nodes', [])):
             self._selected_node_id = record["node_id"]
             self.graph.show_graph(self.case or {}, self._selected_node_id)
         if record.get("hypothesis_id"):
@@ -1269,6 +1451,11 @@ class InvestigationGraphPanel(QWidget):
             self._show_details(value)
             self._set_status('Owned cleanup result: ' + str(value.get('status', 'RECOVERY_UNCONFIRMED')),
                              'Результат очистки своих ресурсов: ' + str(value.get('status', 'RECOVERY_UNCONFIRMED')))
+        elif operation == 'cleanup_offline_dump':
+            value = packet.get('offline_cleanup') or {}
+            self._show_details(value)
+            self._set_status('Current-process offline symbol cleanup: ' + str(value.get('status', 'RECOVERY_UNCONFIRMED')),
+                             'Очистка офлайн-символов этого процесса: ' + str(value.get('status', 'RECOVERY_UNCONFIRMED')))
         self._controls()
 
     def _controls(self, *_):
@@ -1283,6 +1470,12 @@ class InvestigationGraphPanel(QWidget):
         self.build_button.setEnabled(can_change_case)
         self.add_source_button.setEnabled(can_change_case)
         self.open_button.setEnabled(can_change_case)
+        self.saved_dump_button.setEnabled(can_change_case)
+        self.retry_offline_dump_button.setEnabled(not busy and not self._closing and bool(self._offline_dump_path))
+        self.crash_graph_button.setEnabled(active and self._selected_crash_node() is not None)
+        crash_model = self._models['crash']
+        self.crash_previous_button.setEnabled(active and crash_model.offset > 0)
+        self.crash_next_button.setEnabled(active and crash_model.offset + crash_model.page_size < len(crash_model.rows))
         self.context_button.setEnabled(can_change_case and bool(self.case is not None or self.sources))
         self.cancel_button.setEnabled(busy)
         self.export_button.setEnabled(active)

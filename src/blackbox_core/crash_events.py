@@ -90,9 +90,12 @@ def parse_event(xml,*,pid,start_utc_ns,end_utc_ns,expected_created_100ns=None):
  if (not named_pids or any(value is None or not 0<value<=0xFFFFFFFF for value in named_pids)
      or len(set(named_pids))!=1 or named_pids[0]!=pid):return None
  creation=[_payload_integer(data.get(k)) for k in CREATION_NAMES if k in data]
- creation=[n for n in creation if n]
- if len(set(creation))>1:return None
- recorded_creation=creation[0] if creation else None
+ # A malformed recognized alias cannot disappear while another alias grants
+ # exact birth authority. Retain the PID-only observation, without attestation.
+ if any(n is None or n==0 for n in creation):recorded_creation=None
+ else:
+  if len(set(creation))>1:return None
+  recorded_creation=creation[0] if creation else None
  if recorded_creation is not None and (recorded_creation-116444736000000000)*100>stamp+999:return None
  if expected_created_100ns is not None:
   if type(expected_created_100ns) is not int or not 0<expected_created_100ns<2**64:raise ValueError('INVALID_EVENT_TARGET_FILETIME')

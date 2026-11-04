@@ -1184,15 +1184,26 @@ def _investigation_v2(spec, selection, out):
 def _dump(spec, selection, out):
     from .deep_dump import inspect_dump
     path = safe_path(Path(spec["path"]))
-    stable = _StableSource([path], out.budget)
+    _require(not spec.get("pdb_path") or bool(spec.get("image_path")), "LOCAL_IMAGE_REQUIRED_FOR_DUMP_UNWIND")
+    _require("max_frames" not in spec, "DUMP_NORMALIZATION_USES_FIXED_FRAME_BUDGET")
+    related = [(key, safe_path(Path(spec[key]))) for key in ("image_path", "pdb_path") if spec.get(key)]
+    stable = _StableSource([path, *[value for _, value in related]], out.budget)
+    options = {key: str(value) for key, value in related}
     report = inspect_dump(path, max_bytes=min(out.budget.max_source_bytes, 2 * 1024**3),
-        cancel_event=out.budget, deadline=out.budget.deadline)
-    source = _source("DUMP_METADATA", stable, selection=selection, hash_roles=["minidump"])
+        cancel_event=out.budget, deadline=out.budget.deadline, **options)
+    data = report.get("data", {})
+    _require(data.get("sha256") == stable.hashes[path], "SOURCE_CHANGED_BETWEEN_HASH_AND_DUMP_INSPECTION")
+    source = _source("DUMP_METADATA", stable, selection=selection,
+                     hash_roles=["minidump", *["local_image" if key == "image_path" else "local_pdb" for key, _ in related]])
     if not _register_source(source, stable, path, out):
         return
     out.add(source, "minidump:metadata", "ARTIFACT", metadata={"kind": "SAVED_MINIDUMP", "report": report,
         "memory_contents_included": False, "live_process_binding": "NOT_ESTABLISHED"})
-    data = report.get("data", {})
+    native_started = data.get("stack_unwind_status") not in (None, "UNSUPPORTED_PLATFORM")
+    source["native_resources_started"] = native_started
+    if native_started:
+        source["native_resource_cleanup"] = _metadata(data.get("cleanup", {
+            "status": "NOT_COLLECTED", "confirmed": False, "resource_owner": "SAVED_DBGHELP_SESSION"}))
     domain = "MINIDUMP_RECORDED:" + stable.hashes[path]
     process = ({"kind": "UNRESOLVED_PROCESS", "pid": data["recorded_pid"],
                 "source_scope": source["source_id"], "exact": False}
@@ -1233,7 +1244,8 @@ def _dump(spec, selection, out):
                 thread_identity=thread, time_domain=domain,
                 metadata={"frames": frames[:64], "method": saved.get("method", "CAPTURED_CONTROL_CONTEXT_PC_ONLY"),
                     "context_status": row.get("context", {}).get("status"),
-                    "context_source": "SAVED_MINIDUMP_THREAD_CONTEXT",
+                    "context_source": saved.get("context_source", row.get("context_source", "SAVED_MINIDUMP_THREAD_CONTEXT")),
+                    "frames_omitted_from_view": max(0, len(frames) - 64),
                     "unwind_status": saved.get("status", row.get("context", {}).get("unwind_status", "NOT_ESTABLISHED")),
                     "record_refs": [record], "record_ref_relation": "SAVED_MINIDUMP_STACK",
                     "memory_contents_included": False, "root_cause": "UNKNOWN"})

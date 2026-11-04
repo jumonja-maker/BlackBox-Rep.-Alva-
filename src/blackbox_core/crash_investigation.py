@@ -157,6 +157,32 @@ def validate_crash_report(report, *, nodes=None, budget=None):
     return report
 
 
+def crash_report_html(report, *, nodes=None, budget=None):
+    """Human-readable metadata only; source references remain visible."""
+    from html import escape
+    budget = use_budget(budget)
+    validate_crash_report(report, nodes=nodes, budget=budget)
+    parts = ["<h2>Crash evidence / Сведения об аварии</h2>",
+        "<p>Status: " + escape(report["status"]) + ". Root cause: UNKNOWN. "
+        "Recorded exceptions and WER candidates do not establish an internal cause.</p>"]
+    for title, rows, columns in (
+        ("Windows events / События Windows", report["events"], ("provider", "event_id", "classification", "node_id")),
+        ("Saved dumps / Сохранённые дампы", report["dumps"], ("file", "exception_code", "live_process_binding", "node_id")),
+        ("Saved frames / Сохранённые кадры", report["frames"], ("tid", "recorded_symbol", "recorded_source_file", "node_id"))):
+        budget.check()
+        parts.append("<h3>" + title + "</h3><table border='1' style='overflow-wrap:anywhere'><tr>" +
+                     "".join("<th>" + escape(key) + "</th>" for key in columns) + "</tr>")
+        for row in rows[:200]:
+            budget.check()
+            parts.append("<tr>" + "".join("<td>" + escape(str(row[key]) if row[key] is not None else "NOT_RECORDED") +
+                                         "</td>" for key in columns) + "</tr>")
+        parts.append("</table>")
+        if len(rows) > 200:
+            parts.append("<p>Additional metadata rows remain in the source-linked JSON section.</p>")
+    parts.append("<p>Dump/memory bytes excluded. Live binding and complete stack coverage are not established.</p>")
+    return "".join(parts)
+
+
 def project_crash_evidence(case, *, budget=None, cancel_event=None):
     """Project selected graph evidence without authenticating imported labels."""
     from .evidence_graph import validate_case

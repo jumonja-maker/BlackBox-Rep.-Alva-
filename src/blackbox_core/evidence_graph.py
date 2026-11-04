@@ -362,6 +362,9 @@ def validate_case(case, *, budget=None):
         if name in case and (type(case[name]) is not list or len(case[name]) > 10000):
             raise InvestigationError("INVALID_INVESTIGATION_" + name.upper())
     _models(case, indexed, edge_ids, budget)
+    if "crash_investigation" in case:
+        from .crash_investigation import validate_crash_report
+        validate_crash_report(case["crash_investigation"], nodes=indexed, budget=budget)
     if "_source_paths" in case:
         paths = case["_source_paths"]
         if (type(paths) is not dict or len(paths) > 64 or any(key not in sources or type(value) is not str or

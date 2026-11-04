@@ -3,6 +3,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import sqlite3
 import struct
 import sys
 import tempfile
@@ -17,6 +18,8 @@ from blackbox_core.deep_dump import inspect_dump, unwind_dump
 from blackbox_core.crash_investigation import project_crash_evidence, validate_crash_report
 from blackbox_core.investigation_graph_contracts import InvestigationError
 from blackbox_core.investigation_v3 import create_investigation, export_investigation, load_investigation
+from blackbox_core.evidence_graph import validate_case
+from blackbox_core.investigation_graph_contracts import canonical_json
 from blackbox_core.deep_contracts import ActionRequest, ProcessIdentity
 from blackbox_core.deep_service import InspectorService
 from test_deep_dump import dump_bytes
@@ -165,6 +168,7 @@ class R40DumpContracts(unittest.TestCase):
         case = create_investigation([{"source_type": "DUMP_METADATA", "path": str(self.path)}],
                                     index_path=self.root / "case.sqlite3")
         projected = project_crash_evidence(case)
+        self.assertEqual(case["crash_investigation"], projected)
         self.assertEqual(projected["summary"]["saved_dumps"], 1)
         self.assertEqual(projected["summary"]["recorded_exceptions"], 1)
         self.assertEqual(projected["summary"]["unwound_callers"], 0)
@@ -176,8 +180,12 @@ class R40DumpContracts(unittest.TestCase):
             export_investigation(case, destination, format=format)
             if format == "json":
                 loaded = json.loads(destination.read_text())
+                validate_case(loaded)
+                self.assertEqual(loaded["crash_investigation"]["summary"], projected["summary"])
                 self.assertEqual(project_crash_evidence(loaded)["summary"], projected["summary"])
             data = destination.read_text()
+            if format == "html":
+                self.assertIn("Crash evidence / Сведения об аварии", data)
             self.assertNotIn("private-user", data)
             self.assertNotIn("deadbeef", data)
             with self.assertRaises(FileExistsError):
@@ -185,6 +193,90 @@ class R40DumpContracts(unittest.TestCase):
         self.assertEqual(self.path.read_bytes(), raw)
         self.assertEqual(project_crash_evidence(load_investigation(self.root / "case.sqlite3"))["summary"],
                          projected["summary"])
+
+    def test_explicit_pe_pdb_roles_and_native_cleanup_are_in_the_real_creation_receipt(self):
+        self.path.write_bytes(crash_dump())
+        image, pdb = self.root / "selected.exe", self.root / "selected.pdb"
+        image.write_bytes(b"CONTRACT_SELECTED_IMAGE_NOT_NATIVE_EXECUTABLE")
+        pdb.write_bytes(b"CONTRACT_SELECTED_PDB_NOT_NATIVE_SYMBOL_PROOF")
+        # Native success is not simulated as acceptance: this isolates the
+        # real normalizer/facade/store plumbing and role-hash receipt boundary.
+        report = inspect_dump(self.path)
+        report["data"].update(stack_unwind_status="INCOMPLETE_EVIDENCE", cleanup={
+            "status": "COMPLETED", "confirmed": True, "offline_owner_retained": False,
+            "resource_owner": "SAVED_DBGHELP_SESSION"})
+        with patch("blackbox_core.deep_dump.inspect_dump", return_value=report) as inspection:
+            case = create_investigation([{"source_type": "DUMP_METADATA", "path": str(self.path),
+                                         "image_path": str(image), "pdb_path": str(pdb)}])
+        options = inspection.call_args.kwargs
+        self.assertEqual(options["image_path"], str(image))
+        self.assertEqual(options["pdb_path"], str(pdb))
+        self.assertNotIn("max_frames", options)
+        source = case["sources"][0]
+        manifest = {item["role"]: item["sha256"] for item in source["content_manifest"]}
+        self.assertEqual(manifest, {role: hashlib.sha256(path.read_bytes()).hexdigest()
+            for role, path in (("minidump", self.path), ("local_image", image), ("local_pdb", pdb))})
+        self.assertEqual(source["source_file_count"], 3)
+        self.assertTrue(source["native_resources_started"])
+        self.assertEqual(source["native_resource_cleanup"]["resource_owner"], "SAVED_DBGHELP_SESSION")
+        cleanup = case["run_receipt"]["cleanup"]
+        self.assertTrue(cleanup["confirmed"])
+        self.assertEqual(cleanup["scope"], "NORMALIZATION_SOURCE_READ_HANDLES_AND_OFFLINE_UNWIND")
+
+        def mutate_image(*args, **kwargs):
+            image.write_bytes(b"MUTATED_DURING_CONTRACT_INSPECTION")
+            return report
+        with patch("blackbox_core.deep_dump.inspect_dump", side_effect=mutate_image):
+            with self.assertRaisesRegex(InvestigationError, "SOURCE_CHANGED"):
+                create_investigation([{"source_type": "DUMP_METADATA", "path": str(self.path),
+                                       "image_path": str(image), "pdb_path": str(pdb)}])
+
+    def test_source_hash_must_agree_with_actual_dump_inspection_pass(self):
+        self.path.write_bytes(crash_dump())
+        report = inspect_dump(self.path)
+        report["data"]["sha256"] = "e" * 64
+        with patch("blackbox_core.deep_dump.inspect_dump", return_value=report):
+            with self.assertRaisesRegex(InvestigationError, "BETWEEN_HASH_AND_DUMP_INSPECTION"):
+                create_investigation([{"source_type": "DUMP_METADATA", "path": str(self.path)}])
+
+    def test_native_recovery_failure_stays_uncertain_at_the_facade_boundary(self):
+        from blackbox_core.deep_native import NativeError
+        self.path.write_bytes(crash_dump())
+        image = self.root / "selected.exe"
+        image.write_bytes(b"CONTRACT_ONLY_NOT_NATIVE")
+        failure = NativeError("RECOVERY_UNCONFIRMED", "CONTRACT_INJECTED_SYMCLEANUP_FAILURE")
+        failure.offline_owner_retained = True
+        failure.resource_owner = "SAVED_DBGHELP_SESSION"
+        with patch("blackbox_core.deep_dump.inspect_dump", side_effect=failure):
+            with self.assertRaises(NativeError) as caught:
+                create_investigation([{"source_type": "DUMP_METADATA", "path": str(self.path),
+                                       "image_path": str(image)}])
+        self.assertEqual(caught.exception.run_receipt["status"], "RECOVERY_UNCONFIRMED")
+        self.assertFalse(caught.exception.run_receipt["cleanup"]["confirmed"])
+        self.assertTrue(caught.exception.offline_owner_retained)
+
+    def test_readback_recomputes_a_structurally_valid_saved_view_without_source_reopening(self):
+        self.path.write_bytes(crash_dump())
+        index = self.root / "recompute.sqlite3"
+        case = create_investigation([{"source_type": "DUMP_METADATA", "path": str(self.path)}], index_path=index)
+        expected = case["crash_investigation"]["summary"]
+        # Re-signed imported JSON is integrity-consistent, not authenticated.
+        # The reader must derive the view from recorded nodes, not trust it.
+        with sqlite3.connect(index) as db:
+            row = json.loads(db.execute("SELECT content_json FROM investigation").fetchone()[0])
+            saved = row["crash_investigation"]
+            saved.update(status="NOT_COLLECTED", events=[], dumps=[], modules=[], threads=[], frames=[])
+            saved["summary"] = {key: 0 for key in saved["summary"]}
+            validate_case(row)
+            raw = canonical_json(row)
+            db.execute("UPDATE investigation SET content_json=?,content_sha256=?",
+                       (raw, hashlib.sha256(raw.encode("ascii")).hexdigest()))
+        before = index.read_bytes()
+        self.path.unlink()
+        with patch("blackbox_core.deep_dump.inspect_dump", side_effect=AssertionError("SOURCE_REOPENED")):
+            loaded = load_investigation(index)
+        self.assertEqual(loaded["crash_investigation"]["summary"], expected)
+        self.assertEqual(index.read_bytes(), before)
 
     def test_historical_pid_does_not_bind_a_new_live_instance(self):
         self.path.write_bytes(crash_dump())
@@ -238,6 +330,21 @@ class R40DumpContracts(unittest.TestCase):
 
 
 class R40EventLogContracts(unittest.TestCase):
+    def test_invalid_or_conflicting_recorded_birth_aliases_cannot_grant_exact_identity(self):
+        birth = int("1dc4c918af3c41a", 16)
+        for first, second in (("INVALID", str(birth)), ("0", str(birth)),
+                              (str(birth), "INVALID"), (str(birth), "0")):
+            xml = event_xml(birth=first).replace("</EventData>",
+                '<Data Name="FaultingProcessCreationTime">' + second + '</Data></EventData>')
+            row = parse_event(xml, pid=123, start_utc_ns=0, end_utc_ns=2**63-1,
+                              expected_created_100ns=birth)
+            self.assertEqual(row["process_instance_binding"], "BIRTH_NOT_ATTESTED")
+            self.assertIsNone(row["recorded_creation_100ns"])
+        contradictory = event_xml().replace("</EventData>",
+            '<Data Name="FaultingProcessCreationTime">' + str(birth + 1) + '</Data></EventData>')
+        self.assertIsNone(parse_event(contradictory, pid=123, start_utc_ns=0, end_utc_ns=2**63-1,
+                                    expected_created_100ns=birth))
+
     def test_creation_exactly_matches_and_logger_is_not_faulting_pid(self):
         birth = int("1dc4c918af3c41a", 16)
         answer = parse_event(event_xml(), pid=123, start_utc_ns=0, end_utc_ns=2**63-1,

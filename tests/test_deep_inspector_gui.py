@@ -471,14 +471,24 @@ class DeepInspectorGuiTests(unittest.TestCase):
 
     def test_file_dialog_actions_only_submit_explicit_chosen_paths(self):
         with patch("blackbox_universal.deep_inspector_panel.QFileDialog.getOpenFileName",
-                   side_effect=[("sample.exe", ""), ("sample.pdb", ""), ("saved.dmp", ""), ("trace.sqlite3", "")]):
+                   side_effect=[("sample.exe", ""), ("sample.pdb", ""), ("trace.sqlite3", "")]), \
+             patch.object(self.panel.investigation_graph_panel, 'choose_saved_dump', return_value=True) as saved:
             self.panel._symbols()
             self.panel._inspect_dump()
             self.panel._trace()
-        self.assertEqual(self.bridge.calls[-3][0:2], ("symbols_verify", {"pe_path": "sample.exe", "pdb_path": "sample.pdb"}))
-        self.assertEqual(self.bridge.calls[-2][0:2], ("dump_inspect", {"path": "saved.dmp"}))
+        saved.assert_called_once_with()
+        self.assertEqual(self.bridge.calls[-2][0:2], ("symbols_verify", {"pe_path": "sample.exe", "pdb_path": "sample.pdb"}))
+        self.assertNotIn('dump_inspect', [call[0] for call in self.bridge.calls])
         self.assertEqual(self.bridge.calls[-1][0:2], ("trace_evidence", {"index_path": "trace.sqlite3", "limit": 200}))
         self.assertNotIn("process_instance", self.bridge.calls[-1][1])
+
+    def test_builtin_saved_dump_is_available_before_target_without_helper_action(self):
+        self.bridge.set_target(None, None)
+        self.assertTrue(self.panel._action_buttons['dump_inspect'].isEnabled())
+        with patch.object(self.panel.investigation_graph_panel, 'choose_saved_dump', return_value=True) as saved:
+            self.panel._action_buttons['dump_inspect'].click()
+        saved.assert_called_once_with()
+        self.assertEqual(self.bridge.calls, [])
 
     def test_dump_type_destination_and_confirmation_are_explicit(self):
         with patch("blackbox_universal.deep_inspector_panel.QInputDialog.getItem", return_value=("Extended dump with memory", True)), \

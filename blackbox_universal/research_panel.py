@@ -92,7 +92,8 @@ class ResearchPanel(QWidget):
             ("Apply context","Применить контекст",self.configure),
             ("Prepare my application","Подготовить мою программу",self.prepare),
             ("Verify native PDB…","Проверить native PDB…",self.symbols),
-            ("Inspect dump stacks…","Разобрать стеки дампа…",self.inspect_dump),
+            ("Inspect saved dump (built-in)…","Исследовать дамп (встроенный анализатор)…",self.inspect_dump),
+            ("Inspect dump with optional CDB…","Исследовать дамп через необязательный CDB…",self.inspect_dump_cdb),
             ("Windows snapshot","Снимок Windows / WCT",self.native),
             ("ETW recording","Запись ETW",self.etw),
             ("EventPipe 10 s","EventPipe 10 с",self.eventpipe),
@@ -181,6 +182,17 @@ class ResearchPanel(QWidget):
         pdb,_=QFileDialog.getOpenFileName(self,self.tr("Matching native PDB","Подходящий native PDB"),"","PDB (*.pdb)")
         if pdb:self.send("symbols",pdb=pdb)
     def inspect_dump(self):
+        panel = getattr(self.window, 'deep_inspector_panel', None)
+        toggle = getattr(self.window, 'deep_inspector_toggle', None)
+        if panel is None:
+            self.details.setPlainText(self.tr('Built-in saved-dump inspection requires the desktop Evidence Graph workspace.',
+                'Встроенный анализ дампа требует рабочего пространства Графа доказательств в основном приложении.'))
+            return False
+        if toggle is not None:
+            toggle.setChecked(True)
+        return panel._inspect_dump()
+    def inspect_dump_cdb(self):
+        # Keep the original optional debugger API as an explicit alternative.
         dump,_=QFileDialog.getOpenFileName(self,self.tr("Process dump","Дамп процесса"),"","Dump (*.dmp)")
         if not dump:return
         symbols=QFileDialog.getExistingDirectory(self,self.tr("Local symbols (Cancel: none)","Локальные символы (Отмена: без них)"))

@@ -2,6 +2,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <dbghelp.h>
+#include <werapi.h>
 #include <sddl.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -16,6 +17,7 @@ static DWORD ui_tid;
 static WCHAR root_path[MAX_PATH], dump_path[MAX_PATH];
 static volatile LONG ui_waiting, burst_stop;
 static int mutex_owned;
+static HRESULT wer_flags_result;
 static unsigned long long created_100ns, frequency;
 
 static unsigned long long filetime_value(FILETIME ft) {
@@ -47,11 +49,13 @@ static void state(const char *event) {
     emit("{\"event\":\"%s\",\"pid\":%lu,\"created_100ns\":%llu,"
          "\"control_tid\":%lu,\"control_thread_created_100ns\":%llu,"
          "\"ui_tid\":%lu,\"ui_thread_created_100ns\":%llu,\"hwnd\":%llu,"
-         "\"qpc\":%llu,\"qpc_frequency\":%llu,\"ui_waiting\":%ld,\"mutex_owned\":%s}",
+         "\"qpc\":%llu,\"qpc_frequency\":%llu,\"ui_waiting\":%ld,\"mutex_owned\":%s,"
+         "\"wer_flags_hresult\":%lu,\"wer_policy\":\"%s\"}",
          event, GetCurrentProcessId(), created_100ns, GetCurrentThreadId(),
          thread_created(GetCurrentThread()), ui_tid, thread_created(ui_thread),
          (unsigned long long)(uintptr_t)ui_window, qpc(), frequency, ui_waiting,
-         mutex_owned ? "true" : "false");
+         mutex_owned ? "true" : "false", (DWORD)wer_flags_result,
+         SUCCEEDED(wer_flags_result) ? "PER_PROCESS_NO_UI_NO_HEAP_NO_QUEUE_UPLOAD_REQUEST" : "FIXTURE_WER_SUPPRESSED");
 }
 
 static LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wp, LPARAM lp) {
@@ -278,7 +282,12 @@ int wmain(int argc, WCHAR **argv) {
     int result = 0;
     if (argc != 3 || wcslen(argv[1]) >= MAX_PATH || wcslen(argv[2]) >= MAX_PATH) return 2;
     wcscpy_s(root_path, MAX_PATH, argv[1]); wcscpy_s(dump_path, MAX_PATH, argv[2]);
-    SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX);
+    /* Preserve actual OS crash observation when WER accepts process-local no-UI
+       flags. Never request upload/queueing or change machine/user policy. */
+    wer_flags_result = WerSetFlags(WER_FAULT_REPORTING_NO_UI |
+        WER_FAULT_REPORTING_FLAG_NOHEAP | WER_FAULT_REPORTING_FLAG_NO_HEAP_ON_QUEUE);
+    SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOOPENFILEERRORBOX |
+        (FAILED(wer_flags_result) ? SEM_NOGPFAULTERRORBOX : 0));
     SetUnhandledExceptionFilter(crash_filter);
     InitializeCriticalSection(&output_lock);
     if (!GetProcessTimes(GetCurrentProcess(), &created, &exited, &kernel, &user) ||

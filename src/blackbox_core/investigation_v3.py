@@ -55,15 +55,23 @@ def _create_investigation(sources, *, target_identity=None, selection=None, scen
     case["issues"] = grouped["groups"] + grouped["candidates"]
     case["coverage"]["issue_groups"] = len(grouped["groups"])
     case["coverage"]["candidate_issues"] = len(grouped["candidates"])
+    from .crash_investigation import project_crash_evidence
+    case["crash_investigation"] = project_crash_evidence(case, budget=budget)
     revalidate_sources(normalized, budget=budget)
     from .deep_tool_contracts import attach_evidence_run_receipt
+    native_sources = [source for source in case["sources"] if source.get("native_resources_started")]
+    native_cleanup = all(source.get("native_resource_cleanup", {}).get("confirmed") is True and
+                         source.get("native_resource_cleanup", {}).get("offline_owner_retained") is False
+                         for source in native_sources)
     case = attach_evidence_run_receipt(context, {**case, "status": "COMPLETED"},
         sources=case["sources"], source_revalidated=True, execution_started=True,
         coverage={"completeness": case["coverage"]["evidence_completeness"],
                   "display_graph_complete": case["coverage"]["display_graph_complete"],
                   "scope": "SOURCE_BOUND_ANALYSIS_NOT_ORIGINAL_CAPTURE_COMPLETENESS"},
-        cleanup={"status": "CONFIRMED", "confirmed": True,
-                 "scope": "NORMALIZATION_SOURCE_READ_HANDLES", "native_resources_started": False})
+        cleanup={"status": "CONFIRMED" if native_cleanup else "NOT_COLLECTED", "confirmed": native_cleanup,
+                 "scope": "NORMALIZATION_SOURCE_READ_HANDLES_AND_OFFLINE_UNWIND" if native_sources else
+                          "NORMALIZATION_SOURCE_READ_HANDLES",
+                 "native_resources_started": bool(native_sources)})
     case.pop("status")  # Keep the existing case schema; status lives in its receipt.
     if index_path is not None:
         from .investigation_graph_store import save_investigation

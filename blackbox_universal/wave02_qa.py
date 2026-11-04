@@ -10,9 +10,9 @@ import time
 import traceback
 from unittest.mock import patch
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QFileDialog, QScrollArea, QTableView, QWidget
+from PySide6.QtWidgets import QApplication, QComboBox, QDialogButtonBox, QFileDialog, QInputDialog, QScrollArea, QTableView, QWidget
 
 from .provenance import source_identity
 from .theme import font_coverage
@@ -98,6 +98,41 @@ def run_wave02_e2e(app, window, output, evidence_root, container, expected_sha):
         require(panel.section.currentData() == key and panel.pages.currentIndex() == index,
                 'WAVE02_ACTUAL_SECTION_NAVIGATION_FAILED:' + key)
 
+    def answer_input_dialog(*, text=None, select_last=False):
+        """Operate the real modal Qt dialog; only source file pickers are fixed."""
+        state = {'answered':False,'error':None}; attempts = [0]
+        def failed(error):
+            state['error']=type(error).__name__+': '+str(error)[:300]
+            dialog=QApplication.activeModalWidget()
+            if isinstance(dialog,QInputDialog):dialog.reject()
+        def answer():
+            try:
+                dialog=QApplication.activeModalWidget();attempts[0]+=1
+                if not isinstance(dialog,QInputDialog):
+                    if attempts[0]<500:QTimer.singleShot(10,answer)
+                    else:failed(TimeoutError('WAVE02_REAL_INPUT_DIALOG_NOT_SHOWN'))
+                    return
+                if select_last:
+                    box=dialog.findChild(QComboBox)
+                    require(box is not None,'WAVE02_REAL_MODE_DIALOG_COMBO_MISSING')
+                    box.setFocus();QTest.keyClick(box,Qt.Key.Key_End)
+                if text is not None:
+                    editor=dialog.findChild(QWidget,'qt_inputdlg_lineedit')
+                    if editor is None:
+                        from PySide6.QtWidgets import QLineEdit
+                        editor=dialog.findChild(QLineEdit)
+                    require(editor is not None,'WAVE02_REAL_MARK_DIALOG_EDITOR_MISSING')
+                    editor.setFocus();QTest.keyClicks(editor,text)
+                buttons=dialog.findChild(QDialogButtonBox)
+                require(buttons is not None,'WAVE02_REAL_INPUT_DIALOG_BUTTONS_MISSING')
+                button=buttons.button(QDialogButtonBox.StandardButton.Ok)
+                require(button is not None,'WAVE02_REAL_INPUT_DIALOG_OK_MISSING')
+                QTest.mouseClick(button,Qt.MouseButton.LeftButton)
+                state['answered']=True
+            except BaseException as error:failed(error)
+        QTimer.singleShot(0,answer)
+        return state
+
     def inspect_section(key, summary_name, table_name, detail_name):
         section(key)
         summary = panel.findChild(QWidget, summary_name)
@@ -173,6 +208,10 @@ def run_wave02_e2e(app, window, output, evidence_root, container, expected_sha):
                 if case_kind == 'R20' and 'R30' in scopes[container]:
                     inspect_section('delays', 'invDelaySummary', 'invDelayEvidenceTable', 'invDelayReport')
                 if case_kind == 'R40':
+                    section('crash')
+                    reveal(panel.crash_kind);panel.crash_kind.setFocus()
+                    QTest.keyClick(panel.crash_kind,Qt.Key.Key_End);app.processEvents()
+                    require(panel.crash_kind.currentData()=='frames','WAVE02_GUI_SAVED_FRAMES_KIND_NOT_SELECTED')
                     inspect_section('crash', 'invCrashSummary', 'invCrashEvidenceTable', 'invCrashReport')
                 shot = output / (case_kind + '-' + language + '.png')
                 require(window.grab().save(str(shot), 'PNG'), 'WAVE02_GUI_SCREENSHOT_WRITE_FAILED')
@@ -196,6 +235,35 @@ def run_wave02_e2e(app, window, output, evidence_root, container, expected_sha):
                             'WAVE02_GUI_INDEPENDENT_JSON_READBACK_FAILED')
                 proof['exports'].append({'case_id': panel.case['case_id'], 'format': kind,
                     'sha256': digest(path), 'bytes': path.stat().st_size, 'independent_readback': True})
+        if 'R40' in scopes[container]:
+            proof['phase']='R40_ACTUAL_SAVED_DUMP_BUTTON_AND_MATCHED_LOCAL_SYMBOLS'
+            crash=native['container_results']['R40']
+            paths=[Path(crash[key]).resolve(strict=True) for key in
+                   ('private_dump_path','local_image_path','local_pdb_path')]
+            for path in paths:inputs[str(path)]=digest(path)
+            section('crash');previous=panel.case
+            answered=answer_input_dialog(select_last=True)
+            with patch.object(QFileDialog,'getOpenFileName',side_effect=[
+                    (str(paths[0]),'Minidump (*.dmp)'),(str(paths[1]),'PE image (*.exe)'),
+                    (str(paths[2]),'PDB (*.pdb)')]):
+                click(panel.saved_dump_button)
+            require(answered['answered'] and answered['error'] is None,
+                    'WAVE02_GUI_ACTUAL_DUMP_MODE_DIALOG_NOT_OPERATED:'+str(answered['error']))
+            pump(lambda:panel.bridge.worker is None and panel.case is not None and panel.case is not previous)
+            projected=panel.case['crash_investigation']
+            require(projected['summary']['recorded_exceptions']==1 and
+                    projected['summary']['unwound_callers']>=2 and
+                    projected['root_cause']=='UNKNOWN' and
+                    not window.deep_inspector_panel.bridge.has_session,
+                    'WAVE02_GUI_SAVED_DUMP_WORKER_LOST_REAL_EXCEPTION_OR_CALLERS')
+            proof['r40_raw_dump_route']={'status':'PASS','case_id':panel.case['case_id'],
+                'source_sha256':crash['dump_sha256'],'unwound_callers':projected['summary']['unwound_callers'],
+                'actual_mode_dialog':True,'native_helper_started':False}
+            for language in ('EN','RU'):
+                window._set_language(language);section('crash')
+                reveal(panel.crash_kind);panel.crash_kind.setFocus()
+                QTest.keyClick(panel.crash_kind,Qt.Key.Key_End)
+                inspect_section('crash','invCrashSummary','invCrashEvidenceTable','invCrashReport')
         require(all(digest(path) == value for path, value in inputs.items()),
                 'WAVE02_GUI_MODIFIED_ORIGINAL_EVIDENCE')
         proof['phase'] = 'GUI_CLOSE_AND_RESOURCE_EXIT'
