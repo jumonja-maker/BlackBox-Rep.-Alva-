@@ -8,7 +8,7 @@ import re
 import stat
 import zipfile
 
-VERSION = '0.5.4'
+VERSION = '0.5.5'
 PREFIX = 'BLACK.BOX-Universal/'
 MAX_UNCOMPRESSED = 2 * 1024**3
 REQUIRED = (
