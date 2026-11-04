@@ -1,9 +1,10 @@
-"""Fail-closed tests for new owner-approved R10 v0.5.5 publication."""
+"""Owner-authorized v0.5.5 ETW repair release: exact ancestry and QA regression."""
 import copy
 import unittest
 
 from tools.publish_v055_after_ci import (
     approved_release_source, REPOSITORY, CI_NAME, APPROVED_RELEASE_BRANCH,
+    APPROVED_REPAIR_BRANCH, APPROVED_VERSION_HEAD_SHA, V055_VERSION_MAIN_SHA,
     R10_MAIN_SHA, PRIOR_RELEASE_SHA, PRIOR_ZIP_SHA256, REQUIRED_JOBS,
 )
 
@@ -21,9 +22,15 @@ class R10V055PublicationAuthorityTests(unittest.TestCase):
         self.main = SHA
         self.r10_merged = True
         self.r10_sha = R10_MAIN_SHA
+        self.version_merged = True
+        self.version_merge = V055_VERSION_MAIN_SHA
+        self.version_head = APPROVED_VERSION_HEAD_SHA
         self.version_branch = APPROVED_RELEASE_BRANCH
-        self.version_merge = SHA
-        self.parent = R10_MAIN_SHA
+        self.version_parent = R10_MAIN_SHA
+        self.version_other_parent = APPROVED_VERSION_HEAD_SHA
+        self.repair_branch = APPROVED_REPAIR_BRANCH
+        self.repair_merge = SHA
+        self.parent = V055_VERSION_MAIN_SHA
         self.other_parent = HEAD
         self.jobs = [{"name": name, "status": "completed", "conclusion": "success"}
                      for name in sorted(REQUIRED_JOBS)]
@@ -39,10 +46,20 @@ class R10V055PublicationAuthorityTests(unittest.TestCase):
             prefix + "pulls/30": {
                 "merged": self.r10_merged, "merge_commit_sha": self.r10_sha,
             },
-            prefix + "pulls?state=closed&per_page=100": [{
-                "merged_at": "2026-11-04T18:00:00Z", "number": 31,
+            prefix + "pulls/31": {
+                "merged": self.version_merged,
                 "merge_commit_sha": self.version_merge,
-                "head": {"ref": self.version_branch, "sha": HEAD},
+                "head": {"ref": self.version_branch, "sha": self.version_head},
+                "base": {"ref": "main"},
+            },
+            prefix + "git/commits/" + V055_VERSION_MAIN_SHA: {
+                "parents": [{"sha": self.version_parent},
+                            {"sha": self.version_other_parent}],
+            },
+            prefix + "pulls?state=closed&per_page=100": [{
+                "merged_at": "2026-11-04T20:00:00Z", "number": 32,
+                "merge_commit_sha": self.repair_merge,
+                "head": {"ref": self.repair_branch, "sha": HEAD},
                 "base": {"ref": "main"},
             }],
             prefix + "git/commits/" + SHA: {
@@ -66,28 +83,26 @@ class R10V055PublicationAuthorityTests(unittest.TestCase):
         return copy.deepcopy(table[endpoint])
 
     def verify(self, run=None):
-        return approved_release_source(
-            self.api, REPOSITORY, SHA,
-            RUN if run is None else run,
-        )
+        return approved_release_source(self.api, REPOSITORY, SHA,
+                                       RUN if run is None else run)
 
-    def test_exact_release_merge_and_eight_green_jobs(self):
-        good = self.verify()
-        self.assertEqual(good["version_pr"], 31)
-        self.assertEqual(good["r10_pr"], 30)
-        self.assertEqual(good["required_jobs"], 8)
+    def test_exact_r10_version_repair_chain_and_eight_green_jobs(self):
+        receipt = self.verify()
+        self.assertEqual(receipt["version_pr"], 31)
+        self.assertEqual(receipt["etw_repair_pr"], 32)
+        self.assertEqual(receipt["r10_pr"], 30)
+        self.assertEqual(receipt["required_jobs"], 8)
+        self.assertEqual(receipt["main_sha"], SHA)
 
-    def test_cancelled_partial_or_unrelated_ci_never_releases(self):
-        for change in (
-            {"conclusion": "cancelled"}, {"status": "in_progress"},
-            {"head_sha": HEAD}, {"event": "pull_request"},
-            {"head_branch": "feature"},
-        ):
+    def test_cancelled_partial_or_unrelated_ci_cannot_publish(self):
+        for change in ({"conclusion": "cancelled"},
+                       {"status": "in_progress"}, {"head_sha": HEAD},
+                       {"event": "pull_request"}, {"head_branch": "feature"}):
             with self.subTest(change=change):
                 with self.assertRaisesRegex(ValueError, "EXACT_MAIN_GREEN_CI_REQUIRED"):
                     self.verify({**RUN, **change})
 
-    def test_moved_main_and_unmerged_original_r10_block_release(self):
+    def test_moved_main_or_original_r10_changed_blocks_release(self):
         self.main = HEAD
         with self.assertRaisesRegex(ValueError, "MAIN_MOVED"):
             self.verify()
@@ -96,26 +111,63 @@ class R10V055PublicationAuthorityTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "APPROVED_R10_MERGE_CHANGED"):
             self.verify()
 
-    def test_wrong_release_branch_or_ancestry_blocks_publication(self):
-        self.version_branch = "unrelated"
-        with self.assertRaisesRegex(ValueError, "OWNER_APPROVED_V055_VERSION_MERGE_MISSING"):
+    def test_version_pr_must_match_original_verified_source(self):
+        for attribute, value in (
+            ("version_merged", False),
+            ("version_merge", HEAD),
+            ("version_head", HEAD),
+            ("version_branch", "other-version"),
+        ):
+            with self.subTest(field=attribute):
+                before = getattr(self, attribute)
+                setattr(self, attribute, value)
+                with self.assertRaisesRegex(ValueError, "APPROVED_V055_VERSION_MERGE_CHANGED"):
+                    self.verify()
+                setattr(self, attribute, before)
+
+    def test_version_ancestry_must_be_exact(self):
+        self.version_parent = HEAD
+        with self.assertRaisesRegex(ValueError, "V055_VERSION_MERGE_ANCESTRY_MISMATCH"):
             self.verify()
-        self.version_branch = APPROVED_RELEASE_BRANCH
-        self.parent = HEAD
-        with self.assertRaisesRegex(ValueError, "V055_SOURCE_PARENT_MISMATCH"):
+        self.version_parent = R10_MAIN_SHA
+        self.version_other_parent = HEAD
+        with self.assertRaisesRegex(ValueError, "V055_VERSION_MERGE_ANCESTRY_MISMATCH"):
             self.verify()
 
-    def test_missing_or_skipped_windows_job_blocks_publication(self):
+    def test_repair_branch_and_merge_source_must_be_exact(self):
+        self.repair_branch = "unapproved"
+        with self.assertRaisesRegex(ValueError, "OWNER_APPROVED_V055_ETW_REPAIR_MERGE_MISSING"):
+            self.verify()
+        self.repair_branch = APPROVED_REPAIR_BRANCH
+        self.repair_merge = HEAD
+        with self.assertRaisesRegex(ValueError, "OWNER_APPROVED_V055_ETW_REPAIR_MERGE_MISSING"):
+            self.verify()
+        self.repair_merge = SHA
+        self.parent = R10_MAIN_SHA
+        with self.assertRaisesRegex(ValueError, "V055_REPAIR_MERGE_ANCESTRY_MISMATCH"):
+            self.verify()
+        self.parent = V055_VERSION_MAIN_SHA
+        self.other_parent = "c" * 40
+        with self.assertRaisesRegex(ValueError, "V055_REPAIR_MERGE_ANCESTRY_MISMATCH"):
+            self.verify()
+
+    def test_any_missing_failed_skipped_or_duplicate_mandatory_job_blocks(self):
         self.jobs.pop()
         with self.assertRaisesRegex(ValueError, "INCOMPLETE_REQUIRED_CI_JOBS"):
             self.verify()
         self.jobs = [{"name": name, "status": "completed", "conclusion": "success"}
                      for name in sorted(REQUIRED_JOBS)]
-        self.jobs[0]["conclusion"] = "skipped"
-        with self.assertRaisesRegex(ValueError, "NON_GREEN_REQUIRED_CI_JOB"):
+        for bad in ("skipped", "cancelled", "failure"):
+            with self.subTest(bad=bad):
+                self.jobs[0]["conclusion"] = bad
+                with self.assertRaisesRegex(ValueError, "NON_GREEN_REQUIRED_CI_JOB"):
+                    self.verify()
+        self.jobs[0]["conclusion"] = "success"
+        self.jobs.append(dict(self.jobs[0]))
+        with self.assertRaisesRegex(ValueError, "DUPLICATE_REQUIRED_CI_JOB"):
             self.verify()
 
-    def test_tampered_original_public_release_blocks_publication(self):
+    def test_changed_prior_public_release_asset_or_source_blocks(self):
         self.old_digest = "sha256:" + "f" * 64
         with self.assertRaisesRegex(ValueError, "PREVIOUS_RELEASE_ZIP_CHANGED"):
             self.verify()
