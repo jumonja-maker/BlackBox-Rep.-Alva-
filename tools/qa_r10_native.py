@@ -476,7 +476,8 @@ class NativeAcceptance:
                     and service.identity(foreign.process.pid).to_dict() == owner_identity,
                     "R10_FOREIGN_WPR_OWNER_IDENTITY_OR_START_ANCHORS_CHANGED")
             actual = command(["-status"])
-            require(actual["exit_code"] == 0 and "generalprofile" in actual["output"].lower(),
+            require(actual["exit_code"] == 0 and "wpr recording is in progress" in actual["output"].lower()
+                    and re.search(r"\blogging mode\s*:\s*memory\b", actual["output"].lower()) is not None,
                     "R10_FOREIGN_WPR_NOT_PRESENT_IN_ACTUAL_NAMED_STATUS:" + actual["output"][:1000])
             return {"owner_identity": owner_identity, "state": current["state"],
                 "start_fields_sha256": hashlib.sha256(json.dumps(original, sort_keys=True).encode("utf-8")).hexdigest(),
