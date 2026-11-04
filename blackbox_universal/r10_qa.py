@@ -213,7 +213,6 @@ def run_r10_e2e(app, window, output, probe_executable, expected_sha):
         while not predicate() and time.monotonic() < deadline:
             app.processEvents()
             QTest.qWait(5)
-        app.processEvents()
         _require(predicate(), "R10_GUI_DEADLINE:" + str(proof.get("phase")))
 
     def oracle(fixture):
