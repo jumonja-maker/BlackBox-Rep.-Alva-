@@ -86,6 +86,21 @@ jobs:
         run: python app.py --research-e2e source-research-e2e
       - name: Real process action thread incident and selected export (Python)
         run: python app.py --deep-smoke --qa-output deep-smoke-python --qa-commit-sha "${{ github.event.pull_request.head.sha || github.sha }}"
+      - name: Build owned native R10 targets for independent effect read-back
+        run: python tools/qa_r10_fixture.py --output r10-probe-build --source-sha "${{ github.event.pull_request.head.sha || github.sha }}"
+      - name: R10 real one-runas lease, two targets, native effects and failure lifecycle
+        timeout-minutes: 8
+        run: python tools/qa_r10_native.py --probe r10-probe-build/deep-probe.exe --output r10-native-qa --source-sha "${{ github.event.pull_request.head.sha || github.sha }}"
+      - name: R10 actual top administrator button, two targets, Investigation 3 and export at RU/EN DPI 100-200%
+        timeout-minutes: 22
+        shell: pwsh
+        run: |
+          foreach ($scale in @('1', '1.25', '1.5', '2')) {
+            $env:QT_SCALE_FACTOR = $scale
+            python tools/qa_r10_gui.py --probe r10-probe-build/deep-probe.exe --output "r10-gui-$scale" --source-sha '${{ github.event.pull_request.head.sha || github.sha }}'
+            if ($LASTEXITCODE -ne 0) { throw "R10 real GUI failed at scale $scale" }
+          }
+          Remove-Item Env:\QT_SCALE_FACTOR -ErrorAction SilentlyContinue
       - name: Explicit real WPR guardian TTL on the disposable CI runner
         env:
           BB_QA_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
@@ -270,6 +285,11 @@ jobs:
           if ($summary.requested_head_sha -ne '${{ github.event.pull_request.head.sha || github.sha }}') { throw 'Frozen evidence head mismatch' }
           if ($summary.actual_source_sha -ne '${{ github.event.pull_request.head.sha || github.sha }}' -or $summary.source_identity_status -ne 'VERIFIED_EXPECTED_HEAD') { throw 'Frozen build provenance mismatch' }
           Get-FileHash -Algorithm SHA256 -LiteralPath $exe | Format-List
+      - name: Build owned R10 native fixture for actual frozen GUI acceptance
+        run: python tools/qa_r10_fixture.py --output r10-frozen-probe-build --source-sha "${{ github.event.pull_request.head.sha || github.sha }}"
+      - name: R10 full frozen GUI, packaged elevated helper, two native targets and Investigation export
+        timeout-minutes: 8
+        run: python tools/qa_r10_gui.py --exe dist/BLACK.BOX-Universal/BLACK.BOX-Universal.exe --probe r10-frozen-probe-build/deep-probe.exe --output "${{ runner.temp }}/r10-frozen-gui" --source-sha "${{ github.event.pull_request.head.sha || github.sha }}"
       - name: Include public source license and distribution notices
         shell: pwsh
         run: |

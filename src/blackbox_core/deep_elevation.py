@@ -21,12 +21,30 @@ class HelperProcess:
     def alive(self) -> bool:
         if self.process is not None:
             return self.process.poll() is None
+        return not self.wait_for_exit(timeout_ms=0)
+
+    def wait_for_exit(self, *, timeout_ms: int = 0) -> bool:
+        """Observe this held process handle; failed waits are never death proof."""
+        if type(timeout_ms) is not int or not 0 <= timeout_ms <= 5000:
+            raise ValueError("INVALID_HELPER_EXIT_WAIT")
+        if self.process is not None:
+            try:
+                self.process.wait(timeout=timeout_ms / 1000)
+                return True
+            except subprocess.TimeoutExpired:
+                return False
         if self.handle is None:
-            return False
+            return True
         kernel = C.WinDLL("kernel32", use_last_error=True, winmode=0x800)
         kernel.WaitForSingleObject.argtypes = [W.HANDLE, W.DWORD]
         kernel.WaitForSingleObject.restype = W.DWORD
-        return kernel.WaitForSingleObject(self.handle, 0) == 258
+        observed = kernel.WaitForSingleObject(self.handle, timeout_ms)
+        if observed == 0:  # WAIT_OBJECT_0: this exact process exited.
+            return True
+        if observed == 258:  # WAIT_TIMEOUT: still running.
+            return False
+        error = C.get_last_error() if observed == 0xFFFFFFFF else 0
+        raise OSError(error, "HELPER_PROCESS_WAIT_UNCONFIRMED")
 
     def terminate(self) -> None:
         # Kill only this helper, not the unrelated target or a recovery guardian.
@@ -46,8 +64,14 @@ class HelperProcess:
             kernel.WaitForSingleObject.argtypes = [W.HANDLE, W.DWORD]
             kernel.WaitForSingleObject.restype = W.DWORD
             if not kernel.TerminateProcess(self.handle, 1):
-                raise OSError(C.get_last_error(), "HELPER_TERMINATION_UNCONFIRMED")
-            if kernel.WaitForSingleObject(self.handle, 5000) != 0:
+                error = C.get_last_error()
+                # The helper can exit naturally after its cleanup ACK, between
+                # alive() and TerminateProcess. Only this exact held handle's
+                # signaled state can turn that denial into verified completion.
+                if self.wait_for_exit(timeout_ms=0):
+                    return
+                raise OSError(error, "HELPER_TERMINATION_UNCONFIRMED")
+            if not self.wait_for_exit(timeout_ms=5000):
                 raise OSError("HELPER_TERMINATION_UNCONFIRMED")
 
     def close_handle(self) -> None:

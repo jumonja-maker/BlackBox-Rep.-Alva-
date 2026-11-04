@@ -59,6 +59,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--attach-pid", type=int, help="Select an existing process; recording remains explicit")
     parser.add_argument("--research-e2e", type=Path, help="Run isolated end-to-end research QA into an explicit directory")
     parser.add_argument("--deep-smoke",action="store_true",help="Run real Qt action/thread/incident/export QA")
+    parser.add_argument("--r10-e2e", type=Path, help=argparse.SUPPRESS)
+    parser.add_argument("--r10-probe", type=Path, help=argparse.SUPPRESS)
     parser.add_argument("--qa-output",type=Path,help="Explicit QA artifact directory")
     parser.add_argument("--qa-fixture",choices=("cpu","ui","waitchain"),help=argparse.SUPPRESS)
     parser.add_argument("--qa-commit-sha",default="UNKNOWN",help=argparse.SUPPRESS)
@@ -70,7 +72,9 @@ def main(argv: list[str] | None = None) -> int:
             parser.error("--qa-fixture requires --qa-output")
         from blackbox_universal.qa_fixtures import run_fixture
         return run_fixture(options.qa_fixture,options.qa_output)
-    if options.smoke or options.deep_smoke:
+    if options.r10_e2e and options.r10_probe is None:
+        parser.error("--r10-e2e requires --r10-probe")
+    if options.smoke or options.deep_smoke or options.r10_e2e:
         os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
         _qa_checkpoint("QT_START")
     app = QApplication.instance() or QApplication(sys.argv[:1])
@@ -78,11 +82,14 @@ def main(argv: list[str] | None = None) -> int:
     app.setOrganizationName("BlackBox")
     set_retro_theme(app)
     window = UniversalWindow(isolated=True,
-        output_root=(options.research_e2e or options.qa_output) / "sessions" if (options.research_e2e or options.deep_smoke) else None,
-        allow_update_check=not (options.smoke or options.research_e2e or options.deep_smoke))
+        output_root=(options.research_e2e or options.r10_e2e or options.qa_output) / "sessions" if (options.research_e2e or options.deep_smoke or options.r10_e2e) else None,
+        allow_update_check=not (options.smoke or options.research_e2e or options.deep_smoke or options.r10_e2e))
     # Native Windows starts maximized, while retaining the normal window frame,
     # minimize/restore and user resizing (not exclusive fullscreen mode).
     window.showMaximized()
+    if options.r10_e2e:
+        from blackbox_universal.r10_qa import run_r10_e2e
+        return run_r10_e2e(app, window, options.r10_e2e, options.r10_probe, options.qa_commit_sha)
     if options.deep_smoke:
         if options.qa_output is None:
             parser.error("--deep-smoke requires --qa-output")
@@ -172,7 +179,7 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    if "--smoke" in sys.argv or "--research-e2e" in sys.argv or "--deep-smoke" in sys.argv:
+    if any(flag in sys.argv for flag in ("--smoke", "--research-e2e", "--deep-smoke", "--r10-e2e")):
         # A windowed PyInstaller failure otherwise opens a blocking error
         # dialog on the headless runner. QA must retain the real traceback and
         # return failure, never certify a hanging binary as a successful build.

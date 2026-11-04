@@ -22,7 +22,7 @@ from blackbox_investigation import InvestigationError
 from blackbox_core.contracts import ObserverError
 from blackbox_core.report import compare as compare_sessions
 from blackbox_core.sampling_health import BusyTickTracker
-from PySide6.QtCore import Qt, QTimer, QThread, Signal, QSettings, QUrl, QStandardPaths
+from PySide6.QtCore import Qt, QTimer, QThread, Signal, QSettings, QUrl, QStandardPaths, QPoint
 from PySide6.QtGui import QAction, QDesktopServices, QIcon
 from PySide6.QtWidgets import (
     QAbstractItemView, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QSpinBox, QFileDialog, QFrame,
@@ -255,6 +255,19 @@ class UniversalWindow(QMainWindow):
             button.setMenu(menu)
             tl.addWidget(button)
         tl.addStretch()
+        self.admin_button = _button("Enable administrator rights", "adminSessionButton")
+        self.admin_button.setObjectName("adminSessionButton")
+        self.admin_button.setAutoDefault(False)
+        self.admin_button.clicked.connect(self._admin_session_click)
+        self.admin_menu = QMenu(self.admin_button)
+        self.admin_menu.setObjectName("adminSessionMenu")
+        self.admin_start_action = self.admin_menu.addAction("Enable administrator rights", self._admin_session_click)
+        self.admin_start_action.setObjectName("adminSessionStartAction")
+        self.admin_end_action = self.admin_menu.addAction("End session", self._end_admin_session)
+        self.admin_end_action.setObjectName("adminSessionEndAction")
+        self.admin_retry_cleanup_action = self.admin_menu.addAction("Retry diagnostic cleanup", self._retry_admin_cleanup)
+        self.admin_retry_cleanup_action.setObjectName("adminSessionRetryCleanupAction")
+        tl.addWidget(self.admin_button)
         self.update_button = _button("↻  CHECK UPDATES", "update")
         self.update_button.setProperty("available", False)
         self.update_button.setToolTip(
@@ -485,6 +498,8 @@ class UniversalWindow(QMainWindow):
         self.deep_inspector_panel.setVisible(False)
         self.deep_inspector_panel.closed.connect(self._deep_inspector_closed)
         self.deep_inspector_panel.recovery_required.connect(self._deep_inspector_recovery_required)
+        self.deep_inspector_panel.bridge.admin_status_changed.connect(self._refresh_admin_controls)
+        self.deep_inspector_panel.bridge.busy_changed.connect(self._refresh_admin_controls)
         self._deep_close_complete = False
         content.addWidget(self.deep_inspector_toggle)
         content.addWidget(self.deep_inspector_panel)
@@ -1003,6 +1018,7 @@ class UniversalWindow(QMainWindow):
         if hasattr(self, 'deep_inspector_panel'):
             self.deep_inspector_panel.retranslate()
             self.deep_inspector_toggle.setText("ГЛУБОКОЕ ИССЛЕДОВАНИЕ" if language == "RU" else "DEEP INSPECTION")
+            self._refresh_admin_controls()
         if self.stack.currentIndex() == self._page_ids["reports"]:
             self._update_report_preview()
 
@@ -2444,6 +2460,94 @@ class UniversalWindow(QMainWindow):
         QMessageBox.about(
             self, "BLACK.BOX Universal",
             f"BLACK.BOX Universal v{__version__} · BB-DEEP-001\n\n" + text)
+
+    def _refresh_admin_controls(self, *_):
+        bridge = self.deep_inspector_panel.bridge
+        ru = self.language == "RU"
+        state = bridge.admin_state
+        active = bridge.admin_active
+        remaining = bridge.admin_remaining_seconds
+        labels = {
+            "INACTIVE": ("Enable administrator rights", "Включить права администратора"),
+            "REQUESTING_UAC": ("Requesting administrator rights…", "Запрос прав администратора…"),
+            "ACTIVE": ("Checking administrator session…", "Проверка административной сессии…"),
+            "DENIED": ("Administrator request denied", "Отказ в правах администратора"),
+            "EXPIRED": ("Administrator session expired", "Административная сессия истекла"),
+            "FAILED": ("Administrator session failed", "Ошибка административной сессии"),
+            "CLEANUP_REQUIRED": ("Diagnostic cleanup required", "Требуется завершение диагностики"),
+        }
+        text = labels.get(state, labels["FAILED"])[1 if ru else 0]
+        if active:
+            text = (("Административная сессия активна" if ru else "Administrator session active") +
+                    (" · Осталось: " if ru else " · Remaining: ") + f"{remaining // 60:02d}:{remaining % 60:02d}  ▾")
+        elif state == "CLEANUP_REQUIRED":
+            text += "  ▾"
+        self.admin_button.setText(text)
+        self.admin_button.setAccessibleName(text)
+        self.admin_button.setProperty("adminActive", active)
+        state_style = ("color: #176432; font-weight: bold;" if active else
+                       "color: #a12020; font-weight: bold;" if state == "CLEANUP_REQUIRED" else "")
+        self.admin_button.setStyleSheet("padding: 2px 8px; font-size: 11px;" + state_style)
+        self.admin_button.setMinimumWidth(self.admin_button.sizeHint().width())
+        tooltip = (("Осталось: " if ru else "Remaining: ") + f"{remaining // 60:02d}:{remaining % 60:02d}\n" +
+            ("Отдельный ограниченный Diagnostic Helper · не более 900 секунд.\nКаждая новая цель и каждое вмешательство требуют подтверждения." if ru else
+             "Separate limited Diagnostic Helper · at most 900 seconds.\nEach new target and each intervention require confirmation.") +
+            f"\n{state}")
+        error = bridge._admin_status.get("error")
+        if error:
+            tooltip += "\n" + str(error)[:1000]
+        self.admin_button.setToolTip(tooltip)
+        self.admin_button.setEnabled(not bridge.busy or bridge.cleanup_required)
+        self.admin_start_action.setText("Включить права администратора" if ru else "Enable administrator rights")
+        self.admin_start_action.setEnabled(not bridge.busy and state != "ACTIVE")
+        self.admin_end_action.setText("Завершить сеанс" if ru else "End session")
+        self.admin_end_action.setEnabled(not bridge.busy and bridge.has_session and state not in ("INACTIVE", "DENIED"))
+        self.admin_retry_cleanup_action.setText("Повторить завершение диагностики" if ru else "Retry diagnostic cleanup")
+        self.admin_retry_cleanup_action.setVisible(bridge.cleanup_required)
+        self.admin_retry_cleanup_action.setEnabled(bridge.cleanup_required and bridge.worker is None)
+
+    def _admin_session_click(self):
+        bridge = self.deep_inspector_panel.bridge
+        if bridge.cleanup_required or bridge.admin_state == "ACTIVE":
+            self.admin_menu.popup(self.admin_button.mapToGlobal(QPoint(0, self.admin_button.height())))
+            return
+        if bridge.busy or bridge._closing:
+            return
+        ru = self.language == "RU"
+        text = (
+            "BLACK.BOX запустит отдельный ограниченный Diagnostic Helper через стандартный запрос Windows UAC. "
+            "Сессия действует не более 900 секунд (15 минут). Дополнительные возможности включают исследование защищённых данных процесса, "
+            "отладку, изменение памяти, управление потоками и системную ETW-запись в пределах разрешений Windows.\n\n"
+            "Вы можете включить сессию до выбора процесса. Каждая новая цель получает отдельное разрешение с проверкой PID и времени создания; "
+            "каждое вмешательство требует подтверждения параметров и последствий. Один действующий Helper используется для разных подтверждённых целей "
+            "без продления срока. «Завершить сеанс», истечение срока и закрытие BLACK.BOX освобождают принадлежащие ему ресурсы. "
+            "При отказе UAC обычное наблюдение, отчёты и декодер трасс остаются доступны."
+            if ru else
+            "BLACK.BOX will launch a separate limited Diagnostic Helper through the standard Windows UAC prompt. "
+            "The session lasts at most 900 seconds (15 minutes). Additional capabilities include inspecting restricted process data, "
+            "debugging, memory changes, thread control and system-wide ETW recording within Windows permissions.\n\n"
+            "You can enable the session before selecting a process. Each new target requires separate authorization with PID and creation-time verification; "
+            "each intervention requires confirmation of its parameters and consequences. The same live helper serves different authorized targets "
+            "within its original lease. End session, expiry and closing BLACK.BOX release its owned resources. "
+            "Ordinary observation, reports and Trace Decoder remain available if UAC is declined.")
+        dialog = QMessageBox(QMessageBox.Icon.Warning,
+            "BLACK.BOX — " + ("Права администратора" if ru else "Administrator rights"), text,
+            QMessageBox.StandardButton.Cancel, self)
+        dialog.setObjectName("adminSessionConsent")
+        dialog.setTextFormat(Qt.TextFormat.PlainText)
+        dialog.button(QMessageBox.StandardButton.Cancel).setText("ОТМЕНА" if ru else "CANCEL")
+        enable = dialog.addButton("ВКЛЮЧИТЬ ПРАВА АДМИНИСТРАТОРА" if ru else "ENABLE ADMINISTRATOR RIGHTS",
+                                  QMessageBox.ButtonRole.AcceptRole)
+        dialog.setDefaultButton(QMessageBox.StandardButton.Cancel)
+        dialog.exec()
+        if dialog.clickedButton() is enable and not bridge._closing and not bridge.busy:
+            bridge.start_admin()
+
+    def _end_admin_session(self):
+        self.deep_inspector_panel.bridge.end_admin()
+
+    def _retry_admin_cleanup(self):
+        self.deep_inspector_panel.bridge.retry_cleanup()
 
     def _deep_inspector_closed(self, result) -> None:
         self._deep_close_complete = True

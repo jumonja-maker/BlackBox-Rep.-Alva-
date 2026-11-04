@@ -102,8 +102,76 @@ def native_wpr(output,binary,pdb,helper):
         if owned is not None:owned.close(kill=True)
     source=capture/journal['result']['path'];digest=file_hash(source)
     index=output/'native-etl.sqlite3'
-    with patch('blackbox_core.decoder_service.helper_path',return_value=helper):
-        meta=decode_file(source,index)
+    decoder_processes=[]
+
+    class ObservedDecoderProcess(OwnedProcess):
+        """Observe the real helper without substituting launch or decode results."""
+        def __init__(self,*args,**kwargs):
+            super().__init__(*args,**kwargs)
+            self._qa_log=Path(kwargs['stderr'].name) if hasattr(kwargs.get('stderr'),'name') else None
+
+        def close(self,*args,**kwargs):
+            try:
+                return super().close(*args,**kwargs)
+            finally:
+                observed={'pid':self.process.pid,'exit_code':self.process.poll(),
+                          'launch':'PRODUCTION_OWNED_PROCESS_DELEGATED_UNCHANGED'}
+                try:
+                    if self._qa_log is not None and self._qa_log.is_file():
+                        with self._qa_log.open('rb') as stream:
+                            stream.seek(max(0,self._qa_log.stat().st_size-4096))
+                            observed['merged_stdout_stderr_tail']=stream.read(4096).decode('utf-8',errors='replace')
+                except OSError as error:
+                    observed['console_capture_error_type']=type(error).__name__
+                if len(decoder_processes)<4:
+                    decoder_processes.append(observed)
+
+    def fixed_metadata(value):
+        if type(value) is not dict:
+            return {'metadata_type':type(value).__name__}
+        allowed=('schema','status','error','reason','format','rows','bounded_events','events_with_errors',
+                 'events_without_fields_or_schema','events_with_stacks','decoder_reported_lost_events',
+                 'import_completeness','input_sha256')
+        bounded={key:value[key][:1000] if isinstance(value[key],str) else value[key]
+                 for key in allowed if key in value and (value[key] is None or type(value[key]) in (str,int,bool))}
+        reliability=value.get('reliability')
+        if type(reliability) is dict:
+            bounded['reliability']={key:reliability[key] for key in
+                ('event_limit','record_limit_bytes','index_disk_limit_bytes','partial_index_published')
+                if key in reliability and type(reliability[key]) in (int,bool)}
+        return bounded
+
+    def emit_decode_diagnostics(meta,error=None):
+        from blackbox_universal.provenance import source_identity
+        diagnostics={'label':'NATIVE_ETL_DECODE_FIXED_RESULT_METADATA','source_identity':source_identity(),
+            'capture':{'bytes':source.stat().st_size,'sha256':digest,'profile':journal['policy']['profile'],
+                       'status':journal['result'].get('status'),'guardian_exit_code':trace.process.returncode},
+            'helper':{'name':helper.name,'sha256':file_hash(helper)},
+            'decoder_result':fixed_metadata(meta or {}),'decoder_processes':decoder_processes,
+            'index':{'exists':index.is_file()},'raw_trace_or_events_printed':False}
+        if error is not None:
+            diagnostics['error']={'type':type(error).__name__,'message':str(error)[:1000]}
+        if index.is_file():
+            diagnostics['index'].update(bytes=index.stat().st_size,sha256=file_hash(index))
+            try:
+                with closing(sqlite3.connect(index.resolve().as_uri()+'?mode=ro',uri=True)) as db:
+                    db.execute('PRAGMA query_only=ON')
+                    row=db.execute("SELECT value FROM metadata WHERE key='summary'").fetchone()
+                    if row is not None and len(row[0])<=65536:
+                        diagnostics['index']['metadata']=fixed_metadata(json.loads(row[0]))
+            except (OSError,ValueError,sqlite3.Error) as read_error:
+                diagnostics['index']['metadata_read_error_type']=type(read_error).__name__
+        print('NATIVE_ETL_DECODE_DIAGNOSTICS '+json.dumps(diagnostics,ensure_ascii=True),flush=True)
+        (output/'native-decode-diagnostics.json').write_text(json.dumps(diagnostics,ensure_ascii=True,indent=2),encoding='utf-8')
+
+    try:
+        with patch('blackbox_core.decoder_service.helper_path',return_value=helper), \
+             patch('blackbox_core.optional_jobs.OwnedProcess',ObservedDecoderProcess):
+            meta=decode_file(source,index)
+    except BaseException as error:
+        emit_decode_diagnostics(None,error)
+        raise
+    emit_decode_diagnostics(meta)
     require(meta['status']=='DECODED','NATIVE_ETL_DECODE_FAILED')
     rows_seen=bound_frames=resolved=0;example=None
     with closing(sqlite3.connect(index.resolve().as_uri()+'?mode=ro',uri=True)) as db:

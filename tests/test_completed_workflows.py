@@ -1,9 +1,10 @@
 """Integrated read-only reports and recording ownership, not endurance proof."""
 from contextlib import closing
-import csv,json,os,sqlite3,tempfile,unittest
+import csv,json,os,sqlite3,sys,tempfile,unittest
 from pathlib import Path
 from unittest.mock import patch
 from blackbox_core.research_worker import ResearchSession
+from blackbox_core.contracts import ObserverError
 from blackbox_core.session_v2 import SessionV2Writer
 from blackbox_core.session_view import SessionView
 from blackbox_core.process_tree import resource_tree_page,tree_totals
@@ -18,7 +19,24 @@ class CompletedWorkflowTests(unittest.TestCase):
     row=observation(n);row['children_total']=2
     row['children']=[{'pid':200+i,'created':2.+i,'parent_pid':123,'name':'TEST_ONLY_CHILD','cpu_user_s':float(n),'cpu_system_s':0.,'rss_bytes':value,'thread_count':1} for i,value in enumerate(memory)]
     w.submit('detail',row)
-   w.finish('COMPLETED')
+   try:w.finish('COMPLETED')
+   except ObserverError:
+    # Failure-only metadata: preserve the original bound/error and never read
+    # frame locals, evidence, the environment or another process's state.
+    stack=[];frame=sys._current_frames().get(w.thread.ident)
+    while frame is not None and len(stack)<12:
+     stack.append({'file':Path(frame.f_code.co_filename).name[:128],
+                   'function':frame.f_code.co_name[:128],'line':frame.f_lineno})
+     frame=frame.f_back
+    del frame
+    print('V2_FINISH_FAILURE '+json.dumps({
+     'failure':str(w.failure or '')[:256],'thread_alive':w.thread.is_alive(),
+     'ready':w._ready.is_set(),'closed':w._closed,
+     'queued_commands':len(w._commands.queue),
+     'unfinished_commands':w._commands.unfinished_tasks,
+     'dropped_commands':w.dropped_commands,'writer_stack':stack},
+     ensure_ascii=True,sort_keys=True),flush=True)
+    raise
    with SessionView.open(folder) as view:
     page=resource_tree_page(view,ORIGIN,ORIGIN+4*10**9);total=tree_totals(view,ORIGIN,ORIGIN+4*10**9)
     self.assertEqual(page['total_instances'],3);self.assertEqual(total['observed_tree_rss_peak_bytes'],150)

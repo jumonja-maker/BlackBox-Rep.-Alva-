@@ -18,6 +18,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from unittest.mock import patch
 
@@ -74,18 +75,119 @@ def sha256(path: Path):
     return h.hexdigest()
 
 
-def _run_exe(command, *, cwd, env, timeout=120):
-    child = subprocess.Popen(command, cwd=cwd, env=env,
-                             stdin=subprocess.DEVNULL,
-                             stdout=subprocess.DEVNULL,
-                             stderr=subprocess.DEVNULL)
+class _OldSmokeDiagnostics:
+    """Bounded fixed-file diagnostics outside the update-owned installation.
+
+    The old GUI keeps its original cwd and command. A reader drains its console
+    without blocking it; a watcher preserves only its known smoke progress and
+    QA traceback files before maintenance can replace the installation.
+    """
+    FILES = {"blackbox-qa-error.txt": 16384, "blackbox-smoke-progress.json": 4096}
+    CONSOLE_BYTES = 16384
+
+    def __init__(self, evidence, label, cwd, report):
+        self.directory = evidence / label
+        self.directory.mkdir()
+        self.label, self.cwd, self.report = label, Path(cwd), report
+        self.started_ns = time.time_ns()
+        self.stop = threading.Event()
+        self.errors = []
+        self.process = None
+
+    def launch(self, command, env):
+        self.process = subprocess.Popen(command, cwd=str(self.cwd), env=env,
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        self.reader = threading.Thread(target=self._console, daemon=True,
+                                       name="old-smoke-bounded-console")
+        self.watcher = threading.Thread(target=self._watch, daemon=True,
+                                        name="old-smoke-fixed-qa-files")
+        self.reader.start()
+        self.watcher.start()
+        return self.process
+
+    def _console(self):
+        retained = 0
+        try:
+            with (self.directory / "console.log").open("wb") as output:
+                while chunk := self.process.stdout.read(4096):
+                    remaining = max(0, self.CONSOLE_BYTES - retained)
+                    if remaining:
+                        output.write(chunk[:remaining])
+                        retained += min(len(chunk), remaining)
+        except OSError as error:
+            self.errors.append({"stage": "console", "error_type": type(error).__name__})
+
+    def _capture_fixed_files(self):
+        for name, limit in self.FILES.items():
+            source = self.cwd / name
+            try:
+                if source.is_symlink() or not source.is_file() or source.stat().st_mtime_ns < self.started_ns:
+                    continue
+                with source.open("rb") as stream:
+                    content = stream.read(limit)
+                if name.endswith(".json"):
+                    progress = json.loads(content)
+                    if type(progress) is not dict or progress.get("pid") != self.process.pid:
+                        continue
+                    # Only known smoke markers are retained, never a generic
+                    # application snapshot, service dictionary or memory data.
+                    content = json.dumps({"pid": progress["pid"], "stage": str(progress.get("stage", ""))[:256]},
+                                         ensure_ascii=True).encode("utf-8")
+                (self.directory / name).write_bytes(content)
+            except (OSError, ValueError, UnicodeError):
+                # Partial progress writes and concurrent update renames are
+                # expected; preserve the latest complete bounded observation.
+                continue
+
+    def _watch(self):
+        while not self.stop.wait(.1):
+            self._capture_fixed_files()
+        self._capture_fixed_files()
+
+    def finish(self, *, exit_code, failure):
+        self.stop.set()
+        self.watcher.join(timeout=2)
+        self.reader.join(timeout=2)
+        snapshot = {"label": self.label, "process_pid": self.process.pid,
+            "exit_code": exit_code, "poll_after_cleanup": self.process.poll(),
+            "exit_wait_completed": exit_code is not None,
+            "scope": "PINNED_OLD_OFFICIAL_GUI_SMOKE_FIXED_QA_FILES_AND_BOUNDED_CONSOLE",
+            "console_capture_limit_bytes": self.CONSOLE_BYTES,
+            "console_reader_finished": not self.reader.is_alive(),
+            "fixed_file_watcher_finished": not self.watcher.is_alive(),
+            "files": {}, "capture_errors": self.errors}
+        for name in ("console.log", *self.FILES):
+            path = self.directory / name
+            if path.is_file():
+                limit = self.FILES.get(name, self.CONSOLE_BYTES)
+                with path.open("rb") as stream:
+                    raw = stream.read(limit)
+                snapshot["files"][name] = {"retained_bytes": len(raw),
+                    "sha256": hashlib.sha256(raw).hexdigest(),
+                    "text": raw.decode("utf-8", errors="replace")}
+        self.report.setdefault("old_smoke_diagnostics", []).append(snapshot)
+        (self.directory / "diagnostics.json").write_text(json.dumps(snapshot, ensure_ascii=True, indent=2), encoding="utf-8")
+        if failure:
+            print("OLD_OFFICIAL_GUI_SMOKE_FAILURE_DIAGNOSTICS " + json.dumps(snapshot, ensure_ascii=True), flush=True)
+
+
+def _run_exe(command, *, cwd, env, timeout=120, diagnostics=None):
+    child = (diagnostics.launch(command, env) if diagnostics is not None else
+             subprocess.Popen(command, cwd=cwd, env=env,
+                              stdin=subprocess.DEVNULL,
+                              stdout=subprocess.DEVNULL,
+                              stderr=subprocess.DEVNULL))
+    code, failed = None, True
     try:
         code = child.wait(timeout=timeout)
         require(code == 0, "EXE_EXIT_NOT_ZERO_" + str(code))
+        failed = False
     finally:
         if child.poll() is None:
             child.kill()
             child.wait(timeout=10)
+        if diagnostics is not None:
+            diagnostics.finish(exit_code=code, failure=failed)
 
 
 def _maintenance(exe, action, install, env, *, staged=None, wait_pid=0,
@@ -191,7 +293,8 @@ def acceptance(built_zip: Path, source_sha: str, evidence: Path, *,
             old_exe_hash = sha256(exe_root)
             report["old_exe_sha256"] = old_exe_hash
             report["steps"].append("OLD_OFFICIAL_RELEASE_DOWNLOAD_VERIFIED_AND_INSTALLED")
-            _run_exe([str(exe_root), "--smoke"], cwd=str(install), env=env)
+            _run_exe([str(exe_root), "--smoke"], cwd=str(install), env=env,
+                diagnostics=_OldSmokeDiagnostics(evidence, "old-initial-smoke", install, report))
             report["steps"].append("REAL_OLD_FROZEN_EXE_SMOKE_PASS")
 
             # Original user evidence lives inside the old portable folder.
@@ -226,10 +329,8 @@ def acceptance(built_zip: Path, source_sha: str, evidence: Path, *,
 
             # Real old executable runs during maintenance start; it closes
             # naturally, and the OLD frozen maintenance helper must wait.
-            old_process = subprocess.Popen(
-                [str(exe_root), "--smoke"], cwd=str(install), env=env,
-                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL)
+            old_diagnostics = _OldSmokeDiagnostics(evidence, "old-smoke-during-update", install, report)
+            old_process = old_diagnostics.launch([str(exe_root), "--smoke"], env)
             old_maintenance = root / "outside-old-maintenance"
             old_maintenance.mkdir()
             shutil.copy2(install / MAINTENANCE_NAME,
@@ -237,8 +338,10 @@ def acceptance(built_zip: Path, source_sha: str, evidence: Path, *,
             maintenance = _maintenance(
                 old_maintenance / MAINTENANCE_NAME, "update",
                 install, env, staged=staged, wait_pid=old_process.pid)
+            old_exit_code = None
             try:
-                require(old_process.wait(timeout=120) == 0,
+                old_exit_code = old_process.wait(timeout=120)
+                require(old_exit_code == 0,
                         "OLD_APPLICATION_FAILED_TO_EXIT")
                 require(maintenance.wait(timeout=180) == 0,
                         "OLD_MAINTENANCE_UPDATE_FAILED")
@@ -247,6 +350,7 @@ def acceptance(built_zip: Path, source_sha: str, evidence: Path, *,
                     if proc.poll() is None:
                         proc.kill()
                         proc.wait(timeout=15)
+                old_diagnostics.finish(exit_code=old_exit_code, failure=old_exit_code != 0)
             require(_safe_install(install) == install,
                     "UPDATED_INSTALL_INVALID")
             require(sha256(exe_root) == new_exe_hash,
