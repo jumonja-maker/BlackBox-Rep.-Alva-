@@ -1,5 +1,6 @@
 """Audit UI contracts with real helper commands and nested Qt event loops."""
 from contextlib import closing
+import json
 import os
 from pathlib import Path
 import sqlite3
@@ -60,7 +61,32 @@ class AuditUi(unittest.TestCase):
         w.probe.attach(os.getpid())
         self.assertTrue(self.drain(lambda: w.probe.pid == os.getpid() and not w.probe.pending))
         w._start()
-        self.assertTrue(self.drain(lambda: w.probe.active and not w.probe.pending and w.probe.total_samples > 0))
+        ready = self.drain(lambda: w.probe.active and not w.probe.pending and w.probe.total_samples > 0)
+        diagnostic = None
+        if not ready:
+            # Cached GUI/bridge fields only: no helper request, process probe,
+            # evidence read or extra event-loop pass changes the failure state.
+            probe = w.probe
+            snapshot = probe.data
+            sensor_health = snapshot.get('sensor_health')
+            base = sensor_health.get('base') if isinstance(sensor_health, dict) else None
+            base = base if isinstance(base, dict) else {}
+            diagnostic = 'OBSERVER_START_NOT_READY ' + json.dumps({
+                'active': probe.active, 'pending': probe.pending,
+                'pending_operations': list(probe._pending.values())[:64],
+                'sample_count': probe.total_samples, 'pid': probe.pid,
+                'expected_pid': os.getpid(), 'helper_alive': probe.alive,
+                'helper_pid': snapshot.get('helper_pid'),
+                'session_state': probe.session_state,
+                'research_state': snapshot.get('research_state'),
+                'last_command': snapshot.get('last_command'),
+                'last_error': str(probe.last_error or '')[:512],
+                'research_error': str(snapshot.get('research_error') or '')[:512],
+                'base_sensor_status': str(base.get('status') or '')[:128],
+                'base_sensor_error': str(base.get('error') or '')[:512],
+                'helper_stderr_tail': probe._stderr[-2048:],
+            }, ensure_ascii=True, sort_keys=True)
+        self.assertTrue(ready, diagnostic)
         return w
 
     def session(self, count):
