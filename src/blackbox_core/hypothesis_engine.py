@@ -176,7 +176,7 @@ def generate_hypotheses(case, *, budget=None):
             groups["WAIT_OR_DEADLOCK"].append(node)
             if finite_number(row.get("off_cpu_ms")) and row["off_cpu_ms"] > 0:
                 groups["EXECUTION_DELAY"].append(node)
-        if _suffix(codes, {"WCT_CYCLE", "WAIT_CHAIN", "WAIT_OBSERVED", "DEADLOCK_CANDIDATE"}):
+        if _suffix(codes, {"WCT_CYCLE", "WAIT_CHAIN", "WAIT_OBSERVED", "DEADLOCK_CANDIDATE", "WCT_SNAPSHOT"}):
             groups["WAIT_OR_DEADLOCK"].append(node)
         if _suffix(codes, {"RSS_GROWTH", "PRIVATE_GROWTH", "MEMORY_GROWTH"}):
             groups["MEMORY_GROWTH"].append(node)
@@ -187,7 +187,7 @@ def generate_hypotheses(case, *, budget=None):
             groups["NETWORK_PROBLEM"].append(node)
         if _suffix(codes, {"PROCESS_EXIT_OBSERVED", "PROCESS_EXIT", "UNEXPECTED_EXIT", "PROCESS_TERMINATED"}):
             groups["UNEXPECTED_EXIT"].append(node)
-        if _suffix(codes, {"UI_TIMEOUT", "UI_UNRESPONSIVE", "WINDOW_UNRESPONSIVE", "WM_NULL_TIMEOUT"}):
+        if _suffix(codes, {"UI_TIMEOUT", "UI_UNRESPONSIVE", "WINDOW_UNRESPONSIVE", "WM_NULL_TIMEOUT", "UI_UNRESPONSIVE_OBSERVED"}):
             groups["UI_UNRESPONSIVE"].append(node)
         if kind == "DIAGNOSTIC_ACTION" and row.get("phase") == "RESULT":
             if row.get("status") not in {"COMPLETED", "AVAILABLE", "DETACHED"}:

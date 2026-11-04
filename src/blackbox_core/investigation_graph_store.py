@@ -254,7 +254,9 @@ def export_investigation(case, destination, *, format="json", budget=None, cance
         for hypothesis in value.get("hypotheses", []):
             budget.check()
             content += "<li>" + html.escape(str(hypothesis.get("description", ""))) + " — " + html.escape(str(hypothesis.get("status", ""))) + "</li>"
-        content += "</ul><h2>Source-linked investigation</h2><pre>" + html.escape(json.dumps(value, ensure_ascii=False, indent=2, allow_nan=False)) + "</pre></body></html>"
+        from .delay_investigation import render_delay_html
+        content += "</ul>" + render_delay_html(value.get("delay_investigation"))
+        content += "<h2>Source-linked investigation</h2><pre>" + html.escape(json.dumps(value, ensure_ascii=False, indent=2, allow_nan=False)) + "</pre></body></html>"
         payload = content.encode("utf-8")
     else:
         payload = raw.encode("ascii")

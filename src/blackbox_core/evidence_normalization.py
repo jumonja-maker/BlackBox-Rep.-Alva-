@@ -269,6 +269,9 @@ def _trace_thread(trace, row):
     sample = row.get("cpu_sample")
     if isinstance(sample, dict) and isinstance(sample.get("thread"), dict):
         candidate = sample["thread"]
+    io = row.get("io_observation")
+    if isinstance(io, dict) and isinstance(io.get("event_thread"), dict):
+        candidate = io["event_thread"]
     if isinstance(candidate, dict) and _int(candidate.get("thread_instance")):
         return {**process, "kind": "TRACE_THREAD", "thread_instance": candidate["thread_instance"],
                 "tid": row["tid"]}
@@ -418,7 +421,7 @@ def _register_source(source, stable, path, out):
 
 def _trace(spec, selection, out):
     from .decoder_index import APP_ID, _saved_json, read_index, validate_event
-    from .decoder_io import validate_io_clock
+    from .decoder_io import validate_io_clock, build_file_io_report, build_disk_io_report
     from .decoder_waits import build_wait_report
     from .decoder_cpu import classify_cpu_sample
     path = safe_path(Path(spec["path"]))
@@ -453,6 +456,7 @@ def _trace(spec, selection, out):
         alignment = assess_session_alignment(path, spec["clock_journal"], spec["session_path"], cancel=out.budget)
         source["clock_alignment"] = _metadata(alignment)
     count = selected = schedule_nodes = schedule_omitted = 0
+    file_candidates = disk_request_candidates = 0
     previous_time = None
     out_of_order = errors = False
     after = selection.get("after", 0)
@@ -501,6 +505,8 @@ def _trace(spec, selection, out):
                 "event_id": row.get("event_id"), "opcode": row.get("opcode"), "version": row.get("version"),
                 "fields": row.get("payload", {}), "errors": row.get("errors", [])}
             typed = row.get("io_observation")
+            file_candidates += row["name"].startswith(("FileIO/", "FileIo/"))
+            disk_request_candidates += row["name"] in ("DiskIO/ReadInit", "DiskIO/WriteInit")
             cpu_source = "etw"
             cpu_class = classify_cpu_sample(row, cpu_source)
             if cpu_class == "OTHER_SOURCE":
@@ -592,8 +598,91 @@ def _trace(spec, selection, out):
             time_domain=domain, time_bounds=_bounds(interval["start_ms"], interval["end_ms"], "ms"),
             metadata={**interval, "record_refs": ["events:" + str(x) for x in interval["source_event_ids"]],
                       "record_ref_relation": "SCHEDULER_INTERVAL_BOUNDARY"})
+    # Request pairing needs the complete recorded inventory, as scheduler
+    # pairing does. A source prefix/continuation never starts another full scan.
+    file_report = disk_report = None
+    file_nodes_added = disk_nodes_added = 0
+
+    def io_boundary(record, name, timestamp, identity, kind, *, phase, details=None):
+        """A retained projection of an actually validated source index row.
+
+        Completion headers may describe a system/completer thread outside the
+        selected issuing process. Keep that real boundary so its direct record
+        reference remains navigable; never relabel it with the issuer's PID.
+        """
+        if name is None:
+            return
+        process = _trace_process(trace, identity or {})
+        thread = ({**process, "kind": "TRACE_THREAD", "tid": identity["tid"], "thread_instance": identity["thread_instance"]}
+            if process is not None and _int((identity or {}).get("thread_instance")) else None)
+        out.add(source, "events:" + str(record), kind, process_identity=process, thread_identity=thread,
+            time_domain=domain, time_bounds=_bounds(timestamp, unit="ms"),
+            metadata={"event_name": name, "event_kind": name, "source_event_id": record,
+                "request_boundary_phase": phase, "event_thread": identity,
+                "projection_kind": "VALIDATED_INDEX_IO_BOUNDARY", **(details or {})})
+
+    if count == total and after == 0:
+        io_filters = {"pid": selection.get("pid", 0), "process_instance": selection.get("process_instance"),
+            "tid": selection.get("tid"), "start_ms": selection.get("start_ms"),
+            "end_ms": selection.get("end_ms"), "cancel": out.budget}
+        if file_candidates:
+            file_report = build_file_io_report(path, max_operations=min(10_000, out.budget.max_nodes), **io_filters)
+            source["file_io_coverage"] = _metadata(file_report["coverage"])
+            for operation in file_report["operations"]:
+                out.budget.check()
+                refs = operation["source_event_ids"]
+                io_boundary(refs[0], operation["start_event_name"], operation["source_start_ms"],
+                    operation["issuing_thread"], "FILE_OPERATION", phase="start")
+                if len(refs) == 2:
+                    io_boundary(refs[1], operation["end_event_name"], operation["source_end_ms"],
+                        operation["completion_thread"], "FILE_OPERATION", phase="end",
+                        details={"observed_completion_ntstatus": operation["observed_completion_ntstatus"],
+                                 "status_attribution": "COMPLETION_EVENT_HEADER_NOT_ISSUER"})
+                process = _trace_process(trace, operation)
+                thread = ({**process, "kind": "TRACE_THREAD", "thread_instance": operation["thread_instance"],
+                    "tid": operation["tid"]} if process is not None and _int(operation.get("thread_instance")) else None)
+                added = out.add(source, "file-io:" + operation["operation_id"], "FILE_OPERATION",
+                    process_identity=process, thread_identity=thread, time_domain=domain,
+                    time_bounds=_bounds(operation["start_ms"], operation["end_ms"], "ms"),
+                    completeness_status="OBSERVED_REQUEST_BOUNDARIES" if operation["quality"] == "OBSERVED_REQUEST_PAIR" else "INCOMPLETE_EVIDENCE",
+                    metadata={**operation, "file_io_pair": True,
+                        "recorded_source": "ETW_KERNEL_FILE_IO",
+                        "status": "ERROR" if type(operation.get("ntstatus")) is int and operation["ntstatus"] >> 30 == 3 else
+                                  "RECORDED_NTSTATUS" if operation.get("ntstatus") is not None else "NOT_ESTABLISHED",
+                        "record_refs": ["events:" + str(x) for x in operation["source_event_ids"]],
+                        "record_ref_relation": "FILE_IO_REQUEST_BOUNDARIES"})
+                file_nodes_added += added is not None
+            source["file_io_coverage"]["graph_operation_nodes_added"] = file_nodes_added
+        if disk_request_candidates:
+            disk_report = build_disk_io_report(path, max_requests=min(10_000, out.budget.max_nodes), **io_filters)
+            source["disk_io_coverage"] = _metadata(disk_report["coverage"])
+            for request in disk_report["requests"]:
+                out.budget.check()
+                refs = request["source_event_ids"]
+                io_boundary(refs[0], request["start_event_name"], request["source_start_ms"],
+                    request["issuing_thread"], "ANNOTATION", phase="start")
+                io_boundary(refs[1], request["end_event_name"], request["source_end_ms"],
+                    request["completion_thread"], "DISK_COMPLETION", phase="end",
+                    details={"reported_response_ms": request["reported_response_ms"],
+                             "status_attribution": "COMPLETION_EVENT_HEADER_NOT_ISSUER"})
+                process = _trace_process(trace, request)
+                thread = {**process, "kind": "TRACE_THREAD", "thread_instance": request["thread_instance"], "tid": request["tid"]}
+                added = out.add(source, "disk-io:" + request["request_id"], "DISK_COMPLETION",
+                    process_identity=process, thread_identity=thread, time_domain=domain,
+                    time_bounds=_bounds(request["start_ms"], request["end_ms"], "ms"),
+                    completeness_status="OBSERVED_REQUEST_BOUNDARIES" if request["quality"] == "OBSERVED_REQUEST_PAIR" else "INCOMPLETE_EVIDENCE",
+                    metadata={**request, "disk_io_pair": True, "recorded_source": "ETW_KERNEL_DISK_IO",
+                        "record_refs": ["events:" + str(x) for x in request["source_event_ids"]],
+                        "record_ref_relation": "DISK_IO_REQUEST_BOUNDARIES"})
+                disk_nodes_added += added is not None
+            source["disk_io_coverage"]["graph_request_nodes_added"] = disk_nodes_added
+    elif file_candidates or disk_request_candidates:
+        out.limitations.add("IO_REQUEST_ANALYSIS_REQUIRES_COMPLETE_SOURCE_SCAN")
     out.coverage["source_coverage"].append({"source_id": source["source_id"], "events_scanned": count,
-        "selected_events": selected, "events_total_after_cursor": total, "wait_intervals": len(waits.get("intervals", []))})
+        "selected_events": selected, "events_total_after_cursor": total, "wait_intervals": len(waits.get("intervals", [])),
+        "file_operations": len(file_report["operations"]) if file_report is not None else None,
+        "disk_requests": len(disk_report["requests"]) if disk_report is not None else None,
+        "file_operation_nodes_added": file_nodes_added, "disk_request_nodes_added": disk_nodes_added})
     if count < total:
         out.coverage["next_cursor"].append({"source_id": source["source_id"], "source_sha256": source["source_sha256"],
             "after": last_identifier, "algorithm_version": ALGORITHM_VERSION, "selection": selection})
