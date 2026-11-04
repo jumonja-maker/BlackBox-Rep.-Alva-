@@ -150,14 +150,37 @@ def _pending_metadata_size(boundary):
     return len(json.dumps(boundary, ensure_ascii=True, separators=(",", ":")).encode("ascii"))
 
 
+def _disk_identity_conflict(row, thread):
+    """Fixed, bounded identity diagnostics; never include imported text/payloads."""
+    def integer(value):
+        return str(value) if _int(value, -1, 2**63-1) else "UNAVAILABLE"
+    source_index = row.get("source_index")
+    if (type(source_index) is str and 1 <= len(source_index) <= 20 and
+            source_index.isascii() and source_index.isdecimal()):
+        source_index = str(int(source_index))
+    else:
+        source_index = integer(source_index)
+    role = "COMPLETION_EVENT_HEADER" if row["io_observation"]["kind"] == "disk" else "REQUEST_INIT_EVENT_HEADER"
+    fields = {"role": role, "ordinal": integer(row.get("ordinal")), "source_index": source_index,
+        "opcode": integer(row.get("opcode")), "version": integer(row.get("version")),
+        "row_pid": integer(row.get("pid")), "row_tid": integer(row.get("tid")),
+        "row_process_instance": integer(row.get("process_instance")),
+        "typed_pid": integer(thread["pid"]), "typed_tid": integer(thread["tid"]),
+        "typed_process_instance": integer(thread["process_instance"]),
+        "typed_thread_instance": integer(thread["thread_instance"]),
+        "attribution": thread["attribution"]}
+    return "INVALID_TYPED_IO_CONTRACT:DISK_EVENT_THREAD_CONFLICT:" + ",".join(key+"="+value for key,value in fields.items())
+
+
 def _validate_disk_request_identity(row, value):
     from .decoder_waits import _identity
     _require(value["request_key"] is None or type(value["request_key"]) is str and _KEY.fullmatch(value["request_key"]) is not None)
     identity = _identity(value["event_thread"], row["time_ms"])
     thread = value["event_thread"]
-    _require(thread["tid"] == row.get("tid") and
+    if not (thread["tid"] == row.get("tid") and
         (thread["pid"] < 0 or row.get("pid", -1) < 0 or thread["pid"] == row["pid"]) and
-        (identity is None or row.get("process_instance") is None or identity[1] == row["process_instance"]))
+        (identity is None or row.get("process_instance") is None or identity[1] == row["process_instance"])):
+        raise ValueError(_disk_identity_conflict(row, thread))
     if "disk_number" in value:
         _require(_int(value["disk_number"], -1, 2**31-1))
     pointer = row.get("payload", {}).get("Irp")

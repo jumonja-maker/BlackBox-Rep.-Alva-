@@ -199,7 +199,7 @@ class FileIoRequestContracts(_IndexFixture):
         self.assertIsNone(operation["ntstatus"]);self.assertIsNone(operation["elapsed_ms"])
 
     def test_unmatched_completion_is_not_attributed_to_header_process(self):
-        report=build_file_io_report(self.index([file_end()]),pid=4)
+        report=build_file_io_report(self.index([file_end(1)]),pid=4)
         self.assertEqual(report["operations"],[])
         self.assertEqual(report["coverage"]["unmatched_completions"],1)
 
@@ -260,6 +260,35 @@ class FileIoRequestContracts(_IndexFixture):
 
 
 class DiskIoRequestContracts(_IndexFixture):
+    def test_identity_conflict_reports_only_bounded_numeric_identity_metadata(self):
+        for row_field in ("pid", "tid", "process_instance"):
+            with self.subTest(row_field=row_field):
+                item=disk_end(1)
+                item[row_field]+=1
+                item["source_index"]="7"
+                item["payload"]["secret"]="DO_NOT_REPORT_PAYLOAD"
+                with self.assertRaisesRegex(ValueError,"DISK_EVENT_THREAD_CONFLICT") as raised:
+                    validate_io_observation(item)
+                message=str(raised.exception)
+                self.assertIn("role=COMPLETION_EVENT_HEADER",message)
+                self.assertIn("source_index=7",message)
+                self.assertIn("typed_tid=99",message)
+                self.assertNotIn("DO_NOT_REPORT_PAYLOAD",message)
+                self.assertNotIn("Irp",message)
+                self.assertLess(len(message),700)
+
+    def test_identity_diagnostics_do_not_echo_arbitrary_source_index_text(self):
+        item=disk_start()
+        item["process_instance"]+=1
+        item["source_index"]="PRIVATE"*10000
+        with self.assertRaisesRegex(ValueError,"DISK_EVENT_THREAD_CONFLICT") as raised:
+            validate_io_observation(item)
+        message=str(raised.exception)
+        self.assertIn("role=REQUEST_INIT_EVENT_HEADER",message)
+        self.assertIn("source_index=UNAVAILABLE",message)
+        self.assertNotIn("PRIVATE",message)
+        self.assertLess(len(message),700)
+
     def test_pending_disk_request_releases_unrelated_large_source_payload_before_completion(self):
         self.assert_unrelated_payload_not_retained(build_disk_io_report,[disk_start(),disk_end()])
 
