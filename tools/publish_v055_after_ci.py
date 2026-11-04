@@ -21,7 +21,10 @@ TAG = "v0.5.5"
 REPOSITORY = "jumonja-maker/BlackBox-Rep.-Alva-"
 CI_NAME = "BLACK.BOX Universal - independent Windows build and release"
 R10_MAIN_SHA = "b0e91ca54ebe4055d9d9df3fe6a193c653d45889"
+V055_VERSION_MAIN_SHA = "0bfbb56bcd3a5deaa7d72f1bc995ac890c8a00e9"
 APPROVED_RELEASE_BRANCH = "release/r10-v055-20261104"
+APPROVED_VERSION_HEAD_SHA = "7eb741a1b05d259ab0998c69e53df5620589e570"
+APPROVED_REPAIR_BRANCH = "fix/r10-v055-complete-etw-20261104"
 PR_NUMBER = 30
 PRIOR_RELEASE_SHA = "74fe0f856776bcee018d79bfeec96f33d2ace0b2"
 PRIOR_ZIP_SHA256 = "01390ec18fbac40accc2ae2774c748994a5dcde7d29421dbdcdacb8555c2cdc4"
@@ -53,22 +56,38 @@ def approved_release_source(client, repo: str, sha: str, run: dict) -> dict:
     require(r10.get("merged") is True
             and r10.get("merge_commit_sha") == R10_MAIN_SHA,
             "APPROVED_R10_MERGE_CHANGED")
+    # The v0.5.5 version PR already merged on a fully green main commit.
+    # The separate owned ETW fixture repair must follow it directly, never
+    # authorize an unrelated push or bypass the previously failed release gate.
+    version_pr = client(f"repos/{repo}/pulls/31")
+    require(version_pr.get("merged") is True
+            and version_pr.get("merge_commit_sha") == V055_VERSION_MAIN_SHA
+            and (version_pr.get("head") or {}).get("sha") == APPROVED_VERSION_HEAD_SHA
+            and (version_pr.get("head") or {}).get("ref") == APPROVED_RELEASE_BRANCH
+            and (version_pr.get("base") or {}).get("ref") == "main",
+            "APPROVED_V055_VERSION_MERGE_CHANGED")
+    version_commit = client(f"repos/{repo}/git/commits/{V055_VERSION_MAIN_SHA}")
+    version_parents = version_commit.get("parents")
+    require(isinstance(version_parents, list) and len(version_parents) == 2
+            and version_parents[0].get("sha") == R10_MAIN_SHA
+            and version_parents[1].get("sha") == APPROVED_VERSION_HEAD_SHA,
+            "V055_VERSION_MERGE_ANCESTRY_MISMATCH")
     pulls = client(f"repos/{repo}/pulls?state=closed&per_page=100")
     require(isinstance(pulls, list), "INVALID_CLOSED_PR_LIST")
     matches = [
         p for p in pulls
         if p.get("merged_at") and p.get("merge_commit_sha") == sha
-        and (p.get("head") or {}).get("ref") == APPROVED_RELEASE_BRANCH
+        and (p.get("head") or {}).get("ref") == APPROVED_REPAIR_BRANCH
         and (p.get("base") or {}).get("ref") == "main"
         and type(p.get("number")) is int
     ]
-    require(len(matches) == 1, "OWNER_APPROVED_V055_VERSION_MERGE_MISSING")
+    require(len(matches) == 1, "OWNER_APPROVED_V055_ETW_REPAIR_MERGE_MISSING")
     commit = client(f"repos/{repo}/git/commits/{sha}")
     parents = commit.get("parents")
     require(isinstance(parents, list) and len(parents) == 2
-            and parents[0].get("sha") == R10_MAIN_SHA
+            and parents[0].get("sha") == V055_VERSION_MAIN_SHA
             and parents[1].get("sha") == matches[0]["head"]["sha"],
-            "V055_SOURCE_PARENT_MISMATCH")
+            "V055_REPAIR_MERGE_ANCESTRY_MISMATCH")
     response = client(f"repos/{repo}/actions/runs/{run['id']}/jobs?per_page=100")
     jobs = response.get("jobs") if isinstance(response, dict) else None
     require(isinstance(jobs, list), "UPSTREAM_CI_JOBS_UNREADABLE")
@@ -96,8 +115,9 @@ def approved_release_source(client, repo: str, sha: str, run: dict) -> dict:
             and zip_asset.get("digest") == "sha256:" + PRIOR_ZIP_SHA256,
             "PREVIOUS_RELEASE_ZIP_CHANGED")
     return {"main_sha": sha, "r10_pr": PR_NUMBER,
-            "version_pr": matches[0]["number"],
-            "version_head": matches[0]["head"]["sha"],
+            "version_pr": 31, "version_head": APPROVED_VERSION_HEAD_SHA,
+            "etw_repair_pr": matches[0]["number"],
+            "etw_repair_head": matches[0]["head"]["sha"],
             "upstream_ci_run": run["id"], "required_jobs": len(found)}
 
 
@@ -159,7 +179,7 @@ def main() -> None:
             f.write("## BLACK.BOX v0.5.5 — verified R10 release\n")
             f.write(f"- Source SHA: {sha}\n")
             f.write(f"- R10 merge: {R10_MAIN_SHA}\n")
-            f.write(f"- Version PR: #{verified['version_pr']}\n")
+            f.write(f"- Version PR: #{verified['version_pr']}\n")            f.write(f"- Bounded ETW repair PR: #{verified['etw_repair_pr']}\n")
             f.write(f"- Full main CI: {verified['upstream_ci_run']}\n")
             f.write(f"- Windows ZIP SHA-256: {digest}\n")
             f.write(f"- Official release: {published['url']}\n")
