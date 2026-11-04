@@ -199,13 +199,23 @@ def run_wave02_e2e(app, window, output, evidence_root, container, expected_sha):
         require(all(digest(path) == value for path, value in inputs.items()),
                 'WAVE02_GUI_MODIFIED_ORIGINAL_EVIDENCE')
         proof['phase'] = 'GUI_CLOSE_AND_RESOURCE_EXIT'
+        graph_busy_at_close = panel.bridge.busy
+        graph_worker_at_close = panel.bridge.worker is not None
+        close_ack_before = len(closed)
+        require(graph_busy_at_close == graph_worker_at_close,
+                'WAVE02_GUI_GRAPH_OWNER_STATE_INCONSISTENT')
         window.close()
         pump(lambda: not window.isVisible() and not window.probe.alive and
-             panel.bridge.worker is None and not window.deep_inspector_panel.bridge.has_session, timeout=60)
-        require(closed, 'WAVE02_GUI_GRAPH_CLOSE_ACK_NOT_OBSERVED')
+             panel.bridge.worker is None and not panel.bridge.busy and
+             not window.deep_inspector_panel.bridge.has_session and
+             (not graph_busy_at_close or len(closed) > close_ack_before), timeout=60)
+        require(not graph_busy_at_close or len(closed) > close_ack_before,
+                'WAVE02_GUI_GRAPH_CLOSE_ACK_NOT_OBSERVED')
         proof['cleanup'] = {'status': 'COMPLETED', 'ordinary_observer_exit_verified': not window.probe.alive,
             'graph_worker_finished': panel.bridge.worker is None,
-            'graph_closed_acknowledged': True,
+            'graph_busy_at_close': graph_busy_at_close,
+            'graph_close_scope': 'BUSY_READER_CLOSE_ACK' if graph_busy_at_close else 'IDLE_NO_GRAPH_READER_AT_CLOSE',
+            'graph_closed_acknowledged': len(closed) > close_ack_before,
             'diagnostic_helper_started': False, 'source_hashes_unchanged': True}
         proof['status'] = 'PASS'
     except BaseException as error:
