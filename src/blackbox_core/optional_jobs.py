@@ -27,6 +27,7 @@ class OwnedProcess:
     """A kill boundary confined to our operation and its own descendants."""
     _owners = {}
     _owners_lock = threading.RLock()
+    _spawn_lock = threading.RLock()
     MAX_OWNERS = 32
 
     def __init__(self, args, *, stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,env=None,
@@ -66,7 +67,9 @@ class OwnedProcess:
             k.AssignProcessToJobObject.argtypes=[W.HANDLE,W.HANDLE]; k.AssignProcessToJobObject.restype=W.BOOL
             k.TerminateJobObject.argtypes=[W.HANDLE,W.UINT]; k.TerminateJobObject.restype=W.BOOL
             k.CloseHandle.argtypes=[W.HANDLE]; k.CloseHandle.restype=W.BOOL
-            k.OpenThread.argtypes=[W.DWORD,W.BOOL,W.DWORD]; k.OpenThread.restype=W.HANDLE
+            k.GetCurrentProcess.argtypes=[]; k.GetCurrentProcess.restype=W.HANDLE
+            k.DuplicateHandle.argtypes=[W.HANDLE,W.HANDLE,W.HANDLE,C.POINTER(W.HANDLE),W.DWORD,W.BOOL,W.DWORD]
+            k.DuplicateHandle.restype=W.BOOL
             k.GetProcessIdOfThread.argtypes=[W.HANDLE]; k.GetProcessIdOfThread.restype=W.DWORD
             k.ResumeThread.argtypes=[W.HANDLE]; k.ResumeThread.restype=W.DWORD
             k.QueryInformationJobObject.argtypes=[W.HANDLE,C.c_int,C.c_void_p,W.DWORD,C.c_void_p]
@@ -99,30 +102,106 @@ class OwnedProcess:
             # No child code can spawn an escaping descendant before job binding.
             options['creationflags'] = self.windows_creation_flags
         else: options['start_new_session'] = True
-        self.process = subprocess.Popen(args, **options)
+        if self._platform == 'nt':
+            self._popen_suspended(args, options)
+        else:
+            self.process = subprocess.Popen(args, **options)
         if self.job:
-            if not self.kernel.AssignProcessToJobObject(self.job, int(self.process._handle)):
-                raise OSError('OPTIONAL_JOB_ASSIGNMENT_FAILED')
-            self._job_assigned = True
-            # Popen closes its primary thread handle. Open the sole suspended
-            # thread by its observed TID and verify against our still-live held
-            # process before resuming; no foreign process is resumed.
-            import psutil
-            threads = psutil.Process(self.process.pid).threads()
-            if len(threads) != 1:
-                raise OSError('OPTIONAL_SUSPENDED_INITIAL_THREAD_UNCONFIRMED')
-            handle = self.kernel.OpenThread(0x2 | 0x800, False, threads[0].id)
-            if not handle:
-                raise OSError('OPTIONAL_INITIAL_THREAD_OPEN_FAILED')
-            self._thread_handles.append(handle)
-            if (self.kernel.GetProcessIdOfThread(handle) != self.process.pid or
-                    self.process.poll() is not None):
-                raise OSError('OPTIONAL_INITIAL_THREAD_IDENTITY_CHANGED')
-            if self.kernel.ResumeThread(handle) != 1:
-                raise OSError('OPTIONAL_INITIAL_THREAD_RESUME_UNCONFIRMED')
-            if not self.kernel.CloseHandle(handle):
-                raise OSError('OPTIONAL_INITIAL_THREAD_HANDLE_CLOSE_FAILED')
-            self._thread_handles.remove(handle)
+            self._resume_initial_thread()
+
+    def _popen_suspended(self, args, options):
+        """Retain the exact CreateProcess thread capability before Popen closes it.
+
+        CPython's Windows Popen does not expose its primary thread handle. A
+        restricted token can use the original creation capability while being
+        unable to reopen the same thread by TID. Duplicate that existing grant,
+        without changing tokens, DACLs or requested access. The private CPython
+        hook is active only during this launching thread's Popen call; foreign
+        threads are delegated unchanged and OwnedProcess launches serialize.
+        """
+        import ctypes as C
+        from ctypes import wintypes as W
+        api = getattr(subprocess, '_winapi', None)
+        if api is None or not callable(getattr(api, 'CreateProcess', None)):
+            raise OSError('OPTIONAL_CPYTHON_CREATE_PROCESS_HOOK_UNAVAILABLE')
+        command_line = (args if isinstance(args, str) else
+                        subprocess.list2cmdline([args] if isinstance(args, os.PathLike) else args))
+        creation_flags = options.get('creationflags', 0)
+        with self._spawn_lock:
+            launching_thread = threading.get_ident()
+            original = api.CreateProcess
+            active = True
+            creating = False
+            self._initial_thread_capture = None
+            def capture(*arguments, **keywords):
+                nonlocal creating
+                # Match the one requested launch as well as its thread. An
+                # unrelated Popen from a same-thread audit hook also delegates.
+                matches = (active and threading.get_ident() == launching_thread and len(arguments) >= 6 and
+                           arguments[1] == command_line and arguments[5] == creation_flags)
+                if not matches or creating:
+                    return original(*arguments, **keywords)
+                creating = True
+                try:
+                    result = original(*arguments, **keywords)
+                finally:
+                    creating = False
+                if active:
+                    if self._initial_thread_capture is not None:
+                        self._initial_thread_capture['error'] = OSError('OPTIONAL_MULTIPLE_INITIAL_THREAD_CREATIONS')
+                        return result
+                    process_handle, thread_handle, pid, tid = result
+                    entry = {'process_handle': int(process_handle), 'pid': pid, 'tid': tid,
+                             'handle': None, 'error': None}
+                    self._initial_thread_capture = entry
+                    duplicate = W.HANDLE()
+                    try:
+                        # Bind while hp is still the exact creation capability,
+                        # including if Popen later fails before returning its
+                        # process object. The retained job then owns cleanup.
+                        if not self.kernel.AssignProcessToJobObject(self.job, process_handle):
+                            raise OSError('OPTIONAL_JOB_ASSIGNMENT_FAILED')
+                        self._job_assigned = True
+                        current = self.kernel.GetCurrentProcess()
+                        if not self.kernel.DuplicateHandle(current, thread_handle, current,
+                                C.byref(duplicate), 0, False, 0x2):  # DUPLICATE_SAME_ACCESS
+                            raise OSError(C.get_last_error(), 'OPTIONAL_INITIAL_THREAD_DUPLICATE_FAILED')
+                        if not duplicate.value:
+                            raise OSError('OPTIONAL_INITIAL_THREAD_DUPLICATE_MISSING')
+                        entry['handle'] = duplicate.value
+                        self._thread_handles.append(duplicate.value)
+                    except BaseException as error:
+                        # Return the unchanged tuple first, so Popen acquires hp
+                        # and closes its original ht even when duplication fails.
+                        # The caller then kills only that suspended owned child.
+                        entry['error'] = error
+                return result
+            try:
+                api.CreateProcess = capture
+                self.process = subprocess.Popen(args, **options)
+            finally:
+                active = False
+                if api.CreateProcess is capture:
+                    api.CreateProcess = original
+
+    def _resume_initial_thread(self):
+        entry = self._initial_thread_capture
+        if (entry is None or entry['pid'] != self.process.pid or
+                entry['process_handle'] != int(self.process._handle)):
+            raise OSError('OPTIONAL_INITIAL_THREAD_CREATION_IDENTITY_UNCONFIRMED')
+        if entry['error'] is not None:
+            raise entry['error']
+        handle = entry['handle']
+        if (not self._job_assigned or handle is None or
+                self.kernel.GetProcessIdOfThread(handle) != self.process.pid or
+                self.process.poll() is not None):
+            raise OSError('OPTIONAL_INITIAL_THREAD_IDENTITY_CHANGED')
+        if self.kernel.ResumeThread(handle) != 1:
+            raise OSError('OPTIONAL_INITIAL_THREAD_RESUME_UNCONFIRMED')
+        if not self.kernel.CloseHandle(handle):
+            raise OSError('OPTIONAL_INITIAL_THREAD_HANDLE_CLOSE_FAILED')
+        self._thread_handles.remove(handle)
+        self._initial_thread_capture = None
 
     def _job_empty(self):
         import ctypes as C
@@ -202,6 +281,11 @@ class OwnedProcess:
                 # A false termination result is acceptable only if the SAME job
                 # is independently proved empty below, never merely on leader exit.
                 self._termination_accepted = bool(self.kernel.TerminateJobObject(self.job, 1))
+            elif self.process is None and getattr(self, '_initial_thread_capture', None) is not None:
+                # A failed Popen did not transfer hp, and the child was not
+                # bound. Never certify cleanup using an empty unrelated job or
+                # retry an unowned numeric process handle.
+                raise OSError('OPTIONAL_CREATED_PROCESS_OWNERSHIP_UNCONFIRMED')
             elif self.process is not None and self.process.poll() is None:
                 self.process.kill()  # Constructor failed before job assignment.
         if self.process is not None:

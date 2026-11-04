@@ -5,6 +5,8 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
+from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
@@ -147,8 +149,321 @@ class OwnedCleanupContracts(unittest.TestCase):
                     session.command({'op':operation, 'args':{}})
 
 
+class InitialThreadCapabilityContracts(unittest.TestCase):
+    """Private CPython interception contracts; native proof is separate below."""
+    def owner(self):
+        import ctypes as C
+        from ctypes import wintypes as W
+        owner = OwnedProcess.__new__(OwnedProcess)
+        owner._thread_handles = []
+        owner._job_assigned = True
+        owner.job = 37
+        owner.process = None
+        owner.kernel = Mock()
+        owner.kernel.GetCurrentProcess.return_value = 900
+        owner.kernel.GetProcessIdOfThread.return_value = 42
+        owner.kernel.ResumeThread.return_value = 1
+        owner.kernel.CloseHandle.return_value = 1
+        owner.kernel.AssignProcessToJobObject.return_value = 1
+        def duplicate(source, handle, target, result, access, inherit, flags):
+            self.assertEqual((source, target, access, inherit, flags), (900, 900, 0, False, 0x2))
+            C.cast(result, C.POINTER(W.HANDLE)).contents.value = 101
+            return 1
+        owner.kernel.DuplicateHandle.side_effect = duplicate
+        return owner
+
+    def process(self):
+        process = Mock(pid=42, _handle=70)
+        process.poll.return_value = None
+        return process
+
+    def create(self, api, label='owned', flags=0):
+        return api.CreateProcess(None, label, None, None, False, flags, None, None, None)
+
+    def test_exact_creation_capability_is_duplicated_then_resumed_only_after_binding(self):
+        owner, process = self.owner(), self.process()
+        original = Mock(return_value=(70, 80, 42, 43))
+        api = SimpleNamespace(CreateProcess=original)
+        def popen(*args, **options):
+            self.assertEqual(self.create(api, flags=0xC), (70, 80, 42, 43))
+            owner.kernel.ResumeThread.assert_not_called()
+            return process
+        with patch('blackbox_core.optional_jobs.subprocess._winapi', api, create=True), \
+                patch('blackbox_core.optional_jobs.subprocess.Popen', side_effect=popen):
+            owner._popen_suspended(['owned'], {'creationflags': 0xC})
+        self.assertIs(api.CreateProcess, original)
+        self.assertEqual(owner._thread_handles, [101])
+        owner.kernel.AssignProcessToJobObject.assert_called_once_with(37, 70)
+        owner._resume_initial_thread()
+        owner.kernel.ResumeThread.assert_called_once_with(101)
+        owner.kernel.CloseHandle.assert_called_once_with(101)
+        self.assertEqual(owner._thread_handles, [])
+        owner.kernel.OpenThread.assert_not_called()
+
+    def test_simultaneous_foreign_create_process_is_delegated_without_capture(self):
+        owner, process = self.owner(), self.process()
+        calls = []
+        def original(*arguments):
+            label = arguments[1]
+            calls.append(label)
+            return (170, 180, 142, 143) if label == 'foreign' else (70, 80, 42, 43)
+        api = SimpleNamespace(CreateProcess=original)
+        foreign_result = []
+        def popen(*args, **options):
+            foreign = threading.Thread(target=lambda: foreign_result.append(self.create(api, 'foreign')))
+            foreign.start(); foreign.join(timeout=5)
+            self.assertFalse(foreign.is_alive())
+            self.create(api)
+            return process
+        with patch('blackbox_core.optional_jobs.subprocess._winapi', api, create=True), \
+                patch('blackbox_core.optional_jobs.subprocess.Popen', side_effect=popen):
+            owner._popen_suspended(['owned'], {})
+        self.assertEqual(foreign_result, [(170, 180, 142, 143)])
+        self.assertEqual(calls, ['foreign', 'owned'])
+        self.assertEqual(owner._initial_thread_capture['pid'], 42)
+        self.assertEqual(owner.kernel.DuplicateHandle.call_count, 1)
+        self.assertEqual(owner.kernel.DuplicateHandle.call_args.args[1], 80)
+        self.assertIs(api.CreateProcess, original)
+
+    def test_popen_after_create_failure_retains_the_job_boundary_before_return(self):
+        owner = self.owner(); owner._job_assigned = False
+        original = Mock(return_value=(70, 80, 42, 43))
+        api = SimpleNamespace(CreateProcess=original)
+        def popen(*args, **options):
+            self.create(api)
+            self.assertTrue(owner._job_assigned)
+            raise OSError('CONTROLLED_POPEN_AFTER_CREATE_FAILURE')
+        with patch('blackbox_core.optional_jobs.subprocess._winapi', api, create=True), \
+                patch('blackbox_core.optional_jobs.subprocess.Popen', side_effect=popen):
+            with self.assertRaisesRegex(OSError, 'POPEN_AFTER_CREATE'):
+                owner._popen_suspended(['owned'], {})
+        self.assertIsNone(owner.process)
+        self.assertTrue(owner._job_assigned)
+        self.assertEqual(owner._thread_handles, [101])
+        self.assertIs(api.CreateProcess, original)
+        owner.kernel.ResumeThread.assert_not_called()
+
+    def test_same_thread_unrelated_command_is_never_bound_or_captured(self):
+        owner, process = self.owner(), self.process()
+        def original(*arguments):
+            return (170, 180, 142, 143) if arguments[1] == 'foreign' else (70, 80, 42, 43)
+        api = SimpleNamespace(CreateProcess=original)
+        def popen(*args, **options):
+            self.assertEqual(self.create(api, 'foreign'), (170, 180, 142, 143))
+            owner.kernel.AssignProcessToJobObject.assert_not_called()
+            self.create(api)
+            return process
+        with patch('blackbox_core.optional_jobs.subprocess._winapi', api, create=True), \
+                patch('blackbox_core.optional_jobs.subprocess.Popen', side_effect=popen):
+            owner._popen_suspended(['owned'], {})
+        owner.kernel.AssignProcessToJobObject.assert_called_once_with(37, 70)
+        self.assertEqual(owner.kernel.DuplicateHandle.call_count, 1)
+
+    def test_reentrant_identical_create_process_call_is_not_bound_or_captured(self):
+        owner, process = self.owner(), self.process()
+        nested = False
+        nested_results = []
+        api = SimpleNamespace()
+        def original(*arguments, **keywords):
+            nonlocal nested
+            if nested:
+                return (170, 180, 142, 143)
+            nested = True
+            try:
+                nested_results.append(api.CreateProcess(*arguments, **keywords))
+                owner.kernel.AssignProcessToJobObject.assert_not_called()
+            finally:
+                nested = False
+            return (70, 80, 42, 43)
+        api.CreateProcess = original
+        def popen(*args, **options):
+            self.create(api)
+            return process
+        with patch('blackbox_core.optional_jobs.subprocess._winapi', api, create=True), \
+                patch('blackbox_core.optional_jobs.subprocess.Popen', side_effect=popen):
+            owner._popen_suspended(['owned'], {})
+        self.assertEqual(nested_results, [(170, 180, 142, 143)])
+        owner.kernel.AssignProcessToJobObject.assert_called_once_with(37, 70)
+        self.assertEqual(owner.kernel.DuplicateHandle.call_args.args[1], 80)
+
+    def test_duplicate_failure_waits_for_popen_ownership_and_never_resumes(self):
+        owner, process = self.owner(), self.process()
+        owner.kernel.DuplicateHandle.side_effect = OSError('CONTROLLED_DUPLICATE_FAILURE')
+        original = Mock(return_value=(70, 80, 42, 43))
+        api = SimpleNamespace(CreateProcess=original)
+        def popen(*args, **options):
+            self.assertEqual(self.create(api), (70, 80, 42, 43))
+            return process
+        with patch('blackbox_core.optional_jobs.subprocess._winapi', api, create=True), \
+                patch('blackbox_core.optional_jobs.subprocess.Popen', side_effect=popen):
+            owner._popen_suspended(['owned'], {})
+        self.assertIs(owner.process, process)
+        with self.assertRaisesRegex(OSError, 'CONTROLLED_DUPLICATE_FAILURE'):
+            owner._resume_initial_thread()
+        owner.kernel.ResumeThread.assert_not_called()
+        self.assertEqual(owner._thread_handles, [])
+        self.assertIs(api.CreateProcess, original)
+
+    def test_mismatched_process_handle_or_unassigned_job_cannot_resume(self):
+        for change in ('process', 'thread', 'job'):
+            with self.subTest(change=change):
+                owner = self.owner(); owner.process = self.process()
+                owner._thread_handles = [101]
+                owner._initial_thread_capture = {'process_handle': 70, 'pid': 42, 'tid': 43,
+                                                  'handle': 101, 'error': None}
+                if change == 'process': owner.process._handle = 170
+                if change == 'thread': owner.kernel.GetProcessIdOfThread.return_value = 142
+                if change == 'job': owner._job_assigned = False
+                with self.assertRaisesRegex(OSError, 'IDENTITY'):
+                    owner._resume_initial_thread()
+                owner.kernel.ResumeThread.assert_not_called()
+                owner.kernel.CloseHandle.assert_not_called()
+                self.assertEqual(owner._thread_handles, [101])
+
+    def test_external_hook_replacement_is_preserved_and_old_capture_deactivated(self):
+        owner, process = self.owner(), self.process()
+        original = Mock(return_value=(70, 80, 42, 43))
+        api = SimpleNamespace(CreateProcess=original)
+        replacements = []
+        def popen(*args, **options):
+            capture = api.CreateProcess
+            self.create(api)
+            def replacement(*values, **keywords):
+                return capture(*values, **keywords)
+            replacements.append(replacement)
+            api.CreateProcess = replacement
+            return process
+        with patch('blackbox_core.optional_jobs.subprocess._winapi', api, create=True), \
+                patch('blackbox_core.optional_jobs.subprocess.Popen', side_effect=popen):
+            owner._popen_suspended(['owned'], {})
+        self.assertIs(api.CreateProcess, replacements[0])
+        api.CreateProcess('later-unrelated')
+        self.assertEqual(owner.kernel.DuplicateHandle.call_count, 1)
+
+    def test_unexpected_suspend_count_retains_capability_for_cleanup(self):
+        for count in (0, 2, 0xFFFFFFFF):
+            with self.subTest(count=count):
+                owner = self.owner(); owner.process = self.process()
+                owner._thread_handles = [101]
+                owner._initial_thread_capture = {'process_handle': 70, 'pid': 42, 'tid': 43,
+                                                  'handle': 101, 'error': None}
+                owner.kernel.ResumeThread.return_value = count
+                with self.assertRaisesRegex(OSError, 'RESUME_UNCONFIRMED'):
+                    owner._resume_initial_thread()
+                owner.kernel.CloseHandle.assert_not_called()
+                self.assertEqual(owner._thread_handles, [101])
+
+
 @unittest.skipUnless(os.name == 'nt', 'Actual Windows job membership and descendant exit')
 class NativeOwnedCleanup(unittest.TestCase):
+    def test_popen_after_create_failure_still_kills_job_owned_suspended_child(self):
+        owners, processes = [], []
+        actual_popen = subprocess.Popen
+        class ObservedOwner(OwnedProcess):
+            def _popen_suspended(self, args, options):
+                owners.append(self)
+                return super()._popen_suspended(args, options)
+        def fail_after_create(*args, **options):
+            process = actual_popen(*args, **options)
+            processes.append(process)
+            raise OSError('CONTROLLED_POPEN_AFTER_CREATE_FAILURE')
+        with tempfile.TemporaryDirectory() as root:
+            marker = Path(root) / 'must-not-execute-after-create-error'
+            try:
+                with patch('blackbox_core.optional_jobs.subprocess.Popen', side_effect=fail_after_create):
+                    with self.assertRaisesRegex(OSError, 'POPEN_AFTER_CREATE_FAILURE'):
+                        ObservedOwner([sys.executable, '-c',
+                            'import pathlib,sys;pathlib.Path(sys.argv[1]).write_text("unexpected")', str(marker)],
+                            detach_console=True)
+                self.assertEqual(len(owners), 1)
+                self.assertEqual(len(processes), 1)
+                self.assertIsNone(owners[0].process)
+                self.assertTrue(owners[0]._closed)
+                self.assertIsNotNone(processes[0].wait(timeout=5))
+                self.assertFalse(marker.exists())
+            finally:
+                for process in processes:
+                    if process.poll() is None: process.kill()
+                    process.wait(timeout=5)
+
+    def test_duplicate_failure_kills_only_suspended_owned_child_before_any_code_runs(self):
+        import ctypes as C
+        owners = []
+        class DuplicateDenied(OwnedProcess):
+            def _popen_suspended(self, args, options):
+                owners.append(self)
+                duplicate = self.kernel.DuplicateHandle
+                def deny(*arguments):
+                    C.set_last_error(5)
+                    return 0
+                self.kernel.DuplicateHandle = deny
+                try:
+                    return super()._popen_suspended(args, options)
+                finally:
+                    self.kernel.DuplicateHandle = duplicate
+        with tempfile.TemporaryDirectory() as root:
+            marker = Path(root) / 'must-not-execute'
+            with self.assertRaisesRegex(OSError, 'INITIAL_THREAD_DUPLICATE_FAILED'):
+                DuplicateDenied([sys.executable, '-c',
+                    'import pathlib,sys;pathlib.Path(sys.argv[1]).write_text("unexpected")', str(marker)],
+                    detach_console=True)
+            self.assertEqual(len(owners), 1)
+            owner = owners[0]
+            self.assertIsNotNone(owner.process)
+            self.assertIsNotNone(owner.process.poll())
+            self.assertTrue(owner._closed)
+            self.assertFalse(owner.cleanup_required)
+            self.assertIsNone(owner.job)
+            self.assertFalse(marker.exists(), 'Suspended child ran despite failure to retain its initial capability')
+
+    def test_simultaneous_foreign_popen_runs_and_survives_owned_cleanup(self):
+        import subprocess as sp
+        api = sp._winapi
+        original = api.CreateProcess
+        waiting, foreign_ready = threading.Event(), threading.Event()
+        owners, errors = [], []
+        with tempfile.TemporaryDirectory() as root:
+            marker = Path(root) / 'foreign-started'
+            def observe(*arguments, **keywords):
+                if threading.current_thread().name == 'owned-capability-test':
+                    waiting.set()
+                    if not foreign_ready.wait(15):
+                        raise TimeoutError('FOREIGN_POPEN_DID_NOT_RUN_CONCURRENTLY')
+                return original(*arguments, **keywords)
+            def launch():
+                try:
+                    owners.append(OwnedProcess([sys.executable, '-c', 'import time;time.sleep(60)'],
+                                               detach_console=True))
+                except BaseException as error:
+                    errors.append(error)
+            thread = threading.Thread(target=launch, name='owned-capability-test')
+            foreign = None
+            with patch.object(api, 'CreateProcess', side_effect=observe) as observer:
+                thread.start()
+                try:
+                    self.assertTrue(waiting.wait(15))
+                    foreign = sp.Popen([sys.executable, '-c',
+                        'import pathlib,sys,time;pathlib.Path(sys.argv[1]).write_text("ready");time.sleep(60)',
+                        str(marker)])
+                    until = time.monotonic() + 15
+                    while not marker.exists() and foreign.poll() is None and time.monotonic() < until:
+                        time.sleep(.01)
+                    self.assertTrue(marker.exists(), 'Foreign process was suspended or otherwise altered')
+                    foreign_ready.set(); thread.join(timeout=15)
+                    self.assertFalse(thread.is_alive())
+                    self.assertFalse(errors)
+                    self.assertEqual(len(owners), 1)
+                    self.assertEqual(owners[0].windows_creation_flags, 0xC)
+                    self.assertIs(api.CreateProcess, observer)
+                    owners[0].close(kill=True)
+                    self.assertIsNone(foreign.poll(), 'Foreign process was captured or killed')
+                finally:
+                    foreign_ready.set(); thread.join(timeout=15)
+                    for owner in owners: owner.close(kill=True)
+                    if foreign is not None:
+                        if foreign.poll() is None: foreign.kill()
+                        foreign.wait(timeout=5)
+
     def test_immediate_descendant_is_in_job_and_dies_after_leader_exit(self):
         import ctypes as C
         from ctypes import wintypes as W
