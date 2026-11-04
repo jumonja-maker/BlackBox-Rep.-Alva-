@@ -96,6 +96,8 @@ class DiagnosticActionEngine:
         self._execution_identity_verified = False
         self._execution_attempted = False
         response = self._execute(request, cancel_event=cancel_event, file_handle=file_handle)
+        if response.get("status") == "RECOVERY_UNCONFIRMED" and response.get("data", {}).get("owner_retained"):
+            self.retained_cleanup = response
         if self._execution_identity_verified and self._execution_attempted:
             response["diagnostic_execution"] = {"source": "DIAGNOSTIC_HELPER", "source_verified": True,
                                                   "target_verified": response.get("status") != "PROCESS_CHANGED",
@@ -111,7 +113,7 @@ class DiagnosticActionEngine:
                           next_action="END_SESSION_AND_APPROVE_A_NEW_OPERATION_SCOPE")
         if self.retained_cleanup is not None and request.operation not in (
                 "debug.detach", "debug.context", "debug.breakpoints", "capabilities"):
-            return result(request.operation, "RECOVERY_UNCONFIRMED", error="OWNED_DEBUG_CONTEXT_REQUIRES_CLEANUP",
+            return result(request.operation, "RECOVERY_UNCONFIRMED", error="OWNED_DIAGNOSTIC_CONTEXT_REQUIRES_CLEANUP",
                           data={"owner_retained": True, "retry_cleanup_required": True})
         validate_parameters(request.parameters)
         spec = DEEP_ACTIONS[request.operation]
@@ -226,7 +228,14 @@ class DiagnosticActionEngine:
                                 "owner_retained": True, "retry_cleanup_required": True},
                           limitations=["Cleanup is retryable only within the original helper lease; unverified held debug context must not be silently resumed."])
         try:
-            self.inspector.close()
+            inspected = self.inspector.close()
+            if isinstance(inspected, dict) and inspected.get("status") not in ("COMPLETED", "AVAILABLE", "OK"):
+                errors.append(inspected)
+                if inspected.get("data", {}).get("owner_retained"):
+                    self.retained_cleanup = inspected
+                    return result("session.close", "RECOVERY_UNCONFIRMED", retains_service=True,
+                        data={"debug_cleanup": cleanup, "errors": errors,
+                              "owner_retained": True, "retry_cleanup_required": True})
         except Exception as exc:
             errors.append({"error": str(exc)[:1000]})
         return result("session.close", "RECOVERY_UNCONFIRMED" if errors else "COMPLETED",

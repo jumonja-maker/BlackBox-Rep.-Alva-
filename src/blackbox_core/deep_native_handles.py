@@ -103,9 +103,9 @@ def _query_child(pid, created_100ns, value):
         kernel.close(process)
 
 
-def query_bounded(identity, value, deadline=None, cancel_event=None):
+def query_bounded(identity, value, deadline=None, cancel_event=None, *, owned_processes=None):
     from .deep_native import _check
-    from .optional_jobs import OwnedProcess
+    from .optional_jobs import OwnedProcess, OwnedProcessCleanupUnconfirmed
     _check(deadline, cancel_event)
     args = [str(identity.pid), str(identity.created_100ns), str(value)]
     command = ([sys.executable, "--deep-handle-query", *args] if getattr(sys, "frozen", False)
@@ -115,6 +115,8 @@ def query_bounded(identity, value, deadline=None, cancel_event=None):
     with tempfile.TemporaryFile() as output:
         try:
             owner = OwnedProcess(command, stdout=output, stderr=subprocess.DEVNULL, detach_console=True)
+            if owned_processes is not None:
+                owned_processes.append(owner)
             while owner.process.poll() is None:
                 _check(deadline, cancel_event)
                 if time.monotonic() >= end:
@@ -131,11 +133,21 @@ def query_bounded(identity, value, deadline=None, cancel_event=None):
                     {"name_status", "name", "type_name", "binding", "winerror"}):
                 raise ValueError("HANDLE_QUERY_RESULT_SCHEMA")
             return result
+        except OwnedProcessCleanupUnconfirmed as error:
+            owner = error.owner
+            if owned_processes is not None and owner not in owned_processes:
+                owned_processes.append(owner)
+            raise
         except (OSError, ValueError):
             return {"name_status": "INCOMPLETE_EVIDENCE", "name": None, "type_name": None}
         finally:
             if owner is not None:
-                owner.close(kill=owner.process.poll() is None)
+                if not owner.cleanup_required:
+                    # Strict owner.close owns exit observation and descendants.
+                    # A separate raw poll must not bypass its uncertainty path.
+                    owner.close(kill=True)
+                    if owned_processes is not None and owner in owned_processes:
+                        owned_processes.remove(owner)
 
 
 def main(argv=None):

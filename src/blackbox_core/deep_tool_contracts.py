@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import time
 from typing import Any
+from uuid import uuid4
 
 from .deep_contracts import (ActionRequest, DEEP_ACTIONS, MAX_MEMORY_BYTES,
                              MAX_MESSAGE_BYTES, MAX_OPERATION_SECONDS,
@@ -21,6 +22,7 @@ from .deep_journal import journal_metadata
 CONTRACT_VERSION = 1
 _LOCAL = frozenset({"timeline", "compare", "trace_evidence", "dump_inspect",
                     "dump_read_memory", "symbols_verify"})
+_EVIDENCE_OPERATIONS = frozenset({"decoder.decode", "investigation.create", "investigation.export"})
 
 
 @dataclass(frozen=True)
@@ -81,7 +83,7 @@ def describe_tool(operation: str) -> ToolDescriptor:
 class RunContext:
     run_id: str
     operation: str
-    target: ProcessIdentity
+    target: ProcessIdentity | None
     sources: tuple[dict[str, Any], ...]
     parameters: dict[str, Any]
     started_at_utc: str
@@ -93,7 +95,8 @@ class RunContext:
 
     def to_dict(self) -> dict[str, Any]:
         return journal_metadata(dict(self.__dict__, contract_version=CONTRACT_VERSION,
-                                     target=self.target.to_dict(), sources=list(self.sources),
+                                     target=self.target.to_dict() if self.target is not None else None,
+                                     sources=list(self.sources),
                                      clock_scope="CALLING_PROCESS_MONOTONIC_NS"))
 
 
@@ -155,7 +158,8 @@ class RunReceipt:
 
     def to_dict(self) -> dict[str, Any]:
         return journal_metadata(dict(self.__dict__, contract_version=CONTRACT_VERSION,
-                                     status_adapter="DEEP_LEGACY_STATUS_IDENTITY_V1",
+                                     status_adapter=("EVIDENCE_LEGACY_STATUS_IDENTITY_V1" if
+                                         self.operation in _EVIDENCE_OPERATIONS else "DEEP_LEGACY_STATUS_IDENTITY_V1"),
                                      result_references=list(self.result_references),
                                      limitations=list(self.limitations),
                                      evidence_scope="LOCAL_DIAGNOSTIC_METADATA_NOT_AUTHENTICATED_PROVENANCE"))
@@ -247,3 +251,103 @@ def attach_run_receipt(context: RunContext, answer: dict, *,
         cleanup=_cleanup_receipt(context, answer, cleanup), effects=effects)
     return {**answer, "tool_descriptor": describe_tool(context.operation).to_dict(),
             "run_context": context.to_dict(), "run_receipt": receipt.to_dict()}
+
+
+def begin_evidence_run(operation, *, run_id=None, sources=(), timeout_seconds=30,
+                       target=None, parameters=None):
+    """Use the existing contracts for three actual, read-only evidence paths.
+
+    This descriptive list is not a Helper execution catalog. Deep ActionRequest
+    still requires its exact live ProcessIdentity and unchanged authorization.
+    No target is invented for an offline source that cannot establish one.
+    """
+    if type(operation) is not str or operation not in _EVIDENCE_OPERATIONS:
+        raise ValueError("UNSUPPORTED_EVIDENCE_OPERATION")
+    if type(timeout_seconds) not in (int, float) or not 0 < timeout_seconds <= 600:
+        raise ValueError("INVALID_EVIDENCE_OPERATION_TIMEOUT")
+    run_id = uuid4().hex if run_id is None else run_id
+    if (type(run_id) is not str or not 1 <= len(run_id) <= 128 or
+            any(ord(c) < 32 for c in run_id)):
+        raise ValueError("INVALID_DIAGNOSTIC_RUN_ID")
+    if target is not None and not isinstance(target, ProcessIdentity):
+        target = ProcessIdentity.from_dict(target)
+    if (not isinstance(sources, (list, tuple)) or len(sources) > 64 or
+            any(type(source) is not dict for source in sources) or
+            parameters is not None and type(parameters) is not dict):
+        raise ValueError("INVALID_EVIDENCE_RUN_METADATA")
+    now, monotonic = datetime.now(timezone.utc), time.monotonic_ns()
+    return RunContext(run_id, operation, target,
+        tuple(journal_metadata(source) for source in sources),
+        journal_metadata(parameters or {}), now.isoformat(), monotonic,
+        (now + timedelta(seconds=timeout_seconds)).isoformat(),
+        monotonic + int(timeout_seconds * 1_000_000_000),
+        {"level_at_request": "READ_ONLY_LOCAL_EVIDENCE", "confirmation_required": False,
+         "authorization": "NO_HELPER_OR_NATIVE_INTERVENTION_AUTHORITY"},
+        {"timeout_seconds": timeout_seconds, "scope": "EXISTING_COMPONENT_BUDGET"})
+
+
+def attach_evidence_run_receipt(context, answer, *, sources=(), coverage=None,
+                                cleanup=None, source_revalidated=False, execution_started=None):
+    """Attach factual R10 records without replacing a component's legacy status.
+
+    COMPLETE describes neither original capture coverage nor producer identity.
+    Only an explicitly supplied resource/readback acknowledgement confirms
+    cleanup. Source revalidation means byte consistency, never authentication.
+    """
+    if (not isinstance(context, RunContext) or type(context.operation) is not str or
+            context.operation not in _EVIDENCE_OPERATIONS or
+            type(answer) is not dict or not isinstance(sources, (list, tuple)) or
+            len(sources) > 64 or any(type(source) is not dict for source in sources) or
+            coverage is not None and type(coverage) is not dict or
+            cleanup is not None and type(cleanup) is not dict or
+            execution_started is not None and type(execution_started) is not bool):
+        raise ValueError("INVALID_EVIDENCE_RUN_RESULT")
+    status = answer.get("status", "UNKNOWN")
+    descriptor = ToolDescriptor("blackbox." + context.operation, CONTRACT_VERSION,
+        ("existing local evidence inputs",), ("legacy result", "RunReceipt/v1"),
+        (context.operation,), "READ_ONLY_LOCAL_FILES", "NO_NATIVE_INTERVENTION",
+        context.limits, ("operation-owned file handles and private staging",),
+        {"supported": True, "method": "EXISTING_COMPONENT_CANCEL_AND_DEADLINE",
+         "cleanup": "ACKNOWLEDGED_BY_COMPONENT", "completion_is_not_rollback": True})
+    sources = tuple(journal_metadata(source) for source in (sources or context.sources))
+    coverage = journal_metadata(coverage or {"completeness": "UNKNOWN", "scope": "AVAILABLE_SOURCE_RECORDS"})
+    cleanup = journal_metadata(cleanup or {"status": "NOT_COLLECTED", "confirmed": False})
+    if cleanup.get("confirmed") is not True:
+        cleanup["confirmed"] = False
+    references = []
+    for key in ("case_id", "input_sha256", "sha256"):
+        if isinstance(answer.get(key), str):
+            references.append({"kind": key, "reference": answer[key]})
+    limitations = answer.get("limitations", [])
+    if not isinstance(limitations, (list, tuple)):
+        limitations = ["INVALID_LEGACY_LIMITATIONS"]
+    receipt = RunReceipt(context.run_id, context.operation, descriptor.tool_id,
+        context.started_at_utc, datetime.now(timezone.utc).isoformat(),
+        max(0, time.monotonic_ns() - context.started_monotonic_ns), status, execution_started,
+        {"name": "LOCAL_EVIDENCE_COMPONENT", "verified": source_revalidated is True,
+         "verification_scope": "BYTE_CONSISTENCY_ONLY_NOT_PRODUCER_AUTHENTICATION",
+         "sources": list(sources), "producer_authentication": "NOT_ESTABLISHED"},
+        {"identity": context.target.to_dict() if context.target is not None else None,
+         "verified": False, "scope": "RECORDED_IDENTITY_NOT_LIVE_BINDING"},
+        tuple(references), coverage, tuple(journal_metadata(list(limitations))),
+        context.limits, cleanup, "READ_ONLY_SOURCE; CREATE_NEW_RESULT_ONLY")
+    return {**answer, "tool_descriptor": descriptor.to_dict(),
+            "run_context": context.to_dict(), "run_receipt": receipt.to_dict()}
+
+
+def record_evidence_failure(context, error, *, sources=()):
+    """Add metadata to the original exception; preserve its type and traceback."""
+    uncertain = (getattr(error, "cleanup_unconfirmed", False) or
+                 getattr(error, "cleanup_required", False) or getattr(error, "publication_unconfirmed", False) or
+                 getattr(getattr(error, "owner", None), "cleanup_required", False))
+    legacy = getattr(error, "status", None)
+    status = ("RECOVERY_UNCONFIRMED" if uncertain else
+              legacy if type(legacy) is str and legacy in {"CANCELLED", "TIMED_OUT", "RECOVERY_UNCONFIRMED", "PROCESS_CHANGED",
+                  "ACCESS_DENIED", "NOT_COLLECTED", "INCOMPLETE_EVIDENCE", "OPERATION_FAILED"} else
+              "CANCELLED" if isinstance(error, InterruptedError) else
+              "TIMED_OUT" if isinstance(error, TimeoutError) else "OPERATION_FAILED")
+    result = attach_evidence_run_receipt(context, {"status": status,
+        "limitations": ["FAILED_READ_ONLY_EVIDENCE_RUN", "CLEANUP_NOT_INFERRED_FROM_EXCEPTION"]},
+        sources=sources, coverage={"completeness": "UNKNOWN", "scope": "FAILED_OPERATION"})
+    error.run_receipt = result["run_receipt"]
+    error.run_context = result["run_context"]
