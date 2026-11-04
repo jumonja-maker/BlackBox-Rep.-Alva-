@@ -51,11 +51,20 @@ live_process_binding остаётся NOT_ESTABLISHED.
 необходимости PDB. В существующую dump_inspect передаются image_path,
 pdb_path и max_frames (1–128). Прямой API — deep_dump.unwind_dump.
 
-На Windows используется настоящий DbgHelp StackWalk64 с callback, читающим
-только захваченные диапазоны. До загрузки metadata проверяются сохранённые
+На Windows используется настоящий DbgHelp StackWalk64. Стек и обычные данные
+читаются только из захваченных диапазонов, которые имеют приоритет. До загрузки metadata проверяются сохранённые
 RSDS GUID/age, timestamp и размер образа; локальный PE закреплён от изменения.
 Автоматической загрузки по путям из дампа, symbol-server или чтения текущей
 памяти процесса нет.
+
+Если диапазон действительно отсутствует в dump, разрешено читать из явно
+выбранного закреплённого PE только file-backed headers, Exception Directory
+и точные UNWIND_INFO spans, выведенные из проверенных RUNTIME_FUNCTION.
+Отдельный cursor не меняет позицию DbgHelp hFile. SHA-256 вычисляется именно
+для этого открытого файла и сравнивается с local_image role manifest и PE
+источником PDB. Источник помечен LOCAL_PINNED_PE_UNWIND_METADATA, отдельно от
+captured memory. Writable/code/другие readonly данные, gaps и virtual tails не
+подставляются; неоднозначный или частичный captured диапазон не заменяется.
 
 Непроверенный следующий модуль или отсутствующая память останавливают
 unwind. Полнота стека не заявляется: результат остаётся частичным.

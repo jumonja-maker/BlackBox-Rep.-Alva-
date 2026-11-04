@@ -27,8 +27,12 @@ class _SavedMemoryAdapter:
         self.owner, self.read_memory, self.check = owner, read_memory, check
         self.enabled = True
         self.error = self.reason = None
+        self.metadata_provider = None
+        self.failed_read_classes = {}
         self.counters = {"stackwalk_requests": 0, "symbol_handler_requests": 0,
-                         "successful_reads": 0, "failed_reads": 0, "copied_bytes": 0}
+                         "successful_reads": 0, "failed_reads": 0, "copied_bytes": 0,
+                         "captured_memory_reads": 0, "local_image_metadata_reads": 0,
+                         "local_image_metadata_bytes": 0}
 
     def refuse(self, reason):
         self.counters["failed_reads"] = min(16385, self.counters["failed_reads"] + 1)
@@ -49,13 +53,27 @@ class _SavedMemoryAdapter:
                     self.counters["copied_bytes"] + requested > 8 * 1024**2):
                 return self.refuse("DUMP_MEMORY_CALLBACK_READ_BUDGET")
             self.check()
-            value = self.read_memory(int(address), int(requested))
+            file_backed = False
+            try:
+                value = self.read_memory(int(address), int(requested))
+            except ValueError as missing:
+                # A conflicting/partial captured mapping is never replaced.
+                if str(missing) != "DUMP_UNWIND_MEMORY_NOT_CAPTURED" or self.metadata_provider is None:
+                    raise
+                role = self.metadata_provider.classify(int(address), int(requested))
+                if role not in ("PE_HEADERS", "RUNTIME_FUNCTION_TABLE", "UNWIND_INFO"):
+                    self.failed_read_classes[role] = min(16385, self.failed_read_classes.get(role, 0) + 1)
+                value, _role = self.metadata_provider.read(int(address), int(requested))
+                file_backed = True
             if len(value) != requested:
                 return self.refuse("DUMP_MEMORY_CALLBACK_SHORT_READ")
             C.memmove(destination, value, len(value))
             received[0] = len(value)
             self.counters["successful_reads"] += 1
             self.counters["copied_bytes"] += len(value)
+            self.counters["local_image_metadata_reads" if file_backed else "captured_memory_reads"] += 1
+            if file_backed:
+                self.counters["local_image_metadata_bytes"] += len(value)
             return True
         except BaseException as error:
             if isinstance(error, (InterruptedError, TimeoutError)) or getattr(error, "status", None) in ("CANCELLED", "TIMED_OUT"):
@@ -487,12 +505,12 @@ def collect_stacks(inspector, params, deadline, cancel):
 
 
 def unwind_saved_contexts(contexts, read_memory, modules, image_path, *, pdb_path=None,
-                          max_frames=64, deadline=None, cancel=None):
+                          max_frames=64, deadline=None, cancel=None, metadata_result=None):
     """Reuse DbgHelp for an explicit saved AMD64 image, never a live process.
 
-    The memory callback can only read the caller's already validated dump
-    descriptors. Dump-embedded paths and automatic symbol discovery are never
-    used. Only the explicitly chosen image's saved identity is considered.
+    Captured memory has priority. Truly absent typed unwind metadata may come
+    from the explicit pinned PE; target stack/data never do. No dump-embedded
+    path, automatic symbol discovery, code or zero-filled image mapping is used.
     """
     from .deep_native import _DBGHELP_LOCK, _check, _os_error
     global _SAVED_UNWIND_OWNER
@@ -570,6 +588,19 @@ def unwind_saved_contexts(contexts, read_memory, modules, image_path, *, pdb_pat
             if not register_callback(owner, C.cast(symbol_callback, W.PTR), 0):
                 raise _os_error("OFFLINE_SYMBOL_READ_CALLBACK_REGISTRATION_FAILED")
             image_handle = image_owners.enter_context(_unwind_image(kernel, module))
+            from .deep_pe_unwind import PinnedPEUnwindMetadata
+            # An independent open cursor must never move DbgHelp's borrowed
+            # hFile pointer. The earlier pin denies writes and path replacement.
+            metadata_stream = image_owners.enter_context(path.open("rb"))
+            _stable_file(path, initial, os.fstat(metadata_stream.fileno()))
+            provider = PinnedPEUnwindMetadata(metadata_stream, initial.st_size, pe, module["base"],
+                                              lambda: _check(deadline, cancel))
+            _stable_file(path, initial, os.fstat(metadata_stream.fileno()))
+            if symbols is not None and provider.sha256 != symbols.summary()["pe_sha256"]:
+                raise ValueError("PINNED_PE_METADATA_AND_PDB_SOURCE_HASH_MISMATCH")
+            adapter.metadata_provider = provider
+            if metadata_result is not None:
+                metadata_result.update(provider.facts())
             loaded = load_module(owner, image_handle, None, module["name"],
                                  module["base"], module["size"], None, 0)
             if adapter.error is not None:
@@ -639,8 +670,10 @@ def unwind_saved_contexts(contexts, read_memory, modules, image_path, *, pdb_pat
                 del storage
                 row["truncated"] = len(row["frames"]) >= max_frames
                 row["captured_memory_stop_reason"] = adapter.reason
-                row["memory_read_contract"] = "CAPTURED_DUMP_RANGES_ONLY"
+                row["memory_read_contract"] = "CAPTURED_MEMORY_AND_TYPED_PINNED_PE_UNWIND_METADATA"
                 row["unwind_read_counters"] = dict(adapter.counters)
+                row["failed_read_classes"] = dict(adapter.failed_read_classes)
+                row["local_image_metadata"] = provider.facts()
                 if len(row["frames"]) > 1:
                     row["status"] = "UNWOUND_PARTIAL_STACK"
                 if symbols is not None:
