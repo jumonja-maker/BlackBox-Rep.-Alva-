@@ -64,7 +64,8 @@ def oracle_events(probe, path):
             'parent_id': None, 'client_dropped': 0,
             'attributes': {'status': 'ERROR' if observed['winerror'] else 'COMPLETED',
                 'error_code': observed['winerror'], 'winerror': observed['winerror'],
-                'io_kind': 'WRITE', 'role': observed['role'],
+                'io_kind': 'CREATE_FILE' if observed['winerror'] else 'READ_WRITE',
+                'role': observed['role'],
                 'latency_ns': (observed['end_qpc'] - observed['start_qpc']) * 1000000000 // frequency,
                 'process_created_100ns': observed['created_100ns'],
                 'source_start_qpc': observed['start_qpc'], 'source_end_qpc': observed['end_qpc'],
@@ -330,7 +331,7 @@ def run(args):
         require(not broken_path.exists() and file_hash(corrupt) == corrupt_hash,
                 'WAVE02_CORRUPT_SOURCE_OR_PARTIAL_DESTINATION_CHANGED')
         proof['writer_fault'] = writer_failure(output, target)
-        require(all(file_hash(path) == before for path, before in sources_before.items()),
+        require(all(file_hash(Path(path)) == before for path, before in sources_before.items()),
                 'WAVE02_USER_SOURCE_CHANGED_BY_ANALYSIS_OR_EXPORT')
         proof['container_results']['R20'] = {'status': 'PASS', 'case_id': case['case_id'],
             'source_count': len(case['sources']), 'source_hashes_unchanged': True,
