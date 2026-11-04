@@ -260,6 +260,28 @@ class FileIoRequestContracts(_IndexFixture):
 
 
 class DiskIoRequestContracts(_IndexFixture):
+    def test_unknown_header_pid_without_instance_preserves_separate_typed_completion_lifetime(self):
+        end=disk_end()
+        end["pid"]=-1
+        end["process_instance"]=None
+        validate_io_observation(end)
+        report=build_disk_io_report(self.index([disk_start(),end]),pid=42,process_instance=2)
+        operation,=report["requests"]
+        self.assertEqual(report["status"],"OBSERVED_REQUESTS")
+        self.assertEqual((operation["pid"],operation["process_instance"],operation["tid"]),(42,2,8))
+        self.assertEqual(operation["elapsed_ms"],20.)
+        self.assertEqual((operation["completion_thread"]["pid"],operation["completion_thread"]["process_instance"]),(4,4))
+        self.assertEqual(end["io_observation"]["event_thread"]["pid"],4)
+        self.assertEqual(end["pid"],-1)
+        self.assertIsNone(end["process_instance"])
+
+    def test_indexed_unknown_header_process_cannot_replace_known_thread_process_instance(self):
+        end=disk_end(1)
+        end["pid"]=-1
+        end["process_instance"]=2
+        with self.assertRaisesRegex(ValueError,"DISK_EVENT_THREAD_CONFLICT"):
+            validate_io_observation(end)
+
     def test_identity_conflict_reports_only_bounded_numeric_identity_metadata(self):
         for row_field in ("pid", "tid", "process_instance"):
             with self.subTest(row_field=row_field):
