@@ -79,6 +79,60 @@ class PrehistoryContractTests(unittest.TestCase):
             capture.trigger('CRASH_OBSERVED',elapsed_ms=2,sample_seq=1,
                 evidence_ref='eventlog:3',verification='USER_DECLARED')
 
+    def test_one_observation_cpu_rss_io_pulse_keeps_exact_completed_context(self):
+        capture=IncidentCapture(threshold=20,min_duration_ms=0,growth_window_ms=1000,
+            memory_growth_bytes=8*1024**2,io_rate_bytes_s=1024,pre_ms=60000,
+            post_ms=2000,cooldown_ms=1000,max_buffer_samples=16,max_buffer_bytes=8192,
+            enabled_triggers=['CPU_SUSTAINED','RSS_GROWTH','IO_BURST'])
+        capture.observe(elapsed_ms=0,sample_seq=1,cpu_percent=0,
+            rss_bytes=32*1024**2,read_bytes=0,write_bytes=0)
+        started=capture.observe(elapsed_ms=1000,sample_seq=2,cpu_percent=100,
+            rss_bytes=96*1024**2,read_bytes=0,write_bytes=1024**2)
+        self.assertEqual([row['code'] for row in started],['AUTO_INCIDENT_STARTED'])
+        self.assertEqual(started[0]['trigger_code'],'CPU_SUSTAINED')
+        # The step has ended: none of the three signals qualifies again.
+        self.assertEqual(capture.observe(elapsed_ms=2000,sample_seq=3,cpu_percent=0,
+            rss_bytes=96*1024**2,read_bytes=0,write_bytes=1024**2),[])
+        completed=capture.observe(elapsed_ms=3000,sample_seq=4,cpu_percent=0,
+            rss_bytes=96*1024**2,read_bytes=0,write_bytes=1024**2)
+        self.assertEqual([row['code'] for row in completed],['AUTO_INCIDENT_COMPLETED'])
+        incident=completed[0]
+        self.assertEqual(incident['trigger_code'],'CPU_SUSTAINED')
+        self.assertEqual(incident['trigger_detail']['observed_percent'],100)
+        self.assertEqual(incident['secondary_signals'],{
+            'RSS_GROWTH':{'metric':'rss_bytes','delta':64*1024**2,'threshold':8*1024**2,
+                'first_seq':1,'observed_window_ms':1000,
+                'interpretation':'GROWTH_OBSERVED_NOT_A_PROVEN_LEAK'},
+            'IO_BURST':{'observed_bytes_s':1024**2,'threshold_bytes_s':1024,
+                'observed_window_ms':1000,'interpretation':'THROUGHPUT_NOT_IO_LATENCY'}})
+        self.assertEqual(incident['source'],'BLACKBOX_EXTERNAL_COUNTERS')
+        self.assertEqual(incident['context_refs']['base_samples'],'session.sqlite3:samples:1..4')
+        self.assertEqual(incident['trigger_sample_seq'],2)
+        self.assertEqual(incident['status'],'CAPTURED')
+        self.assertTrue(incident['capture_coverage']['post_complete'])
+        self.assertEqual(incident['capture_coverage']['coverage_state'],'INCOMPLETE')
+        self.assertEqual(incident['root_cause'],'UNKNOWN')
+        self.assertFalse(incident['proven_root_cause'])
+        self.assertEqual(capture.coverage()['incidents_completed'],1)
+        self.assertFalse(capture.coverage()['active'])
+
+    def test_immediate_pulse_keeps_only_enabled_observed_secondary_signals(self):
+        capture=IncidentCapture(threshold=20,min_duration_ms=0,growth_window_ms=1000,
+            memory_growth_bytes=8*1024**2,io_rate_bytes_s=1024,post_ms=0,
+            enabled_triggers=['CPU_SUSTAINED','RSS_GROWTH'])
+        capture.observe(elapsed_ms=0,sample_seq=1,cpu_percent=0,
+            rss_bytes=32*1024**2,read_bytes=0,write_bytes=0)
+        rows=capture.observe(elapsed_ms=1000,sample_seq=2,cpu_percent=100,
+            rss_bytes=96*1024**2,read_bytes=0,write_bytes=1024**2)
+        self.assertEqual([row['code'] for row in rows],
+            ['AUTO_INCIDENT_STARTED','AUTO_INCIDENT_COMPLETED'])
+        self.assertEqual(rows[-1]['trigger_code'],'CPU_SUSTAINED')
+        self.assertEqual(set(rows[-1]['secondary_signals']),{'RSS_GROWTH'})
+        self.assertEqual(rows[-1]['secondary_signals']['RSS_GROWTH']['first_seq'],1)
+        self.assertEqual(rows[-1]['last_sample_seq'],2)
+        self.assertEqual(capture.coverage()['incidents_completed'],1)
+        self.assertFalse(capture.coverage()['active'])
+
 
 def recorded_context(pid=123,created=100,image='a'*64):
     return {'state':'COMPLETED','capture_health':{'recording_resources_closed':True},

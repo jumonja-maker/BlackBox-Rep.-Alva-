@@ -168,7 +168,12 @@ class IncidentCapture:
             code,data=ready[0]
             if self.incidents>=self.max_incidents:
                 self.dropped_triggers+=len(ready);self._latched.update(c for c,_ in ready)
-            else:events.append(self._begin(code,data,sample_seq,elapsed_ms))
+            else:
+                events.append(self._begin(code,data,sample_seq,elapsed_ms))
+                # A one-sample growth/I/O pulse can coincide with the primary
+                # CPU trigger and disappear before the next observation.
+                for secondary,detail in candidates:
+                    if secondary!=code:self._active['secondary_signals'].setdefault(secondary,detail)
         if self._active and elapsed_ms-self._active['start_ms']>=self.post_ms:
             events.append(self._complete(sample_seq,elapsed_ms,status='CAPTURED'))
         return events

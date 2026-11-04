@@ -291,6 +291,15 @@ def verify_saved(folder, profile, requested, expected_identity, executable_hash,
                 'WAVE02_ENDURANCE_REAL_BURST_TTL_RETENTION_OR_MANUAL_COVERAGE_MISSING')
         codes = {code for code, _ in incidents}
         codes.update(k for _, value in incidents for k in value.get('secondary_signals', {}))
+        required_codes = {'MANUAL_PROBLEM', 'CPU_SUSTAINED', 'RSS_GROWTH', 'IO_BURST'}
+        incomplete_count = sum(value.get('capture_coverage', {}).get('prehistory_complete') is False
+            and value['capture_coverage'].get('coverage_state') == 'INCOMPLETE'
+            for _, value in incidents)
+        print('WAVE02_ENDURANCE_TRIGGER_COVERAGE ' + json.dumps({
+            'observed_codes': sorted(required_codes & codes),
+            'missing_codes': sorted(required_codes - codes),
+            'incomplete_prehistory_count': incomplete_count,
+            'incomplete_prehistory_observed': bool(incomplete_count)}, sort_keys=True), flush=True)
         require({'MANUAL_PROBLEM', 'CPU_SUSTAINED', 'RSS_GROWTH', 'IO_BURST'} <= codes and
                 any(value.get('capture_coverage', {}).get('prehistory_complete') is False
                     and value['capture_coverage'].get('coverage_state') == 'INCOMPLETE'

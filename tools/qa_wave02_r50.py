@@ -28,14 +28,23 @@ def policy(*, tiny=False):
                                  'MANUAL_PROBLEM', 'CRASH_OBSERVED']}}
 
 
-def sample_for(session, seconds):
+def sample_for(session, seconds, *, cadence_ms=500, wait_first=False, captures=None):
     started = time.monotonic()
+    if wait_first:
+        time.sleep(cadence_ms / 1000)
     while True:
+        if cadence_ms == 1000:
+            require(session.interval_ms == 1000,
+                    'WAVE02_R50_PREFLIGHT_ACTUAL_BASE_CADENCE_CHANGED')
         session.tick()
         require(session.probe.active, 'WAVE02_R50_RECORDING_STOPPED_UNEXPECTEDLY')
+        if captures is not None:
+            for capture in (session.probe.detailed_capture, session._last_detail_capture):
+                if capture is not None and not any(q is capture for q in captures):
+                    captures.append(capture)
         if time.monotonic() - started >= seconds:
             return
-        time.sleep(.5)
+        time.sleep(cadence_ms / 1000)
 
 
 def read_recording(folder):
@@ -61,19 +70,74 @@ def read_recording(folder):
             'completed_actions': completed, 'incidents': incidents, 'incident_events': events}
 
 
-def recording(executable, output, *, workload='native-burst-v1', repeats=2, tiny=False):
+def verify_policy_preflight(folder, actual, coverage, captures):
+    """Short real-policy regression gate; it never establishes hour acceptance."""
+    required = {'MANUAL_PROBLEM', 'CPU_SUSTAINED', 'RSS_GROWTH', 'IO_BURST'}
+    codes = {q['trigger_code'] for q in actual['incidents']}
+    codes.update(k for q in actual['incidents'] for k in q['context'].get('secondary_signals', {}))
+    incomplete = sum(q['context'].get('capture_coverage', {}).get('prehistory_complete') is False
+        and q['context']['capture_coverage'].get('coverage_state') == 'INCOMPLETE'
+        for q in actual['incidents'])
+    paths = [folder / name for name in ('session-v2.sqlite3', 'research.sqlite3')]
+    hashes = {path.name: file_hash(path) for path in paths}
+    with closing(sqlite3.connect(paths[0].resolve().as_uri()+'?mode=ro', uri=True)) as db:
+        db.execute('PRAGMA query_only=ON')
+        detail_count = db.execute("SELECT count(*) FROM samples WHERE series='DETAILED'").fetchone()[0]
+        minimum_gap, maximum_gap = db.execute('''SELECT min(gap),max(gap) FROM
+            (SELECT monotonic_ns-lag(monotonic_ns) OVER(ORDER BY monotonic_ns) gap
+             FROM samples WHERE series='STANDARD')''').fetchone()
+    with closing(sqlite3.connect(paths[1].resolve().as_uri()+'?mode=ro', uri=True)) as db:
+        db.execute('PRAGMA query_only=ON')
+        burst_starts = db.execute("SELECT count(*) FROM evidence WHERE kind='observer.burst_started'").fetchone()[0]
+        stops = db.execute("SELECT data FROM evidence WHERE kind='observer.burst_stopped'").fetchall()
+        ttl_stops = sum(json.loads(q[0]).get('reason') == 'TTL_EXPIRED' for q in stops)
+        unavailable = db.execute("SELECT count(*) FROM evidence WHERE kind='observer.burst_unavailable'").fetchone()[0]
+    facts = {'scope': 'FULL_HOUR_POLICY_SHORT_PREFLIGHT', 'endurance_acceptance': False,
+        'base_cadence_ms': 1000, 'sample_count': actual['sample_count'],
+        'observed_codes': sorted(required & codes), 'missing_codes': sorted(required - codes),
+        'incomplete_prehistory_count': incomplete, 'incomplete_prehistory_observed': bool(incomplete),
+        'capacity_evictions': coverage['capacity_evictions'], 'byte_evictions': coverage['byte_evictions'],
+        'detail_samples': detail_count, 'burst_starts': burst_starts, 'burst_ttl_stops': ttl_stops}
+    print('WAVE02_R50_ENDURANCE_POLICY_PREFLIGHT ' + json.dumps(facts, sort_keys=True), flush=True)
+    require(required <= codes and incomplete and coverage['capacity_evictions'] > 0 and
+            coverage['byte_evictions'] > 0 and coverage['samples_not_retained'] == 0 and
+            coverage['observed_samples'] == actual['sample_count'] and not coverage['active'] and
+            coverage['raw_recording_deleted'] is False,
+            'WAVE02_R50_PREFLIGHT_MEASURED_TRIGGERS_OR_HONEST_LOSS_MISSING')
+    require(detail_count > 0 and captures and burst_starts == ttl_stops == len(stops) == len(captures)
+            and not unavailable and all(not q.thread.is_alive() and q.error is None for q in captures),
+            'WAVE02_R50_PREFLIGHT_ACTUAL_DETAIL_TTL_OR_CLEANUP_MISSING')
+    require(minimum_gap >= 10**9 and maximum_gap <= 30*10**9 and
+            all(file_hash(path) == hashes[path.name] for path in paths),
+            'WAVE02_R50_PREFLIGHT_CADENCE_OR_READONLY_SOURCE_CHANGED')
+    return {'status': 'PREFLIGHT_PASS', **facts, 'source_sha256': hashes,
+            'readonly_original_hashes_unchanged': True}
+
+
+def recording(executable, output, *, workload='native-burst-v1', repeats=2, tiny=False,
+              full_policy_preflight=False):
     from blackbox_core.research_worker import ResearchSession
     from blackbox_core.casebook import context
     fixture = WaveProbe(executable, output / 'target')
     session = None
     stopped = None; successful = False
+    captures = [] if full_policy_preflight else None
+    cadence_ms = 1000 if full_policy_preflight else 500
+    sample_args = {'cadence_ms': cadence_ms, 'captures': captures}
+    preflight = None
     try:
         session = ResearchSession(output / 'recordings')
         command(session, 'attach', pid=fixture.ready['pid'])
         command(session, 'configure', scenario='BB-WAVE-02-RARE-NATIVE-BURST',
                 scenario_version='1', workload=workload, target_version='owned-source-v1')
-        command(session, 'capture_policy', policy=policy(tiny=tiny))
-        command(session, 'interval', milliseconds=500)
+        if full_policy_preflight:
+            from tools.qa_wave02_endurance import policy as endurance_policy
+            require(repeats == 1 and not tiny, 'WAVE02_R50_PREFLIGHT_SCOPE_INVALID')
+            selected_policy = endurance_policy('INCIDENT_BURST')
+        else:
+            selected_policy = policy(tiny=tiny)
+        command(session, 'capture_policy', policy=selected_policy)
+        command(session, 'interval', milliseconds=cadence_ms)
         folder = Path(command(session, 'start')['folder'])
         identity = session.context['run_identity']
         require(identity['identity_status'] == 'OS_OBSERVED_EXACT_FILETIME' and
@@ -81,23 +145,32 @@ def recording(executable, output, *, workload='native-burst-v1', repeats=2, tiny
                     'created_100ns': fixture.ready['created_100ns']} and
                 identity['image']['source_sha256'] == file_hash(executable),
                 'WAVE02_R50_RUN_IMAGE_OR_EXACT_BIRTH_NOT_MATCHED_TO_ORACLE')
-        sample_for(session, 2.5)
+        sample_for(session, 2.5, **sample_args)
         baseline=session.probe.incident_capture.coverage()
         require(baseline['incidents_completed']==0 and baseline['active'] is False,
                 'WAVE02_R50_ACTUAL_IDLE_BASELINE_PRODUCED_UNEXPECTED_INCIDENT')
         # Manual context is user declared and must persist independently of CPU.
         command(session, 'mark', note='owned QA manual problem, cause unknown')
-        sample_for(session, 2)
+        sample_for(session, 4 if full_policy_preflight else 2,
+                   wait_first=full_policy_preflight, **sample_args)
+        if full_policy_preflight:
+            capture = session.probe.incident_capture
+            require(capture.coverage()['incidents_completed'] >= 1 and
+                    capture.coverage()['active'] is False and
+                    session.probe.last_elapsed_ms >= capture._next_allowed_ms,
+                    'WAVE02_R50_PREFLIGHT_MANUAL_POST_AND_COOLDOWN_NOT_COMPLETED')
         bursts = []
         for repeat in range(repeats):
             command(session, 'prepare', baseline_ms=0)
             command(session, 'begin')
-            session.tick()  # First real cumulative counters inside action boundary.
+            if not full_policy_preflight:
+                session.tick()  # First real cumulative counters inside action boundary.
             fixture.send('burst')
             begun = fixture.receive('burst_begin')
-            sample_for(session, 6.5)
+            sample_for(session, 6.5, wait_first=full_policy_preflight, **sample_args)
             done = fixture.receive('burst_done', timeout=10)
-            session.tick()
+            if not full_policy_preflight:
+                session.tick()
             command(session, 'end')
             require(done['pid'] == fixture.ready['pid'] and
                     done['created_100ns'] == fixture.ready['created_100ns'] and
@@ -105,10 +178,29 @@ def recording(executable, output, *, workload='native-burst-v1', repeats=2, tiny
                     done['worker_threads'] == 4 and done['io_bytes'] > 0 and
                     done['allocated_bytes'] >= 64*1024**2,
                     'WAVE02_R50_REAL_BURST_COMPLETION_ORACLE_REQUIRED')
+            if full_policy_preflight:
+                require(begun['pid'] == fixture.ready['pid'] and
+                        begun['created_100ns'] == fixture.ready['created_100ns'] and
+                        done['start_qpc'] == begun['start_qpc'] and
+                        done['end_qpc'] - begun['start_qpc'] >= 6*fixture.ready['qpc_frequency'] and
+                        done['allocated_bytes'] == 64*1024**2,
+                        'WAVE02_R50_PREFLIGHT_ACTUAL_SIX_SECOND_NATIVE_BURST_REQUIRED')
             bursts.append({'begin': begun, 'done': done})
-            sample_for(session, 2)
+            sample_for(session, 2, wait_first=full_policy_preflight, **sample_args)
+            if full_policy_preflight:
+                settle_deadline = time.monotonic() + 25
+                while (session.probe.incident_capture.coverage()['active'] or
+                       session._burst_until is not None or session.probe.detailed_capture is not None or
+                       session.probe._pending_detailed is not None):
+                    require(time.monotonic() < settle_deadline,
+                            'WAVE02_R50_PREFLIGHT_DETAIL_SETTLE_DEADLINE')
+                    sample_for(session, 1, wait_first=True, **sample_args)
             require(session.probe.actions.state == 'COMPLETED',
                     'WAVE02_R50_ACTUAL_ACTION_NOT_COMPLETED')
+        if full_policy_preflight:
+            require(session._burst_until is None and session.probe.detailed_capture is None and
+                    session.probe._pending_detailed is None,
+                    'WAVE02_R50_PREFLIGHT_DETAIL_DID_NOT_ACTUALLY_EXPIRE')
         stopped = command(session, 'stop')
         metadata = context(folder)
         require(stopped['cleanup_required'] is False and not stopped['errors'] and
@@ -129,7 +221,9 @@ def recording(executable, output, *, workload='native-burst-v1', repeats=2, tiny
                 'WAVE02_R50_ACTUAL_MANUAL_AND_MEASURED_BURST_INCIDENTS_REQUIRED')
         require(not any(q['trigger_code'] == 'CRASH_OBSERVED' for q in actual['incidents']),
                 'WAVE02_R50_NORMAL_LIVE_WORKLOAD_FABRICATED_OS_CRASH')
-        if tiny:
+        if full_policy_preflight:
+            preflight = verify_policy_preflight(folder, actual, coverage, captures)
+        elif tiny:
             require(coverage['samples_not_retained'] > 0 and
                     any(q['context'].get('capture_coverage',{}).get('prehistory_complete') is False
                         for q in actual['incidents']),
@@ -143,13 +237,17 @@ def recording(executable, output, *, workload='native-burst-v1', repeats=2, tiny
         require(cards and all(q['status'] == 'OBSERVATION_ONLY' and
                 q['root_cause'] == 'UNKNOWN' and q['root_cause_proven'] is False for q in cards),
                 'WAVE02_R50_INCIDENT_CARD_CAUSE_OR_SOURCE_SCOPE_OVERCLAIM')
-        save(output / 'recording-proof.json', {'status':'PASS','ready':fixture.ready,
+        save(output / 'recording-proof.json', {
+            'status':'PREFLIGHT_PASS' if full_policy_preflight else 'PASS','ready':fixture.ready,
             'baseline_no_incident_observed':True,
+            'endurance_policy_preflight':preflight,
+            'requested_capture_policy':selected_policy,
             'run_identity':identity, 'coverage':coverage, 'actual':actual,
             'bursts':bursts, 'cards':cards, 'stop':stopped})
         successful = True
         return {'folder':str(folder),'run_identity':identity, 'coverage':coverage,
                 'baseline_no_incident_observed':True,
+                'endurance_policy_preflight':preflight,
                 'sample_count':actual['sample_count'],'incident_count':len(actual['incidents']),
                 'completed_actions':repeats,'source_sha256':actual['sha256']}
     finally:
@@ -167,6 +265,9 @@ def check_r50(executable, output, args):
     from blackbox_core.investigation_v3 import create_investigation
     from tools.qa_wave02 import export_case, verify_case
     root = Path(output) / 'R50'; root.mkdir()
+    preflight = recording(executable, root / 'endurance-policy-preflight',
+                          workload='native-hour-policy-preflight-v1', repeats=1,
+                          full_policy_preflight=True)
     first = recording(executable, root / 'before')
     second = recording(executable, root / 'after')
     changed = recording(executable, root / 'changed-workload',
@@ -222,6 +323,7 @@ def check_r50(executable, output, args):
         'negative_status':negative['comparison_status'],'negative_context_mismatches':negative['context_mismatches'],
         'source_hashes_unchanged':True,'exports':exports,'graph_exports':graph_exports},sort_keys=True),flush=True)
     return {'status':'PASS','case_index':str(root/'case.sqlite3'),
+        'endurance_policy_preflight':preflight,
         'before':first,'after':second,'changed_workload':changed,
         'comparison_status':compared['comparison_status'],
         'negative_status':negative['comparison_status'],'exports':exports,
