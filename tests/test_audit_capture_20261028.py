@@ -175,7 +175,7 @@ class CaptureHandlerContractTests(unittest.TestCase):
     def make_session(self, folder):
         probe = SimpleNamespace(output_root=folder, session_folder=folder,
             active=True, _store=object(), report_result={}, last_error=None,
-            session_state='RECORDING', _pending_detailed=None,
+            session_state='RECORDING', incident_capture=None, _pending_detailed=None,
             _pending_windows=None, _pending_v2=None)
         def stop(reason, **_kwargs):
             probe.active=False; probe._store=None; probe.session_state='COMPLETED'

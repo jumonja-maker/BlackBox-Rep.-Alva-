@@ -66,7 +66,8 @@ def _validated(case, budget):
     validate_case(case, budget=budget)
     value = public_metadata(case)
     validate_case(value, budget=budget)
-    value["crash_investigation"] = project_crash_evidence(value, budget=budget)
+    if "crash_investigation" in value:
+        value["crash_investigation"] = project_crash_evidence(value, budget=budget)
     return budget.result(value)
 
 
@@ -262,7 +263,8 @@ def load_investigation(path, *, budget=None):
     value["analysis_provenance"] = "UNVERIFIED_DERIVATION_RECOMPUTE_SOURCES_FOR_CURRENT_LINK_VALIDATION"
     value["file_trust"] = "UNVERIFIED_IMPORT"
     from .crash_investigation import project_crash_evidence
-    value["crash_investigation"] = project_crash_evidence(value, budget=budget)
+    if "crash_investigation" in value:
+        value["crash_investigation"] = project_crash_evidence(value, budget=budget)
     return budget.result(value)
 
 
@@ -296,7 +298,8 @@ def export_investigation(case, destination, *, format="json", budget=None, cance
         from .delay_investigation import render_delay_html
         content += "</ul>" + render_delay_html(value.get("delay_investigation"))
         from .crash_investigation import crash_report_html
-        content += crash_report_html(value["crash_investigation"], nodes=value["nodes"], budget=budget)
+        if "crash_investigation" in value:
+            content += crash_report_html(value["crash_investigation"], nodes=value["nodes"], budget=budget)
         content += "<h2>Source-linked investigation</h2><pre>" + html.escape(json.dumps(value, ensure_ascii=False, indent=2, allow_nan=False)) + "</pre></body></html>"
         payload = content.encode("utf-8")
     else:

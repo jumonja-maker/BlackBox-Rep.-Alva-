@@ -12,6 +12,17 @@ from PySide6.QtCore import QPoint, QRect
 from PySide6.QtWidgets import QScrollArea, QPushButton
 
 
+RESEARCH_ACTIONS = (
+    "Context / capabilities", "Apply context", "Prepare my application",
+    "Verify native PDB…", "Inspect saved dump (built-in)…", "Inspect dump with optional CDB…",
+    "Windows snapshot", "ETW recording", "EventPipe 10 s", "System failure events",
+    "Read saved ETL…", "Capture minidump", "Diagnostic permissions…",
+    "Export investigation…", "Compare investigations…", "Save comparison JSON / HTML…",
+    "Open saved comparison…", "Verify package…",
+    "Recover interrupted session…", "Open saved session…",
+)
+
+
 def _settle(app):
     # Geometry delivery only. Do not call sample/Start or process external IO.
     for _ in range(3):
@@ -32,7 +43,9 @@ def capture_integrated_layout(window, app, output: Path, scale: str) -> None:
         "research": list(window.research_panel.buttons),
         "markers": [button for _, button in window.marker_panel.buttons],
     }
-    if len(original["research"]) != 17 or len(original["markers"]) != 4:
+    if (len(original["research"]) != 20 or len(original["markers"]) != 4 or
+            tuple(window.research_panel.by_action) != RESEARCH_ACTIONS or
+            list(window.research_panel.by_action.values()) != original["research"]):
         raise RuntimeError("INTEGRATED_ACTION_INVENTORY_CHANGED")
     result = {"status": "RUNNING", "scale": scale,
               "scope": "EMPTY_OFFSCREEN_EXPANDED_ACTION_GEOMETRY",
