@@ -21,7 +21,7 @@ from blackbox_core.deep_dump import inspect_dump, unwind_dump
 from blackbox_core.crash_investigation import project_crash_evidence, validate_crash_report
 from blackbox_core.investigation_graph_contracts import InvestigationError
 from blackbox_core.investigation_v3 import create_investigation, export_investigation, load_investigation
-from blackbox_core.evidence_graph import validate_case
+from blackbox_core.evidence_graph import build_graph, validate_case
 from blackbox_core.investigation_graph_contracts import canonical_json
 from blackbox_core.deep_contracts import ActionRequest, ProcessIdentity
 from blackbox_core.deep_service import InspectorService
@@ -263,6 +263,62 @@ class R40DumpContracts(unittest.TestCase):
         self.assertEqual(self.path.read_bytes(), raw)
         self.assertEqual(project_crash_evidence(load_investigation(self.root / "case.sqlite3"))["summary"],
                          projected["summary"])
+
+    def test_large_synthetic_import_keeps_compact_dump_anchor_and_same_source_typed_children(self):
+        """Imported format labels are not proof that native unwinding occurred."""
+        from blackbox_core.evidence_normalization import _Output, _dump_anchor, _metadata, MAX_METADATA_BYTES
+        from blackbox_core.investigation_graph_contracts import use_budget
+        self.path.write_bytes(crash_dump())
+        report = inspect_dump(self.path)  # Real parser, synthetic MDMP; no native call.
+        modules = [{"name": "SYNTHETIC_FORMAT_MODULE_" + str(i) + "X" * 200,
+                    "base_address": 0x140000000 + i * 4096, "image_size": 4096}
+                   for i in range(128)]
+        report["data"]["modules"] = modules
+        report["data"]["coverage"]["module_count"] = len(modules)
+        fat = {"kind": "SAVED_MINIDUMP", "report": report}
+        self.assertGreater(len(canonical_json(_metadata(fat))), MAX_METADATA_BYTES)
+        source = {"source_id": "a" * 64, "source_type": "DUMP_METADATA", "source_sha256": "b" * 64,
+                  "verification_class": "UNVERIFIED_IMPORT"}
+        out = _Output(use_budget())
+        out.add(source, "minidump:metadata", "ARTIFACT", metadata=_dump_anchor(report))
+        for index, module in enumerate(modules):
+            out.add(source, "minidump:module:" + str(index), "MODULE", metadata=module)
+        out.add(source, "minidump:thread:77", "THREAD", metadata={"tid": 77,
+            "context": {"status": "SAVED_AMD64_CONTROL_CONTEXT"}})
+        frames = [{"address": 0x140000100 + i * 16, "module": "SYNTHETIC_FORMAT_ONLY",
+                   "origin": "CAPTURED_CONTEXT_PC" if i == 0 else "DBGHELP_UNWOUND_CALLER"} for i in range(4)]
+        out.add(source, "minidump:stack:77", "STACK", metadata={"frames": frames,
+            "method": "SYNTHETIC_IMPORTED_FORMAT_NOT_NATIVE_PROOF", "unwind_status": "INCOMPLETE_EVIDENCE"})
+        out.add(source, "minidump:exception", "ERROR", metadata={"kind": "SAVED_MINIDUMP_EXCEPTION",
+            "exception": report["data"]["exception"]})
+        # Legacy nested artifact, same TID in a different source. Its captured
+        # PC must not borrow the first source's three imported caller labels.
+        legacy = inspect_dump(self.path)
+        legacy["data"]["exception"] = None
+        other = {**source, "source_id": "c" * 64, "source_sha256": "d" * 64}
+        out.add(other, "minidump:metadata", "ARTIFACT", metadata={"kind": "SAVED_MINIDUMP", "report": legacy})
+        case = build_graph({"sources": [source, other], "nodes": out.nodes, "coverage": {}, "limitations": []})
+        view = project_crash_evidence(case)
+        self.assertEqual(view["summary"]["saved_dumps"], 2)
+        self.assertEqual(view["summary"]["recorded_exceptions"], 1)
+        self.assertEqual(view["summary"]["unwound_callers"], 3)
+        self.assertEqual(sum(row["source_id"] == source["source_id"] for row in view["frames"]), 4)
+        self.assertEqual(sum(row["source_id"] == other["source_id"] for row in view["frames"]), 1)
+        self.assertTrue(all(row["node_id"] in {node["node_id"] for node in case["nodes"]}
+                            for kind in ("dumps", "modules", "threads", "frames") for row in view[kind]))
+        self.assertEqual(view["root_cause"], "UNKNOWN")
+        self.assertFalse(view["privacy"]["memory_contents_included"])
+        self.assertFalse(view["privacy"]["dump_bytes_included"])
+        anchor = next(node for node in case["nodes"] if node["source_identity"] == source["source_id"] and
+                      node["source_record_id"] == "minidump:metadata")
+        self.assertEqual(anchor["metadata"]["kind"], "SAVED_MINIDUMP")
+        self.assertLess(len(canonical_json(anchor["metadata"])), MAX_METADATA_BYTES)
+        self.assertNotIn("modules", anchor["metadata"]["report"]["data"])
+        self.assertNotIn("threads", anchor["metadata"]["report"]["data"])
+        missing = [node for node in out.nodes if not (node["source_identity"] == source["source_id"] and
+                   node["source_record_id"] == "minidump:module:127")]
+        partial = build_graph({"sources": [source, other], "nodes": missing, "coverage": {}, "limitations": []})
+        self.assertGreaterEqual(project_crash_evidence(partial)["coverage"]["omitted_records"], 1)
 
     def test_explicit_pe_pdb_roles_and_native_cleanup_are_in_the_real_creation_receipt(self):
         self.path.write_bytes(crash_dump())

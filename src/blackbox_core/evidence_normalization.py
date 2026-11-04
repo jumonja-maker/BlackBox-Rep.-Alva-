@@ -1181,6 +1181,24 @@ def _investigation_v2(spec, selection, out):
     out.receipts.append(stable)
 
 
+def _dump_anchor(report):
+    """Keep the source anchor bounded; detailed rows have existing typed nodes."""
+    data = report.get("data", {})
+    fields = ("schema", "file", "size_bytes", "sha256", "architecture", "recorded_pid",
+              "recorded_creation_unix_seconds", "live_process_binding", "memory_contents_included")
+    summary = {key: data.get(key) for key in fields}
+    coverage = data.get("coverage", {})
+    summary["coverage"] = {key: coverage.get(key) for key in
+        ("module_count", "thread_count", "memory_range_count", "modules_omitted", "threads_omitted", "memory_ranges_omitted")}
+    exception = data.get("exception")
+    summary["exception"] = ({key: exception.get(key) for key in
+        ("tid", "code", "flags", "address", "parameter_count", "context_bytes_recorded")}
+        if isinstance(exception, dict) else None)
+    return {"kind": "SAVED_MINIDUMP", "report": {"status": report.get("status"), "data": summary},
+            "details": "EXISTING_TYPED_MODULE_THREAD_STACK_EXCEPTION_NODES",
+            "memory_contents_included": False, "live_process_binding": "NOT_ESTABLISHED"}
+
+
 def _dump(spec, selection, out):
     from .deep_dump import inspect_dump
     path = safe_path(Path(spec["path"]))
@@ -1204,8 +1222,7 @@ def _dump(spec, selection, out):
                      hash_roles=["minidump", *["local_image" if key == "image_path" else "local_pdb" for key, _ in related]])
     if not _register_source(source, stable, path, out):
         return
-    out.add(source, "minidump:metadata", "ARTIFACT", metadata={"kind": "SAVED_MINIDUMP", "report": report,
-        "memory_contents_included": False, "live_process_binding": "NOT_ESTABLISHED"})
+    out.add(source, "minidump:metadata", "ARTIFACT", metadata=_dump_anchor(report))
     source["native_resources_started"] = native_started
     if native_started:
         source["local_image_metadata"] = _metadata(image_metadata)
