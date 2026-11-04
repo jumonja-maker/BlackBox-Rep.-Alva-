@@ -210,7 +210,7 @@ def check_r50(executable, output, args):
     require(any(q['observation_type'] == 'INCIDENT' for q in case['nodes']),
             'WAVE02_R50_REAL_INCIDENT_DID_NOT_REACH_INV3_GRAPH')
     graph_exports = export_case(case, root)
-    require(all(file_hash(path) == digest for path,digest in before_hashes.items()),
+    require(all(file_hash(Path(path)) == digest for path,digest in before_hashes.items()),
             'WAVE02_R50_COMPARISON_OR_EXPORT_MODIFIED_SOURCE_RECORDINGS')
     save(root / 'comparison-actual.json',compared)
     save(root / 'comparison-negative.json',negative)
