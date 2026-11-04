@@ -60,6 +60,9 @@ def main():
         'child_deadline_exceeded': child_timeout,
         'source_identity': proof.get('source_identity'), 'case_ids': proof.get('case_ids'),
         'sections': proof.get('sections'), 'cleanup': proof.get('cleanup'),
+        'r50_new_gui_capture': proof.get('r50_new_gui_capture'),
+        'r50_coverage_languages': proof.get('r50_coverage_languages'),
+        'exports': proof.get('exports'),
         'physical_windows_10_11': 'NOT_TESTED', 'physical_secure_desktop': 'NOT_TESTED'}
     if result_file.is_file():
         summary['receipt_sha256'] = hashlib.sha256(result_file.read_bytes()).hexdigest()

@@ -360,7 +360,8 @@ def run(args):
                 'WAVE02_REQUIRED_CONTAINER_NOT_PASSED')
         save(output / 'sources.json', {'source_sha': args.source_sha, 'scope': scope,
             'case_index': str(output / 'case.sqlite3'), 'sources': sources,
-            'trace': str(trace), 'index': str(index), 'fixture': fixture_ready})
+            'trace': str(trace), 'index': str(index), 'fixture': fixture_ready,
+            'fixture_executable': str(executable), 'fixture_executable_sha256': file_hash(executable)})
         proof['status'] = 'PASS'; successful = True
     except BaseException as error:
         proof.update(status='FAIL', error=type(error).__name__, reason=str(error)[:2000],

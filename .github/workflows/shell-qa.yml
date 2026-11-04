@@ -382,3 +382,83 @@ jobs:
             echo "- Windows portable EXE: $WINDOWS_PORTABLE"
             echo "- GitHub Actions Artifacts: none"
           } >> "$GITHUB_STEP_SUMMARY"
+
+  wave02-targeted-endurance:
+    name: BB-WAVE-02 one-hour Standard and Incident Burst lifecycle
+    needs: [exact-main-acceptance, windows-portable]
+    if: >-
+      needs.exact-main-acceptance.result == 'success' &&
+      needs.windows-portable.outputs.wave02_endurance_required == 'true'
+    runs-on: windows-latest
+    timeout-minutes: 90
+    env:
+      QT_QPA_PLATFORM: offscreen
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.11.9"
+          architecture: x64
+      - name: Install exact locked observer dependencies
+        run: |
+          python -m pip install --require-hashes -r requirements/ci-windows-py311.lock
+          python -m pip install --no-build-isolation --no-deps -e .
+      - name: Require complete four-container scope and mandatory endurance
+        run: python tools/qa_wave02_scope.py --container full
+      - name: Real continuous owned workloads, bounded prehistory, triggers and resource exit
+        timeout-minutes: 75
+        run: python tools/qa_wave02_endurance.py --output wave02-endurance --duration-seconds 3600 --source-sha "${{ github.event.pull_request.head.sha || github.sha }}"
+
+  wave02-complete-acceptance:
+    name: BB-WAVE-02 required containers and lifecycle gate
+    if: >-
+      always() &&
+      (github.event_name != 'pull_request' ||
+       (github.head_ref != 'patch/bb-deep-001' && github.head_ref != 'patch/bb-inv-003'))
+    needs: [exact-main-acceptance, windows-portable, wave02-targeted-endurance]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      FAST_GATE: ${{ needs.exact-main-acceptance.result }}
+      WAVE_CONTAINER: ${{ needs.windows-portable.outputs.wave02_container }}
+      ENDURANCE_REQUIRED: ${{ needs.windows-portable.outputs.wave02_endurance_required }}
+      ENDURANCE_RESULT: ${{ needs.wave02-targeted-endurance.result }}
+      SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - name: Reject incomplete fast gates and any missing required lifecycle run
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$FAST_GATE" != success ]]; then
+            echo '::error::Complete mandatory Windows/Linux/portable fast QA is not successful'
+            exit 1
+          fi
+          case "$WAVE_CONTAINER" in
+            full)
+              if [[ "$ENDURANCE_REQUIRED" != true || "$ENDURANCE_RESULT" != success ]]; then
+                echo '::error::Full BB-WAVE-02 requires successful real one-hour Standard and Incident Burst lifecycle QA'
+                exit 1
+              fi
+              lifecycle='SUCCESS: real continuous one-hour Standard and Incident Burst runs'
+              ;;
+            r20|r30|r40)
+              if [[ "$ENDURANCE_REQUIRED" != false || "$ENDURANCE_RESULT" != skipped ]]; then
+                echo '::error::Unexpected container lifecycle requirement or execution state'
+                exit 1
+              fi
+              lifecycle='NOT_APPLICABLE: R50 recording lifecycle is outside this finite container scope'
+              ;;
+            *) echo '::error::Unknown or missing tracked BB-WAVE-02 scope'; exit 1 ;;
+          esac
+          {
+            echo '## BB-WAVE-02 exact-source acceptance'
+            echo "- Source SHA: $SOURCE_SHA"
+            echo "- Tracked required scope: $WAVE_CONTAINER"
+            echo '- Original complete Windows/Linux/portable gates: SUCCESS'
+            echo "- Recording lifecycle: $lifecycle"
+            echo '- Physical Windows 10/11 and Secure Desktop: NOT_TESTED'
+            echo '- Actions artifacts, cache, releases and publication: none'
+          } >> "$GITHUB_STEP_SUMMARY"

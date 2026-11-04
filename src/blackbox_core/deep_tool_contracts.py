@@ -22,7 +22,8 @@ from .deep_journal import journal_metadata
 CONTRACT_VERSION = 1
 _LOCAL = frozenset({"timeline", "compare", "trace_evidence", "dump_inspect",
                     "dump_read_memory", "symbols_verify"})
-_EVIDENCE_OPERATIONS = frozenset({"decoder.decode", "investigation.create", "investigation.export"})
+_EVIDENCE_OPERATIONS = frozenset({"decoder.decode", "investigation.create", "investigation.export",
+                                "research.compare", "research.export_comparison"})
 
 
 @dataclass(frozen=True)
