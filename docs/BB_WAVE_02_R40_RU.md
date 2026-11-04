@@ -36,6 +36,11 @@ ExceptionStream и creation FILETIME из ThreadInfoList, когда они
 ThreadList CONTEXT может уже относиться к обработчику исключения.
 Без unwind показывается только CAPTURED_CONTROL_CONTEXT_PC_ONLY.
 
+Полный диапазон записанного CONTEXT проверяется, но native-анализ читает
+только реальный базовый AMD64 prefix 1232B. Исходные размер и flags сохраняются;
+trailing/XSTATE bytes помечены EXTENSIONS_NOT_ANALYZED. Во временной native
+копии снимается только XSTATE flag0x40; расширенные регистры не выдумываются.
+
 SHA-256 подтверждает выбранные байты, но не удостоверяет производителя.
 PID и секундное creation time из MiscInfo не заменяют live-идентичность.
 live_process_binding остаётся NOT_ESTABLISHED.

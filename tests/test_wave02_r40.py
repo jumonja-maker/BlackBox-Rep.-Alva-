@@ -110,6 +110,73 @@ class R40DumpContracts(unittest.TestCase):
         self.path.write_bytes(crash_dump(thread_flags=8))
         self.assertIsNone(inspect_dump(self.path)["data"]["threads"][0]["recorded_creation_100ns"])
 
+    def test_large_recorded_thread_and_exception_contexts_read_only_actual_base_prefix(self):
+        from blackbox_core import deep_dump as dump
+        raw = crash_dump(context_size=8192)
+        exception_offset = struct.unpack_from("<I", raw, 32 + 5 * 12 + 8)[0]
+        size, offset = struct.unpack_from("<II", raw, exception_offset + 160)
+        struct.pack_into("<I", raw, offset + 48, 0x10004B)
+        marker = b"PRIVATE_EXTENSION_BYTES_MUST_NOT_BE_COPIED"
+        raw[offset + 1232:offset + 1232 + len(marker)] = marker
+        reads = []
+        class RecordedReads(dump._Reader):
+            def read(self, at, length):
+                reads.append((at, length))
+                return super().read(at, length)
+        reader = RecordedReads(io.BytesIO(raw), len(raw), None, time.monotonic() + 10)
+        entries, _ = dump._directory(reader)
+        thread_start = entries[3][0] + 4
+        struct.pack_into("<II", raw, thread_start + 40, size, offset)
+        reader = RecordedReads(io.BytesIO(raw), len(raw), None, time.monotonic() + 10)
+        contexts, _ = dump._saved_unwind_inputs(reader, entries)
+        saved = contexts[0]
+        self.assertEqual(saved["context_bytes_recorded"], 8192)
+        self.assertEqual(saved["base_context_bytes_copied"], 1232)
+        self.assertEqual(saved["context_trailing_bytes_recorded"], 6960)
+        self.assertEqual(saved["context_extension_status"], "EXTENSIONS_NOT_ANALYZED")
+        self.assertEqual(saved["recorded_context_flags"], 0x10004B)
+        self.assertEqual(saved["context_source"], "SAVED_EXCEPTION_CONTEXT")
+        self.assertEqual(saved["context"], bytes(raw[offset:offset + 1232]))
+        self.assertNotIn(marker, saved["context"])
+        self.assertEqual(sum(at == offset and length == 1232 for at, length in reads), 2)
+        self.assertNotIn((offset, 8192), reads)
+
+    def test_complete_extended_descriptor_and_stack_overflow_remain_hard_guards(self):
+        from blackbox_core import deep_dump as dump
+        reader = dump._Reader(io.BytesIO(b"\0" * 8192), 8192, None, time.monotonic() + 10)
+        with self.assertRaisesRegex(ValueError, "DUMP_RANGE_OUTSIDE_FILE") as caught:
+            dump._saved_context_prefix(reader, 0, 16384, index=1)
+        self.assertEqual(caught.exception.dump_context_diagnostics["recorded_context_bytes"], 16384)
+        self.assertEqual(reader.consumed, 0)
+        raw = crash_dump()
+        reader = dump._Reader(io.BytesIO(raw), len(raw), None, time.monotonic() + 10)
+        entries, _ = dump._directory(reader)
+        struct.pack_into("<Q", raw, entries[3][0] + 4 + 24, 2**64 - 1)
+        reader = dump._Reader(io.BytesIO(raw), len(raw), None, time.monotonic() + 10)
+        with self.assertRaisesRegex(ValueError, "STACK_ADDRESS_OVERFLOW") as caught:
+            dump._saved_unwind_inputs(reader, entries)
+        diagnostics = caught.exception.dump_context_diagnostics
+        self.assertTrue(diagnostics["stack_address_overflow"])
+        self.assertEqual(set(diagnostics), {"record_index", "recorded_context_bytes", "recorded_stack_bytes", "stack_address_overflow"})
+        self.assertNotIn(str(2**64 - 1), json.dumps(diagnostics))
+
+    def test_native_base_view_preserves_real_bytes_and_clears_only_uncopied_xstate_flag(self):
+        from blackbox_core.deep_native_stacks import _saved_base_context
+        raw = bytearray(1232)
+        struct.pack_into("<I", raw, 48, 0x10004B)
+        struct.pack_into("<Q", raw, 248, 0x140000124)
+        original = bytes(raw)
+        storage, context, recorded = _saved_base_context(original)
+        self.assertEqual(recorded, 0x10004B)
+        self.assertEqual(context.flags, recorded & ~0x40)
+        expected = bytearray(original)
+        struct.pack_into("<I", expected, 48, recorded & ~0x40)
+        self.assertEqual(C.string_at(C.addressof(context), 1232), bytes(expected))
+        self.assertEqual(raw, bytearray(original))
+        self.assertEqual(context.rip, 0x140000124)
+        with self.assertRaisesRegex(ValueError, "FULL_AMD64_CONTEXT_NOT_CAPTURED"):
+            _saved_base_context(original[:256])
+
     def test_corrupt_exception_and_thread_info_fail_closed(self):
         raw = crash_dump()
         offset, = struct.unpack_from("<I", raw, 32 + 5 * 12 + 8)

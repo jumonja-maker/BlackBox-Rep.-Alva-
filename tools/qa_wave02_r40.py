@@ -2,6 +2,7 @@
 from contextlib import closing
 import ctypes as C
 from ctypes import wintypes as W
+import errno
 import json
 from pathlib import Path
 import re
@@ -88,7 +89,21 @@ def check_r40(executable, output, args):
                 'R40_PRODUCT_DUMP_METADATA_MUST_MATCH_INDEPENDENT_STREAM_ORACLE')
         pdb = executable.with_suffix('.pdb')
         require(pdb.is_file(), 'R40_OWNED_COMPILER_PDB_REQUIRED')
-        metadata = inspect_dump(dump, image_path=executable, pdb_path=pdb, max_frames=32)
+        def bounded_uint(value):
+            return value if type(value) is int and 0<=value<2**64 else None
+        try:
+            metadata = inspect_dump(dump, image_path=executable, pdb_path=pdb, max_frames=32)
+        except ValueError as error:
+            failure=getattr(error,'dump_context_diagnostics',None)
+            if type(failure) is dict:
+                print('WAVE02_R40_CONTEXT_FAILURE_DIAGNOSTICS '+json.dumps({
+                    'scope':'FIXED_COUNTS_AND_OVERFLOW_BOOLEAN_ONLY_NO_ADDRESSES_OR_CONTEXT_BYTES',
+                    **{key:bounded_uint(failure.get(key)) for key in
+                       ('record_index','recorded_context_bytes','recorded_stack_bytes')},
+                    'stack_address_overflow':failure.get('stack_address_overflow')
+                        if type(failure.get('stack_address_overflow')) is bool else None
+                    },sort_keys=True),flush=True)
+            raise
         data = metadata['data']; exception = data['exception']
         require(data['sha256'] == dump_hash and data['size_bytes'] == dump.stat().st_size
                 and data['architecture'] == 'AMD64' and exception['tid'] == independent['tid']
@@ -123,6 +138,8 @@ def check_r40(executable, output, args):
         selected_metadata=next(q for q in data['threads'] if q['tid']==ready['control_tid'])
         image_metadata=thread.get('local_image_metadata') or {}
         image_hash=image_metadata.get('sha256')
+        recorded_sizes=[bounded_uint(q.get('context_bytes_recorded'))
+                        for q in data['stack_unwind']['threads'][:200]]
         print('WAVE02_R40_UNWIND_DIAGNOSTICS '+json.dumps({
             'scope':'BOUNDED_STATUS_COUNTS_ONLY_NO_ADDRESSES_MEMORY_PATHS_OR_DUMP_BYTES',
             'inspection_status':fixed_code(metadata.get('status')),
@@ -130,6 +147,17 @@ def check_r40(executable, output, args):
             'saved_thread_count':len(data['stack_unwind']['threads']),
             'exception_context_bytes_recorded':exception.get('context_bytes_recorded'),
             'required_amd64_context_bytes':C.sizeof(native_win.CONTEXT64),
+            'recorded_context_sizes':recorded_sizes,
+            'context_sizes_omitted':max(0,len(data['stack_unwind']['threads'])-200),
+            'maximum_recorded_context_bytes':max((bounded_uint(q.get('context_bytes_recorded'))
+                for q in data['stack_unwind']['threads']
+                if bounded_uint(q.get('context_bytes_recorded')) is not None),default=None),
+            'selected_base_context':{key:bounded_uint(thread.get(key)) for key in
+                ('context_bytes_recorded','base_context_bytes_copied','context_trailing_bytes_recorded',
+                 'recorded_context_flags','native_context_flags')},
+            'context_extension_status':fixed_code(thread.get('context_extension_status')),
+            'xstate_advertisement_cleared':thread.get('xstate_advertisement_cleared')
+                if type(thread.get('xstate_advertisement_cleared')) is bool else None,
             'exception_context_status':fixed_code(exception.get('context',{}).get('status')),
             'selected_context_status':fixed_code(selected_metadata.get('context',{}).get('status')),
             'selected_stack_bytes_recorded':selected_metadata.get('stack_bytes_recorded'),
@@ -210,10 +238,22 @@ def check_r40(executable, output, args):
         held=kernel.CreateFileW(str(dump),0x80000000,0,None,3,0x80,None)
         require(held and held!=C.c_void_p(-1).value,'R40_OWNED_EXCLUSIVE_DUMP_CONTROL_NOT_OPENED')
         try:
+            C.set_last_error(0)
+            attempted=kernel.CreateFileW(str(dump),0x80000000,7,None,3,0x80,None)
+            native_denial_winerror=C.get_last_error()
+            invalid=C.c_void_p(-1).value
+            if attempted and attempted!=invalid:
+                require(kernel.CloseHandle(attempted),'R40_UNEXPECTED_DENIAL_PROBE_HANDLE_NOT_CLOSED')
+            require(attempted==invalid and native_denial_winerror in (5,32),
+                    'R40_INDEPENDENT_WIN32_EXCLUSIVE_READ_DENIAL_NOT_OBSERVED')
             try:inspect_dump(dump)
             except OSError as error:
                 denied_error=getattr(error,'winerror',None)
-                require(denied_error in (5,32),'R40_EXCLUSIVE_DUMP_DID_NOT_REPORT_ACTUAL_ACCESS_ERROR')
+                denied_errno=error.errno
+                denied_type=type(error).__name__
+                require(denied_error in (5,32) or isinstance(error,PermissionError) and
+                        denied_errno in (errno.EACCES,errno.EPERM),
+                        'R40_EXCLUSIVE_DUMP_DID_NOT_REPORT_ACTUAL_ACCESS_ERROR')
             else:raise AssertionError('R40_EXCLUSIVELY_LOCKED_DUMP_WAS_READ')
         finally:
             require(kernel.CloseHandle(held),'R40_EXCLUSIVE_DUMP_CONTROL_HANDLE_NOT_CLOSED')
@@ -282,6 +322,9 @@ def check_r40(executable, output, args):
             normal_exit_eventlog_status=normal_events['status'],
             wrong_birth_eventlog_status=wrong_birth['status'],
             actual_dump_read_denial_winerror=denied_error,
+            actual_dump_read_denial_errno=denied_errno,
+            actual_dump_read_denial_error_type=denied_type,
+            native_dump_read_denial_winerror=native_denial_winerror,
             missing_symbols='NO_SYMBOL_NAME_INVENTED', dump_source_unchanged=True,
             negative_controls=['CANCELLED', 'TIMED_OUT', 'CORRUPT_INPUT', 'SIZE_BUDGET', 'NORMAL_EXIT',
                                'ACTUAL_OWNED_EXCLUSIVE_DUMP_READ_DENIAL'])
@@ -290,7 +333,8 @@ def check_r40(executable, output, args):
              'own_frame_count','own_function_names','pdb_source_line_observed','local_image_sha256',
              'local_pdb_sha256','eventlog_status','matched_event_count','wer_candidate_count',
              'wer_fixture_policy','wer_flags_hresult','normal_exit_eventlog_status',
-             'wrong_birth_eventlog_status','actual_dump_read_denial_winerror','dump_source_unchanged',
+             'wrong_birth_eventlog_status','actual_dump_read_denial_winerror','actual_dump_read_denial_errno',
+             'actual_dump_read_denial_error_type','native_dump_read_denial_winerror','dump_source_unchanged',
              'negative_controls','public_exports')},
             sort_keys=True),flush=True)
         ok = True
