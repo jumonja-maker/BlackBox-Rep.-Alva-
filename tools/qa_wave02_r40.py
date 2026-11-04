@@ -4,6 +4,7 @@ import ctypes as C
 from ctypes import wintypes as W
 import json
 from pathlib import Path
+import re
 import struct
 import threading
 import time
@@ -96,6 +97,41 @@ def check_r40(executable, output, args):
                 'R40_PRODUCT_EXCEPTION_HASH_PRIVACY_OR_BINDING_CHANGED')
         thread = next(q for q in data['stack_unwind']['threads'] if q['tid'] == ready['control_tid'])
         own = [q for q in thread['frames'] if q['module_binding'] == 'SAVED_RSDS_AND_PINNED_LOCAL_PE_MATCH']
+        def fixed_code(value):
+            if value is None:return None
+            return value if type(value) is str and re.fullmatch(r'[A-Z0-9_]{1,160}',value) else 'NON_CODE_VALUE_WITHHELD'
+        preview=[]
+        for frame in thread['frames'][:8]:
+            symbol=frame.get('symbol') or {}
+            preview.append({'origin':fixed_code(frame.get('origin')),
+                'module_binding':fixed_code(frame.get('module_binding')),
+                'symbol_status':fixed_code(symbol.get('status')),
+                'source_status':fixed_code(symbol.get('source_status')),
+                'expected_function':next((name for name in
+                    ('wave_crash_leaf','wave_crash_middle','wave_crash_entry')
+                    if type(symbol.get('name')) is str and name in symbol['name']),None)})
+        from blackbox_core import deep_native_win as native_win
+        selected_metadata=next(q for q in data['threads'] if q['tid']==ready['control_tid'])
+        print('WAVE02_R40_UNWIND_DIAGNOSTICS '+json.dumps({
+            'scope':'BOUNDED_STATUS_COUNTS_ONLY_NO_ADDRESSES_MEMORY_PATHS_OR_DUMP_BYTES',
+            'inspection_status':fixed_code(metadata.get('status')),
+            'unwind_status':fixed_code(data.get('stack_unwind_status')),
+            'saved_thread_count':len(data['stack_unwind']['threads']),
+            'exception_context_bytes_recorded':exception.get('context_bytes_recorded'),
+            'required_amd64_context_bytes':C.sizeof(native_win.CONTEXT64),
+            'exception_context_status':fixed_code(exception.get('context',{}).get('status')),
+            'selected_context_status':fixed_code(selected_metadata.get('context',{}).get('status')),
+            'selected_stack_bytes_recorded':selected_metadata.get('stack_bytes_recorded'),
+            'first_frame_matches_recorded_exception_pc':bool(thread['frames']) and
+                thread['frames'][0].get('address')==exception['address'],
+            'selected_thread':{key:fixed_code(thread.get(key)) for key in
+                ('status','method','context_source','reason','captured_memory_stop_reason')},
+            'unwind_winerror':thread.get('unwind_winerror') if type(thread.get('unwind_winerror')) is int else None,
+            'recorded_frame_count':len(thread['frames']),'matched_own_frame_count':len(own),
+            'matched_unwound_callers':sum(q['origin']=='DBGHELP_UNWOUND_CALLER' for q in own),
+            'frame_preview':preview,
+            'offline_cleanup_confirmed':data.get('stack_unwind',{}).get('cleanup',{}).get('confirmed') is True
+            },sort_keys=True),flush=True)
         require(len(own) >= 3 and sum(q['origin'] == 'DBGHELP_UNWOUND_CALLER' for q in own) >= 2,
                 'R40_ACTUAL_OWNED_AMD64_CALL_CHAIN_NOT_UNWOUND')
         names = {q.get('symbol', {}).get('name') for q in own}
