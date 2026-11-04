@@ -133,8 +133,8 @@ def worker(helper, trace_root, output):
                         for owner in owners)
             require(len(owners) == 1 and owners[0].process.returncode == 0,
                     "STANDARD_NATIVE_HELPER_SUCCESS_NOT_CONFIRMED")
-            require(owners[0].windows_creation_flags == 0x8,
-                    "STANDARD_NATIVE_HELPER_DETACHED_LAUNCH_NOT_CONFIRMED")
+            require(owners[0].windows_creation_flags == 0xC,
+                    "STANDARD_NATIVE_HELPER_DETACHED_BOUND_LAUNCH_NOT_CONFIRMED")
             page = read_index(index, limit=1)
             require(page["rows"] and page["summary"] == meta,
                     "STANDARD_INDEX_NOT_READABLE")
@@ -655,7 +655,7 @@ def validate_worker(proof, child, plan):
         require(result.get("format") == expected["format"] and result.get("status") == "PASS" and
                 result.get("input_sha256") == expected["input_sha256"] and
                 result.get("rows") == expected["rows"] and result.get("helper_exit_code") == 0 and
-                result.get("helper_windows_creation_flags") == 0x8 and
+                result.get("helper_windows_creation_flags") == 0xC and
                 result.get("helper_pid") != proof["pid"] and result.get("index_readable") is True,
                 "STANDARD_TRACE_RESULT_NOT_CONFIRMED")
 

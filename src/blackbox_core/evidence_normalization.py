@@ -392,15 +392,47 @@ def _selection(spec, shared):
 
 def _source(kind, stable, *, selection, extra=None, hash_roles=None):
     hashes = sorted(stable.hashes.values())
-    manifest = sorted(zip(hash_roles or (str(index) for index in range(len(stable.paths))),
-                          (stable.hashes[path] for path in stable.paths)))
+    roles = list(hash_roles or (str(index) for index in range(len(stable.paths))))
+    manifest = sorted(zip(roles, (stable.hashes[path] for path in stable.paths)))
     digest = hashes[0] if len(hashes) == 1 else hashlib.sha256(canonical_json(manifest).encode("ascii")).hexdigest()
     return {"source_id": stable_id("source", kind, digest), "source_type": kind,
             "source_sha256": digest, "source_file_count": len(hashes),
             "verification_class": "UNVERIFIED_IMPORT", "selection": selection,
-            "content_hashes": hashes, "content_manifest": [{"role": role, "sha256": value} for role, value in manifest],
+            "source_size_bytes": sum(stable.stamps[path][2] for path in stable.paths),
+            "content_hashes": hashes,
+            "content_manifest": sorted([{"role": role, "sha256": stable.hashes[path],
+                "size_bytes": stable.stamps[path][2]} for role, path in zip(roles, stable.paths)],
+                key=lambda item: item["role"]),
+            "provenance": {"origin": "EXPLICIT_LOCAL_FILE_SELECTION",
+                "producer_authentication": "NOT_ESTABLISHED",
+                "content_integrity": "STABLE_HASHED_NO_ACTIVE_WAL"},
             "source_consistency": "STABLE_HASHED_NO_ACTIVE_WAL",
             **(extra or {})}
+
+
+def source_coverage(source):
+    """Separate a complete bounded scan from unknown original capture coverage."""
+    issues = []
+    if source.get("scan_complete") is not True:
+        issues.append("SOURCE_SCAN_INCOMPLETE")
+    if source.get("decoded_status") == "TRUNCATED":
+        issues.append("DECODED_PREFIX_ONLY")
+    if (type(source.get("decoder_reported_lost_events")) is int and
+            source["decoder_reported_lost_events"] > 0):
+        issues.append("REPORTED_EVENT_LOSS")
+    for key in ("writer_dropped_commands", "sensor_errors_count", "event_sequence_gaps",
+                "scheduler_nodes_omitted", "application_client_dropped_total",
+                "application_order_errors", "application_sequence_gaps", "events_with_errors",
+                "events_without_fields_or_schema", "bounded_events"):
+        if type(source.get(key)) is int and source[key] > 0:
+            issues.append(key.upper())
+    if source.get("decode_errors_observed") is True:
+        issues.append("DECODE_ERRORS_OBSERVED")
+    if source.get("source_type") == "SESSION" and source.get("source_closed") is not True:
+        issues.append("SESSION_CLOSE_NOT_CONFIRMED")
+    return {"scan_status": "COMPLETE_AVAILABLE_ROWS" if source.get("scan_complete") is True else "INCOMPLETE",
+        "capture_status": "INCOMPLETE_EVIDENCE" if issues else "UNKNOWN_CAPTURE_COMPLETENESS",
+        "scope": "AVAILABLE_RECORDED_EVIDENCE_NOT_PROOF_OF_COMPLETE_CAPTURE", "issues": issues}
 
 
 def _register_source(source, stable, path, out):
@@ -443,6 +475,9 @@ def _trace(spec, selection, out):
     source = _source("TRACE_INDEX", stable, selection=selection, hash_roles=["trace_index", *extra_roles],
         extra={"trace_sha256": trace, "trace_input_sha256": trace, "index_sha256": stable.hashes[path],
         "decoded_status": summary.get("status"), "decoder_reported_lost_events": summary.get("decoder_reported_lost_events"),
+        "events_with_errors": summary.get("events_with_errors"),
+        "events_without_fields_or_schema": summary.get("events_without_fields_or_schema"),
+        "bounded_events": summary.get("bounded_events"),
         "scheduler_complete": False, "time_domain": "TRACE_RELATIVE:" + trace})
     if not _register_source(source, stable, path, out):
         return
@@ -1151,12 +1186,64 @@ def _dump(spec, selection, out):
     path = safe_path(Path(spec["path"]))
     stable = _StableSource([path], out.budget)
     report = inspect_dump(path, max_bytes=min(out.budget.max_source_bytes, 2 * 1024**3),
-                          cancel_event=out.budget, deadline=out.budget.deadline)
-    source = _source("DUMP_METADATA", stable, selection=selection)
+        cancel_event=out.budget, deadline=out.budget.deadline)
+    source = _source("DUMP_METADATA", stable, selection=selection, hash_roles=["minidump"])
     if not _register_source(source, stable, path, out):
         return
     out.add(source, "minidump:metadata", "ARTIFACT", metadata={"kind": "SAVED_MINIDUMP", "report": report,
         "memory_contents_included": False, "live_process_binding": "NOT_ESTABLISHED"})
+    data = report.get("data", {})
+    domain = "MINIDUMP_RECORDED:" + stable.hashes[path]
+    process = ({"kind": "UNRESOLVED_PROCESS", "pid": data["recorded_pid"],
+                "source_scope": source["source_id"], "exact": False}
+               if _int(data.get("recorded_pid"), 1, 2**32 - 1) else None)
+    source.update(time_domain=domain, dump_sha256=stable.hashes[path],
+                  live_process_binding="NOT_ESTABLISHED")
+    if process is not None:
+        out.add(source, "minidump:process", "PROCESS", process_identity=process, time_domain=domain,
+            metadata={"recorded_pid": data["recorded_pid"],
+                "recorded_creation_unix_seconds": data.get("recorded_creation_unix_seconds"),
+                "record_refs": ["minidump:metadata"], "identity_quality": "RECORDED_NOT_LIVE_FILETIME"})
+    for index, module in enumerate(data.get("modules", [])[:200]):
+        if not out.scan():
+            break
+        out.add(source, "minidump:module:" + str(index), "MODULE", process_identity=process,
+            time_domain=domain, metadata={**module, "record_refs": ["minidump:metadata"],
+                "record_ref_relation": "CAPTURED_MINIDUMP_MODULE"})
+    unwind = data.get("stack_unwind", {})
+    unwind_threads = {row["tid"]: row for row in unwind.get("threads", []) if isinstance(row, dict) and
+                      _int(row.get("tid"), 1)} if isinstance(unwind, dict) else {}
+    for row in data.get("threads", [])[:200]:
+        if not out.scan():
+            break
+        tid = row.get("tid")
+        if not _int(tid, 1, 2**32 - 1):
+            continue
+        record = "minidump:thread:" + str(tid)
+        thread = {"kind": "UNRESOLVED_THREAD", "tid": tid, "source_scope": source["source_id"], "exact": False}
+        out.add(source, record, "THREAD", process_identity=process, thread_identity=thread,
+            time_domain=domain, metadata={**row, "record_refs": ["minidump:metadata"],
+                "record_ref_relation": "CAPTURED_MINIDUMP_THREAD", "live_thread_binding": "NOT_ESTABLISHED"})
+        saved = unwind_threads.get(tid, {})
+        frames = saved.get("frames") or row.get("frames") or []
+        if not frames and isinstance(row.get("context"), dict) and _int(row["context"].get("rip")):
+            frames = [{"address": row["context"]["rip"], "origin": "CAPTURED_CONTEXT_PC"}]
+        if frames:
+            out.add(source, "minidump:stack:" + str(tid), "STACK", process_identity=process,
+                thread_identity=thread, time_domain=domain,
+                metadata={"frames": frames[:64], "method": saved.get("method", "CAPTURED_CONTROL_CONTEXT_PC_ONLY"),
+                    "context_status": row.get("context", {}).get("status"),
+                    "context_source": "SAVED_MINIDUMP_THREAD_CONTEXT",
+                    "unwind_status": saved.get("status", row.get("context", {}).get("unwind_status", "NOT_ESTABLISHED")),
+                    "record_refs": [record], "record_ref_relation": "SAVED_MINIDUMP_STACK",
+                    "memory_contents_included": False, "root_cause": "UNKNOWN"})
+    if isinstance(data.get("exception"), dict):
+        out.add(source, "minidump:exception", "ERROR", process_identity=process, time_domain=domain,
+            metadata={"kind": "SAVED_MINIDUMP_EXCEPTION", "exception": data["exception"],
+                "record_refs": ["minidump:metadata"], "root_cause": "UNKNOWN"})
+    source["scan_complete"] = (not out.coverage["has_more"] and
+        not any(data.get("coverage", {}).get(key, 0) for key in
+                ("modules_omitted", "threads_omitted", "memory_ranges_omitted")))
     stable.verify()
     out.receipts.append(stable)
 
@@ -1194,6 +1281,12 @@ def normalize_sources(sources, *, selection=None, budget=None):
         _require(old is None or old.get("selection") == source.get("selection"), "DUPLICATE_SOURCE_SELECTION_AMBIGUOUS")
         by_source[source["source_id"]] = source
     out.sources = sorted(by_source.values(), key=lambda x: x["source_id"])
+    for source in out.sources:
+        source["coverage"] = source_coverage(source)
+    out.coverage["evidence_completeness"] = ("INCOMPLETE_EVIDENCE" if
+        out.coverage["has_more"] or out.coverage["events_omitted"] or out.coverage["nodes_omitted"] or
+        any(source["coverage"]["capture_status"] == "INCOMPLETE_EVIDENCE" for source in out.sources)
+        else "UNKNOWN_CAPTURE_COMPLETENESS")
     _finish_clocks(out)
     result = budget.result({"sources": out.sources, "nodes": out.nodes, "coverage": out.coverage,
         "limitations": sorted(out.limitations), "clock_relations": []})

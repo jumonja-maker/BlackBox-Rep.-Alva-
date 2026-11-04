@@ -26,6 +26,7 @@ SECTIONS = (
     ("hypotheses", "Hypotheses", "Гипотезы"),
     ("verification", "Verification", "Проверка"),
     ("recurrences", "Recurrences", "Повторения"),
+    ("integrity", "Source integrity and cleanup", "Источники и очистка"),
 )
 RELATION_COLORS = {"EXACT_IDENTITY": "#087b76", "DIRECT_REFERENCE": "#087b76",
     "BOUNDED_TIME_CORRELATION": "#416a9a", "OBSERVED_DEPENDENCY": "#416a9a",
@@ -190,6 +191,9 @@ class InvestigationGraphPanel(QWidget):
         self.deep_panel.bridge.result_ready.connect(self._diagnostic_result)
         self.deep_panel.bridge.target_changed.connect(self._target_changed)
         self.deep_panel.bridge.busy_changed.connect(self._controls)
+        probe_updated = getattr(getattr(window, 'probe', None), 'updated', None)
+        if probe_updated is not None:
+            probe_updated.connect(self._controls)
         self.retranslate()
 
     def tr2(self, en, ru):
@@ -351,6 +355,32 @@ class InvestigationGraphPanel(QWidget):
             ("occurrence_count", "Occurrences", "Повторения"), ("frequency", "Observed frequency", "Наблюдаемая частота")])
         self._models["recurrences"], self._tables["recurrences"] = recurrence_model, self.recurrence_table
         self._add_page(recurrence_page)
+        integrity_page = QVBoxLayout()
+        self.integrity_summary = _plain()
+        self.integrity_summary.setObjectName('invIntegritySummary')
+        integrity_page.addWidget(self.integrity_summary)
+        integrity_table, integrity_model = self._table(integrity_page, 'invIntegritySources', [
+            ('source_type', 'Source', 'Источник'), ('source_size_bytes', 'Bytes', 'Байт'),
+            ('verification_class', 'Recorded trust', 'Доверие к записи'),
+            ('capture_status', 'Capture coverage', 'Полнота сбора'),
+            ('source_sha256', 'SHA-256', 'SHA-256')])
+        self._models['integrity'], self._tables['integrity'] = integrity_model, integrity_table
+        self.integrity_receipt = QPlainTextEdit()
+        self.integrity_receipt.setObjectName('invIntegrityReceipt')
+        self.integrity_receipt.setReadOnly(True)
+        self.integrity_receipt.setMaximumHeight(190)
+        integrity_page.addWidget(self.integrity_receipt)
+        self.integrity_note = self._label(_plain(),
+            'A file hash checks bytes, not the identity of its producer. Imported records remain unverified. '
+            'Operation completion and capture completeness are separate. Cleanup retry acts only on current owned resources.',
+            'Хеш проверяет байты, но не удостоверяет производителя. Импортированные записи остаются непроверенными. '
+            'Завершение операции не означает полноту сбора. Повтор очистки относится только к текущим собственным ресурсам.')
+        integrity_page.addWidget(self.integrity_note)
+        integrity_actions = ActionGrid(max_columns=2)
+        self.retry_owned_button = self._button(integrity_actions, 'invRetryOwnedCleanup',
+            'Retry owned cleanup', 'Повторить очистку своих ресурсов', self.retry_owned_cleanup)
+        integrity_page.addLayout(integrity_actions)
+        self._add_page(integrity_page)
         links = ActionGrid(max_columns=3)
         self.thread_button = self._button(links, "invOpenThread", "Show thread evidence", "Показать доказательства потока", self.show_thread)
         self.stack_button = self._button(links, "invOpenStack", "Show stack / module", "Показать стек / модуль", self.show_stack)
@@ -390,6 +420,7 @@ class InvestigationGraphPanel(QWidget):
             basis = self.tr2("Manual · ", "Вручную · ") if descriptor.get("selection_basis") == "EXPLICIT_MANUAL_TOOL_NOT_HYPOTHESIS_RECOMMENDATION" else self.tr2("Suggested · ", "Предложено · ")
             self.action_combo.setItemText(i, basis + self.tr2(en, ru) + " · " + str(descriptor.get("availability", "NOT_ESTABLISHED")))
         self._render_summary()
+        self._render_integrity()
         self._render_binding()
         self._controls()
 
@@ -515,6 +546,9 @@ class InvestigationGraphPanel(QWidget):
         self.details.clear()
         self.verification_status.clear()
         self._models["sources"].set_rows(case.get("sources", []))
+        self._models['integrity'].set_rows([
+            {**row, 'capture_status': (row.get('coverage') or {}).get('capture_status', 'UNKNOWN')}
+            for row in case.get('sources', []) if isinstance(row, dict)])
         self.nodes_model.set_rows(case.get("nodes", []))
         self._models["edges"].set_rows(case.get("edges", []))
         self._models["hypotheses"].set_rows(case.get("hypotheses", []))
@@ -522,6 +556,7 @@ class InvestigationGraphPanel(QWidget):
         self._render_critical(case.get("critical_path", {}))
         self._set_actions(case.get("actions", []))
         self._render_summary()
+        self._render_integrity()
         self._render_binding()
         self._controls()
         if self._invalid_saved_grouping:
@@ -531,6 +566,53 @@ class InvestigationGraphPanel(QWidget):
     def _grouping_import_warning(self):
         self._set_status("Malformed imported grouping was ignored. The investigation and its source evidence remain available; rebuild grouping explicitly.",
                          "Некорректные импортированные группы проигнорированы. Расследование и исходные данные доступны; явно постройте группы заново.")
+
+    def _render_integrity(self):
+        if not hasattr(self, 'integrity_summary'):
+            return
+        case = self.case or {}
+        coverage = case.get('coverage') or {}
+        self.integrity_summary.setText(self.tr2('Saved source coverage: ', 'Полнота сохранённых источников: ') +
+            _value(coverage.get('evidence_completeness', 'NOT_ESTABLISHED')))
+        receipt = case.get('run_receipt')
+        if not isinstance(receipt, dict):
+            self.integrity_receipt.setPlainText(self.tr2(
+                'No run receipt was recorded for this investigation.', 'Квитанция выполнения этого расследования не записана.'))
+            return
+        source = receipt.get('source') if isinstance(receipt.get('source'), dict) else {}
+        cleanup = receipt.get('cleanup') if isinstance(receipt.get('cleanup'), dict) else {}
+        lines = [self.tr2('Run: ', 'Запуск: ') + _value(receipt.get('run_id')),
+            self.tr2('Operation: ', 'Операция: ') + _value(receipt.get('operation')),
+            self.tr2('Result: ', 'Результат: ') + _value(receipt.get('status')),
+            self.tr2('Source check scope: ', 'Область проверки источника: ') + _value(source.get('verification_scope')),
+            self.tr2('Producer authentication: ', 'Подлинность производителя: ') + _value(source.get('producer_authentication', 'NOT_ESTABLISHED')),
+            self.tr2('Cleanup: ', 'Очистка: ') + _value(cleanup, 1200)]
+        self.integrity_receipt.setPlainText('\n'.join(lines))
+
+    def _owned_cleanup_pending(self):
+        from blackbox_core.optional_jobs import OwnedProcess
+        probe = getattr(self.window, 'probe', None)
+        data = getattr(probe, 'data', {})
+        optional = data.get('optional_jobs', {}) if isinstance(data, dict) else {}
+        optional = optional if isinstance(optional, dict) else {}
+        remote = bool(optional.get('cleanup_required') and getattr(probe, 'alive', False))
+        return remote, bool(OwnedProcess.pending_cleanup())
+
+    def retry_owned_cleanup(self):
+        if self._closing or self.bridge.busy:
+            return False
+        remote, local = self._owned_cleanup_pending()
+        if not (remote or local):
+            return False
+        if remote:
+            # Existing owned ResearchBridge protocol; the exact current helper
+            # retains its own failed child. No saved/imported owner is acted on.
+            self.window.probe.stop()
+        if local:
+            return self.bridge.submit('cleanup_owned')
+        self._set_status('Cleanup requested from the current recording owner; inspect its actual result.',
+                         'Очистка запрошена у текущего наблюдателя; проверьте фактический результат.')
+        return True
 
     def _render_summary(self):
         self.source_summary.setText(self.tr2("Saved sources: ", "Сохранённые источники: ") +
@@ -1182,12 +1264,19 @@ class InvestigationGraphPanel(QWidget):
             self._deferred_checkpoint = True
         elif operation == "export":
             self._set_status("Investigation export saved with provenance and limitations.", "Экспорт расследования сохранён с происхождением и ограничениями.")
+        elif operation == 'cleanup_owned':
+            value = packet.get('owned_cleanup') or {}
+            self._show_details(value)
+            self._set_status('Owned cleanup result: ' + str(value.get('status', 'RECOVERY_UNCONFIRMED')),
+                             'Результат очистки своих ресурсов: ' + str(value.get('status', 'RECOVERY_UNCONFIRMED')))
         self._controls()
 
     def _controls(self, *_):
         if not hasattr(self, "run_button"):
             return
         busy = self.bridge.busy
+        remote_cleanup, local_cleanup = self._owned_cleanup_pending()
+        self.retry_owned_button.setEnabled(not busy and not self._closing and (remote_cleanup or local_cleanup))
         native_busy = self.deep_panel.bridge.busy
         active = self.case is not None and not busy and not self._record_queue and not self._closing
         can_change_case = not busy and not native_busy and self._pending_native is None and not self._closing

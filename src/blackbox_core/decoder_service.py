@@ -1,5 +1,6 @@
 """Offline trace decode supervisor; the recorder and its databases are not touched."""
 from __future__ import annotations
+from contextlib import contextmanager
 import os
 from pathlib import Path
 import sys
@@ -35,7 +36,42 @@ def _local_file(path):
     return path
 
 
+@contextmanager
+def _private_decode_stage():
+    stage = tempfile.TemporaryDirectory(prefix="blackbox-decode-")
+    released = False
+    def release():
+        nonlocal released
+        if not released:
+            stage.cleanup()
+            released = True
+    try:
+        yield stage.name, release
+    except BaseException as error:
+        owner = getattr(error, "owner", None)
+        if owner is not None and getattr(owner, "cleanup_required", False):
+            # Keep the actual TemporaryDirectory object alive with its native
+            # owner until an explicit verified close can release both.
+            owner.retain_cleanup_resource(stage)
+            released = True
+        raise
+    finally:
+        release()
+
+
 def decode_file(path, destination, *, cancel=None, timeout=180):
+    from .deep_tool_contracts import begin_evidence_run, record_evidence_failure
+    # Preserve the established validation error before constructing metadata.
+    DecodeBudget(cancel, timeout)
+    context = begin_evidence_run("decoder.decode", timeout_seconds=timeout)
+    try:
+        return _decode_file(path, destination, cancel=cancel, timeout=timeout, context=context)
+    except Exception as error:
+        record_evidence_failure(context, error)
+        raise
+
+
+def _decode_file(path, destination, *, cancel, timeout, context):
     from .session_v2 import safe_path
     budget = DecodeBudget(cancel, timeout)
     budget.check("VALIDATE")
@@ -46,7 +82,7 @@ def decode_file(path, destination, *, cancel=None, timeout=180):
     if path.suffix.lower() == ".etl" and os.name != "nt":
         raise OSError("ETL_REQUIRES_WINDOWS")
     before = file_hash(path, cancel, budget=budget, max_bytes=MAX_INPUT_BYTES)
-    with tempfile.TemporaryDirectory(prefix="blackbox-decode-") as temp:
+    with _private_decode_stage() as (temp, release_private_stage):
         root = Path(temp)
         snapshot = root / ("input" + path.suffix.lower())
         # Decoder sees a private snapshot, not the mutable original file.
@@ -110,6 +146,29 @@ def decode_file(path, destination, *, cancel=None, timeout=180):
                     path, cancel, budget=budget, max_bytes=MAX_INPUT_BYTES) != before:
                 raise ValueError("ORIGINAL_INPUT_CHANGED_DURING_DECODE")
 
+        def complete_metadata(meta):
+            from .deep_tool_contracts import attach_evidence_run_receipt
+            verify_original()
+            # build_index has closed the parser and its private SQLite writer.
+            # Native OwnedProcess.close must also have returned successfully.
+            release_private_stage()
+            source = {"source_id": "trace-input:" + before, "source_type": "TRACE_FILE",
+                "source_sha256": before, "source_size_bytes": total,
+                "verification_class": "UNVERIFIED_IMPORT",
+                "provenance": "EXPLICIT_LOCAL_FILE_SELECTION_NOT_PRODUCER_AUTHENTICATION"}
+            partial = (meta["status"] == "TRUNCATED" or meta.get("events_with_errors", 0) > 0 or
+                       meta.get("events_without_fields_or_schema", 0) > 0 or meta.get("bounded_events", 0) > 0 or
+                       (meta.get("decoder_reported_lost_events") or 0) > 0)
+            return attach_evidence_run_receipt(context, meta, sources=(source,),
+                source_revalidated=True, execution_started=True,
+                coverage={"completeness": "INCOMPLETE_EVIDENCE" if partial else "UNKNOWN_CAPTURE_COMPLETENESS",
+                    "rows": meta["rows"], "import_completeness": meta["import_completeness"],
+                    "original_capture_complete": None},
+                cleanup={"status": "CONFIRMED", "confirmed": True,
+                    "scope": "DECODE_HELPER_AND_PRIVATE_INPUT_STAGING",
+                    "private_staging_removed": True, "capture_started": False})
+
         verify_original()
         return build_index(decoded, destination, input_sha256=before, format_name=path.suffix.lower(),
-                           cancel=cancel, budget=budget, before_publish=verify_original)
+                           cancel=cancel, budget=budget, before_publish=verify_original,
+                           metadata_adapter=complete_metadata)
