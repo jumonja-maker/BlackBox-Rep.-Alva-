@@ -1,4 +1,5 @@
 """R40 format/negative contracts; actual native crash/unwind has a separate CI fixture."""
+from contextlib import closing
 import hashlib
 import json
 import os
@@ -262,7 +263,7 @@ class R40DumpContracts(unittest.TestCase):
         expected = case["crash_investigation"]["summary"]
         # Re-signed imported JSON is integrity-consistent, not authenticated.
         # The reader must derive the view from recorded nodes, not trust it.
-        with sqlite3.connect(index) as db:
+        with closing(sqlite3.connect(index)) as db:
             row = json.loads(db.execute("SELECT content_json FROM investigation").fetchone()[0])
             saved = row["crash_investigation"]
             saved.update(status="NOT_COLLECTED", events=[], dumps=[], modules=[], threads=[], frames=[])
@@ -271,12 +272,23 @@ class R40DumpContracts(unittest.TestCase):
             raw = canonical_json(row)
             db.execute("UPDATE investigation SET content_json=?,content_sha256=?",
                        (raw, hashlib.sha256(raw.encode("ascii")).hexdigest()))
+            db.commit()
         before = index.read_bytes()
         self.path.unlink()
         with patch("blackbox_core.deep_dump.inspect_dump", side_effect=AssertionError("SOURCE_REOPENED")):
             loaded = load_investigation(index)
         self.assertEqual(loaded["crash_investigation"]["summary"], expected)
         self.assertEqual(index.read_bytes(), before)
+
+    def test_legacy_absent_projection_exports_without_adding_a_false_saved_view(self):
+        self.path.write_bytes(crash_dump())
+        case = create_investigation([{"source_type": "DUMP_METADATA", "path": str(self.path)}])
+        case.pop("crash_investigation")
+        for format in ("json", "html"):
+            destination = self.root / ("legacy." + format)
+            export_investigation(case, destination, format=format)
+            self.assertNotIn("crash_investigation", destination.read_text())
+        self.assertNotIn("crash_investigation", case)
 
     def test_historical_pid_does_not_bind_a_new_live_instance(self):
         self.path.write_bytes(crash_dump())

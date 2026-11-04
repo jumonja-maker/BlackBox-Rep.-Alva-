@@ -110,7 +110,7 @@ jobs:
         run: |
           foreach ($scale in @('1', '1.25', '1.5', '2')) {
             $env:QT_SCALE_FACTOR = $scale
-            $job = Start-Process -FilePath (Get-Command python).Source -ArgumentList @('tools/qa_dpi_offscreen.py', 'dpi-offscreen') -PassThru
+            $job = Start-Process -FilePath (Get-Command python).Source -ArgumentList @('tools/qa_dpi_offscreen.py', 'dpi-offscreen') -PassThru -NoNewWindow
             if (-not $job.WaitForExit(120000)) { $job.Kill(); throw "DPI capture exceeded deadline at scale $scale" }
             if ($job.ExitCode -ne 0) { throw "Offscreen DPI capture failed at scale $scale" }
           }
