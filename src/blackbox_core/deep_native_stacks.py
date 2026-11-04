@@ -12,6 +12,79 @@ import time
 
 from . import deep_native_win as W
 
+_SAVED_UNWIND_OWNER = None
+
+
+def _require_saved_unwind_owner_clear():
+    if _SAVED_UNWIND_OWNER is not None:
+        from .deep_native import NativeError
+        error = NativeError("RECOVERY_UNCONFIRMED", "PREVIOUS_OFFLINE_UNWIND_OWNER_REQUIRES_EXPLICIT_CLEANUP")
+        error.offline_owner_retained = True
+        error.resource_owner = "SAVED_DBGHELP_SESSION"
+        raise error
+
+
+def _release_saved_unwind_owner(owner):
+    """Release only this retained capability, in borrowed-image lifetime order."""
+    if owner.get("release_unconfirmed"):
+        return owner["release_unconfirmed"]
+    if owner["initialized"]:
+        try:
+            confirmed = owner["cleanup"](owner["handle"])
+        except BaseException:
+            return "SYM_CLEANUP_EXCEPTION_OWNER_RETAINED"
+        if not confirmed:
+            return "SYM_CLEANUP_NOT_CONFIRMED_OWNER_RETAINED"
+        owner["initialized"] = False
+    try:
+        owner["images"].close()
+    except BaseException:
+        owner["release_unconfirmed"] = "PINNED_IMAGE_RELEASE_UNCONFIRMED_RESTART_REQUIRED"
+        return owner["release_unconfirmed"]
+    try:
+        closed = owner["kernel"].close(owner["handle"])
+    except BaseException:
+        closed = False
+    if not closed:
+        # An unverified CloseHandle outcome cannot be retried by numeric value:
+        # it might already have been recycled by Windows for another owner.
+        owner["release_unconfirmed"] = "SESSION_HANDLE_RELEASE_UNCONFIRMED_RESTART_REQUIRED"
+        return owner["release_unconfirmed"]
+    return None
+
+
+def retry_saved_unwind_cleanup(*, deadline=None, cancel_event=None):
+    """Explicit resource cleanup retry; never repeats a dump/native action."""
+    from .deep_native import _DBGHELP_LOCK, _check
+    global _SAVED_UNWIND_OWNER
+    if deadline is not None and (type(deadline) not in (int, float) or not 0 < deadline < float("inf")):
+        raise ValueError("INVALID_OFFLINE_CLEANUP_DEADLINE")
+    deadline = min(time.monotonic() + 5, deadline) if deadline is not None else time.monotonic() + 5
+    _check(deadline, cancel_event)
+    if not _DBGHELP_LOCK.acquire(timeout=max(.001, deadline - time.monotonic())):
+        raise TimeoutError("DBGHELP_CLEANUP_BUSY")
+    try:
+        _check(deadline, cancel_event)
+        owner = _SAVED_UNWIND_OWNER
+        if owner is None:
+            return {"status": "COMPLETED", "data": {"offline_owner_retained": False,
+                    "had_retained_owner": False, "cleanup_confirmed": True,
+                    "source": "OWNED_OFFLINE_DBGHELP_SESSION", "resource_owner": "SAVED_DBGHELP_SESSION", "memory_contents_included": False},
+                    "limitations": ["NO_DUMP_OR_NATIVE_ACTION_WAS_REPEATED"], "error": None}
+        reason = _release_saved_unwind_owner(owner)
+        if reason is not None:
+            return {"status": "RECOVERY_UNCONFIRMED", "data": {"offline_owner_retained": True,
+                    "had_retained_owner": True, "cleanup_confirmed": False,
+                    "source": "OWNED_OFFLINE_DBGHELP_SESSION", "resource_owner": "SAVED_DBGHELP_SESSION", "memory_contents_included": False},
+                    "error": reason, "limitations": ["NO_DUMP_OR_NATIVE_ACTION_WAS_REPEATED"]}
+        _SAVED_UNWIND_OWNER = None
+        return {"status": "COMPLETED", "data": {"offline_owner_retained": False,
+                "had_retained_owner": True, "cleanup_confirmed": True,
+                "source": "OWNED_OFFLINE_DBGHELP_SESSION", "resource_owner": "SAVED_DBGHELP_SESSION", "memory_contents_included": False},
+                "limitations": ["NO_DUMP_OR_NATIVE_ACTION_WAS_REPEATED"], "error": None}
+    finally:
+        _DBGHELP_LOCK.release()
+
 
 class PSS_THREAD_ENTRY(C.Structure):
     _fields_ = [("exit_status", W.U32), ("teb", W.PTR), ("pid", W.U32),
@@ -329,4 +402,189 @@ def collect_stacks(inspector, params, deadline, cancel):
             "_status": "RECOVERY_UNCONFIRMED" if cleanup_error else "INCOMPLETE_EVIDENCE" if incomplete else "COMPLETED",
             "_limitations": ["PSS_CAPTURE_MAY_BRIEFLY_PAUSE_TARGET", "COPY_ON_WRITE_VA_CLONE_NOT_HISTORICAL_ETW",
                               "STACK_UNWIND_COMPLETENESS_NOT_PROVEN", "NO_SYMBOL_SERVER_OR_SOURCE_NETWORK_ACCESS"]}
+
+
+def unwind_saved_contexts(contexts, read_memory, modules, image_path, *, pdb_path=None,
+                          max_frames=64, deadline=None, cancel=None):
+    """Reuse DbgHelp for an explicit saved AMD64 image, never a live process.
+
+    The memory callback can only read the caller's already validated dump
+    descriptors. Dump-embedded paths and automatic symbol discovery are never
+    used. Only the explicitly chosen image's saved identity is considered.
+    """
+    from .deep_native import _DBGHELP_LOCK, _check, _os_error
+    global _SAVED_UNWIND_OWNER
+    _require_saved_unwind_owner_clear()
+    from .decoder_pdb import _local_file, _stable_file
+    from .decoder_native_symbols import _pe_layout, load_native_symbols
+    path, initial = _local_file(image_path)
+    with path.open("rb") as binary:
+        _stable_file(path, initial, os.fstat(binary.fileno()))
+        pe = _pe_layout(binary, initial.st_size)
+        _stable_file(path, initial, os.fstat(binary.fileno()))
+    matches = [m for m in modules if isinstance(m.get("pdb_identity"), dict) and
+               m["pdb_identity"].get("guid") == pe.get("guid") and
+               m["pdb_identity"].get("age") == pe.get("age") and
+               m.get("image_size") == pe.get("image_size") and
+               m.get("image_timestamp") == pe.get("image_timestamp")]
+    if pe.get("machine") != 0x8664 or len(matches) != 1:
+        raise ValueError("SAVED_MODULE_AND_LOCAL_IMAGE_IDENTITY_MISMATCH_OR_AMBIGUOUS")
+    saved = matches[0]
+    module = {"base": saved["base_address"], "size": saved["image_size"],
+              "name": saved["name"], "path": str(path), "snapshot_pe": pe}
+    class SymbolCancellation:
+        def is_set(self):
+            _check(deadline, cancel)
+            return False
+    symbols = load_native_symbols(path, pdb_path, cancel=SymbolCancellation()) if pdb_path else None
+    if symbols is not None and not _same_unwind_image(pe, symbols.pe):
+        raise ValueError("SAVED_MODULE_LOCAL_PDB_IDENTITY_MISMATCH")
+    kernel = W.Kernel()
+    create = W.bind(kernel.dll, "CreateEventW", W.HANDLE, W.PTR, W.BOOL, W.BOOL, C.c_wchar_p)
+    owner = state = None
+    acquired = False
+    cleanup_reason = None
+    try:
+        _check(deadline, cancel)
+        remaining = max(.001, deadline - time.monotonic()) if deadline else 15
+        acquired = _DBGHELP_LOCK.acquire(timeout=remaining)
+        if not acquired:
+            raise TimeoutError("DBGHELP_BUSY")
+        _require_saved_unwind_owner_clear()
+        owner = create(None, False, False, None)
+        if not owner:
+            raise _os_error("OFFLINE_UNWIND_SESSION_HANDLE_FAILED")
+        state = {"kernel": kernel, "handle": owner, "images": ExitStack(), "initialized": False}
+        dbg = W.library("dbghelp")
+        initialize = W.bind(dbg, "SymInitializeW", W.BOOL, W.HANDLE, C.c_wchar_p, W.BOOL)
+        cleanup = W.bind(dbg, "SymCleanup", W.BOOL, W.HANDLE)
+        state["cleanup"] = cleanup
+        state["library"] = dbg
+        options = W.bind(dbg, "SymGetOptions", W.U32)
+        set_options = W.bind(dbg, "SymSetOptions", W.U32, W.U32)
+        load_module = W.bind(dbg, "SymLoadModuleExW", W.U64, W.HANDLE, W.HANDLE,
+                             C.c_wchar_p, C.c_wchar_p, W.U64, W.U32, W.PTR, W.U32)
+        walk = W.bind(dbg, "StackWalk64", W.BOOL, W.U32, W.HANDLE, W.HANDLE,
+                      C.POINTER(W.STACKFRAME64), W.PTR, W.PTR, W.PTR, W.PTR, W.PTR)
+        table = W.bind(dbg, "SymFunctionTableAccess64", W.PTR, W.HANDLE, W.U64)
+        module_base = W.bind(dbg, "SymGetModuleBase64", W.U64, W.HANDLE, W.U64)
+        previous_options = options()
+        image_owners = state["images"]
+        set_options(0x4 | 0x80 | 0x100 | 0x200 | 0x400 | 0x1000 |
+                    0x20000 | 0x40000 | 0x80000 | 0x200000 | 0x2000000)
+        try:
+            if not initialize(owner, "", False):
+                raise _os_error("OFFLINE_SYM_INITIALIZE_FAILED")
+            state["initialized"] = True
+            rows = []
+            image_handle = image_owners.enter_context(_unwind_image(kernel, module))
+            if load_module(owner, image_handle, None, module["name"],
+                           module["base"], module["size"], None, 0) != module["base"]:
+                raise ValueError("OFFLINE_MATCHED_UNWIND_IMAGE_NOT_LOADED")
+            read_type = C.WINFUNCTYPE(W.BOOL, W.HANDLE, W.U64, W.PTR, W.U32, C.POINTER(W.U32))
+            failure = {"error": None, "reason": None}
+
+            @read_type
+            def read_saved(_, address, destination, requested, received):
+                try:
+                    if received:
+                        received[0] = 0
+                    if not received or not destination or not address or not 0 < requested <= 65536:
+                        return False
+                    value = read_memory(int(address), int(requested))
+                    if len(value) != requested:
+                        return False
+                    C.memmove(destination, value, len(value))
+                    received[0] = len(value)
+                    return True
+                except (InterruptedError, TimeoutError) as error:
+                    failure["error"] = error
+                    return False
+                except (ValueError, OSError) as error:
+                    failure["reason"] = str(error)[:160]
+                    return False
+                except BaseException:
+                    failure["error"] = ValueError("DUMP_MEMORY_CALLBACK_FAILED")
+                    return False
+
+            for saved_context in contexts:
+                _check(deadline, cancel)
+                row = {"tid": saved_context["tid"], "frames": [], "status": "INCOMPLETE_EVIDENCE",
+                       "unwind_completeness": "NOT_PROVEN", "method": "SAVED_AMD64_DBGHELP_STACKWALK64",
+                       "context_source": saved_context.get("context_source", "SAVED_THREAD_CONTEXT"),
+                       "memory_contents_included": False}
+                raw = saved_context["context"]
+                if len(raw) < C.sizeof(W.CONTEXT64):
+                    row["reason"] = "FULL_AMD64_CONTEXT_NOT_CAPTURED"
+                    rows.append(row)
+                    continue
+                storage, context = W.aligned_context()
+                C.memmove(C.byref(context), raw, C.sizeof(context))
+                if context.flags & 0x100001 != 0x100001:
+                    row["reason"] = "AMD64_CONTROL_CONTEXT_NOT_CAPTURED"
+                    rows.append(row)
+                    continue
+                frame = W.STACKFRAME64()
+                frame.pc.offset, frame.frame.offset, frame.stack.offset = context.rip, context.rbp, context.rsp
+                frame.pc.mode = frame.frame.mode = frame.stack.mode = 3
+                failure.update(error=None, reason=None)
+
+                def advance():
+                    _check(deadline, cancel)
+                    C.set_last_error(0)
+                    ok = walk(0x8664, owner, saved_context["tid"], C.byref(frame), C.byref(context),
+                              C.cast(read_saved, W.PTR), C.cast(table, W.PTR),
+                              C.cast(module_base, W.PTR), None)
+                    if failure["error"] is not None:
+                        raise failure["error"]
+                    if not ok:
+                        row["unwind_winerror"] = C.get_last_error()
+                        return None
+                    return int(frame.pc.offset), int(frame.stack.offset)
+
+                initial = int(context.rip), int(context.rsp)
+                for index, (pc, sp) in enumerate(_stack_positions(initial, advance, max_frames)):
+                    _check(deadline, cancel)
+                    in_module = module["base"] <= pc < module["base"] + module["size"]
+                    record = {"address": pc, "stack_pointer": sp,
+                              "origin": "CAPTURED_CONTEXT_PC" if index == 0 else "DBGHELP_UNWOUND_CALLER",
+                              "module": module["name"] if in_module else None,
+                              "rva": pc - module["base"] if in_module else None,
+                              "module_binding": "SAVED_RSDS_AND_PINNED_LOCAL_PE_MATCH" if in_module else "NOT_ESTABLISHED"}
+                    if in_module and symbols is not None:
+                        record["symbol"] = symbols.lookup(record["rva"])
+                        record["symbol_binding"] = "SAVED_RSDS_LOCAL_PE_PDB_GUID_AGE_MATCH"
+                    row["frames"].append(record)
+                    # Do not use DbgHelp's leaf fallback in unverified modules.
+                    if not in_module:
+                        row["reason"] = "UNWIND_METADATA_FOR_NEXT_MODULE_NOT_VERIFIED"
+                        break
+                del storage
+                row["truncated"] = len(row["frames"]) >= max_frames
+                row["captured_memory_stop_reason"] = failure["reason"]
+                if len(row["frames"]) > 1:
+                    row["status"] = "UNWOUND_PARTIAL_STACK"
+                if symbols is not None:
+                    row["local_pdb"] = symbols.summary()
+                rows.append(row)
+            return rows
+        finally:
+            cleanup_reason = _release_saved_unwind_owner(state)
+            state["cleanup_processed"] = True
+            if cleanup_reason is not None:
+                _SAVED_UNWIND_OWNER = state
+            set_options(previous_options)
+    finally:
+        if state is not None and not state.get("cleanup_processed"):
+            cleanup_reason = _release_saved_unwind_owner(state)
+            if cleanup_reason is not None:
+                _SAVED_UNWIND_OWNER = state
+        if acquired:
+            _DBGHELP_LOCK.release()
+        if cleanup_reason is not None:
+            from .deep_native import NativeError
+            error = NativeError("RECOVERY_UNCONFIRMED", cleanup_reason)
+            error.offline_owner_retained = True
+            error.resource_owner = "SAVED_DBGHELP_SESSION"
+            raise error
 

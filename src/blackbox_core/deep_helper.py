@@ -36,7 +36,7 @@ _PARAMETER_KEYS = {
     "capabilities": {"operations"}, "timeline": {"limit"}, "compare": {"before_id", "after_id"},
     "trace_evidence": {"index_path", "process_instance", "tid", "start_ms", "end_ms", "limit",
                        "include_waits", "expected_source_trace_sha256"},
-    "dump_inspect": {"path", "max_bytes", "limit"},
+    "dump_inspect": {"path", "max_bytes", "limit", "image_path", "pdb_path", "max_frames", "retry_cleanup"},
     "dump_read_memory": {"path", "address", "size", "max_bytes"},
     "symbols_verify": {"pe_path", "pdb_path", "rva"},
     "debug.context": {"tid", "thread_created_100ns"}, "debug.breakpoints": set(),

@@ -105,7 +105,14 @@ def execute(packet):
         if folder is None:raise ValueError('START_RECORDING_FIRST')
         if op=='crash_events':
             from .crash_events import query
-            result=query(pid,created)
+            identity=packet.get('exact_process_identity')
+            expected=None
+            if identity is not None:
+                if (not isinstance(identity,dict) or identity.get('pid')!=pid or
+                        type(identity.get('created_100ns')) is not int or identity['created_100ns']<=0):
+                    raise ValueError('CRASH_QUERY_TARGET_IDENTITY_MISMATCH')
+                expected=identity['created_100ns']
+            result=query(pid,created,expected_created_100ns=expected,image_name=packet.get('target_image_name'))
         else:
             from .trace_decode import decode
             result=decode(a['path'],target_pid=pid)

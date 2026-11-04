@@ -972,9 +972,9 @@ class InspectorService:
                     snapshot = answer.get("data", {})
                     snapshot_id = self.journal.snapshot(request.target.to_dict(), snapshot)
                     answer["data"] = {"snapshot_id": snapshot_id, "snapshot": snapshot}
-                if answer.get("data", {}).get("owner_retained"):
+                if request.operation not in LOCAL_OPERATIONS and answer.get("data", {}).get("owner_retained"):
                     self._owner_retained = True
-                if (self._admin_session_managed and self.helper is not None
+                if (request.operation not in LOCAL_OPERATIONS and self._admin_session_managed and self.helper is not None
                         and answer.get("status") == "RECOVERY_UNCONFIRMED"
                         and not (self._expiry_cleanup and self._expiry_cleanup.get("confirmed"))):
                     self._owner_retained = self._cleanup_unconfirmed = True
