@@ -1,5 +1,6 @@
 """R40 format/negative contracts; actual native crash/unwind has a separate CI fixture."""
 from contextlib import closing
+import ctypes as C
 import hashlib
 import json
 import os
@@ -486,6 +487,98 @@ class R40OfflineCleanupContracts(unittest.TestCase):
         self.assertFalse(answer["data"]["offline_owner_retained"])
         self.assertTrue(answer["data"]["had_retained_owner"])
         self.assertEqual(history, [("sym", 1234), ("images", None), ("event", 1234)])
+
+    def test_failed_cleanup_keeps_callback_capabilities_alive_but_never_reuses_closed_reader(self):
+        from blackbox_core import deep_native_stacks as stacks
+        calls = []
+        adapter = stacks._SavedMemoryAdapter(1234, lambda *_: calls.append(True), lambda: None)
+        callbacks = stacks._saved_memory_callbacks(adapter, C.CFUNCTYPE)
+        owner, history = self.owner([False, True])
+        owner.update(callbacks=callbacks, memory_adapter=adapter)
+        self.assertIn("NOT_CONFIRMED", stacks._release_saved_unwind_owner(owner))
+        self.assertIs(owner["callbacks"], callbacks)
+        self.assertFalse(adapter.enabled)
+        from blackbox_core import deep_native_win as win
+        received = C.pointer(win.U32(99))
+        destination = C.create_string_buffer(8)
+        self.assertFalse(callbacks[0](1234, 4096, C.addressof(destination), 8, received))
+        self.assertEqual(received[0], 0)
+        self.assertEqual(calls, [])
+        self.assertIsNone(stacks._release_saved_unwind_owner(owner))
+        self.assertNotIn("callbacks", owner)
+        self.assertNotIn("memory_adapter", owner)
+
+
+class R40SymbolReadCallbackContracts(unittest.TestCase):
+    """C ABI/copy contracts only; these never substitute for actual AMD64 QA."""
+    def adapter(self, read=None, check=None):
+        from blackbox_core import deep_native_stacks as stacks
+        self.adapter_value = stacks._SavedMemoryAdapter(1234, read or (lambda *_: b"CAPTURED"), check or (lambda: None))
+        self.callbacks = stacks._saved_memory_callbacks(self.adapter_value, C.CFUNCTYPE)
+        from blackbox_core import deep_native_win as win
+        self.destination = C.create_string_buffer(8)
+        self.received = C.pointer(win.U32(99))
+        self.request = stacks._IMAGEHLP_CBA_READ_MEMORY(4096, C.addressof(self.destination), 8, self.received)
+        return self.adapter_value
+
+    def test_documented_x64_cba_layout_and_both_routes_copy_only_selected_captured_bytes(self):
+        from blackbox_core import deep_native_stacks as stacks
+        self.assertEqual(C.sizeof(stacks._IMAGEHLP_CBA_READ_MEMORY), 32)
+        self.assertEqual(stacks._IMAGEHLP_CBA_READ_MEMORY.bytesread.offset, 24)
+        calls = []
+        def captured(address, size):
+            calls.append((address, size))
+            return b"CAPTURED"
+        adapter = self.adapter(captured)
+        self.assertTrue(self.callbacks[0](1234, 4096, C.addressof(self.destination), 8, self.received))
+        self.assertTrue(self.callbacks[1](1234, 6, C.addressof(self.request), 0))
+        self.assertEqual(self.received[0], 8)
+        self.assertEqual(self.destination.raw, b"CAPTURED")
+        self.assertEqual(calls, [(4096, 8), (4096, 8)])
+        self.assertEqual(adapter.counters["stackwalk_requests"], 1)
+        self.assertEqual(adapter.counters["symbol_handler_requests"], 1)
+
+    def test_symbol_handler_rejects_other_owner_action_and_null_without_reader_access(self):
+        calls = []
+        self.adapter(lambda *_: calls.append(True))
+        for args in ((999, 6, C.addressof(self.request), 0),
+                     (1234, 7, C.addressof(self.request), 0),
+                     (1234, 6, 0, 0), (1234, 6, C.addressof(self.request), 1)):
+            self.assertFalse(self.callbacks[1](*args))
+        self.assertEqual(calls, [])
+
+    def test_short_missing_and_oversized_reads_never_copy_partial_or_private_errors(self):
+        for read, expected in ((lambda *_: b"SHORT", "DUMP_MEMORY_CALLBACK_SHORT_READ"),
+                               (lambda *_: (_ for _ in ()).throw(ValueError("/PRIVATE/PATH")),
+                                "DUMP_MEMORY_CALLBACK_READ_REFUSED")):
+            adapter = self.adapter(read)
+            self.assertFalse(self.callbacks[1](1234, 6, C.addressof(self.request), 0))
+            self.assertEqual(self.received[0], 0)
+            self.assertEqual(self.destination.raw, b"\0" * 8)
+            self.assertEqual(adapter.reason, expected)
+        adapter = self.adapter(lambda *_: self.fail("OVERSIZED_READ_REACHED_READER"))
+        self.request.bytes = 65537
+        self.assertFalse(self.callbacks[1](1234, 6, C.addressof(self.request), 0))
+        self.assertEqual(self.received[0], 0)
+        self.assertEqual(adapter.reason, "DUMP_MEMORY_CALLBACK_INVALID_READ")
+
+    def test_cancel_and_deadline_preserve_original_failure_without_escaping_native_callback(self):
+        from blackbox_core.deep_native import NativeError
+        for failure in (InterruptedError("CANCELLED"), TimeoutError("TIMED_OUT"),
+                        NativeError("CANCELLED", "DIAGNOSTIC_OPERATION_CANCELLED")):
+            def check():
+                raise failure
+            adapter = self.adapter(check=check)
+            self.assertFalse(self.callbacks[1](1234, 6, C.addressof(self.request), 0))
+            self.assertIs(adapter.error, failure)
+            self.assertEqual(self.received[0], 0)
+
+    def test_total_read_budget_stops_before_source_access(self):
+        adapter = self.adapter(lambda *_: self.fail("EXCEEDED_BUDGET_REACHED_READER"))
+        adapter.counters["copied_bytes"] = 8 * 1024**2
+        self.assertFalse(self.callbacks[0](1234, 4096, C.addressof(self.destination), 8, self.received))
+        self.assertEqual(self.received[0], 0)
+        self.assertEqual(adapter.reason, "DUMP_MEMORY_CALLBACK_READ_BUDGET")
 
 
 class R40ServiceOwnerIsolation(unittest.TestCase):

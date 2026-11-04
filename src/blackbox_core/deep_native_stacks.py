@@ -8,11 +8,86 @@ from __future__ import annotations
 from contextlib import contextmanager, ExitStack
 import ctypes as C
 import os
+import re
 import time
 
 from . import deep_native_win as W
 
 _SAVED_UNWIND_OWNER = None
+
+
+class _IMAGEHLP_CBA_READ_MEMORY(C.Structure):
+    _fields_ = [("addr", W.U64), ("buf", W.PTR), ("bytes", W.U32),
+                ("bytesread", C.POINTER(W.U32))]
+
+
+class _SavedMemoryAdapter:
+    """One bounded captured-memory reader shared by DbgHelp's two callbacks."""
+    def __init__(self, owner, read_memory, check):
+        self.owner, self.read_memory, self.check = owner, read_memory, check
+        self.enabled = True
+        self.error = self.reason = None
+        self.counters = {"stackwalk_requests": 0, "symbol_handler_requests": 0,
+                         "successful_reads": 0, "failed_reads": 0, "copied_bytes": 0}
+
+    def refuse(self, reason):
+        self.counters["failed_reads"] = min(16385, self.counters["failed_reads"] + 1)
+        self.reason = self.reason or reason
+        return False
+
+    def copy(self, owner, address, destination, requested, received, channel):
+        try:
+            self.counters[channel] = min(16385, self.counters[channel] + 1)
+            if received:
+                received[0] = 0
+            if not self.enabled or owner != self.owner:
+                return self.refuse("DUMP_CALLBACK_READ_SCOPE_CLOSED_OR_WRONG_OWNER")
+            if (not received or not destination or not address or not 0 < requested <= 65536 or
+                    address + requested > 2**64):
+                return self.refuse("DUMP_MEMORY_CALLBACK_INVALID_READ")
+            if (self.counters["stackwalk_requests"] + self.counters["symbol_handler_requests"] > 16384 or
+                    self.counters["copied_bytes"] + requested > 8 * 1024**2):
+                return self.refuse("DUMP_MEMORY_CALLBACK_READ_BUDGET")
+            self.check()
+            value = self.read_memory(int(address), int(requested))
+            if len(value) != requested:
+                return self.refuse("DUMP_MEMORY_CALLBACK_SHORT_READ")
+            C.memmove(destination, value, len(value))
+            received[0] = len(value)
+            self.counters["successful_reads"] += 1
+            self.counters["copied_bytes"] += len(value)
+            return True
+        except BaseException as error:
+            if isinstance(error, (InterruptedError, TimeoutError)) or getattr(error, "status", None) in ("CANCELLED", "TIMED_OUT"):
+                self.error = self.error or error
+            elif not isinstance(error, (ValueError, OSError)):
+                self.error = self.error or ValueError("DUMP_MEMORY_CALLBACK_FAILED")
+            reason = str(error)
+            return self.refuse(reason if re.fullmatch(r"[A-Z0-9_]{1,160}", reason) else
+                               "DUMP_MEMORY_CALLBACK_READ_REFUSED")
+
+
+def _saved_memory_callbacks(adapter, callback_type):
+    @callback_type(W.BOOL, W.HANDLE, W.U64, W.PTR, W.U32, C.POINTER(W.U32))
+    def read_saved(owner, address, destination, requested, received):
+        return adapter.copy(owner, address, destination, requested, received, "stackwalk_requests")
+
+    @callback_type(W.BOOL, W.HANDLE, W.U32, W.U64, W.U64)
+    def symbol_callback(owner, action, data, user):
+        # CBA_READ_MEMORY only. Never enable symbol servers or arbitrary actions.
+        if action != 0x6:
+            return False
+        if not adapter.enabled or owner != adapter.owner or not data or user != 0:
+            return adapter.refuse("DUMP_SYMBOL_CALLBACK_INVALID_OWNER_OR_DATA")
+        try:
+            request = C.cast(data, C.POINTER(_IMAGEHLP_CBA_READ_MEMORY)).contents
+            return adapter.copy(owner, request.addr, request.buf, request.bytes, request.bytesread,
+                                "symbol_handler_requests")
+        except BaseException:
+            adapter.error = adapter.error or ValueError("DUMP_SYMBOL_CALLBACK_FAILED")
+            return adapter.refuse("DUMP_SYMBOL_CALLBACK_FAILED")
+
+    return read_saved, symbol_callback
 
 
 def _require_saved_unwind_owner_clear():
@@ -26,6 +101,11 @@ def _require_saved_unwind_owner_clear():
 
 def _release_saved_unwind_owner(owner):
     """Release only this retained capability, in borrowed-image lifetime order."""
+    adapter = owner.get("memory_adapter")
+    if adapter is not None:
+        # Retained native callback objects stay alive, but cleanup may never
+        # reuse a reader whose enclosing dump scope has already been closed.
+        adapter.enabled = False
     if owner.get("release_unconfirmed"):
         return owner["release_unconfirmed"]
     if owner["initialized"]:
@@ -36,6 +116,8 @@ def _release_saved_unwind_owner(owner):
         if not confirmed:
             return "SYM_CLEANUP_NOT_CONFIRMED_OWNER_RETAINED"
         owner["initialized"] = False
+    owner.pop("callbacks", None)  # Only after SymCleanup has confirmed release.
+    owner.pop("memory_adapter", None)
     try:
         owner["images"].close()
     except BaseException:
@@ -464,6 +546,7 @@ def unwind_saved_contexts(contexts, read_memory, modules, image_path, *, pdb_pat
         set_options = W.bind(dbg, "SymSetOptions", W.U32, W.U32)
         load_module = W.bind(dbg, "SymLoadModuleExW", W.U64, W.HANDLE, W.HANDLE,
                              C.c_wchar_p, C.c_wchar_p, W.U64, W.U32, W.PTR, W.U32)
+        register_callback = W.bind(dbg, "SymRegisterCallback64", W.BOOL, W.HANDLE, W.PTR, W.U64)
         walk = W.bind(dbg, "StackWalk64", W.BOOL, W.U32, W.HANDLE, W.HANDLE,
                       C.POINTER(W.STACKFRAME64), W.PTR, W.PTR, W.PTR, W.PTR, W.PTR)
         table = W.bind(dbg, "SymFunctionTableAccess64", W.PTR, W.HANDLE, W.U64)
@@ -477,35 +560,22 @@ def unwind_saved_contexts(contexts, read_memory, modules, image_path, *, pdb_pat
                 raise _os_error("OFFLINE_SYM_INITIALIZE_FAILED")
             state["initialized"] = True
             rows = []
+            adapter = _SavedMemoryAdapter(owner, read_memory, lambda: _check(deadline, cancel))
+            read_saved, symbol_callback = _saved_memory_callbacks(adapter, C.WINFUNCTYPE)
+            # DbgHelp's symbol handler may read unwind metadata separately from
+            # StackWalk64. Its callback must use the same captured-only reader.
+            # Keep both native closures alive even if SymCleanup later fails.
+            state["memory_adapter"] = adapter
+            state["callbacks"] = (read_saved, symbol_callback)
+            if not register_callback(owner, C.cast(symbol_callback, W.PTR), 0):
+                raise _os_error("OFFLINE_SYMBOL_READ_CALLBACK_REGISTRATION_FAILED")
             image_handle = image_owners.enter_context(_unwind_image(kernel, module))
-            if load_module(owner, image_handle, None, module["name"],
-                           module["base"], module["size"], None, 0) != module["base"]:
+            loaded = load_module(owner, image_handle, None, module["name"],
+                                 module["base"], module["size"], None, 0)
+            if adapter.error is not None:
+                raise adapter.error
+            if loaded != module["base"]:
                 raise ValueError("OFFLINE_MATCHED_UNWIND_IMAGE_NOT_LOADED")
-            read_type = C.WINFUNCTYPE(W.BOOL, W.HANDLE, W.U64, W.PTR, W.U32, C.POINTER(W.U32))
-            failure = {"error": None, "reason": None}
-
-            @read_type
-            def read_saved(_, address, destination, requested, received):
-                try:
-                    if received:
-                        received[0] = 0
-                    if not received or not destination or not address or not 0 < requested <= 65536:
-                        return False
-                    value = read_memory(int(address), int(requested))
-                    if len(value) != requested:
-                        return False
-                    C.memmove(destination, value, len(value))
-                    received[0] = len(value)
-                    return True
-                except (InterruptedError, TimeoutError) as error:
-                    failure["error"] = error
-                    return False
-                except (ValueError, OSError) as error:
-                    failure["reason"] = str(error)[:160]
-                    return False
-                except BaseException:
-                    failure["error"] = ValueError("DUMP_MEMORY_CALLBACK_FAILED")
-                    return False
 
             for saved_context in contexts:
                 _check(deadline, cancel)
@@ -527,7 +597,14 @@ def unwind_saved_contexts(contexts, read_memory, modules, image_path, *, pdb_pat
                 frame = W.STACKFRAME64()
                 frame.pc.offset, frame.frame.offset, frame.stack.offset = context.rip, context.rbp, context.rsp
                 frame.pc.mode = frame.frame.mode = frame.stack.mode = 3
-                failure.update(error=None, reason=None)
+                adapter.error = adapter.reason = None
+                row["symbol_handler_callback_registered"] = True
+                selected_context = module["base"] <= context.rip < module["base"] + module["size"]
+                row["function_table_for_context_available"] = bool(table(owner, context.rip)) if selected_context else None
+                row["dbghelp_module_base_matches_selected_image"] = (
+                    module_base(owner, context.rip) == module["base"] if selected_context else None)
+                if adapter.error is not None:
+                    raise adapter.error
 
                 def advance():
                     _check(deadline, cancel)
@@ -535,8 +612,8 @@ def unwind_saved_contexts(contexts, read_memory, modules, image_path, *, pdb_pat
                     ok = walk(0x8664, owner, saved_context["tid"], C.byref(frame), C.byref(context),
                               C.cast(read_saved, W.PTR), C.cast(table, W.PTR),
                               C.cast(module_base, W.PTR), None)
-                    if failure["error"] is not None:
-                        raise failure["error"]
+                    if adapter.error is not None:
+                        raise adapter.error
                     if not ok:
                         row["unwind_winerror"] = C.get_last_error()
                         return None
@@ -561,7 +638,9 @@ def unwind_saved_contexts(contexts, read_memory, modules, image_path, *, pdb_pat
                         break
                 del storage
                 row["truncated"] = len(row["frames"]) >= max_frames
-                row["captured_memory_stop_reason"] = failure["reason"]
+                row["captured_memory_stop_reason"] = adapter.reason
+                row["memory_read_contract"] = "CAPTURED_DUMP_RANGES_ONLY"
+                row["unwind_read_counters"] = dict(adapter.counters)
                 if len(row["frames"]) > 1:
                     row["status"] = "UNWOUND_PARTIAL_STACK"
                 if symbols is not None:
