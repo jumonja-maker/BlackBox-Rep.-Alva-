@@ -6,7 +6,7 @@ using Microsoft.Diagnostics.Tracing.Parsers.Kernel;
 
 internal static class ThreadSchedule
 {
-    static object Identity(TraceLog log, int tid, int expectedPid, double time)
+    internal static object Identity(TraceLog log, int tid, int expectedPid, double time)
     {
         TraceThread? thread = tid > 0 ? log.Threads.GetThread(tid, time) : null;
         var process = thread?.Process;

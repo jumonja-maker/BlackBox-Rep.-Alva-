@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from contextlib import closing
+from dataclasses import replace
 import hashlib
 import html
 import json
@@ -72,11 +73,15 @@ def _stamp(path):
     return stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns
 
 
-def _hash(path, budget):
+def _hash(path, budget, *, max_bytes=None):
     digest = hashlib.sha256()
+    size = 0
     with path.open("rb") as stream:
         while block := stream.read(1024 * 1024):
             budget.check()
+            size += len(block)
+            if max_bytes is not None and size > max_bytes:
+                raise InvestigationError("INVESTIGATION_PUBLICATION_READBACK_BYTE_BUDGET")
             digest.update(block)
     return digest.hexdigest()
 
@@ -158,7 +163,8 @@ def save_investigation(case, path, *, budget=None, before_publish=None):
             before_publish()
         budget.check()
         # Atomic create-new publication; an existing source or index is never overwritten.
-        expected_identity = _stamp(temporary)[:2]
+        expected_stamp = _stamp(temporary)
+        expected_identity, expected_size = expected_stamp[:2], expected_stamp[2]
         os.link(temporary, destination)
     except sqlite3.Error:
         budget.check()  # SQLite translates progress-handler cancellation into OperationalError.
@@ -170,9 +176,15 @@ def save_investigation(case, path, *, budget=None, before_publish=None):
             error.cleanup_unconfirmed = True
             raise
     try:
-        if (_stamp(destination)[:2] != expected_identity or _hash(destination, budget) != digest or
-                canonical_json(load_investigation(destination, budget=budget)) != canonical_json(value) or
-                _stamp(destination)[:2] != expected_identity):
+        # Publication is the commit point: cancellation after it cannot undo
+        # success. Verify committed bytes without that late cancellation, while
+        # retaining the original deadline and every other caller budget limit.
+        readback_budget = replace(budget, cancel_event=None)
+        readback_stamp = _stamp(destination)
+        if (readback_stamp[:2] != expected_identity or readback_stamp[2] != expected_size or
+                _hash(destination, readback_budget, max_bytes=expected_size) != digest or
+                canonical_json(load_investigation(destination, budget=readback_budget)) != canonical_json(value) or
+                _stamp(destination) != readback_stamp):
             raise InvestigationError("INVESTIGATION_INDEX_PUBLICATION_READBACK_UNCONFIRMED")
     except Exception as error:
         # The published name may now belong to another writer. Never remove it
@@ -277,7 +289,9 @@ def export_investigation(case, destination, *, format="json", budget=None, cance
         for hypothesis in value.get("hypotheses", []):
             budget.check()
             content += "<li>" + html.escape(str(hypothesis.get("description", ""))) + " — " + html.escape(str(hypothesis.get("status", ""))) + "</li>"
-        content += "</ul><h2>Source-linked investigation</h2><pre>" + html.escape(json.dumps(value, ensure_ascii=False, indent=2, allow_nan=False)) + "</pre></body></html>"
+        from .delay_investigation import render_delay_html
+        content += "</ul>" + render_delay_html(value.get("delay_investigation"))
+        content += "<h2>Source-linked investigation</h2><pre>" + html.escape(json.dumps(value, ensure_ascii=False, indent=2, allow_nan=False)) + "</pre></body></html>"
         payload = content.encode("utf-8")
     else:
         payload = raw.encode("ascii")
@@ -302,9 +316,11 @@ def export_investigation(case, destination, *, format="json", budget=None, cance
             error.cleanup_unconfirmed = True
             raise
     try:
+        readback_budget = replace(budget, cancel_event=None)
         stamp = _stamp(target)
         if (stamp[:2] != expected_identity or stamp[2] != len(payload) or
-                _hash(target, budget) != hashlib.sha256(payload).hexdigest() or _stamp(target) != stamp):
+                _hash(target, readback_budget, max_bytes=len(payload)) != hashlib.sha256(payload).hexdigest() or
+                _stamp(target) != stamp):
             raise InvestigationError("INVESTIGATION_EXPORT_PUBLICATION_READBACK_UNCONFIRMED")
     except Exception as error:
         error.publication_unconfirmed = True

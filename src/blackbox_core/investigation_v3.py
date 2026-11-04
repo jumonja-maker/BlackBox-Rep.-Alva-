@@ -49,6 +49,8 @@ def _create_investigation(sources, *, target_identity=None, selection=None, scen
     case = build_graph(normalized, target_identity=target_identity, scenario=scenario,
                        app_identity=app_identity, budget=budget)
     case["critical_path"] = path(case, budget=budget)
+    from .delay_investigation import analyze_delay
+    case["delay_investigation"] = analyze_delay(case, budget=budget)
     case["hypotheses"] = hypotheses(case, budget=budget)
     case["actions"] = advisor(case, target_identity=target_identity, budget=budget)
     grouped = group([case], budget=budget)
@@ -87,6 +89,11 @@ def get_related_evidence(case, node_id, *, after=0, limit=100, budget=None, canc
 
 def analyze_critical_path(case, *, budget=None, cancel_event=None):
     from .critical_path import analyze_critical_path as analyze
+    return analyze(case, budget=use_budget(budget, cancel_event=cancel_event))
+
+
+def analyze_delay(case, *, budget=None, cancel_event=None):
+    from .delay_investigation import analyze_delay as analyze
     return analyze(case, budget=use_budget(budget, cancel_event=cancel_event))
 
 
@@ -141,7 +148,14 @@ def export_investigation(case, destination, *, format="json", budget=None, cance
 
 def load_investigation(path, *, budget=None, cancel_event=None):
     from .investigation_graph_store import load_investigation as load
-    return load(path, budget=use_budget(budget, cancel_event=cancel_event))
+    budget = use_budget(budget, cancel_event=cancel_event)
+    case = load(path, budget=budget)
+    # Recompute this display projection from the validated source-linked graph;
+    # an imported cached interpretation never overrides current node/loss rules.
+    from .critical_path import analyze_critical_path
+    case["critical_path"] = analyze_critical_path(case, budget=budget)
+    case["delay_investigation"] = analyze_delay(case, budget=budget)
+    return budget.result(case)
 
 
 def prepare_scenario(case, hypothesis_id, *, budget=None, cancel_event=None, **kwargs):

@@ -3,6 +3,7 @@ using System.Buffers.Binary;
 using System.Globalization;
 using System.Net;
 using Microsoft.Diagnostics.Tracing;
+using Microsoft.Diagnostics.Tracing.Etlx;
 using Microsoft.Diagnostics.Tracing.Parsers;
 using Microsoft.Diagnostics.Tracing.Parsers.Kernel;
 
@@ -46,11 +47,18 @@ internal static class IoObservations
         return BinaryPrimitives.ReadInt64LittleEndian(counter);
     }
 
-    internal static object? Project(TraceEvent e, long? counterFrequency)
+    internal static object? Project(TraceEvent e, long? counterFrequency, TraceLog log)
     {
         if (e.ProviderGuid != KernelTraceEventParser.ProviderGuid || (int)e.ID != 65535)
             return null;
         int opcode = (int)e.Opcode;
+        if (e is DiskIOInitTraceData init && opcode is 12 or 13 && e.Version <= 3 &&
+            e.EventName == (opcode == 12 ? "DiskIO/ReadInit" : "DiskIO/WriteInit"))
+            return new { schema = Schema, source = "ETW_KERNEL_DISK_REQUEST",
+                parser = "TRACEEVENT_DISK_IO_INIT", kind = "disk_request",
+                operation = opcode == 12 ? "read" : "write",
+                request_key = FileIoObservations.Key(init.Irp, "disk-request"),
+                event_thread = ThreadSchedule.Identity(log, e.ThreadID, e.ProcessID, e.TimeStampRelativeMSec) };
         if (e is DiskIOTraceData disk && (opcode == 10 || opcode == 11) &&
             e.Version >= 2 && e.Version <= 3)
         {
@@ -70,7 +78,9 @@ internal static class IoObservations
                 transferred_bytes = size, elapsed_ms = elapsed, response_qpc_ticks = ticks,
                 counter_frequency_hz = counterFrequency.Value,
                 duration_basis = "COMPLETION_EVENT_REPORTED_QPC_DURATION",
-                start_boundary_observed = false, device_busy_time_established = false };
+                start_boundary_observed = false, device_busy_time_established = false,
+                request_key = FileIoObservations.Key(disk.Irp, "disk-request"), disk_number = disk.DiskNumber,
+                event_thread = ThreadSchedule.Identity(log, e.ThreadID, e.ProcessID, e.TimeStampRelativeMSec) };
         }
         // Bind the actual parser class to the operation/family. In pinned
         // TraceEvent the public UDP-v6 type is spelled "UpdIpV6TraceData".

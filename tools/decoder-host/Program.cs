@@ -153,8 +153,8 @@ internal static class Program
         catch (Exception ex) { errors.Add("SCHEDULER_CLASSIFICATION:" + ex.GetType().Name); }
         object? ioObservation = null;
         try {
-            ioObservation = IoObservations.Project(e,
-                e is DiskIOTraceData ? SourceCounterFrequency(log) : null);
+            ioObservation = FileIoObservations.Project(e, log) ?? IoObservations.Project(e,
+                e is DiskIOTraceData ? SourceCounterFrequency(log) : null, log);
         }
         catch (Exception ex) { errors.Add("IO_CLASSIFICATION:" + ex.GetType().Name); }
         // UTC is TraceEvent's reconstruction from the trace clock (QPC), NOT
