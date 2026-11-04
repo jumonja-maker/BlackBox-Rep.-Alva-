@@ -30,6 +30,21 @@ def require(value, reason):
         raise AssertionError(reason)
 
 
+NATIVE_QA_CAPTURE_SECONDS = 2
+
+
+def require_complete_native_etl(meta, actual_input_sha256):
+    """A partial prefix must never satisfy real Windows-native release acceptance."""
+    require(type(meta) is dict, 'NATIVE_ETL_RESULT_MISSING')
+    require(meta.get('status') == 'DECODED' and
+            meta.get('import_completeness') == 'ALL_EMITTED_RECORDS',
+            'NATIVE_ETL_DECODE_FAILED')
+    require(meta.get('input_sha256') == actual_input_sha256,
+            'NATIVE_ETL_SOURCE_HASH_MISMATCH')
+    require(meta.get('decoder_reported_lost_events') == 0,
+            'NATIVE_ETL_DECODER_REPORTED_LOST_EVENTS')
+
+
 def build_pair(output, *, busy=False):
     clang, linker = shutil.which('clang'), shutil.which('lld-link')
     require(clang and linker, 'NATIVE_QA_COMPILER_REQUIRED_NO_SYNTHETIC_SUBSTITUTE')
@@ -81,7 +96,13 @@ def native_wpr(output,binary,pdb,helper):
             'NATIVE_ETW_ACCEPTANCE_ONLY_ON_DISPOSABLE_WINDOWS_CI')
     require(privilege()['mode']=='ADMINISTRATOR' and wpr_tool(), 'REAL_WPR_REQUIRED_FOR_ACCEPTANCE')
     capture=output/'wpr';capture.mkdir()
-    trace=TraceSupervisor(capture,seconds=5,max_output_bytes=256*1024**2,profile="CPU.Verbose")
+    # The system-wide CPU.Verbose profile can emit >384 MiB of JSONL during a
+    # five-second sample on busy hosted Windows runners. Keep the exact same
+    # real ETW provider/stack/PDB oracle and *full* DECODED requirement, but
+    # bound the owned native fixture's sampling window to two seconds.
+    # A TRUNCATED result still fails; never weaken the decoder's output limits.
+    trace=TraceSupervisor(capture,seconds=NATIVE_QA_CAPTURE_SECONDS,
+                          max_output_bytes=256*1024**2,profile="CPU.Verbose")
     owned=None
     try:
         trace.start();deadline=time.monotonic()+25
@@ -172,7 +193,7 @@ def native_wpr(output,binary,pdb,helper):
         emit_decode_diagnostics(None,error)
         raise
     emit_decode_diagnostics(meta)
-    require(meta['status']=='DECODED','NATIVE_ETL_DECODE_FAILED')
+    require_complete_native_etl(meta, digest)
     rows_seen=bound_frames=resolved=0;example=None
     with closing(sqlite3.connect(index.resolve().as_uri()+'?mode=ro',uri=True)) as db:
         db.execute('PRAGMA query_only=ON')
