@@ -84,10 +84,8 @@ class ResearchBridge(QObject):
             data=self._queue.pop(0)
             if self.process.write(data)!=len(data):
                 self.last_error="RESEARCH_COMMAND_NOT_SENT";break
-        if self.closing and not self._queue:
-            # Let the helper's stdin reader finish before Python shutdown;
-            # leaving a daemon blocked in buffered stdin can hang finalization.
-            self.process.closeWriteChannel()
+        # Keep stdin open until a matching successful quit ACK. An uncertain
+        # resource owner must remain reachable for explicit cleanup retry.
 
     def _read(self):
         self._buffer.extend(bytes(self.process.readAllStandardOutput()))
@@ -101,8 +99,19 @@ class ResearchBridge(QObject):
                 self.last_response=time.monotonic()
                 if packet.get("type")=="snapshot":self._apply(packet["snapshot"])
                 elif packet.get("type")=="result":
+                    matched = packet.get('id') in self._pending
                     op=self._pending.pop(packet.get("id"),packet.get("op",""))
-                    if op=="stop":self._stop_deadline=None
+                    if op in ('stop', 'quit') and matched:self._stop_deadline=None
+                    if op == 'quit' and matched:
+                        result = packet.get('result')
+                        if (not packet.get('error') and type(result) is dict and
+                                result.get('cleanup_required') is False):
+                            # Confirmed owner release; EOF also lets the reader
+                            # thread finish before interpreter finalization.
+                            self.process.closeWriteChannel()
+                        else:
+                            self.closing = False
+                            self.last_error = 'RESEARCH_RESOURCE_CLEANUP_UNCONFIRMED'
                     if op in ("attach","start") and not packet.get("error"):
                         self.last_error=None
                     else:self.last_error=packet.get("error") or self.last_error
@@ -151,7 +160,9 @@ class ResearchBridge(QObject):
     def _check_deadline(self):
         if self._stop_deadline is not None and time.monotonic()>self._stop_deadline:
             self.last_error="HELPER_STOP_TIMEOUT_PARTIAL_SESSION_RETAINED"
-            self.process.kill()
+            self._stop_deadline = None
+            self.closing = False
+            self.updated.emit()
         elif self.active and time.monotonic()-self.last_response>15 and not self.pending:
             self.last_error="HELPER_NOT_RESPONDING_RECORDING_STATE_UNKNOWN"
             self.updated.emit()

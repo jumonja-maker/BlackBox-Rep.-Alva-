@@ -61,6 +61,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--deep-smoke",action="store_true",help="Run real Qt action/thread/incident/export QA")
     parser.add_argument("--r10-e2e", type=Path, help=argparse.SUPPRESS)
     parser.add_argument("--r10-probe", type=Path, help=argparse.SUPPRESS)
+    parser.add_argument("--wave02-e2e", type=Path, help=argparse.SUPPRESS)
+    parser.add_argument("--wave02-evidence", type=Path, help=argparse.SUPPRESS)
+    parser.add_argument("--wave02-container", choices=("r20", "r30", "r40", "full"), help=argparse.SUPPRESS)
     parser.add_argument("--qa-output",type=Path,help="Explicit QA artifact directory")
     parser.add_argument("--qa-fixture",choices=("cpu","ui","waitchain"),help=argparse.SUPPRESS)
     parser.add_argument("--qa-commit-sha",default="UNKNOWN",help=argparse.SUPPRESS)
@@ -74,7 +77,9 @@ def main(argv: list[str] | None = None) -> int:
         return run_fixture(options.qa_fixture,options.qa_output)
     if options.r10_e2e and options.r10_probe is None:
         parser.error("--r10-e2e requires --r10-probe")
-    if options.smoke or options.deep_smoke or options.r10_e2e:
+    if options.wave02_e2e and (options.wave02_evidence is None or options.wave02_container is None):
+        parser.error("--wave02-e2e requires --wave02-evidence and --wave02-container")
+    if options.smoke or options.deep_smoke or options.r10_e2e or options.wave02_e2e:
         os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
         _qa_checkpoint("QT_START")
     app = QApplication.instance() or QApplication(sys.argv[:1])
@@ -82,11 +87,15 @@ def main(argv: list[str] | None = None) -> int:
     app.setOrganizationName("BlackBox")
     set_retro_theme(app)
     window = UniversalWindow(isolated=True,
-        output_root=(options.research_e2e or options.r10_e2e or options.qa_output) / "sessions" if (options.research_e2e or options.deep_smoke or options.r10_e2e) else None,
-        allow_update_check=not (options.smoke or options.research_e2e or options.deep_smoke or options.r10_e2e))
+        output_root=(options.research_e2e or options.r10_e2e or options.wave02_e2e or options.qa_output) / "sessions" if (options.research_e2e or options.deep_smoke or options.r10_e2e or options.wave02_e2e) else None,
+        allow_update_check=not (options.smoke or options.research_e2e or options.deep_smoke or options.r10_e2e or options.wave02_e2e))
     # Native Windows starts maximized, while retaining the normal window frame,
     # minimize/restore and user resizing (not exclusive fullscreen mode).
     window.showMaximized()
+    if options.wave02_e2e:
+        from blackbox_universal.wave02_qa import run_wave02_e2e
+        return run_wave02_e2e(app, window, options.wave02_e2e, options.wave02_evidence,
+                            options.wave02_container, options.qa_commit_sha)
     if options.r10_e2e:
         from blackbox_universal.r10_qa import run_r10_e2e
         return run_r10_e2e(app, window, options.r10_e2e, options.r10_probe, options.qa_commit_sha)

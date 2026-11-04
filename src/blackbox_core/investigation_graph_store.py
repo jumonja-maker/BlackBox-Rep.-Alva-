@@ -99,13 +99,21 @@ def save_investigation(case, path, *, budget=None, before_publish=None):
     value = _validated(case, budget)
     destination = safe_path(Path(path))
     if destination.exists():
+        initial_stamp, initial_digest = _stamp(destination), _hash(destination, budget)
         existing = load_investigation(destination, budget=budget)
+        if _stamp(destination) != initial_stamp or _hash(destination, budget) != initial_digest:
+            raise InvestigationError("INVESTIGATION_INDEX_CHANGED_BEFORE_PUBLICATION")
         if canonical_json(existing) != canonical_json(value):
             raise FileExistsError("INVESTIGATION_INDEX_DESTINATION_EXISTS")
         if before_publish is not None:
             before_publish()
+        if _stamp(destination) != initial_stamp or _hash(destination, budget) != initial_digest:
+            raise InvestigationError("INVESTIGATION_INDEX_CHANGED_DURING_PUBLICATION")
+        verified = load_investigation(destination, budget=budget)
+        if canonical_json(verified) != canonical_json(value) or _stamp(destination) != initial_stamp:
+            raise InvestigationError("INVESTIGATION_INDEX_READBACK_MISMATCH")
         return {"status": "COMPLETED", "path": str(destination), "case_id": value["case_id"],
-                "sha256": _hash(destination, budget), "publication": "IDENTICAL_EXISTING_INDEX"}
+                "sha256": initial_digest, "publication": "IDENTICAL_EXISTING_INDEX", "readback_verified": True}
     descriptor, temporary = tempfile.mkstemp(prefix=".blackbox-investigation-", suffix=".sqlite3", dir=destination.parent)
     os.close(descriptor)
     temporary = Path(temporary)
@@ -150,14 +158,29 @@ def save_investigation(case, path, *, budget=None, before_publish=None):
             before_publish()
         budget.check()
         # Atomic create-new publication; an existing source or index is never overwritten.
+        expected_identity = _stamp(temporary)[:2]
         os.link(temporary, destination)
     except sqlite3.Error:
         budget.check()  # SQLite translates progress-handler cancellation into OperationalError.
         raise
     finally:
-        temporary.unlink(missing_ok=True)
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError as error:
+            error.cleanup_unconfirmed = True
+            raise
+    try:
+        if (_stamp(destination)[:2] != expected_identity or _hash(destination, budget) != digest or
+                canonical_json(load_investigation(destination, budget=budget)) != canonical_json(value) or
+                _stamp(destination)[:2] != expected_identity):
+            raise InvestigationError("INVESTIGATION_INDEX_PUBLICATION_READBACK_UNCONFIRMED")
+    except Exception as error:
+        # The published name may now belong to another writer. Never remove it
+        # in an attempt to roll back an unconfirmed result.
+        error.publication_unconfirmed = True
+        raise
     return {"status": "COMPLETED", "path": str(destination), "case_id": value["case_id"],
-            "sha256": digest, "publication": "ATOMIC_CREATE_NEW"}
+            "sha256": digest, "publication": "ATOMIC_CREATE_NEW", "readback_verified": True}
 
 
 def _open_index(path, budget):
@@ -272,11 +295,25 @@ def export_investigation(case, destination, *, format="json", budget=None, cance
             stream.flush()
             os.fsync(stream.fileno())
         budget.check()
+        expected_identity = _stamp(Path(temporary))[:2]
         os.link(temporary, target)
     finally:
-        Path(temporary).unlink(missing_ok=True)
+        try:
+            Path(temporary).unlink(missing_ok=True)
+        except OSError as error:
+            error.cleanup_unconfirmed = True
+            raise
+    try:
+        stamp = _stamp(target)
+        if (stamp[:2] != expected_identity or stamp[2] != len(payload) or
+                _hash(target, budget) != hashlib.sha256(payload).hexdigest() or _stamp(target) != stamp):
+            raise InvestigationError("INVESTIGATION_EXPORT_PUBLICATION_READBACK_UNCONFIRMED")
+    except Exception as error:
+        error.publication_unconfirmed = True
+        raise
     return {"status": "COMPLETED", "path": str(target), "case_id": value["case_id"],
             "format": format, "bytes": len(payload), "sha256": hashlib.sha256(payload).hexdigest(),
+            "readback_verified": True,
             "privacy": "METADATA_ONLY_DEFINED_SENSITIVE_KEYS_AND_RECOGNIZABLE_PATHS_URLS_REDACTED",
             "universal_secret_detection": False, "source_files_modified": False}
 
