@@ -15,6 +15,7 @@ import json
 import os
 from pathlib import Path, PurePosixPath
 import random
+import re
 import shutil
 import sqlite3
 import stat
@@ -55,6 +56,42 @@ def require(value, message):
 def write_json(path, value):
     Path(path).write_text(json.dumps(value, ensure_ascii=False, indent=2,
                                     allow_nan=False), encoding="utf-8")
+
+
+def print_failure_diagnostics(report):
+    """Print only controlled result metadata, never workload/source contents."""
+    if report.get('status') == 'PASS':
+        return
+    keys = {
+        '7-Zip': ('compression_extraction_hash_roundtrip','owned_native_image_identity',
+            'cpu_counters','etw_cpu_samples','etw_cpu_stacks','etw_file_operations',
+            'etw_threads','pid_lifetime_attribution'),
+        'PowerShell 7': ('real_workload_phase_events','gc_pairs','managed_cpu_samples_with_stacks',
+            'known_workload_managed_frames','allocation_events','allocation_and_gc_oracle'),
+        'Notepad++': ('open_edit_save_exact_bytes','win32_window_responsiveness',
+            'etw_file_operations','etw_scheduler_events','observed_off_cpu_intervals',
+            'pid_lifetime_attribution')}
+    result = {}
+    for name, capabilities in keys.items():
+        item = report.get('applications', {}).get(name, {})
+        reason = item.get('reason')
+        code = reason.split(':',1)[0] if type(reason) is str else None
+        if code is not None and (not re.fullmatch(r'[A-Z][A-Z0-9_]{0,127}',code) or
+                not code.startswith(('APP_','APPLICATION_','NOTEPAD_','PINNED_NOTEPAD_','NATIVE_',
+                    'ACTUAL_','POWERSHELL_','DECODER_','INVALID_','WAIT_','TYPED_',
+                    'IMPORT_','DECODE_','OPTIONAL_','OWNED_','SOURCE_','INDEX_','TRACE_'))):
+            code = 'NON_CODE_REASON_WITHHELD'
+        error = item.get('error')
+        result[name] = {'status':item.get('status') if item.get('status') in
+            ('PASS','FAIL','NOT_EXECUTED') else 'NOT_RECORDED',
+            'error_type':error if type(error) is str and re.fullmatch(r'[A-Za-z][A-Za-z0-9_]{0,79}',error) else None,
+            'reason_code':code,
+            'capabilities':{key:value for key in capabilities
+                for value in [(item.get('capabilities') or {}).get(key)]
+                if value in ('PASS','FAIL_NOT_OBSERVED')}}
+    print('THIRD_PARTY_DECODER_FAILURE_DIAGNOSTICS '+json.dumps({
+        'scope':'FIXED_APPLICATION_STATUS_CODES_ONLY_NO_PAYLOAD_PATH_ADDRESS_ENVIRONMENT_OR_URL',
+        'applications':result},sort_keys=True),flush=True)
 
 
 def safe_extract(archive, destination):
@@ -604,6 +641,7 @@ def main():
     report["status"] = "FAIL" if "FAIL" in states else "NOT_EXECUTED" if "NOT_EXECUTED" in states else "PASS"
     report["duration_seconds"] = time.monotonic() - started
     write_json(output / "apps-qa.json", report)
+    print_failure_diagnostics(report)
     print("THIRD_PARTY_DECODER_QA_" + report["status"])
     return 0 if report["status"] == "PASS" else 2 if report["status"] == "NOT_EXECUTED" else 1
 
