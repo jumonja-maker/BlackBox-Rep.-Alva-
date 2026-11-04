@@ -21,6 +21,23 @@ class _IMAGEHLP_CBA_READ_MEMORY(C.Structure):
                 ("bytesread", C.POINTER(W.U32))]
 
 
+def _saved_base_context(raw):
+    """Use only the real captured AMD64 base; never advertise absent XSTATE.
+
+    Windows SDK winnt.h: CONTEXT_XSTATE = CONTEXT_AMD64 | 0x40. That bit
+    describes extension storage which this bounded reader does not consume.
+    """
+    if C.sizeof(W.CONTEXT64) != 1232:
+        raise ValueError("UNSUPPORTED_AMD64_BASE_CONTEXT_ABI")
+    if len(raw) < 1232:
+        raise ValueError("FULL_AMD64_CONTEXT_NOT_CAPTURED")
+    storage, context = W.aligned_context()
+    C.memmove(C.byref(context), raw, 1232)
+    recorded_flags = int(context.flags)
+    context.flags &= ~0x40
+    return storage, context, recorded_flags
+
+
 class _SavedMemoryAdapter:
     """One bounded captured-memory reader shared by DbgHelp's two callbacks."""
     def __init__(self, owner, read_memory, check):
@@ -515,6 +532,8 @@ def unwind_saved_contexts(contexts, read_memory, modules, image_path, *, pdb_pat
     from .deep_native import _DBGHELP_LOCK, _check, _os_error
     global _SAVED_UNWIND_OWNER
     _require_saved_unwind_owner_clear()
+    if C.sizeof(W.CONTEXT64) != 1232:
+        raise ValueError("UNSUPPORTED_AMD64_BASE_CONTEXT_ABI")
     from .decoder_pdb import _local_file, _stable_file
     from .decoder_native_symbols import _pe_layout, load_native_symbols
     path, initial = _local_file(image_path)
@@ -613,14 +632,21 @@ def unwind_saved_contexts(contexts, read_memory, modules, image_path, *, pdb_pat
                 row = {"tid": saved_context["tid"], "frames": [], "status": "INCOMPLETE_EVIDENCE",
                        "unwind_completeness": "NOT_PROVEN", "method": "SAVED_AMD64_DBGHELP_STACKWALK64",
                        "context_source": saved_context.get("context_source", "SAVED_THREAD_CONTEXT"),
+                       "context_bytes_recorded": saved_context.get("context_bytes_recorded", len(saved_context["context"])),
+                       "base_context_bytes_copied": min(len(saved_context["context"]), 1232),
+                       "context_trailing_bytes_recorded": saved_context.get("context_trailing_bytes_recorded", max(0, len(saved_context["context"]) - 1232)),
+                       "context_extension_status": "EXTENSIONS_NOT_ANALYZED",
+                       "recorded_context_flags": saved_context.get("recorded_context_flags"),
                        "memory_contents_included": False}
                 raw = saved_context["context"]
                 if len(raw) < C.sizeof(W.CONTEXT64):
                     row["reason"] = "FULL_AMD64_CONTEXT_NOT_CAPTURED"
                     rows.append(row)
                     continue
-                storage, context = W.aligned_context()
-                C.memmove(C.byref(context), raw, C.sizeof(context))
+                storage, context, recorded_flags = _saved_base_context(raw)
+                row["recorded_context_flags"] = recorded_flags
+                row["native_context_flags"] = int(context.flags)
+                row["xstate_advertisement_cleared"] = bool(recorded_flags & 0x40)
                 if context.flags & 0x100001 != 0x100001:
                     row["reason"] = "AMD64_CONTROL_CONTEXT_NOT_CAPTURED"
                     rows.append(row)

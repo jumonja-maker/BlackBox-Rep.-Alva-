@@ -19,6 +19,7 @@ MAX_DUMP_BYTES = 2 * 1024**3
 MAX_METADATA_BYTES = 8 * 1024**2
 MAX_ENTRIES = 65_536
 MAX_READ_BYTES = 4096
+AMD64_BASE_CONTEXT_BYTES = 1232
 
 
 def _int(value, low=0, high=2**64 - 1):
@@ -245,6 +246,25 @@ def _exception(reader, entry, architecture=None):
             "classification": "RECORDED_EXCEPTION_NOT_INTERNAL_ROOT_CAUSE"}
 
 
+def _saved_context_prefix(reader, offset, size, *, index, stack_size=0, stack_overflow=False):
+    diagnostics = {"record_index": index, "recorded_context_bytes": size,
+                   "recorded_stack_bytes": stack_size, "stack_address_overflow": stack_overflow}
+    try:
+        # Extended/XSTATE storage may be much larger. Validate its complete
+        # recorded descriptor, but allocate/read only the base ABI we consume.
+        reader.range(offset, size)
+        _require(not stack_overflow, "INVALID_DUMP_UNWIND_STACK_ADDRESS_OVERFLOW")
+    except ValueError as error:
+        error.dump_context_diagnostics = diagnostics
+        raise
+    raw = reader.read(offset, min(size, AMD64_BASE_CONTEXT_BYTES))
+    return {"context": raw, "context_bytes_recorded": size,
+            "base_context_bytes_copied": len(raw),
+            "context_trailing_bytes_recorded": max(0, size - AMD64_BASE_CONTEXT_BYTES),
+            "context_extension_status": "EXTENSIONS_NOT_ANALYZED",
+            "recorded_context_flags": struct.unpack_from("<I", raw, 48)[0] if len(raw) >= 52 else None}
+
+
 def _saved_unwind_inputs(reader, entries):
     """Private captured contexts/ranges; none of these raw bytes are exported."""
     _require(3 in entries, "DUMP_THREAD_CONTEXT_REQUIRED")
@@ -255,25 +275,23 @@ def _saved_unwind_inputs(reader, entries):
         tid, suspend, priority_class, priority, teb, stack, stack_size, stack_rva, context_size, context_rva = struct.unpack(
             "<IIIIQQIIII", reader.read(start + i * 48, 48))
         reader.range(stack_rva, stack_size)
-        reader.range(context_rva, context_size)
-        _require(stack + stack_size <= 2**64 and context_size <= 4096, "INVALID_DUMP_UNWIND_CONTEXT")
+        context = _saved_context_prefix(reader, context_rva, context_size, index=i,
+            stack_size=stack_size, stack_overflow=stack + stack_size > 2**64)
         if stack_size:
             ranges.append((stack, stack_size, stack_rva))
-        contexts.append({"tid": tid, "context": reader.read(context_rva, context_size)})
+        contexts.append({"tid": tid, **context})
     if 6 in entries:
         raw = reader.read(entries[6][0], min(entries[6][1], 168))
         _require(len(raw) == 168, "TRUNCATED_EXCEPTION_STREAM")
         tid, = struct.unpack_from("<I", raw)
         size, offset = struct.unpack_from("<II", raw, 160)
-        reader.range(offset, size)
-        _require(size <= 4096, "DUMP_EXCEPTION_CONTEXT_BUDGET")
+        replacement = _saved_context_prefix(reader, offset, size, index=count)
         # The exception CONTEXT is the fault point, unlike the handler's later
         # ThreadList context. Prefer it only for the recorded exception thread.
         if size >= 256:
-            replacement = reader.read(offset, size)
             for row in contexts:
                 if row["tid"] == tid:
-                    row["context"] = replacement
+                    row.update(replacement)
                     row["context_source"] = "SAVED_EXCEPTION_CONTEXT"
     return contexts, list(dict.fromkeys(ranges))
 
