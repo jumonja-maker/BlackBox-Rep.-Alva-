@@ -300,6 +300,25 @@ def check_r40(executable, output, args):
         roles={q['role']:q['sha256'] for q in compound['content_manifest']}
         require(roles=={'minidump':dump_hash,'local_image':file_hash(executable),'local_pdb':file_hash(pdb)},
                 'R40_EXPLICIT_LOCAL_IMAGE_OR_PDB_NOT_BOUND_IN_COMPOUND_SOURCE')
+        print('WAVE02_R40_GRAPH_DIAGNOSTICS '+json.dumps({
+            'scope':'FIXED_PROJECTION_COUNTS_AND_PRIVACY_BOOLEAN_ONLY_NO_PAYLOAD_ADDRESS_OR_PATH',
+            'summary':{key:bounded_uint(projected.get('summary',{}).get(key)) for key in
+                ('failure_events','saved_dumps','recorded_exceptions','modules','threads','frames',
+                 'unwound_callers','unattributed_wer_candidates')},
+            'root_cause':fixed_code(projected.get('root_cause')),
+            'privacy':{key:projected.get('privacy',{}).get(key)
+                if type(projected.get('privacy',{}).get(key)) is bool else None
+                for key in ('memory_contents_included','dump_bytes_included')},
+            'row_counts':{key:len(projected.get(key,[])) for key in
+                ('events','dumps','modules','threads','frames')},
+            'frame_origin_counts':{key:sum(q.get('origin')==key for q in projected.get('frames',[]))
+                for key in ('CAPTURED_CONTEXT_PC','DBGHELP_UNWOUND_CALLER')},
+            'node_kind_counts':{key:sum(q['observation_type']==key for q in case['nodes'])
+                for key in ('ARTIFACT','PROCESS','THREAD','MODULE','STACK','ERROR','ANNOTATION')},
+            'metadata_byte_budget_omissions':sum(q.get('metadata',{}).get('omitted')=='METADATA_BYTE_BUDGET'
+                for q in case['nodes']),
+            'saved_dump_artifact_count':sum(q.get('metadata',{}).get('kind')=='SAVED_MINIDUMP'
+                for q in case['nodes'])},sort_keys=True),flush=True)
         require(projected['summary']['recorded_exceptions'] == 1 and
                 projected['summary']['unwound_callers'] >= 2 and projected['root_cause'] == 'UNKNOWN'
                 and not projected['privacy']['memory_contents_included']

@@ -190,6 +190,14 @@ def project_crash_evidence(case, *, budget=None, cancel_event=None):
     validate_case(case, budget=budget)
     nodes = case["nodes"]
     by_record = {(n["source_identity"], n["source_record_id"]): n for n in nodes}
+    typed_modules, typed_threads = {}, {}
+    for child in nodes:
+        budget.check()
+        record = child["source_record_id"]
+        if child["observation_type"] == "MODULE" and re.fullmatch(r"minidump:module:[0-9]+", record):
+            typed_modules.setdefault(child["source_identity"], []).append(child)
+        elif child["observation_type"] == "THREAD" and re.fullmatch(r"minidump:thread:[0-9]+", record):
+            typed_threads.setdefault(child["source_identity"], []).append(child)
     events, dumps, modules, threads, frames = [], [], [], [], []
     invalid = omitted = 0
 
@@ -256,6 +264,10 @@ def project_crash_evidence(case, *, budget=None, cancel_event=None):
             invalid += 1
             continue
         exception = _mapping(data.get("exception"))
+        exception_node = by_record.get((node["source_identity"], "minidump:exception"), {})
+        exception_metadata = _mapping(exception_node.get("metadata"))
+        if exception_node.get("observation_type") == "ERROR" and exception_metadata.get("kind") == "SAVED_MINIDUMP_EXCEPTION":
+            exception = _mapping(exception_metadata.get("exception")) or exception
         coverage = _mapping(data.get("coverage"))
         dumps.append({**reference(node), "file": _name(data.get("file")),
             "size_bytes": _integer(data.get("size_bytes")), "sha256": _digest(data.get("sha256")),
@@ -273,16 +285,22 @@ def project_crash_evidence(case, *, budget=None, cancel_event=None):
             "modules_omitted": _integer(coverage.get("modules_omitted")),
             "threads_omitted": _integer(coverage.get("threads_omitted")),
             "memory_ranges_omitted": _integer(coverage.get("memory_ranges_omitted"))})
-        module_rows = _rows(data.get("modules"))
+        module_nodes = sorted(typed_modules.get(node["source_identity"], []),
+                              key=lambda n: int(n["source_record_id"].rsplit(":", 1)[-1]))
+        module_rows = ([(child["source_record_id"], _mapping(child.get("metadata"))) for child in module_nodes]
+                       if module_nodes else [("minidump:module:" + str(i), value)
+                                             for i, value in enumerate(_rows(data.get("modules")))])
+        if metadata.get("details") == "EXISTING_TYPED_MODULE_THREAD_STACK_EXCEPTION_NODES":
+            omitted += max(0, min(_integer(coverage.get("module_count")) or 0, 200) - len(module_rows))
         omitted += max(0, len(module_rows) - 200)
-        for index, value in enumerate(module_rows[:200]):
+        for index, (record, value) in enumerate(module_rows[:200]):
             budget.check()
             if len(modules) >= 200:
                 omitted += min(len(module_rows), 200) - index
                 break
             value = _mapping(value)
             pdb = _mapping(value.get("pdb_identity"))
-            modules.append({**reference(node, "minidump:module:" + str(index)),
+            modules.append({**reference(node, record),
                 "name": _name(value.get("name")), "base_address": _integer(value.get("base_address")),
                 "image_size": _integer(value.get("image_size"), 0xFFFFFFFF),
                 "image_timestamp": _integer(value.get("image_timestamp"), 0xFFFFFFFF),
@@ -293,15 +311,24 @@ def project_crash_evidence(case, *, budget=None, cancel_event=None):
         unwind_rows = unwound.get("threads", [])
         unwind_rows = unwind_rows if isinstance(unwind_rows, list) else []
         by_tid = {r.get("tid"): r for r in unwind_rows if isinstance(r, dict)}
-        thread_rows = _rows(data.get("threads"))
+        thread_nodes = sorted(typed_threads.get(node["source_identity"], []),
+                              key=lambda n: int(n["source_record_id"].rsplit(":", 1)[-1]))
+        thread_rows = ([(child["source_record_id"], _mapping(child.get("metadata"))) for child in thread_nodes]
+                       if thread_nodes else [("minidump:thread:" + str(_mapping(value).get("tid")), value)
+                                             for value in _rows(data.get("threads"))])
+        if metadata.get("details") == "EXISTING_TYPED_MODULE_THREAD_STACK_EXCEPTION_NODES":
+            omitted += max(0, min(_integer(coverage.get("thread_count")) or 0, 200) - len(thread_rows))
         omitted += max(0, len(thread_rows) - 200)
-        for thread_index, value in enumerate(thread_rows[:200]):
+        for thread_index, (record, value) in enumerate(thread_rows[:200]):
             budget.check()
             if len(threads) >= 200:
                 omitted += min(len(thread_rows), 200) - thread_index
                 break
             value = _mapping(value)
             tid = _integer(value.get("tid"), 0xFFFFFFFF)
+            if record != "minidump:thread:" + str(tid):
+                invalid += 1
+                continue
             context = _mapping(value.get("context"))
             unwind = _mapping(by_tid.get(tid))
             stack_node = by_record.get((node["source_identity"], "minidump:stack:" + str(tid)), {})
@@ -309,7 +336,7 @@ def project_crash_evidence(case, *, budget=None, cancel_event=None):
             rows = stack_metadata.get("frames", unwind.get("frames", value.get("frames", [])))
             rows = rows if isinstance(rows, list) else []
             omitted += max(0, len(rows) - 128)
-            threads.append({**reference(node, "minidump:thread:" + str(tid)), "tid": tid,
+            threads.append({**reference(node, record), "tid": tid,
                 "recorded_creation_100ns": _integer(value.get("recorded_creation_100ns")),
                 "context_status": _text(stack_metadata.get("context_status")) or _text(context.get("status")),
                 "context_source": _text(stack_metadata.get("context_source")) or _text(value.get("context_source")),
