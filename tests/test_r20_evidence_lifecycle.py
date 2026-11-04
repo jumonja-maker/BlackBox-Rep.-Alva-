@@ -19,7 +19,7 @@ from blackbox_core.decoder_service import decode_file, _private_decode_stage
 from blackbox_core.decoder_index import read_index
 from blackbox_core.evidence_graph import validate_case
 from blackbox_core.evidence_normalization import source_coverage
-from blackbox_core.investigation_graph_contracts import InvestigationError
+from blackbox_core.investigation_graph_contracts import InvestigationBudget, InvestigationError
 from blackbox_core.investigation_v3 import create_investigation, export_investigation, load_investigation
 from blackbox_core import investigation_graph_store as store
 from blackbox_core.optional_jobs import OwnedProcessCleanupUnconfirmed
@@ -189,6 +189,73 @@ class EvidenceLifecycleContracts(unittest.TestCase):
         self.assertEqual(caught.exception.run_receipt["status"], "RECOVERY_UNCONFIRMED")
         self.assertFalse(caught.exception.run_receipt["cleanup"]["confirmed"])
         self.assertEqual(target.read_bytes(), b"FOREIGN_PUBLICATION")
+
+    def test_successful_index_publication_retains_readback_after_late_cancellation(self):
+        case = self.build()
+        cancelled = threading.Event()
+        budget = InvestigationBudget(cancel_event=cancelled)
+        deadline = budget.deadline
+        target = self.root / "committed.sqlite3"
+        original_link, original_load = os.link, store.load_investigation
+        readback_budgets = []
+        def publish_then_cancel(source, destination):
+            original_link(source, destination)
+            cancelled.set()
+        def observe_readback(path, *, budget=None):
+            readback_budgets.append(budget)
+            return original_load(path, budget=budget)
+        with patch.object(store.os, "link", side_effect=publish_then_cancel), \
+                patch.object(store, "load_investigation", side_effect=observe_readback):
+            receipt = store.save_investigation(case, target, budget=budget)
+        self.assertEqual(receipt["status"], "COMPLETED")
+        self.assertTrue(receipt["readback_verified"])
+        self.assertEqual(receipt["sha256"], digest(target))
+        self.assertTrue(cancelled.is_set())
+        self.assertIs(budget.cancel_event, cancelled)
+        self.assertTrue(readback_budgets)
+        self.assertTrue(all(item.cancel_event is None and item.deadline == deadline and
+                            item.max_source_bytes == budget.max_source_bytes and
+                            item.max_result_bytes == budget.max_result_bytes
+                            for item in readback_budgets))
+
+    def test_late_cancel_cannot_certify_or_remove_a_replaced_publication(self):
+        case = self.build()
+        original_link = os.link
+        for suffix, publish in (("sqlite3", store.save_investigation),
+                                ("json", store.export_investigation)):
+            with self.subTest(format=suffix):
+                cancelled = threading.Event()
+                target = self.root / ("replaced-after-commit." + suffix)
+                foreign = self.root / ("foreign." + suffix)
+                foreign.write_bytes(b"FOREIGN_RESULT_AFTER_COMMIT")
+                def replace_then_cancel(source, destination):
+                    original_link(source, destination)
+                    os.replace(foreign, destination)
+                    cancelled.set()
+                with patch.object(store.os, "link", side_effect=replace_then_cancel):
+                    with self.assertRaises(InvestigationError) as caught:
+                        publish(case, target, budget=InvestigationBudget(cancel_event=cancelled))
+                self.assertTrue(caught.exception.publication_unconfirmed)
+                self.assertEqual(target.read_bytes(), b"FOREIGN_RESULT_AFTER_COMMIT")
+
+    def test_late_cancellation_does_not_reset_the_publication_readback_deadline(self):
+        case = self.build()
+        cancelled = threading.Event()
+        budget = InvestigationBudget(cancel_event=cancelled)
+        target = self.root / "expired-after-commit.json"
+        original_link = os.link
+        def publish_then_expire(source, destination):
+            original_link(source, destination)
+            cancelled.set()
+            # Simulate the original monotonic deadline expiring at commit;
+            # postcommit verification must retain it rather than start afresh.
+            budget.deadline = 1
+        with patch.object(store.os, "link", side_effect=publish_then_expire):
+            with self.assertRaises(TimeoutError) as caught:
+                store.export_investigation(case, target, budget=budget)
+        self.assertTrue(caught.exception.publication_unconfirmed)
+        self.assertTrue(target.exists())
+        self.assertFalse(list(self.root.glob(".blackbox-investigation-export-*")))
 
     def test_existing_source_cannot_be_selected_as_export_destination(self):
         case = self.build(); before = digest(self.source)
