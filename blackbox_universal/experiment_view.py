@@ -20,6 +20,22 @@ def comparison_text(result,language):
         ('Условия совпадают.' if ru else 'Recorded conditions match.') if result.get('comparable_context') else
         ('Условия различаются или заполнены не полностью: ' if ru else 'Conditions differ or are incomplete: ')+', '.join(result.get('context_mismatches',[])),
         '']
+    status=result.get('comparison_status')
+    if status:
+        labels={'COMPARABLE':('Comparable recorded conditions','Записанные условия сопоставимы'),
+            'NOT_COMPARABLE':('Not comparable','Несопоставимые исследования'),
+            'INCONCLUSIVE':('Insufficient evidence for comparison','Недостаточно данных для сравнения')}
+        lines.insert(1,labels.get(status,(str(status),str(status)))[int(ru)])
+    comparability=result.get('comparability',{})
+    if comparability.get('unknowns'):
+        lines.append(('Не подтверждено: ' if ru else 'Not established: ')+', '.join(comparability['unknowns']))
+    relation=comparability.get('process_relation')
+    if relation=='DISTINCT_EXACT_INSTANCES':
+        lines.append('Разные экземпляры процесса; их события и идентичности не объединялись.' if ru else
+            'Distinct process instances; their events and identities were not merged.')
+    if result.get('source_trust')=='UNVERIFIED_IMPORT' or comparability.get('file_trust')=='UNVERIFIED_IMPORT':
+        lines.append('Импортированные записи не удостоверяют производителя данных.' if ru else
+            'Imported records do not authenticate their producer.')
     if result.get('context_warnings'):
         lines.append(('Не все метаданные условий записаны: ' if ru else 'Some context metadata was not recorded: ')+', '.join(result['context_warnings']))
     def value(v,unit):

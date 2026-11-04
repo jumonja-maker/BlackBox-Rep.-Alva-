@@ -224,6 +224,34 @@ def episode(folder, start_ms, end_ms):
 
 
 def compare_cases(first, second):
+    from .deep_tool_contracts import begin_evidence_run,attach_evidence_run_receipt,record_evidence_failure
+    sources=({'source_type':'RESEARCH_SESSION','role':'before','producer_authentication':'NOT_ESTABLISHED'},
+             {'source_type':'RESEARCH_SESSION','role':'after','producer_authentication':'NOT_ESTABLISHED'})
+    run=begin_evidence_run('research.compare',sources=sources,timeout_seconds=30)
+    try:
+        from .session_v2 import safe_path
+        first,second=safe_path(Path(first)),safe_path(Path(second))
+        answer=_compare_cases(first,second)
+        if time.monotonic_ns()>=run.deadline_monotonic_ns:raise TimeoutError('COMPARISON_DEADLINE')
+        from .investigation_graph_contracts import stable_id
+        sources=tuple({'source_type':'RESEARCH_INDEX','role':role,'filename':'research.sqlite3',
+            'recording_run_id':answer['comparability']['run_contexts'][role].get('run_id'),
+            'source_id':(stable_id('recording-run',answer['comparability']['run_contexts'][role]['run_id'])
+                if type(answer['comparability']['run_contexts'][role].get('run_id')) is str else None),
+            'source_sha256':None,'source_size_bytes':(folder/'research.sqlite3').stat().st_size,
+            'producer_authentication':'NOT_ESTABLISHED'} for role,folder in (('before',first),('after',second)))
+        result=attach_evidence_run_receipt(run,{**answer,'status':'COMPLETED'},sources=sources,
+            coverage={'completeness':'UNKNOWN','scope':'RECORDED_COMPARISON','comparison_status':answer['comparison_status']},
+            cleanup={'status':'COMPLETED','confirmed':True,'scope':'READ_ONLY_COMPARISON_HANDLES_CLOSED_NO_NATIVE_OWNER'},
+            source_revalidated=False,execution_started=True)
+        result.pop('status',None)
+        return result
+    except BaseException as exc:
+        record_evidence_failure(run,exc,sources=sources)
+        raise
+
+
+def _compare_cases(first, second):
     from .report import summarize
     a,b=context(first),context(second)
     required=("scenario","workload","profile","interval_ms")
@@ -248,9 +276,14 @@ def compare_cases(first, second):
     delta=bm-am if am is not None and bm is not None else None
     partial=any(r.get('resource_unobserved_runs') or any(v.get('missing_repeats') or
         v.get('minimum_observed_fraction') is not None and v['minimum_observed_fraction']<.8 for v in r.get('metrics',{}).values()) for r in (ra,rb))
+    from .experiments import assess_comparability
+    comparability=assess_comparability(a,b,before_resources=ra,after_resources=rb,
+        before_repeats=ta['repeats'],after_repeats=tb['repeats'],context_mismatches=reasons)
+    reasons=comparability['context_mismatches']
     keys=("peak_rss_bytes","peak_cpu_percent","elapsed_ms")
-    return {"schema_version":2,"comparison":"OBSERVATION_ONLY",
-        "comparable_context":not reasons,"context_mismatches":reasons,
+    return {"schema_version":2,"comparison":"OBSERVATION_ONLY","source_trust":"UNVERIFIED_IMPORT",
+        "comparison_status":comparability['status'],"comparability":comparability,
+        "comparable_context":comparability['status']=='COMPARABLE',"context_mismatches":reasons,
         "context_warnings":([] if ca.get("scenario_version") and cb.get("scenario_version") else ["scenario_version_not_recorded"])+([] if ca.get("capture_policy") and cb.get("capture_policy") else ["capture_policy_not_recorded"]),
         "target_versions":{"before":ca.get("target_version"),"after":cb.get("target_version")},
         "resource_experiments":{"before":ra,"after":rb},
@@ -263,6 +296,158 @@ def compare_cases(first, second):
                      "delta":sb[k]-sa[k] if sa[k] is not None and sb[k] is not None else None} for k in keys},
         "experiments":{"before":ta,"after":tb},
         "speedup_proven":False,"causal_link_proven":False}
+
+
+def _comparison_sources(folder, *, cancel=None):
+    """Reuse the existing hash and path contracts for a stopped source set."""
+    from .session_v2 import safe_path
+    result={}
+    folder=safe_path(Path(folder))
+    filenames=('session.sqlite3','session-v2.sqlite3','research.sqlite3','detail-v2.sqlite3')
+    for name in (*filenames,*(name+'-wal' for name in filenames)):
+        path=folder/name
+        if not path.exists():continue
+        path=safe_path(path);before=path.stat()
+        if not path.is_file() or before.st_size>2*1024**3:raise ValueError('COMPARISON_SOURCE_SIZE_LIMIT')
+        if name.endswith('-wal') and before.st_size==0:continue
+        value=_hash(path,cancel)
+        after=path.stat()
+        key=lambda info:(info.st_dev,info.st_ino,info.st_size,info.st_mtime_ns)
+        if key(before)!=key(after):raise ValueError('COMPARISON_SOURCE_CHANGED')
+        result[name]={'sha256':value,'size_bytes':after.st_size,'identity':key(after)}
+    if 'research.sqlite3' not in result:raise ValueError('RESEARCH_SOURCE_REQUIRED')
+    return result
+
+
+def export_comparison(before, after, destination, *, format='json', cancel=None):
+    from .deep_tool_contracts import begin_evidence_run,attach_evidence_run_receipt,record_evidence_failure
+    run=begin_evidence_run('research.export_comparison',parameters={'format':format},timeout_seconds=30)
+    try:
+        answer=_export_comparison(before,after,destination,format=format,cancel=cancel)
+        return attach_evidence_run_receipt(run,answer,sources=answer['source_identities'],
+            coverage={'completeness':'UNKNOWN','scope':'COMPARISON_METADATA','comparison_status':answer['comparison_status']},
+            cleanup={'status':'COMPLETED','confirmed':True,'scope':'OWNED_EXPORT_STAGE_PUBLISHED_AND_REMOVED'},
+            source_revalidated=answer['source_revalidated'],execution_started=True)
+    except BaseException as exc:
+        record_evidence_failure(run,exc)
+        raise
+
+
+def _export_comparison(before, after, destination, *, format='json', cancel=None):
+    """Export the existing comparison through the common no-clobber journal."""
+    if format not in ('json','html'):raise ValueError('INVALID_COMPARISON_FORMAT')
+    from .session_v2 import safe_path
+    from .package_privacy import redact
+    from .export_recovery import export_stage,same
+    from .owned_unlink import file_identity
+    destination=safe_path(Path(destination))
+    if destination.exists() or destination.is_symlink():raise FileExistsError('EXPORT_DESTINATION_EXISTS')
+    deadline=time.monotonic()+30
+    def interrupted():
+        if time.monotonic()>=deadline:raise TimeoutError('COMPARISON_EXPORT_DEADLINE')
+        return bool(cancel and cancel())
+    for folder in (before,after):
+        if context(folder).get('state')=='RECORDING':raise ValueError('STOP_RECORDING_BEFORE_EXPORT')
+    originals=(_comparison_sources(before,cancel=interrupted),_comparison_sources(after,cancel=interrupted))
+    comparison=compare_cases(before,after)
+    from .investigation_graph_contracts import stable_id
+    public_sources=[]
+    for entries in originals:
+        public_sources.append({name:{'source_id':stable_id('recording-file',name,row['sha256'],row['size_bytes']),
+            'source_sha256':row['sha256'],'source_size_bytes':row['size_bytes'],
+            'producer_authentication':'NOT_ESTABLISHED'} for name,row in entries.items()})
+    payload=redact({'schema':'blackbox.experiment-comparison.v1','comparison':comparison,
+        'sources':{'before':public_sources[0],'after':public_sources[1]},
+        'source_trust':'UNVERIFIED_IMPORT','privacy':'METADATA_ONLY_NO_MEMORY_OR_DUMP_BYTES',
+        'causal_link_proven':False})
+    raw=compact(payload)
+    if len(raw.encode('utf-8'))>4*1024**2:raise ValueError('COMPARISON_EXPORT_SIZE_LIMIT')
+    with export_stage(destination.parent,kind='EXPERIMENT_COMPARISON') as tx:
+        staged=tx.reserve('comparison.'+format)
+        if format=='json':content=raw
+        else:
+            from blackbox_universal.experiment_view import comparison_text
+            content=('<!doctype html><html lang="en"><meta charset="utf-8"><title>BLACK.BOX experiment comparison</title>'
+                '<h1>BLACK.BOX experiment comparison</h1><pre>'+escape(comparison_text(payload['comparison'],'EN'))+
+                '</pre><h2>Recorded metadata</h2><pre id="blackbox-comparison-data">'+escape(raw)+'</pre></html>')
+        staged.write_text(content,encoding='utf-8')
+        readback=load_comparison(staged)
+        if {k:v for k,v in readback.items() if k!='import_source'}!=payload:raise ValueError('COMPARISON_READBACK_MISMATCH')
+        if originals!=(_comparison_sources(before,cancel=interrupted),_comparison_sources(after,cancel=interrupted)):
+            raise ValueError('COMPARISON_SOURCE_CHANGED')
+        tx.prepare({destination.name:staged});digest=_hash(staged,interrupted);size=staged.stat().st_size
+        expected_identity=tx.data['files'][0]['identity'];expected_parent=tx.data['output_identity']
+        tx.publish()
+    # Publication has committed and common staging cleanup is complete. A
+    # foreign replacement is retained: never enter automatic rollback/deletion
+    # merely because final public read-back cannot confirm our own bytes.
+    try:
+        if (not same(file_identity(destination.parent),expected_parent) or
+            not same(file_identity(destination),expected_identity) or
+            destination.stat().st_size!=size or _hash(destination,interrupted)!=digest):
+            raise ValueError('COMPARISON_PUBLICATION_UNCONFIRMED')
+        public_readback=load_comparison(destination)
+        if ({k:v for k,v in public_readback.items() if k!='import_source'}!=payload or
+            public_readback['import_source']['source_sha256']!=digest or
+            public_readback['import_source']['source_size_bytes']!=size or
+            not same(file_identity(destination),expected_identity) or
+            not same(file_identity(destination.parent),expected_parent)):
+            raise ValueError('COMPARISON_PUBLICATION_UNCONFIRMED')
+    except BaseException as exc:
+        exc.publication_unconfirmed=True
+        raise
+    return {'status':'COMPLETED','schema':'blackbox.experiment-comparison.v1',
+        'format':format,'path':str(destination),'sha256':digest,'size_bytes':size,
+        'readback_verified':True,'source_revalidated':True,'source_modified':False,
+        'publication_identity_verified':True,
+        'source_trust':'UNVERIFIED_IMPORT','comparison_status':comparison['comparison_status'],
+        'source_identities':[{'source_type':'RESEARCH_FILES','role':role,'files':entries,
+            'source_id':stable_id('recording-files',entries),
+            'producer_authentication':'NOT_ESTABLISHED'} for role,entries in zip(('before','after'),public_sources)]}
+
+
+def load_comparison(path):
+    """Read bounded metadata only; a saved report never authenticates itself."""
+    from .session_v2 import safe_path
+    path=safe_path(Path(path))
+    if not path.is_file() or path.stat().st_size>8*1024**2:raise ValueError('COMPARISON_IMPORT_SIZE_LIMIT')
+    with path.open('rb') as stream:
+        before=os.fstat(stream.fileno());data=stream.read(8*1024**2+1);after=os.fstat(stream.fileno())
+    key=lambda item:(item.st_dev,item.st_ino,item.st_size,item.st_mtime_ns)
+    if len(data)>8*1024**2:raise ValueError('COMPARISON_IMPORT_SIZE_LIMIT')
+    if key(before)!=key(after) or key(after)!=key(safe_path(path).stat()) or len(data)!=before.st_size:
+        raise ValueError('COMPARISON_IMPORT_CHANGED')
+    raw=data.decode('utf-8')
+    if raw.lstrip().lower().startswith(('<!doctype html','<html')):
+        from html.parser import HTMLParser
+        class Metadata(HTMLParser):
+            def __init__(self):super().__init__(convert_charrefs=True);self.parts=[];self.inside=False;self.seen=0
+            def handle_starttag(self,tag,attrs):
+                if tag=='pre' and dict(attrs).get('id')=='blackbox-comparison-data':self.inside=True;self.seen+=1
+            def handle_endtag(self,tag):
+                if tag=='pre':self.inside=False
+            def handle_data(self,data):
+                if self.inside:self.parts.append(data)
+        parser=Metadata();parser.feed(raw);parser.close()
+        if parser.seen!=1 or parser.inside:raise ValueError('INVALID_COMPARISON_HTML')
+        raw=''.join(parser.parts)
+    def invalid_constant(_):raise ValueError('INVALID_COMPARISON_REPORT')
+    value=json.loads(raw,parse_constant=invalid_constant)
+    if (type(value) is not dict or value.get('schema')!='blackbox.experiment-comparison.v1' or
+        type(value.get('comparison')) is not dict or
+        value['comparison'].get('comparison_status') not in ('COMPARABLE','NOT_COMPARABLE','INCONCLUSIVE')):
+        raise ValueError('INVALID_COMPARISON_REPORT')
+    value['source_trust']='UNVERIFIED_IMPORT'
+    from .experiments import validate_comparison_presentation
+    validate_comparison_presentation(value['comparison'])
+    value['comparison']['source_trust']='UNVERIFIED_IMPORT'
+    value['comparison']['speedup_proven']=False;value['comparison']['causal_link_proven']=False
+    if type(value['comparison'].get('comparability')) is dict:
+        value['comparison']['comparability'].update(file_trust='UNVERIFIED_IMPORT',speedup_proven=False,causal_link_proven=False)
+    value['causal_link_proven']=False
+    value['import_source']={'source_sha256':hashlib.sha256(data).hexdigest(),'source_size_bytes':len(data),
+        'content_integrity':'HASHED_STABLE_FILE','producer_authentication':'NOT_ESTABLISHED'}
+    return value
 
 
 def action_statistics(folder, *, warmup_count=None):

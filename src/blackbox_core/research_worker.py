@@ -95,6 +95,7 @@ class ResearchSession:
             command_latency_ms=self.command_latency_ms,
             optional_jobs=self.jobs.health(), sensor_health=self.sensors.health() if self.sensors else {},
             capture_policy=self.capture_policy,profile_description=self.profile_info,active_stages=self.markers.snapshot(),
+            incident_coverage=p.incident_capture.coverage() if p.incident_capture else None,
             library_health={"status":"INDEX_ERROR" if self.library_error else "AVAILABLE", "error":self.library_error})
         data['observer_budget']=self.observer_budget.latest
         return data
@@ -131,6 +132,16 @@ class ResearchSession:
         p.detailed_capture.interval_s=c['burst_interval_ms']/1000
         self._burst_until=time.monotonic()+c['burst_seconds']
         self.book.put('observer.burst_started',{'duration_seconds':c['burst_seconds'],'etw_started':False,'dump_started':False})
+
+    def _incident_trigger(self,code,*,evidence_ref,verification):
+        p=self.probe;capture=p.incident_capture
+        if not p.active or capture is None or p._store is None:return
+        if p.total_samples<1:
+            capture.dropped_triggers+=1;return
+        elapsed=max(p.last_elapsed_ms or 0,(time.monotonic_ns()-p._recording_origin_ns)//1000000)
+        for boundary in capture.trigger(code,elapsed_ms=elapsed,sample_seq=p.total_samples or 1,
+                evidence_ref=evidence_ref,verification=verification):
+            p._store.write_event(boundary);p.incident_events.append(boundary)
 
     def _changed_configuration(self):
         self._configuration_changed=True
@@ -284,9 +295,12 @@ class ResearchSession:
         for index,r in enumerate(rows):
             # Source clocks are retained, not silently equated to ours.
             try:
-                self.book.put(r["kind"],r,source="APPLICATION_EVENT",
+                evidence_id=self.book.put(r["kind"],r,source="APPLICATION_EVENT",
                     quality="APP_SUPPLIED_UNAUTHENTICATED",tid=r["tid"] if r.get("tid_kind","OS_NATIVE")=="OS_NATIVE" else None,
                     operation_id=r.get("operation_id"))
+                if r['kind']=='process.crash_marker':
+                    self._incident_trigger('APP_CRASH_MARKER',evidence_ref='research.sqlite3:evidence:'+str(evidence_id),
+                        verification='APP_SUPPLIED_UNAUTHENTICATED')
             except Exception as exc:
                 # EventTail has consumed this batch, but CaseBook.put can fail
                 # before commit, or after its commit while mirroring a v2
@@ -397,9 +411,12 @@ class ResearchSession:
         packet={"op":op,"args":a,"pid":self.probe.pid,
             "created":self.probe._core.created if self.probe._core else None,
             "folder":str(self.probe.session_folder) if self.probe.session_folder else None,
-            "end_ms":self.probe.last_elapsed_ms or 1,"library_root":str(self.probe.output_root)}
+            "end_ms":self.probe.last_elapsed_ms or 1,"library_root":str(self.probe.output_root),
+            "target_image_name":self.probe.name,
+            "exact_process_identity":(self.context.get('run_identity',{}).get('process_identity')
+                if self.context.get('run_identity',{}).get('identity_status')=='OS_OBSERVED_EXACT_FILETIME' else None)}
         if op=="prepare_client":packet.update(event_path=str(self.tail.path),event_token=self.tail.token)
-        self.jobs.submit(command, packet, seconds=300 if op in ("export","export_recover","library_export") else 120 if op in ("library_plan_trash","library_apply_trash","library_plan_purge","library_apply_purge","library_trace_recover") else 75 if op in ("inspect_dump","verify","recover","library_scan","library_compare","investigation","incident_card","events_query","decode_trace") else 15)
+        self.jobs.submit(command, packet, seconds=300 if op in ("export","export_recover","library_export") else 120 if op in ("library_plan_trash","library_apply_trash","library_plan_purge","library_apply_purge","library_trace_recover") else 75 if op in ("inspect_dump","verify","recover","library_scan","library_compare","investigation","incident_card","events_query","decode_trace","compare_export","load_comparison") else 15)
         if self.book:
             self.book.put("observer.operation_queued", {"op":op,"command_id":command.get("id"),
                 "issued_ns":command.get("issued_ns")}, source="BLACKBOX_COMMAND_OWNER")
@@ -435,6 +452,12 @@ class ResearchSession:
                     'timeline_timestamp_semantics':'OBSERVER_RECEIPT_NOT_SOURCE_EVENT_CLOCK'}
                 self.book.put('crash.system_events' if op=='crash_events' else 'trace.decoded',summary,
                     source='WIN32_APPLICATION_EVENTLOG' if op=='crash_events' else 'ETW_TRACERPT',quality=value.get('status','NOT_CONFIRMED'))
+                if op=='crash_events' and value.get('status')=='MATCHING_OS_EVENTS':
+                    for row in rows:
+                        if row.get('process_instance_binding')=='MATCHED_RECORDED_CREATION_FILETIME':
+                            self._incident_trigger('CRASH_OBSERVED',evidence_ref='WIN32_APPLICATION_EVENTLOG:record:'+str(row.get('record_id')),
+                                verification='OS_OBSERVED_MATCHED_CRASH')
+                            break
         return results
 
     def capture_native(self):
@@ -492,7 +515,9 @@ class ResearchSession:
                     "application_event_ready":bool(self.tail and self.tail.ready),
                     "app_invalid_lines":self.tail.invalid if self.tail else None,
                     "app_client_dropped":self.tail.client_dropped if self.tail else None,
-                    "app_file_discontinuities":self.tail.discontinuities if self.tail else None})
+                    "app_file_discontinuities":self.tail.discontinuities if self.tail else None,
+                    "incident_coverage":p.incident_capture.coverage() if p.incident_capture else None,
+                    "recording_resources_closed":self._recording_resources_closed() and not self.jobs.health().get('cleanup_required',False)})
                 book.close("INCOMPLETE" if errors or p.last_error else p.session_state)
                 self.research_state="INCOMPLETE" if errors or p.last_error else p.session_state
                 self.research_error="; ".join(errors) if errors else p.last_error
@@ -523,7 +548,11 @@ class ResearchSession:
                 self.capture_policy=validate_policy(a['policy']);self.profile_info=profile_description(self.capture_policy);self.budget_bytes=self.capture_policy['max_session_mb']*1024**2
                 self.context.update(profile=self.capture_policy['profile'],capture_policy=self.capture_policy)
             return {'policy':self.capture_policy,'description':profile_description(self.capture_policy)}
-        if op=='user_marker':return self.markers.write(self.book,self.probe,a,issued_ns=issued)
+        if op=='user_marker':
+            result=self.markers.write(self.book,self.probe,a,issued_ns=issued)
+            if a.get('kind')=='PROBLEM':self._incident_trigger('MANUAL_PROBLEM',
+                evidence_ref='research.sqlite3:evidence:'+str(result['evidence_id']),verification='USER_DECLARED')
+            return result
         if op=="attach":
             if self.book:self.stop()
             return self.probe.attach(int(a["pid"]))
@@ -555,8 +584,12 @@ class ResearchSession:
             self._capabilities=capabilities();self._capability_inventory=inventory(self._capabilities);self._optional_source_results={}
             self.observer_budget=ObserverBudget();self._cpu_health_primed=False;self._overhead_notified=False
             self.markers=UserMarkers();self._ui_seen=set();self._burst_until=None;self._library_budget=None
+            from .experiments import capture_run_identity
+            self.context['run_identity']=(capture_run_identity(self.probe.pid,
+                expected_created=self.probe._core.created if self.probe._core else None) if self.probe.pid is not None else {})
             self.context.update(profile=self.capture_policy["profile"],capture_policy=self.capture_policy)
             self.probe.start()
+            self.context['origin_monotonic_ns']=self.probe._recording_origin_ns
             self.probe._store.v2.max_bytes=self.budget_bytes
             self.native_enabled=False;self.runtime_trace=None;self.wpr=None;self._last_detail_capture=None
             self.app_source_error=None
@@ -602,8 +635,13 @@ class ResearchSession:
                         "end":self.probe.finish_action}[op](**({"baseline_ms":a["baseline_ms"]} if op=="prepare" and "baseline_ms" in a else {}))
             finally:self.probe.actions.clock=previous
             return result
-        if op=="mark":return self.probe.mark_problem(a.get("note",""),
-            issued_ns=issued if type(issued) is int and self.command_latency_ms is not None else None)
+        if op=="mark":
+            result=self.probe.mark_problem(a.get("note",""),
+                issued_ns=issued if type(issued) is int and self.command_latency_ms is not None else None)
+            if self.book and self.probe.incident_capture:
+                ref=self.book.put('user.problem_incident_request',{'command_elapsed_ms':result},source='USER_MARKER',quality='USER_DECLARED')
+                self._incident_trigger('MANUAL_PROBLEM',evidence_ref='research.sqlite3:evidence:'+str(ref),verification='USER_DECLARED')
+            return result
         if op=="detailed":
             if self.probe.detailed_capture is not None:self._last_detail_capture=self.probe.detailed_capture
             result=self.probe.set_detailed_capture(bool(a["enabled"]))
