@@ -37,6 +37,36 @@ def save(path, value):
     Path(path).write_text(json.dumps(value, indent=2, allow_nan=False), encoding="utf-8")
 
 
+def exception_diagnostics(error):
+    """Exception-owned native fields only; GetLastError after cleanup is stale."""
+    return {"type": type(error).__name__, "reason": str(error)[:1000],
+            "winerror": getattr(error, "winerror", None)
+            if type(getattr(error, "winerror", None)) is int else None,
+            "errno": getattr(error, "errno", None)
+            if type(getattr(error, "errno", None)) is int else None,
+            "notes": [str(note)[:256] for note in getattr(error, "__notes__", [])[:2]]}
+
+
+def emit_failure_diagnostics(report, output):
+    if report.get("status") == "PASS":
+        return
+    child = report.get("child") if type(report.get("child")) is dict else {}
+    worker = report.get("worker") if type(report.get("worker")) is dict else {}
+    attempts = worker.get("helper_attempts") if type(worker.get("helper_attempts")) is list else []
+    proof_path = Path(output) / "standard-token-worker.json"
+    evidence = {"scope": "BOUNDED_FAILURE_METADATA_NO_TRACE_TOKEN_ACL_OR_ENVIRONMENT_DUMP",
+        "status": report.get("status"), "parent_phase": report.get("phase"),
+        "parent_error": report.get("error"), "parent_reason": str(report.get("reason") or "")[:1000],
+        "parent_exception": report.get("exception_diagnostics"),
+        "worker_proof_exists": proof_path.is_file(),
+        "worker": {key: worker.get(key) for key in ("status", "phase", "error", "reason", "exception_diagnostics")},
+        "child": {key: child.get(key) for key in ("pid", "exit_code", "creation_flags", "job_assigned_before_resume")},
+        "helper_attempts": [{key: attempt.get(key) for key in
+            ("format", "pid", "exit_code", "windows_creation_flags")} for attempt in attempts[:4]
+            if type(attempt) is dict]}
+    print("STANDARD_TOKEN_DECODER_DIAGNOSTICS " + json.dumps(evidence, sort_keys=True), flush=True)
+
+
 def restricted_interpreter(executable):
     """Use this installation's windowed interpreter, without console creation.
 
@@ -113,9 +143,12 @@ def worker(helper, trace_root, output):
              "python_version": sys.version}
     code = 1
     try:
+        proof["phase"] = "VERIFY_ACTUAL_STANDARD_TOKEN"
         require(os.name == "nt" and proof["privilege"] == {"mode": "STANDARD", "windows": True},
                 "ACTUAL_STANDARD_WINDOWS_TOKEN_NOT_CONFIRMED")
+        proof["phase"] = "READ_REAL_CAPTURE_PLAN"
         for item in trace_plan(trace_root):
+            proof["phase"] = "DECODE_REAL_" + item["format"]
             owners = []
             def start_owned(*args, **kwargs):
                 owner = OwnedProcess(*args, **kwargs)
@@ -135,6 +168,7 @@ def worker(helper, trace_root, output):
                     "STANDARD_NATIVE_HELPER_SUCCESS_NOT_CONFIRMED")
             require(owners[0].windows_creation_flags == 0xC,
                     "STANDARD_NATIVE_HELPER_DETACHED_BOUND_LAUNCH_NOT_CONFIRMED")
+            proof["phase"] = "VERIFY_STANDARD_" + item["format"] + "_INDEX_AND_ADMIN_BASELINE"
             page = read_index(index, limit=1)
             require(page["rows"] and page["summary"] == meta,
                     "STANDARD_INDEX_NOT_READABLE")
@@ -153,7 +187,8 @@ def worker(helper, trace_root, output):
         proof["status"] = "PASS"
         code = 0
     except BaseException as exc:
-        proof.update(status="FAIL", error=type(exc).__name__, reason=str(exc)[:1000])
+        proof.update(status="FAIL", error=type(exc).__name__, reason=str(exc)[:1000],
+                     exception_diagnostics=exception_diagnostics(exc))
     finally:
         save(output / "standard-token-worker.json", proof)
     return code
@@ -677,23 +712,29 @@ def main():
               "captures_started": False, "physical_uac_account_acl_matrix": False}
     code = 1
     try:
+        report["phase"] = "REQUIRE_DISPOSABLE_WINDOWS_CI"
         if os.name != "nt" or os.environ.get("GITHUB_ACTIONS") != "true":
             report.update(status="NOT_EXECUTED", reason="DISPOSABLE_WINDOWS_CI_REQUIRED")
             return 2
+        report["phase"] = "READ_ACTUAL_ADMIN_CAPTURE_PLAN"
         plan = trace_plan(args.trace_root)
         report["inputs"] = plan
         report["parent_privilege"] = privilege()
+        report["phase"] = "SELECT_SAME_INSTALLATION_RESTRICTED_INTERPRETER"
         interpreter = restricted_interpreter(sys.executable)
         report["launcher"] = {"path": str(interpreter), "sha256": file_hash(interpreter),
                               "subsystem": "WINDOWED_CPYTHON_SAME_INSTALLATION",
                               "creation_flags": 0x4}
         report["runtime_access_diagnostics"] = runtime_access_diagnostics(interpreter)
+        report["phase"] = "LAUNCH_ACTUAL_RESTRICTED_WORKER"
         child = restricted_child([interpreter, Path(__file__).resolve(),
                                   "--worker", "--helper", helper, "--trace-root", args.trace_root.resolve(),
                                   "--output", output], cwd=ROOT)
         report["child"] = child
+        report["phase"] = "READ_ACTUAL_RESTRICTED_WORKER_PROOF"
         proof = read_worker_proof(output, child)
         report["worker"] = proof
+        report["phase"] = "VERIFY_RESTRICTED_INTERPRETER_AND_NATIVE_RESULTS"
         require(os.path.normcase(proof.get("python_executable", "")) ==
                 os.path.normcase(str(interpreter)) and
                 proof.get("python_executable_sha256") == report["launcher"]["sha256"],
@@ -704,9 +745,11 @@ def main():
         report["status"] = "PASS"
         code = 0
     except Exception as exc:
-        report.update(status="FAIL", error=type(exc).__name__, reason=str(exc)[:1000])
+        report.update(status="FAIL", error=type(exc).__name__, reason=str(exc)[:1000],
+                      exception_diagnostics=exception_diagnostics(exc))
     finally:
         save(output / "standard-token-qa.json", report)
+    emit_failure_diagnostics(report, output)
     print("STANDARD_TOKEN_DECODER_QA_" + report["status"])
     return code
 
