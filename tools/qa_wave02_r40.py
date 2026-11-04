@@ -103,7 +103,16 @@ def check_r40(executable, output, args):
         preview=[]
         for frame in thread['frames'][:8]:
             symbol=frame.get('symbol') or {}
+            pc=frame.get('address')
+            recorded_module=type(pc) is int and any(
+                type(module.get('base_address')) is int and type(module.get('image_size')) is int and
+                0<=module['base_address']<2**64 and 0<module['image_size']<=2**64-module['base_address'] and
+                module['base_address']<=pc<module['base_address']+module['image_size']
+                for module in data['modules'])
+            role=('SELECTED_MATCHED_IMAGE' if frame.get('module_binding')=='SAVED_RSDS_AND_PINNED_LOCAL_PE_MATCH'
+                else 'OTHER_RECORDED_DUMP_MODULE' if recorded_module else 'OUTSIDE_RECORDED_MODULES')
             preview.append({'origin':fixed_code(frame.get('origin')),
+                'recorded_module_role':role,
                 'module_binding':fixed_code(frame.get('module_binding')),
                 'symbol_status':fixed_code(symbol.get('status')),
                 'source_status':fixed_code(symbol.get('source_status')),
@@ -126,6 +135,13 @@ def check_r40(executable, output, args):
                 thread['frames'][0].get('address')==exception['address'],
             'selected_thread':{key:fixed_code(thread.get(key)) for key in
                 ('status','method','context_source','reason','captured_memory_stop_reason')},
+            'native_unwind_facts':{key:thread.get(key) if type(thread.get(key)) is bool else None
+                for key in ('symbol_handler_callback_registered','function_table_for_context_available',
+                            'dbghelp_module_base_matches_selected_image')},
+            'memory_read_contract':fixed_code(thread.get('memory_read_contract')),
+            'unwind_read_counters':{key:value if type(value) is int and 0<=value<2**63 else None
+                for key in ('stackwalk_requests','symbol_handler_requests','successful_reads','failed_reads','copied_bytes')
+                for value in [(thread.get('unwind_read_counters') or {}).get(key)]},
             'unwind_winerror':thread.get('unwind_winerror') if type(thread.get('unwind_winerror')) is int else None,
             'recorded_frame_count':len(thread['frames']),'matched_own_frame_count':len(own),
             'matched_unwound_callers':sum(q['origin']=='DBGHELP_UNWOUND_CALLER' for q in own),
