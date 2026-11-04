@@ -96,7 +96,7 @@ def check_r30(case, index, ready, file_oracles, output):
     save(folder / 'file-operations.json', files)
     save(folder / 'disk-requests.json', disk)
     save(folder / 'wait-report.json', intervals)
-    return {'status': 'PASS', 'case_index': str(folder / 'case.sqlite3'),
+    result = {'status': 'PASS', 'case_index': str(folder / 'case.sqlite3'),
         'actual_file_pairs': len(paired), 'recorded_ntstatuses': sorted({q['ntstatus'] for q in paired if q['ntstatus'] is not None}),
         'disk_request_count': len(disk['requests']), 'disk_status': disk['status'],
         'disk_own_latency': 'OBSERVED_ONLY_FOR_MATCHED_REQUESTS' if disk['requests'] else 'NOT_OBSERVED_IN_THIS_CAPTURE',
@@ -106,3 +106,8 @@ def check_r30(case, index, ready, file_oracles, output):
         'negative_controls': {'wrong_lifetime': 'NO_OPERATIONS', 'loss': 'PARTIAL_WITHOUT_DURATIONS',
             'kind': 'EXPLICIT_INDEX_METADATA_FAULT_COPY_NOT_OS_EVENT_LOSS'},
         'root_cause': 'UNKNOWN'}
+    print('WAVE02_R30_NATIVE_FACTS '+json.dumps({key:result[key] for key in
+        ('status','actual_file_pairs','recorded_ntstatuses','disk_request_count','disk_status',
+         'disk_own_latency','actual_ui_wait_matches','wct_owner_snapshot_count','app_recorded_errors',
+         'source_hash_unchanged','exports','negative_controls','root_cause')},sort_keys=True),flush=True)
+    return result
