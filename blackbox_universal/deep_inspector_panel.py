@@ -307,6 +307,7 @@ class OverviewInspectorPanel(QWidget):
         layout.addWidget(self.privacy)
         from .investigation_graph_panel import InvestigationGraphPanel
         self.investigation_graph_panel = InvestigationGraphPanel(self.window, self)
+        self.investigation_graph_panel.bridge.busy_changed.connect(self._refresh_controls)
         self.investigation_graph_panel.hide()
         layout.addWidget(self.investigation_graph_panel)
 
@@ -778,11 +779,10 @@ class OverviewInspectorPanel(QWidget):
             })
 
     def _inspect_dump(self):
-        interaction = self._interaction_token()
-        path, _ = QFileDialog.getOpenFileName(self, self.tr2("Saved diagnostic dump", "Сохранённый диагностический дамп"), "", "Dump (*.dmp)")
-        if path and self._interaction_current(interaction):
-            self._dump_path = path
-            self._request("dump_inspect", {"path": path})
+        # Saved files remain inspectable after process exit or before selecting
+        # a live target. The read-only Graph worker owns the built-in route.
+        self.investigation_graph_panel.show()
+        return self.investigation_graph_panel.choose_saved_dump()
 
     def _read_dump_memory(self):
         interaction = self._interaction_token()
@@ -1203,6 +1203,8 @@ class OverviewInspectorPanel(QWidget):
             button.setEnabled(available)
         # Saved evidence does not require a live process or administrator helper.
         self._action_buttons["investigate_problem"].setEnabled(True)
+        graph = self.investigation_graph_panel
+        self._action_buttons['dump_inspect'].setEnabled(not graph.bridge.busy and not graph._closing and not self.bridge.busy)
         cleanup_required = bool(getattr(self.bridge, "cleanup_required", False))
         self.cancel_button.setEnabled(self.bridge.busy and not cleanup_required)
         self._action_buttons["retry_cleanup"].setEnabled(cleanup_required and getattr(self.bridge, "worker", None) is None)

@@ -63,6 +63,7 @@ def main():
         'r50_new_gui_capture': proof.get('r50_new_gui_capture'),
         'r50_coverage_languages': proof.get('r50_coverage_languages'),
         'exports': proof.get('exports'),
+        'r40_raw_dump_route': proof.get('r40_raw_dump_route'),
         'physical_windows_10_11': 'NOT_TESTED', 'physical_secure_desktop': 'NOT_TESTED'}
     if result_file.is_file():
         summary['receipt_sha256'] = hashlib.sha256(result_file.read_bytes()).hexdigest()

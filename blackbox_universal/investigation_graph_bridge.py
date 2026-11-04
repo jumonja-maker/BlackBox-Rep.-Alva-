@@ -1,7 +1,8 @@
 """Cancellable read-only investigation work outside the Qt event loop.
 
-This owner never starts a diagnostic helper. Native actions stay on the existing
-DeepInspectorBridge, with its original confirmation and cleanup lifecycle.
+This owner never starts a diagnostic helper. Live native actions stay on the
+existing DeepInspectorBridge. Saved-dump reads and explicit cleanup of this
+process's offline DbgHelp owner do not use a live target or that helper.
 """
 from __future__ import annotations
 
@@ -104,6 +105,14 @@ class InvestigationGraphWorker(QThread):
                 packet = {'owned_cleanup': {'status': 'RECOVERY_UNCONFIRMED' if remaining else 'COMPLETED',
                     'scope': 'CURRENT_PROCESS_OWNED_CHILDREN_ONLY',
                     'before': before, 'remaining': remaining, 'results': results}}
+            elif self.operation == 'cleanup_offline_dump':
+                from blackbox_core.deep_dump import inspect_dump
+                if set(args) != {'path'} or type(args['path']) is not str or not args['path']:
+                    raise ValueError('EXPLICIT_OFFLINE_DUMP_CLEANUP_PATH_REQUIRED')
+                # A finite local call, never an action replay, saved owner token,
+                # live ProcessIdentity or administrator-helper cleanup command.
+                packet = {'offline_cleanup': inspect_dump(args['path'], retry_cleanup=True,
+                                                          cancel_event=self.cancel_event)}
             elif self.operation == "actions":
                 recommended = api.suggest_diagnostic_actions(case, budget=budget, **args)
                 from blackbox_core.investigation_planner import describe_diagnostic_actions
@@ -143,8 +152,12 @@ class InvestigationGraphWorker(QThread):
             self.result_ready.emit(self.operation, packet, "", self.generation)
         except Exception as error:
             # Reader/native errors remain plain text, never HTML or executable input.
-            self.result_ready.emit(self.operation, None,
-                str(getattr(error, "code", str(error)))[:1500] or type(error).__name__, self.generation)
+            reason = str(getattr(error, 'code', str(error)))[:1400] or type(error).__name__
+            if getattr(error, 'status', None) == 'RECOVERY_UNCONFIRMED':
+                scope = ' [SAVED_DBGHELP_SESSION]' if (getattr(error, 'offline_owner_retained', False) is True and
+                    getattr(error, 'resource_owner', None) == 'SAVED_DBGHELP_SESSION') else ''
+                reason = 'RECOVERY_UNCONFIRMED' + scope + ': ' + reason
+            self.result_ready.emit(self.operation, None, reason[:1500], self.generation)
 
 
 class InvestigationGraphBridge(QObject):

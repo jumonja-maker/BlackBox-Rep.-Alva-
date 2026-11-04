@@ -61,10 +61,12 @@ def public_metadata(value, depth=0):
 
 def _validated(case, budget):
     from .evidence_graph import validate_case
+    from .crash_investigation import project_crash_evidence
     budget.check()
     validate_case(case, budget=budget)
     value = public_metadata(case)
     validate_case(value, budget=budget)
+    value["crash_investigation"] = project_crash_evidence(value, budget=budget)
     return budget.result(value)
 
 
@@ -259,7 +261,9 @@ def load_investigation(path, *, budget=None):
         raise InvestigationError("INVESTIGATION_INDEX_CHANGED_DURING_READ")
     value["analysis_provenance"] = "UNVERIFIED_DERIVATION_RECOMPUTE_SOURCES_FOR_CURRENT_LINK_VALIDATION"
     value["file_trust"] = "UNVERIFIED_IMPORT"
-    return value
+    from .crash_investigation import project_crash_evidence
+    value["crash_investigation"] = project_crash_evidence(value, budget=budget)
+    return budget.result(value)
 
 
 def query_graph(path, *, kind="nodes", after=0, limit=100, budget=None):
@@ -291,6 +295,8 @@ def export_investigation(case, destination, *, format="json", budget=None, cance
             content += "<li>" + html.escape(str(hypothesis.get("description", ""))) + " — " + html.escape(str(hypothesis.get("status", ""))) + "</li>"
         from .delay_investigation import render_delay_html
         content += "</ul>" + render_delay_html(value.get("delay_investigation"))
+        from .crash_investigation import crash_report_html
+        content += crash_report_html(value["crash_investigation"], nodes=value["nodes"], budget=budget)
         content += "<h2>Source-linked investigation</h2><pre>" + html.escape(json.dumps(value, ensure_ascii=False, indent=2, allow_nan=False)) + "</pre></body></html>"
         payload = content.encode("utf-8")
     else:

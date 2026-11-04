@@ -366,6 +366,9 @@ def validate_case(case, *, budget=None):
         from .delay_investigation import validate_delay_report
         validate_delay_report(case["delay_investigation"], nodes=indexed,
             critical_segments={row.get("segment_id") for row in (case.get("critical_path") or {}).get("segments", [])}, budget=budget)
+    if "crash_investigation" in case:
+        from .crash_investigation import validate_crash_report
+        validate_crash_report(case["crash_investigation"], nodes=indexed, budget=budget)
     if "_source_paths" in case:
         paths = case["_source_paths"]
         if (type(paths) is not dict or len(paths) > 64 or any(key not in sources or type(value) is not str or

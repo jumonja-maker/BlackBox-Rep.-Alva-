@@ -32,7 +32,7 @@ def build(output: Path, source_sha: str) -> Path:
     command = [compiler, "/nologo", "/W4", "/Od", "/Zi", "/MT", "/DUNICODE",
         "/D_UNICODE", "/Fe:" + str(executable), "/Fo:" + str(output / "probe.obj"),
         "/Fd:" + str(output / "compiler.pdb"), str(source), "/link", "/DEBUG:FULL",
-        "/PDB:" + str(pdb), "/INCREMENTAL:NO", "user32.lib", "advapi32.lib", "dbghelp.lib"]
+        "/PDB:" + str(pdb), "/INCREMENTAL:NO", "user32.lib", "advapi32.lib", "dbghelp.lib", "wer.lib"]
     completed = subprocess.run(command, env=environment, capture_output=True,
                                text=True, errors="replace", timeout=90)
     (output / "compiler.log").write_text(completed.stdout + completed.stderr, encoding="utf-8")
