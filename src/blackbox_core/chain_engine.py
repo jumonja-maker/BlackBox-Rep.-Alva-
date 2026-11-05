@@ -129,10 +129,10 @@ def _state(status):
         return "RECOVERY_UNCONFIRMED"
     if status in ("CANCELLED", "TIMED_OUT", "TIMEOUT"):
         return "CANCELLED" if status == "CANCELLED" else "FAILED"
-    if status in ("PARTIAL", "PARTIAL_EVIDENCE", "INCOMPLETE_EVIDENCE", "NOT_ESTABLISHED", "CONTRADICTED",
+    if status in ("PARTIAL", "PARTIAL_EVIDENCE", "INCOMPLETE_EVIDENCE", "TRUNCATED", "NOT_ESTABLISHED", "CONTRADICTED",
                   "NO_COMPLETE_INTERVALS", "NO_SCHEDULER_EVENTS", "REDECODE_REQUIRED"):
         return "PARTIAL"
-    if status in ("COMPLETED", "STOPPED", "CLOSED", "READY", "OBSERVED_INTERVALS", "OBSERVED_OPERATIONS",
+    if status in ("COMPLETED", "DECODED", "STOPPED", "CLOSED", "READY", "OBSERVED_INTERVALS", "OBSERVED_OPERATIONS",
                   "OBSERVED_REQUESTS", "NO_FILE_IO_EVENTS", "NO_DISK_REQUEST_EVENTS"):
         return "COMPLETED"
     return "FAILED"
@@ -383,7 +383,7 @@ class WorkflowEngine:
         for value in inputs.values():
             for artifact in value if isinstance(value, tuple) else (value,):
                 verify_source_scope(artifact, allowed_sources, known_artifacts=known,
-                                    cancel=ctx.cancel, deadline=ctx.deadline)
+                                    cancel=ctx.cancel, deadline=ctx.deadline, owner_run_id=self.store.run_id)
                 actual_inputs.append(artifact)
                 if artifact.kind == "PROCESS" and expected is not None:
                     require(artifact.value.get("identity") == expected, "WORKFLOW_PROFILE_TARGET_MISMATCH")
@@ -433,7 +433,8 @@ class WorkflowEngine:
                     if allowed or not (artifact.kind == "DEEP_RESULT" and not artifact.value.get("_path")):
                         verify_source_scope(artifact, allowed, known_artifacts=known,
                             inputs=getattr(ctx, "input_artifacts", ()), output_dir=ctx.output_dir,
-                            deadline=time.monotonic() + min(30, max(.1, ctx.remaining_seconds())))
+                            deadline=time.monotonic() + min(30, max(.1, ctx.remaining_seconds())),
+                            owner_run_id=self.store.run_id)
             except Exception as error:
                 errors.append(getattr(error, "code", "WORKFLOW_RESULT_REFERENCE_UNCONFIRMED"))
         receipt = result.receipt
@@ -452,6 +453,9 @@ class WorkflowEngine:
         if errors:
             status = "RECOVERY_UNCONFIRMED" if cleanup.get("owner_retained") else "FAILED"
         if partial and status == "COMPLETED":
+            status = "PARTIAL"
+        reported_coverage = (receipt or {}).get("coverage", {})
+        if status == "COMPLETED" and reported_coverage.get("completeness") in ("PARTIAL", "INCOMPLETE_EVIDENCE"):
             status = "PARTIAL"
         known = _known_owner(cleanup)
         unknown_cleanup = (cleanup.get("confirmed") is not True and not
@@ -541,7 +545,7 @@ class WorkflowEngine:
             sources = {canonical(s): s for artifact in artifacts for s in artifact.sources}
             clocks = tuple(sorted({clock for artifact in artifacts for clock in artifact.clock_domains}))
             for artifact in artifacts:
-                verify_artifact(artifact, cancel=ctx.cancel, deadline=ctx.deadline)
+                verify_artifact(artifact, cancel=ctx.cancel, deadline=ctx.deadline, owner_run_id=self.store.run_id)
             artifact = Artifact("EVIDENCE_SET", {"items": [a.to_dict() for a in artifacts],
                 "join_policy": node.parameters.get("mode", "ALL_REQUIRED"), "partial_branches": partial,
                 "missing_or_partial_branches": missing},
@@ -560,9 +564,13 @@ class WorkflowEngine:
                         artifact = Artifact.from_dict(value)
                         if artifact.kind == "DEEP_RESULT" and not artifact.value.get("_path"):
                             continue
-                        verify_artifact(artifact, cancel=self._cancel, deadline=deadline)
+                        verify_artifact(artifact, cancel=self._cancel, deadline=deadline, owner_run_id=self.store.run_id)
 
     def _finalize(self):
+        from .deep_native import cleanup_identity_queries
+        identity_cleanup = cleanup_identity_queries(self.store.run_id)
+        require(type(identity_cleanup) is dict and type(identity_cleanup.get("confirmed")) is bool,
+                "WORKFLOW_IDENTITY_CLEANUP_ACK_REQUIRED")
         callback = getattr(self.runtime, "finish_run", None)
         adapter = None
         if callback is None and getattr(self.runtime, "owned_session_run_id", None) == self.store.run_id:
@@ -570,6 +578,13 @@ class WorkflowEngine:
             if callback is None:
                 adapter = self.catalog.get("session_finalize")
         if callback is None and adapter is None:
+            self.store.append("run.cleanup", data={"cleanup": identity_cleanup,
+                "scope": "ACTUAL_IDENTITY_QUERY_OWNER_BOUNDARY"})
+            self._runtime_cleanup = {"confirmed": identity_cleanup["confirmed"],
+                "status": "CONFIRMED" if identity_cleanup["confirmed"] else "RECOVERY_UNCONFIRMED",
+                "scope": "IDENTITY_QUERY_HANDLES_ONLY_NO_R10_CONTEXT_CLAIM", "identity_queries": identity_cleanup}
+            if identity_cleanup["confirmed"] is not True:
+                self._errors.append({"code": "WORKFLOW_IDENTITY_CLEANUP_UNCONFIRMED"})
             return
         from .chain_contracts import NodeDefinition
         node = NodeDefinition("runtime-cleanup", budget_seconds=100)
@@ -609,7 +624,14 @@ class WorkflowEngine:
                         del _LEASES[key]
         else:
             self._errors.append({"code": "WORKFLOW_RUNTIME_CLEANUP_UNCONFIRMED"})
-        self._runtime_cleanup = cleanup
+        self._runtime_cleanup = {"confirmed": cleanup.get("confirmed") is True and identity_cleanup["confirmed"],
+            "status": "CONFIRMED" if cleanup.get("confirmed") is True and identity_cleanup["confirmed"]
+                else "RECOVERY_UNCONFIRMED", "scope": "SEPARATE_NATIVE_CONTEXT_AND_IDENTITY_QUERY_BOUNDARIES",
+            "native_context": cleanup, "identity_queries": identity_cleanup}
+        if not identity_cleanup["confirmed"]:
+            self._errors.append({"code": "WORKFLOW_IDENTITY_CLEANUP_UNCONFIRMED"})
+        self.store.append("run.cleanup", data={"cleanup": self._runtime_cleanup,
+            "scope": "SEPARATE_ACTUAL_OWNER_ACKNOWLEDGEMENTS"})
 
     def _drain_retained(self, pool, pending):
         """Preserve a late real outcome and eventually release the same owners.

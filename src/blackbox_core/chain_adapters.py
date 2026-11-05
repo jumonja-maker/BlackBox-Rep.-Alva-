@@ -115,7 +115,7 @@ def _path(artifact):
 
 def _verify(artifact, ctx):
     from .chain_io import verify_artifact
-    return verify_artifact(artifact, cancel=ctx.cancel, deadline=ctx.deadline)
+    return verify_artifact(artifact, cancel=ctx.cancel, deadline=ctx.deadline, owner_run_id=ctx.run_id)
 
 
 def _file(kind, path, *, metadata=None, sources=(), coverage=None, clocks=()):
@@ -322,11 +322,8 @@ def _select_process(runtime):
             identity = owner.process_select(pid, ctx)
         else:
             require(type(pid) is int and pid > 0, "WORKFLOW_PROCESS_SELECTION_REQUIRED")
-            if owner.inspector is not None:
-                identity = owner.inspector.identity(pid)
-            else:
-                from .deep_native import capture_identity
-                identity = capture_identity(pid)
+            from .deep_native import capture_identity_checked
+            identity = capture_identity_checked(pid, owner_run_id=ctx.run_id)
         identity = ProcessIdentity.from_dict(identity)
         artifact = make_process_artifact(identity)
         _verify(artifact, ctx)
@@ -337,8 +334,9 @@ def _select_process(runtime):
 
 def _direct_observe(owner, identity, policy, duration, ctx):
     from .research_worker import ResearchSession
-    from .deep_native import verify_identity
-    verify_identity(identity)
+    from .deep_native import capture_identity_checked
+    require(capture_identity_checked(identity.pid, owner_run_id=ctx.run_id) == identity,
+            "WORKFLOW_PROCESS_INSTANCE_CHANGED")
     session = owner.research
     if session is None:
         session = (owner.research_factory or ResearchSession)(output_root=owner.output_root or ctx.output_dir)
@@ -349,7 +347,8 @@ def _direct_observe(owner, identity, policy, duration, ctx):
         session.command({"op": "attach", "args": {"pid": identity.pid}})
         if policy:
             session.command({"op": "capture_policy", "args": {"policy": policy}})
-        verify_identity(identity)
+        require(capture_identity_checked(identity.pid, owner_run_id=ctx.run_id) == identity,
+                "WORKFLOW_PROCESS_INSTANCE_CHANGED")
         started = session.command({"op": "start", "args": {}})
         end = min(ctx.deadline, time.monotonic() + duration)
         while time.monotonic() < end and session.probe.active:

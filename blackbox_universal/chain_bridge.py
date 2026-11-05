@@ -284,18 +284,18 @@ class ChainBuilderBridge(QObject):
             "tag": "chain:" + ctx.run_id + ":finish:" + uuid4().hex}, context=ctx, cleanup=True)
 
     def process_select(self, pid, ctx):
-        from blackbox_core.deep_native import capture_identity
+        from blackbox_core.deep_native import capture_identity_checked
         pid = pid or self._seed.get("pid")
         if not pid:
             raise ValueError("CHOOSE_PROCESS_IN_OVERVIEW_FIRST")
-        identity = capture_identity(int(pid)).to_dict()
+        identity = capture_identity_checked(int(pid), owner_run_id=ctx.run_id).to_dict()
         ctx.waiting_for_human({"operation": "process_select", "target": identity})
         approved = self._exchange(self._human_request, {"operation": "process_select", "target": identity,
             "context": ctx}, context=ctx)
         if approved is not True:
             raise InterruptedError("PROCESS_SELECTION_DECLINED")
         # Revalidate the native instance after the modal choice.
-        if capture_identity(int(pid)).to_dict() != identity:
+        if capture_identity_checked(int(pid), owner_run_id=ctx.run_id).to_dict() != identity:
             raise ValueError("PROCESS_IDENTITY_CHANGED")
         ctx.running()
         return identity

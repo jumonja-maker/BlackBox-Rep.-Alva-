@@ -27,6 +27,10 @@ MAX_MAPPING_NAME_QUERIES = 256
 MAX_MAPPING_NAME_BYTES = 256 * 1024
 _DBGHELP_LOCK = threading.Lock()
 _QUERY_CLEANUP = threading.local()
+_IDENTITY_OWNERS_LOCK = threading.RLock()
+_IDENTITY_OWNERS = []
+_IDENTITY_OPENING = 0
+_MAX_IDENTITY_OWNERS = 1024
 QUERY_CLEANUP_OPERATIONS = frozenset({"processes", "modules", "threads", "handles", "memory_map",
     "memory_read", "wait_chains", "network", "disk", "snapshot", "capabilities"})
 
@@ -202,6 +206,112 @@ def capture_identity(pid):
         return _identity(kernel, handle, pid)
     finally:
         _checked_close(kernel, handle)
+
+
+class _IdentityQueryOwner:
+    """One checked identity capability; never a saved process authorization."""
+    def __init__(self, kernel, handle, pid, run_id):
+        self.run_id, self.pid = run_id, pid
+        self.identity = None
+        self._resource = {"kernel": kernel, "handle": handle, "kind": "IDENTITY_PROCESS_HANDLE", "closed": False}
+        self._lock = threading.RLock()
+
+    def close(self):
+        with self._lock:
+            if not self._resource["closed"]:
+                try:
+                    _close_native_resource(self._resource)
+                except BaseException as failure:
+                    self._resource.update(closed=False, reason=type(failure).__name__ + ": " + str(failure)[:160])
+            confirmed = self._resource["closed"] is True
+            self.cleanup_evidence = {"confirmed": confirmed,
+                "status": "CONFIRMED" if confirmed else "RECOVERY_UNCONFIRMED",
+                "scope": "NATIVE_IDENTITY_QUERY_HANDLES_CLOSED", "owner_retained": not confirmed,
+                "pid": self.pid, "identity": self.identity.to_dict() if self.identity else None,
+                "retained": 0 if confirmed else 1, "winerror": self._resource.get("winerror"),
+                "reason": None if confirmed else self._resource.get("reason", "IDENTITY_HANDLE_CLOSE_NOT_ACKNOWLEDGED")}
+            if confirmed:
+                with _IDENTITY_OWNERS_LOCK:
+                    if self in _IDENTITY_OWNERS:
+                        _IDENTITY_OWNERS.remove(self)
+            return dict(self.cleanup_evidence)
+
+
+def _identity_cleanup_failure(primary, owner):
+    primary.cleanup_unconfirmed = primary.owner_retained = True
+    primary.owner = owner
+    with _IDENTITY_OWNERS_LOCK:
+        if owner not in _IDENTITY_OWNERS:
+            _IDENTITY_OWNERS.append(owner)
+    return primary
+
+
+@contextmanager
+def _identity_query_slot(owner_run_id):
+    global _IDENTITY_OPENING
+    with _IDENTITY_OWNERS_LOCK:
+        previous = next((owner for owner in _IDENTITY_OWNERS if owner.run_id == owner_run_id), None)
+        if previous is not None:
+            raise _identity_cleanup_failure(NativeError("RECOVERY_UNCONFIRMED", "PREVIOUS_IDENTITY_QUERY_CLOSE_UNCONFIRMED"), previous)
+        if len(_IDENTITY_OWNERS) + _IDENTITY_OPENING >= _MAX_IDENTITY_OWNERS:
+            raise NativeError("LIMIT_REACHED", "IDENTITY_QUERY_OWNER_BUDGET_EXCEEDED")
+        _IDENTITY_OPENING += 1
+    try:
+        yield
+    finally:
+        with _IDENTITY_OWNERS_LOCK:
+            _IDENTITY_OPENING -= 1
+
+
+def capture_identity_checked(pid, *, owner_run_id=None):
+    """Return an exact identity only after the owned query handle really closes.
+
+    Legacy capture_identity keeps its existing API. New workflow identity reads
+    use this explicit boundary and retain a failed capability for scoped cleanup.
+    """
+    _windows()
+    _integer(pid, "pid", 1, 0xFFFFFFFF)
+    if owner_run_id is not None and (type(owner_run_id) is not str or not owner_run_id or len(owner_run_id) > 128):
+        raise ValueError("INVALID_IDENTITY_QUERY_OWNER")
+    with _identity_query_slot(owner_run_id):
+        kernel = W.Kernel()
+        handle = kernel.open_process(0x1000 | 0x100000, False, pid)
+        if not handle:
+            raise _os_error("OPEN_PROCESS_IDENTITY_FAILED")
+        owner = _IdentityQueryOwner(kernel, handle, pid, owner_run_id)
+        primary, observed = None, None
+        try:
+            if kernel.wait(handle, 0) != 258:
+                raise NativeError("PROCESS_CHANGED", "PROCESS_ALREADY_EXITED")
+            observed = owner.identity = _identity(kernel, handle, pid)
+        except BaseException as failure:
+            primary = failure
+        acknowledgement = owner.close()
+        if acknowledgement["confirmed"] is not True:
+            if primary is None:
+                primary = NativeError("RECOVERY_UNCONFIRMED", "IDENTITY_QUERY_HANDLE_CLOSE_UNCONFIRMED",
+                                      acknowledgement.get("winerror"))
+            else:
+                primary.add_note("IDENTITY_QUERY_HANDLE_CLOSE_UNCONFIRMED")
+            raise _identity_cleanup_failure(primary, owner)
+        if primary is not None:
+            raise primary
+        return observed
+
+
+def cleanup_identity_queries(owner_run_id):
+    """Retry only this live run's identity capabilities; never another owner."""
+    if type(owner_run_id) is not str or not owner_run_id or len(owner_run_id) > 128:
+        raise ValueError("INVALID_IDENTITY_QUERY_OWNER")
+    with _IDENTITY_OWNERS_LOCK:
+        owners = tuple(owner for owner in _IDENTITY_OWNERS if owner.run_id == owner_run_id)
+    evidence = [owner.close() for owner in owners]
+    confirmed = all(row["confirmed"] is True for row in evidence)
+    return {"confirmed": confirmed, "status": "CONFIRMED" if confirmed else "RECOVERY_UNCONFIRMED",
+            "scope": "RUN_OWNED_NATIVE_IDENTITY_QUERIES" if owners else "NO_OWNED_IDENTITY_HANDLES",
+            "owner_retained": not confirmed,
+            "attempted": len(evidence), "retained": sum(row["confirmed"] is not True for row in evidence),
+            "evidence": evidence}
 
 
 def verify_identity(identity):

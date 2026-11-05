@@ -8,7 +8,7 @@ import tempfile
 import unittest
 
 from blackbox_core.chain_adapters import build_catalog
-from blackbox_core.chain_contracts import WorkflowDefinition, WorkflowError
+from blackbox_core.chain_contracts import Artifact, WorkflowDefinition, WorkflowError
 from blackbox_core.chain_profiles import (builtin_profiles, effective_profile, load_profile,
                                           save_profile, validate_profile, verify_source_scope)
 
@@ -190,7 +190,7 @@ class SelectedByteRootTests(unittest.TestCase):
 
     def test_transitive_flat_lineage_is_resolved_against_actual_published_results(self):
         first = self.derived()
-        flattened = first.to_dict()
+        flattened = deepcopy(first.to_dict())
         flattened["value"].pop("upstream_artifacts")
         next_output = self.root / "second-owned-result"
         next_output.mkdir()
@@ -199,6 +199,12 @@ class SelectedByteRootTests(unittest.TestCase):
         result = verify_source_scope(second, self.allowed, known_artifacts=(self.source, first),
                                      inputs=(first,), output_dir=next_output)
         self.assertEqual(result["byte_roots"], self.allowed)
+        # A flat input reference must resolve through the full actual published
+        # artifact too. It must not admit roots from another independent branch.
+        result = verify_source_scope(second, self.allowed, known_artifacts=(self.source, first),
+                                     inputs=(Artifact.from_dict(flattened),), output_dir=next_output)
+        self.assertEqual(result["byte_roots"], self.allowed)
+        self.assertIn("upstream_artifacts", first.value)
 
     def test_real_decoder_investigation_and_export_keep_restrictive_source_profile(self):
         from blackbox_core.chain_engine import WorkflowEngine

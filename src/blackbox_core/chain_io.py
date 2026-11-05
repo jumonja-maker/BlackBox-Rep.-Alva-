@@ -90,7 +90,7 @@ def make_process_artifact(identity):
         coverage={"evidence_completeness": "IDENTITY_ONLY_NOT_DIAGNOSTIC_COVERAGE"})
 
 
-def verify_artifact(artifact, *, cancel=None, deadline=None, _seen=None, _depth=0):
+def verify_artifact(artifact, *, cancel=None, deadline=None, owner_run_id=None, _seen=None, _depth=0):
     """Revalidate every declared byte source; no origin/authentication promotion."""
     if not isinstance(artifact, Artifact):
         artifact = Artifact.from_dict(artifact)
@@ -108,8 +108,8 @@ def verify_artifact(artifact, *, cancel=None, deadline=None, _seen=None, _depth=
         expected = ProcessIdentity.from_dict(value.get("identity"))
         if os.name != "nt":
             raise WorkflowError("WORKFLOW_NATIVE_FILETIME_REQUIRES_WINDOWS")
-        from .deep_native import capture_identity
-        actual = ProcessIdentity.from_dict(capture_identity(expected.pid))
+        from .deep_native import capture_identity_checked
+        actual = ProcessIdentity.from_dict(capture_identity_checked(expected.pid, owner_run_id=owner_run_id))
         require(actual == expected, "WORKFLOW_PROCESS_INSTANCE_CHANGED")
     elif value.get("_path"):
         path = safe_path(Path(value["_path"]))
@@ -140,7 +140,8 @@ def verify_artifact(artifact, *, cancel=None, deadline=None, _seen=None, _depth=
         paths.add(str(safe_path(Path(value["_path"]))))
     for row in [*upstream, *members]:
         source = Artifact.from_dict(row)
-        verify_artifact(source, cancel=cancel, deadline=deadline, _seen=seen, _depth=_depth + 1)
+        verify_artifact(source, cancel=cancel, deadline=deadline, owner_run_id=owner_run_id,
+                        _seen=seen, _depth=_depth + 1)
         if source.value.get("_path"):
             paths.add(str(safe_path(Path(source.value["_path"]))))
     for key in ("_before_path", "_after_path", "_case_path", "_session_path"):

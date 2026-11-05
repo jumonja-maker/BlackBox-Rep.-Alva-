@@ -127,7 +127,7 @@ def load_profile(path):
 
 
 def verify_source_scope(artifact, source_ids, *, known_artifacts=(), inputs=None,
-                        output_dir=None, cancel=None, deadline=None):
+                        output_dir=None, cancel=None, deadline=None, owner_run_id=None):
     """Check selected byte roots without rewriting component source identities.
 
     A derived source ID may differ from a selected file's SHA. Its dependency
@@ -140,7 +140,7 @@ def verify_source_scope(artifact, source_ids, *, known_artifacts=(), inputs=None
     from .chain_io import verify_artifact
     if not isinstance(artifact, Artifact):
         artifact = Artifact.from_dict(artifact)
-    verify_artifact(artifact, cancel=cancel, deadline=deadline)
+    verify_artifact(artifact, cancel=cancel, deadline=deadline, owner_run_id=owner_run_id)
     if not source_ids or artifact.kind in ("RECEIPT", "BOOLEAN", "PROCESS"):
         return {"scope": "WORKFLOW_PLAN_ONLY_NOT_AUTHORIZATION", "byte_roots": []}
     require(type(source_ids) in (list, tuple) and len(source_ids) <= 256 and
@@ -200,7 +200,7 @@ def verify_source_scope(artifact, source_ids, *, known_artifacts=(), inputs=None
         try:
             raw = canonical(value.to_dict())
             if raw not in verified:
-                verify_artifact(value, cancel=cancel, deadline=deadline)
+                verify_artifact(value, cancel=cancel, deadline=deadline, owner_run_id=owner_run_id)
                 verified.add(raw)
             require(value.kind not in ("RECEIPT", "BOOLEAN", "PROCESS", "PROCESS_SET"),
                     "WORKFLOW_PROFILE_SOURCE_NOT_ALLOWED")
@@ -248,6 +248,14 @@ def verify_source_scope(artifact, source_ids, *, known_artifacts=(), inputs=None
         permitted, pending = set(), list(inputs)
         while pending:
             value = pending.pop()
+            # Adapters intentionally flatten dependency references. Expand only
+            # an exact matching published artifact, never every known artifact
+            # or an arbitrary caller-provided source label.
+            existing = registry.get(value.artifact_id)
+            if existing is not None:
+                require(normalized(existing) == normalized(value),
+                        "WORKFLOW_PROFILE_UNPUBLISHED_SOURCE_LINEAGE")
+                value = existing
             if value.artifact_id in permitted:
                 continue
             require(len(permitted) < 4096, "WORKFLOW_PROFILE_LINEAGE_BUDGET")

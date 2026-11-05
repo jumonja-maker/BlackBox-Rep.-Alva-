@@ -118,6 +118,90 @@ class TransportCapabilityCleanupTests(unittest.TestCase):
         kernel.WriteFile.assert_not_called()
 
 
+class CheckedIdentityBoundaryTests(unittest.TestCase):
+    """Actual collection code with explicit injected Win32 close boundaries."""
+    def setUp(self):
+        self.target = ProcessIdentity(123, 456, "identity-fixture.exe")
+        self.run_id = "identity-" + self._testMethodName
+        self.kernel = Mock()
+        self.kernel.open_process.return_value = 931
+        self.kernel.wait.return_value = 258
+        self.kernel.close.return_value = True
+        self.stack = ExitStack()
+        self.addCleanup(self.stack.close)
+        self.stack.enter_context(patch.object(native, "_windows"))
+        self.stack.enter_context(patch.object(native.W, "Kernel", return_value=self.kernel))
+        self.stack.enter_context(patch.object(native, "_identity", return_value=self.target))
+        self.stack.enter_context(patch.object(C, "get_last_error", return_value=5, create=True))
+        def discard_fixture_metadata():
+            # There is no real Windows capability in this injected boundary
+            # fixture. Do not leave its intentionally invalid fake owner in
+            # the registry used by unrelated tests in the same Python process.
+            with native._IDENTITY_OWNERS_LOCK:
+                native._IDENTITY_OWNERS[:] = [owner for owner in native._IDENTITY_OWNERS
+                                              if owner.run_id != self.run_id]
+        self.addCleanup(discard_fixture_metadata)
+
+    def test_checked_identity_returns_actual_instance_only_after_successful_native_close(self):
+        observed = native.capture_identity_checked(self.target.pid, owner_run_id=self.run_id)
+        self.assertIs(observed, self.target)
+        self.kernel.close.assert_called_once_with(931)
+        cleanup = native.cleanup_identity_queries(self.run_id)
+        self.assertTrue(cleanup["confirmed"])
+        self.assertEqual(cleanup["attempted"], 0)
+        self.assertEqual(cleanup["scope"], "NO_OWNED_IDENTITY_HANDLES")
+
+    def test_failed_checked_identity_close_retains_exact_capability_until_scoped_retry(self):
+        self.kernel.close.side_effect = [False, True]
+        with self.assertRaisesRegex(native.NativeError, "IDENTITY_QUERY_HANDLE_CLOSE_UNCONFIRMED") as caught:
+            native.capture_identity_checked(self.target.pid, owner_run_id=self.run_id)
+        self.assertTrue(caught.exception.cleanup_unconfirmed)
+        owner = caught.exception.owner
+        self.assertIs(owner._resource["kernel"], self.kernel)
+        self.assertEqual(owner._resource["handle"], 931)
+        self.assertIs(owner.identity, self.target)
+        foreign = native.cleanup_identity_queries(self.run_id + "-foreign")
+        self.assertEqual(foreign["attempted"], 0)
+        self.assertEqual(self.kernel.close.call_count, 1)
+        cleanup = native.cleanup_identity_queries(self.run_id)
+        self.assertTrue(cleanup["confirmed"])
+        self.assertEqual((cleanup["attempted"], cleanup["retained"]), (1, 0))
+        self.assertTrue(owner.close()["confirmed"])
+        self.assertEqual([call.args for call in self.kernel.close.call_args_list], [(931,), (931,)])
+
+    def test_checked_identity_preserves_primary_failure_when_finally_close_also_fails(self):
+        primary = native.NativeError("PROCESS_CHANGED", "PRIMARY_INSTANCE_QUERY_FAILURE", 87)
+        self.stack.enter_context(patch.object(native, "_identity", side_effect=primary))
+        self.kernel.close.return_value = False
+        with self.assertRaises(native.NativeError) as caught:
+            native.capture_identity_checked(self.target.pid, owner_run_id=self.run_id)
+        self.assertIs(caught.exception, primary)
+        self.assertEqual((primary.status, primary.winerror), ("PROCESS_CHANGED", 87))
+        self.assertTrue(primary.cleanup_unconfirmed)
+        self.assertIn("IDENTITY_QUERY_HANDLE_CLOSE_UNCONFIRMED", primary.__notes__)
+        self.kernel.close.return_value = True
+        self.assertTrue(native.cleanup_identity_queries(self.run_id)["confirmed"])
+
+    def test_invalid_identity_handle_never_retries_or_opens_another_capability_for_same_owner(self):
+        self.kernel.close.return_value = False
+        with patch.object(C, "get_last_error", return_value=6, create=True):
+            with self.assertRaises(native.NativeError):
+                native.capture_identity_checked(self.target.pid, owner_run_id=self.run_id)
+        cleanup = native.cleanup_identity_queries(self.run_id)
+        self.assertFalse(cleanup["confirmed"])
+        self.assertEqual(cleanup["retained"], 1)
+        with self.assertRaisesRegex(native.NativeError, "PREVIOUS_IDENTITY_QUERY_CLOSE_UNCONFIRMED"):
+            native.capture_identity_checked(self.target.pid, owner_run_id=self.run_id)
+        self.kernel.open_process.assert_called_once()
+        self.kernel.close.assert_called_once_with(931)
+
+    def test_identity_owner_budget_refuses_before_opening_another_native_handle(self):
+        with patch.object(native, "_MAX_IDENTITY_OWNERS", 0), \
+                self.assertRaisesRegex(native.NativeError, "IDENTITY_QUERY_OWNER_BUDGET_EXCEEDED"):
+            native.capture_identity_checked(self.target.pid, owner_run_id=self.run_id)
+        self.kernel.open_process.assert_not_called()
+
+
 class QueryCleanupTests(unittest.TestCase):
     def setUp(self):
         self.target = ProcessIdentity(123, 456, "fixture.exe")
