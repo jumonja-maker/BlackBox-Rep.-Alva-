@@ -60,6 +60,7 @@ APPROVED_DECODER_QA_FILES = {
     "src/blackbox_core/decoder_index.py": "modified",
     "src/blackbox_core/decoder_service.py": "modified",
     "tests/test_decoder_frame_module_transport.py": "added",
+    "tests/test_decoder_scratch_budget.py": "added",
     "tools/qa_decoder_patch.py": "modified",
     "tests/test_native_etl_release_completeness.py": "modified",
 }
