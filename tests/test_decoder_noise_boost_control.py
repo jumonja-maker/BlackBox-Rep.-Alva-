@@ -3,10 +3,21 @@ from copy import deepcopy
 import unittest
 from unittest.mock import patch
 
-from tools.qa_noise_boost_control import requested_policy,validate_cached_control,validate_live_control,SCOPE
+from tools.qa_noise_boost_control import requested_policy,validate_cached_control,validate_live_control,fully_differing_boost_controls,validate_controlled_native_boost_pair,SCOPE
 
 
 class NativeNoiseBoostControlTests(unittest.TestCase):
+    def test_experiment_requires_actual_different_flags_in_both_pairs(self):
+        inherited=[{'disabled_before_count':0,'disabled_after_count':0} for _ in range(2)]
+        disabled=[{'disabled_before_count':0,'disabled_after_count':16} for _ in range(2)]
+        self.assertTrue(fully_differing_boost_controls(inherited,disabled))
+        for changed in ([{'disabled_before_count':16,'disabled_after_count':16}]*2,
+                        [disabled[0],{'disabled_before_count':16,'disabled_after_count':16}],
+                        [disabled[0]],
+                        [{'disabled_before_count':False,'disabled_after_count':16}]*2):
+            with self.subTest(changed=changed):self.assertFalse(fully_differing_boost_controls(inherited,changed))
+        self.assertFalse(fully_differing_boost_controls(disabled,disabled))
+
     def receipt(self, policy='INHERITED'):
         return {'thread_boost_policy':policy,'thread_boost_observation_scope':SCOPE,
             'workers':[{'tid':100+i,'boost_disabled_before':False,'boost_disabled_after':policy=='DISABLED',
@@ -59,7 +70,9 @@ class NativeNoiseBoostControlTests(unittest.TestCase):
         self.assertEqual(verified['workers'][0]['base_priority'],6)
         self.assertEqual(ready['workers'][0]['relative_priority_after'],0)
         for field,value in [('query_handles_closed_verified',False),('retained_query_handles_after',1),
-                            ('query_handles_closed',15),('process_identity_verified_after',False),('errors',['UNKNOWN'])]:
+                            ('query_handles_closed',15),('query_handles_closed',16.0),
+                            ('query_handles_opened',16.0),('retained_query_handles_after',False),
+                            ('process_identity_verified_after',False),('errors',['UNKNOWN'])]:
             with self.subTest(field=field),self.assertRaises(AssertionError):
                 validate_live_control({**observed,field:value},ready,'DISABLED')
         for field,value in [('priority_boost_disabled',False),('priority_boost_disabled',1),('base_priority',True),
@@ -77,6 +90,33 @@ class NativeNoiseBoostControlTests(unittest.TestCase):
                 NoiseOwner(Path('must-not-create'),{'implementation':'NATIVE_WIN32','expected_native_handles':32,
                                                    'thread_boost_policy':'UNKNOWN'})
             opened.assert_not_called();child.assert_not_called()
+
+    def controlled_case(self):
+        ready=self.receipt('DISABLED');cached=validate_cached_control(ready,'DISABLED')
+        live=validate_live_control(self.observation(ready),ready,'DISABLED')
+        return {'native_thread_boost_control':{'requested':'DISABLED','ready':cached,
+                'oracle':deepcopy(cached),'live_ready':live}}
+
+    def test_controlled_pair_adds_attestation_without_claiming_legacy_equivalence(self):
+        decision=validate_controlled_native_boost_pair(self.controlled_case(),self.controlled_case())
+        self.assertEqual(decision['status'],'CONTROLLED_NATIVE_BASELINE_ATTESTED')
+        self.assertIs(decision['legacy_inherited_condition_equivalent'],False)
+        self.assertEqual(decision['historical_deadline_cause'],'NOT_ESTABLISHED')
+
+    def test_controlled_pair_rejects_wrong_mode_partial_flags_or_uncertain_query_cleanup(self):
+        for kind in ('mode','cached','cached_type','oracle','live_flag','live_count','close','retained'):
+            with self.subTest(kind=kind),self.assertRaises(AssertionError):
+                case=self.controlled_case();control=case['native_thread_boost_control']
+                if kind=='mode':control['requested']='INHERITED'
+                elif kind=='cached':control['ready']['disabled_after_count']=15
+                elif kind=='cached_type':
+                    control['ready']['worker_count']=16.0;control['oracle']['worker_count']=16.0
+                elif kind=='oracle':control['oracle']['policy']='INHERITED'
+                elif kind=='live_flag':control['live_ready']['workers'][0]['priority_boost_disabled']=False
+                elif kind=='live_count':control['live_ready']['workers'].pop()
+                elif kind=='close':control['live_ready']['query_handles_closed_verified']=False
+                else:control['live_ready']['retained_query_handles_after']=1
+                validate_controlled_native_boost_pair(self.controlled_case(),case)
 
 
 if __name__=='__main__':unittest.main()

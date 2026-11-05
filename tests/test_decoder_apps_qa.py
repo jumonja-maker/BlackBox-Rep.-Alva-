@@ -2286,6 +2286,7 @@ class ControlledMinimumStimulusProtocolTests(unittest.TestCase):
                     patch('tools.qa_decoder_noise_fixture.build_native_noise', return_value=native) as builder, \
                     patch.object(driver, 'run_case', side_effect=cases) as run, \
                     patch.object(driver, 'validate_comparison', return_value={'protocol_only': True}), \
+                    patch.object(driver, 'validate_controlled_native_boost_pair', return_value={'protocol_only': True}) as boost_pair, \
                     patch('tools.qa_decoder_apps.file_hash', return_value='b' * 64), \
                     patch('tools.qa_decoder_apps.write_json'), \
                     patch.object(driver.time, 'monotonic', return_value=0), \
@@ -2293,6 +2294,8 @@ class ControlledMinimumStimulusProtocolTests(unittest.TestCase):
                 self.assertEqual(driver.run_diagnostic(args), 0)  # Fake protocol flow only, not native acceptance.
             builder.assert_called_once_with(args.output.resolve() / 'native-build', args.source_sha)
             self.assertEqual(run.call_count, 4)
+            boost_pair.assert_called_once_with(cases[2], cases[3])
+            self.assertEqual(run.call_args_list[2].args[5]['thread_boost_policy'], 'DISABLED')
             self.assertEqual(run.call_args_list[0].kwargs, {})
             self.assertEqual(run.call_args_list[2].kwargs, {})
             self.assertEqual(run.call_args_list[1].args[-1], 10000)

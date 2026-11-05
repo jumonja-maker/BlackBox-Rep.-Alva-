@@ -27,6 +27,7 @@ sys.path[:0] = [str(ROOT), str(ROOT / 'src')]
 
 from tools import qa_decoder_apps as apps
 from tools.qa_deep_inspection import require_hosted_windows
+from tools.qa_noise_boost_control import validate_controlled_native_boost_pair
 from blackbox_universal.provenance import source_identity
 
 PAIRS = 8
@@ -1559,6 +1560,7 @@ def run_diagnostic(args):
         'subwindow_delta_scope': 'REPORT_ONLY; UNEQUAL_QPC_WINDOWS_ARE_NOT_A_CAUSAL_RATE_COMPARISON',
         'python_pair_transport_scope': 'COMPACT_ROW_NEGATIVE_AND_EXPLICIT_INLINE_BYTE_NEGATIVE; NOT_PROFILE_CAUSAL_COMPARISON',
         'native_pair_transport_scope': 'BOTH_DEFAULT_COMPACT_PER_EVENT_MODULES_V1',
+        'native_thread_boost_policy': 'DISABLED_FOR_CONTROLLED_NATIVE_BASELINE; DEFAULT_INHERITED_REMAINS_DIAGNOSTIC',
         'diagnostic_budget_seconds': CONTROLLED_SECONDS,
         'workload_budget_scope': 'SEVENZIP_ORDINARY_AND_PYTHON_30; CONTROLLED_NATIVE_PAIR_90; NOT_HARD_OS_COMPLETION_DEADLINE',
         'cases': {}}
@@ -1585,6 +1587,9 @@ def run_diagnostic(args):
             from tools.qa_decoder_noise_fixture import build_native_noise
             native = build_native_noise(output / 'native-build', args.source_sha)
             proof['native_build_mode'] = 'BUILT_IN_CONTROLLED_TOOL'
+        # This is an explicit controlled benchmark policy, not an assertion
+        # that legacy inherited contention or historical APP90 is equivalent.
+        native = {**native, 'thread_boost_policy': 'DISABLED'}
         max_live = 0
         for label, producer, positive in (('python', python, False), ('native', native, True)):
             live = sum(p.stat().st_size for p in output.rglob('*') if p.is_file())
@@ -1605,6 +1610,8 @@ def run_diagnostic(args):
             proof['cases'][label + '_cpu_file'] = second
             max_live = max(max_live, second.get('measured_live_qa_bytes_before_removal', 0))
             proof.setdefault('pair_policy_comparisons', {})[label] = validate_comparison(first, second, positive=positive)
+            if positive:
+                proof['pair_policy_comparisons'][label]['thread_boost_control'] = validate_controlled_native_boost_pair(first, second)
             live = sum(p.stat().st_size for p in output.rglob('*') if p.is_file())
             max_live = max(max_live, live)
             apps.require(live <= MAX_OUTPUT and time.monotonic() < deadline, 'CONTROLLED_LIVE_OUTPUT_OR_DEADLINE')

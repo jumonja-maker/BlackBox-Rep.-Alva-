@@ -11,6 +11,7 @@ from tools import qa_decoder_apps as apps
 from tools import qa_decoder_budget_diagnostic as diagnostic
 from tools.qa_decoder_noise_fixture import load_prepared_native_noise
 from tools.qa_deep_inspection import require_hosted_windows
+from tools.qa_noise_boost_control import fully_differing_boost_controls
 from blackbox_universal.provenance import source_identity
 
 PILOT_SECONDS=1800
@@ -89,7 +90,9 @@ def run(args):
         inherited=[c for c in proof['cases'] if c['policy']=='INHERITED']
         disabled=[c for c in proof['cases'] if c['policy']=='DISABLED']
         good=lambda c:c['status']=='EXPECTED_NATIVE_BUDGET_NEGATIVE' and c['decoder_status']=='TRUNCATED' and c['rows']==250000 and (c['facts']['native_output'] or {}).get('native_truncation_reason')=='MAX_EVENTS'
-        discriminating=all(c['facts']['native_thread_boost_control']['ready']['disabled_before_count']==0 for c in inherited)
+        discriminating=fully_differing_boost_controls(
+            [c['facts']['native_thread_boost_control']['ready'] for c in inherited],
+            [c['facts']['native_thread_boost_control']['ready'] for c in disabled])
         proof['interpretation']={'inherited_actual_statuses':[c['status'] for c in inherited],
             'disabled_actual_statuses':[c['status'] for c in disabled],
             'inherited_all_completed_row_negative':all(good(c) for c in inherited),
