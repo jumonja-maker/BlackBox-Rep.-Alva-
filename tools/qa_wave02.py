@@ -356,6 +356,14 @@ def run(args):
         if 'R50' in scope['required_containers']:
             from tools.qa_wave02_r50 import check_r50
             proof['container_results']['R50'] = check_r50(executable, output, args)
+            from tools.qa_wave02_combined import check_combined
+            proof['combined_e2e'] = check_combined(sources=sources, individual_case=case,
+                container_results=proof['container_results'], output=output,
+                source_sha=args.source_sha, original_trace=trace,
+                producer_cleanup={'target': proof['target_cleanup'], 'helper': proof['helper_cleanup'],
+                                  'capture': proof['capture_stop']})
+            require(proof['combined_e2e'].get('status') == 'PASS',
+                    'WAVE02_COMBINED_E2E_MUST_PASS')
         require(set(proof['container_results']) == set(scope['required_containers']) and
                 all(q.get('status') == 'PASS' for q in proof['container_results'].values()),
                 'WAVE02_REQUIRED_CONTAINER_NOT_PASSED')
@@ -392,6 +400,7 @@ def run(args):
                 'cancelled_no_publication', 'corrupt_no_publication')},
             'exports': proof.get('exports'),
             'writer_fault': proof.get('writer_fault'),
+            'combined_e2e': (proof.get('combined_e2e') or {}).get('public_receipt'),
             'receipt_sha256': file_hash(output / 'wave02-native.json'),
             'receipt_bytes': (output / 'wave02-native.json').stat().st_size,
             'error': proof.get('error'), 'reason': proof.get('reason'),

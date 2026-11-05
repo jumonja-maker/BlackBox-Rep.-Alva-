@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (QApplication, QComboBox, QDialogButtonBox,
 
 from .provenance import source_identity
 from .theme import font_coverage
+from .wave02_comparison_oracles import read_comparison_export
 
 
 def require(value, reason):
@@ -279,14 +280,24 @@ def run_wave02_e2e(app, window, output, evidence_root, container, expected_sha):
             cases.append(('R40', Path(native['container_results']['R40']['case_index'])))
         if 'R50' in scopes[container]:
             cases.append(('R50', Path(native['container_results']['R50']['case_index'])))
+            require(native.get('combined_e2e', {}).get('status') == 'PASS',
+                    'WAVE02_GUI_REQUIRES_REAL_COMBINED_EVIDENCE')
+            cases.append(('COMBINED', Path(native['combined_e2e']['case_index'])))
         for case_kind, case_path in cases:
             proof['phase'] = 'OPEN_REAL_' + case_kind + '_CASE'
             inputs[str(case_path)] = digest(case_path)
+            if case_kind == 'COMBINED':
+                saved = native['combined_e2e']['public_receipt']['sqlite_readback']
+                require(inputs[str(case_path)] == saved['sha256'] and case_path.stat().st_size == saved['bytes'],
+                        'WAVE02_GUI_COMBINED_NATIVE_INDEX_BYTES_CHANGED')
             previous = panel.case
             with patch.object(QFileDialog, 'getOpenFileName', return_value=(str(case_path), 'Investigation index (*.sqlite3)')):
                 click(panel.open_button)
             pump(lambda: panel.bridge.worker is None and panel.case is not None and panel.case is not previous)
             proof['case_ids'].append(panel.case['case_id'])
+            if case_kind == 'COMBINED':
+                require(panel.case['case_id'] == native['combined_e2e']['public_receipt']['case_id'],
+                        'WAVE02_GUI_COMBINED_CASE_ID_MISMATCH')
             require(panel.case.get('run_receipt', {}).get('operation') == 'investigation.create',
                     'WAVE02_GUI_LOST_REAL_RUN_RECEIPT')
             for language in ('EN', 'RU'):
@@ -294,9 +305,9 @@ def run_wave02_e2e(app, window, output, evidence_root, container, expected_sha):
                 require(font_coverage(app)['ok'], 'WAVE02_RU_EN_GLYPHS_MISSING')
                 proof['phase'] = 'REAL_SOURCE_INTEGRITY_' + language
                 inspect_section('integrity', 'invIntegritySummary', 'invIntegritySources', 'invIntegrityReceipt')
-                if case_kind == 'R20' and 'R30' in scopes[container]:
+                if case_kind in ('R20', 'COMBINED') and 'R30' in scopes[container]:
                     inspect_section('delays', 'invDelaySummary', 'invDelayEvidenceTable', 'invDelayReport')
-                if case_kind == 'R40':
+                if case_kind in ('R40', 'COMBINED'):
                     section('crash')
                     reveal(panel.crash_kind);panel.crash_kind.setFocus()
                     QTest.keyClick(panel.crash_kind,Qt.Key.Key_End);app.processEvents()
@@ -461,6 +472,7 @@ def run_wave02_e2e(app, window, output, evidence_root, container, expected_sha):
                         widget_text(research.details).strip() and
                         compared['causal_link_proven'] is False,
                         'WAVE02_GUI_ACTUAL_COMPARISON_OR_LOCALIZED_DETAILS_MISSING')
+                comparison_reference = None
                 for kind in ('json','html'):
                     path=output/('r50-gui-comparison-'+language+'.'+kind)
                     after=len(observer_results)
@@ -469,6 +481,10 @@ def run_wave02_e2e(app, window, output, evidence_root, container, expected_sha):
                     exported=wait_observer('compare_export',after)
                     require(path.is_file() and exported['readback_verified'] is True and
                             exported['sha256']==digest(path),'WAVE02_GUI_COMPARE_EXPORT_READBACK_FAILED')
+                    parsed, semantic = read_comparison_export(path, format=kind,
+                        before=before, after=after_folder, json_reference=comparison_reference)
+                    if kind == 'json':
+                        comparison_reference = parsed
                     after=len(observer_results)
                     with patch.object(QFileDialog,'getOpenFileName',return_value=(str(path),kind.upper())):
                         click(research.by_action['Open saved comparison…'])
@@ -479,7 +495,8 @@ def run_wave02_e2e(app, window, output, evidence_root, container, expected_sha):
                             not research.by_action['Save comparison JSON / HTML…'].isEnabled(),
                             'WAVE02_GUI_COMPARISON_IMPORT_FABRICATED_TRUST_OR_LIVE_PAIR')
                     proof['exports'].append({'case':'R50-comparison','format':kind,'language':language,
-                        'sha256':digest(path),'bytes':path.stat().st_size,'independent_readback':True})
+                        'sha256':digest(path),'bytes':path.stat().st_size,'independent_readback':True,
+                        'independent_semantic_readback':semantic})
                     # Opening an offline report intentionally clears source
                     # selection. Select the real pair again before another save.
                     if kind=='json':

@@ -263,6 +263,7 @@ def recording(executable, output, *, workload='native-burst-v1', repeats=2, tiny
 def check_r50(executable, output, args):
     from blackbox_core.casebook import compare_cases, export_comparison, load_comparison
     from blackbox_core.investigation_v3 import create_investigation
+    from blackbox_universal.wave02_comparison_oracles import read_comparison_export
     from tools.qa_wave02 import export_case, verify_case
     root = Path(output) / 'R50'; root.mkdir()
     preflight = recording(executable, root / 'endurance-policy-preflight',
@@ -285,6 +286,7 @@ def check_r50(executable, output, args):
         for q in (first,second,changed) for filename in
         ('session.sqlite3','session-v2.sqlite3','research.sqlite3')}
     exports = {}
+    comparison_reference = None
     for kind in ('json','html'):
         destination = root / ('comparison.'+kind)
         receipt = export_comparison(first['folder'],second['folder'],destination,format=kind)
@@ -298,12 +300,17 @@ def check_r50(executable, output, args):
         if kind == 'json':
             require(json.loads(destination.read_text(encoding='utf-8'))['comparison']['comparison_status']
                     == 'COMPARABLE','WAVE02_R50_INDEPENDENT_COMPARISON_JSON_FAILED')
+        parsed, semantic = read_comparison_export(destination, format=kind,
+            before=first['folder'], after=second['folder'], json_reference=comparison_reference)
+        if kind == 'json':
+            comparison_reference = parsed
         digest = file_hash(destination)
         try: export_comparison(first['folder'],second['folder'],destination,format=kind)
         except FileExistsError: pass
         else: raise AssertionError('WAVE02_R50_COMPARISON_CLOBBERED_EXISTING_DESTINATION')
         require(file_hash(destination) == digest, 'WAVE02_R50_EXISTING_COMPARISON_CHANGED')
-        exports[kind] = {'sha256':digest,'readback_verified':True,'no_clobber_verified':True}
+        exports[kind] = {'sha256':digest,'readback_verified':True,'no_clobber_verified':True,
+                         'independent_semantic_readback':semantic}
     case = create_investigation([{'source_type':'SESSION','path':first['folder']}],
         scenario={'scenario':'BB-WAVE-02-RARE-NATIVE-BURST'},budget={'timeout_seconds':120},
         index_path=root / 'case.sqlite3')
