@@ -80,6 +80,8 @@ jobs:
         run: |
           python -m pip install --require-hashes -r requirements/ci-windows-py311.lock
           python -m pip install --no-build-isolation --no-deps -e .
+      - name: Early owned native fixture compiler lifecycle preflight
+        run: python tools/qa_decoder_noise_fixture.py --build-fixture --output decoder-compiler-preflight --source-sha "${{ github.event.pull_request.head.sha || github.sha }}"
       - name: Real Qt offscreen startup smoke
         run: python app.py --smoke
       - name: Real Qt isolated research end-to-end
@@ -203,10 +205,14 @@ jobs:
           Add-Content -Path $env:GITHUB_PATH -Value $toolDir
           $llvm = Join-Path $env:ProgramFiles 'LLVM\bin'
           if (Test-Path $llvm) { Add-Content -Path $env:GITHUB_PATH -Value $llvm }
+      - name: Prepare same-job owned native noise fixture before trace workloads
+        id: prepare_native_noise
+        timeout-minutes: 2
+        run: python tools/qa_decoder_noise_fixture.py --prepare-fixture --output decoder-budget-diagnostic/native-build --source-sha "${{ github.event.pull_request.head.sha || github.sha }}"
       - name: Real EventPipe/ETW and guardian capture-clock integration
         run: python tools/qa_decoder.py --helper decoder/BLACK.BOX-Decoder.exe --output decoder-qa
       - name: Real native ETW filtered trees and local PE/PDB acceptance
-        run: python tools/qa_decoder_patch.py --output decoder-native-qa --helper decoder/BLACK.BOX-Decoder.exe --trace-index decoder-qa/eventpipe.sqlite3
+        run: python tools/qa_decoder_patch.py --output decoder-native-qa --helper decoder/BLACK.BOX-Decoder.exe --trace-index decoder-qa/eventpipe.sqlite3 --source-sha "${{ github.event.pull_request.head.sha || github.sha }}"
       - name: Full 250k-event decoder import, cancellation and deadline budget
         run: python tools/qa_decoder_reliability.py --output decoder-reliability-qa --rows 250000
       - name: Compiler-produced native PDB lines, inline and OMAP checks
@@ -216,7 +222,17 @@ jobs:
       - name: Real owned Windows Sleep, Event and Mutex waits
         run: python tools/qa_decoder_waits.py --helper decoder/BLACK.BOX-Decoder.exe --output decoder-waits-qa
       - name: Actual third-party 7-Zip, PowerShell 7 and Notepad++ acceptance
-        run: python tools/qa_decoder_apps.py --helper decoder/BLACK.BOX-Decoder.exe --output decoder-apps-qa
+        shell: pwsh
+        run: |
+          foreach ($trial in @(1, 2, 3)) {
+            Write-Host "THIRD_PARTY_DECODER_QA_TRIAL_BEGIN $trial/3"
+            python tools/qa_decoder_apps.py --helper decoder/BLACK.BOX-Decoder.exe --output "decoder-apps-qa-trial-$trial"
+            if ($LASTEXITCODE -ne 0) { throw "Third-party decoder acceptance failed in trial $trial/3; all three trials must pass" }
+            Write-Host "THIRD_PARTY_DECODER_QA_TRIAL_COMPLETE $trial/3"
+          }
+      - name: Controlled Python budget negatives and native Win32 A B acceptance
+        timeout-minutes: 8
+        run: python tools/qa_decoder_budget_diagnostic.py --helper decoder/BLACK.BOX-Decoder.exe --output decoder-budget-diagnostic --source-sha "${{ github.event.pull_request.head.sha || github.sha }}" --prepared-native-build --prepared-build-sha256 "${{ steps.prepare_native_noise.outputs.manifest_sha256 }}"
       - name: BB-WAVE-02 actual native evidence, provenance, requested domain routes and read-back
         timeout-minutes: 18
         run: python tools/qa_wave02.py --output wave02-native-qa --decoder decoder/BLACK.BOX-Decoder.exe --source-sha "${{ github.event.pull_request.head.sha || github.sha }}"
@@ -386,12 +402,31 @@ jobs:
             echo "- GitHub Actions Artifacts: none"
           } >> "$GITHUB_STEP_SUMMARY"
 
+  wave02-scope-preflight:
+    name: BB-WAVE-02 exact-source lifecycle scope
+    if: >-
+      github.event_name != 'pull_request' ||
+      (github.head_ref != 'patch/bb-deep-001' && github.head_ref != 'patch/bb-inv-003')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      container: ${{ steps.scope.outputs.container }}
+      endurance_required: ${{ steps.scope.outputs.endurance_required }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Read the tracked scope without waiting for the portable build
+        id: scope
+        run: python tools/qa_wave02_scope.py
+
   wave02-targeted-endurance:
     name: BB-WAVE-02 one-hour Standard and Incident Burst lifecycle
-    needs: [exact-main-acceptance, windows-portable]
+    needs: [wave02-scope-preflight]
     if: >-
-      needs.exact-main-acceptance.result == 'success' &&
-      needs.windows-portable.outputs.wave02_endurance_required == 'true'
+      needs.wave02-scope-preflight.result == 'success' &&
+      needs.wave02-scope-preflight.outputs.endurance_required == 'true'
     runs-on: windows-latest
     timeout-minutes: 90
     env:
@@ -421,11 +456,14 @@ jobs:
       always() &&
       (github.event_name != 'pull_request' ||
        (github.head_ref != 'patch/bb-deep-001' && github.head_ref != 'patch/bb-inv-003'))
-    needs: [exact-main-acceptance, windows-portable, wave02-targeted-endurance]
+    needs: [exact-main-acceptance, windows-portable, wave02-targeted-endurance, wave02-scope-preflight]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     env:
       FAST_GATE: ${{ needs.exact-main-acceptance.result }}
+      SCOPE_GATE: ${{ needs.wave02-scope-preflight.result }}
+      PREFLIGHT_CONTAINER: ${{ needs.wave02-scope-preflight.outputs.container }}
+      PREFLIGHT_ENDURANCE: ${{ needs.wave02-scope-preflight.outputs.endurance_required }}
       WAVE_CONTAINER: ${{ needs.windows-portable.outputs.wave02_container }}
       ENDURANCE_REQUIRED: ${{ needs.windows-portable.outputs.wave02_endurance_required }}
       ENDURANCE_RESULT: ${{ needs.wave02-targeted-endurance.result }}
@@ -435,6 +473,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          if [[ "$SCOPE_GATE" != success || "$PREFLIGHT_CONTAINER" != "$WAVE_CONTAINER" || "$PREFLIGHT_ENDURANCE" != "$ENDURANCE_REQUIRED" ]]; then
+            echo '::error::Exact-source scope preflight and portable scope disagree or are incomplete'
+            exit 1
+          fi
           if [[ "$FAST_GATE" != success ]]; then
             echo '::error::Complete mandatory Windows/Linux/portable fast QA is not successful'
             exit 1

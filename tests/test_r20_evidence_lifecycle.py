@@ -49,6 +49,23 @@ class EvidenceLifecycleContracts(unittest.TestCase):
     def build(self, **kwargs):
         return create_investigation([{"source_type": "EVENTS_JSONL", "path": str(self.source)}], **kwargs)
 
+    def test_invalid_decoder_mode_cannot_create_receipt_or_touch_source(self):
+        from blackbox_core import decoder_service as service
+        with patch('blackbox_core.deep_tool_contracts.begin_evidence_run') as begin, \
+                patch.object(service, '_decode_file') as decode, \
+                patch.object(service, 'file_hash') as source_hash, \
+                patch('blackbox_core.optional_jobs.OwnedProcess') as owner:
+            for mode in ('UNSUPPORTED', True, 0, [], {}):
+                with self.subTest(mode=mode), self.assertRaisesRegex(
+                        ValueError, 'UNSUPPORTED_FRAME_MODULE_ENCODING'):
+                    service.decode_file(self.source, self.root / 'must-not-exist.sqlite3',
+                                        timeout=0, native_module_encoding=mode)
+            begin.assert_not_called()
+            decode.assert_not_called()
+            source_hash.assert_not_called()
+            owner.assert_not_called()
+        self.assertFalse((self.root / 'must-not-exist.sqlite3').exists())
+
     def test_readonly_nullable_context_cannot_create_a_targetless_deep_action(self):
         context = begin_evidence_run("decoder.decode")
         self.assertIsNone(context.to_dict()["target"])

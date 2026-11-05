@@ -7,6 +7,8 @@ from tools.publish_v055_after_ci import (
     APPROVED_REPAIR_BRANCH, APPROVED_VERSION_HEAD_SHA, V055_VERSION_MAIN_SHA,
     APPROVED_ETW_MAIN_SHA, APPROVED_REPAIR_HEAD_SHA,
     APPROVED_RELEASE_QA_PR, APPROVED_RELEASE_QA_BRANCH, APPROVED_RELEASE_QA_SCOPE,
+    APPROVED_RELEASE_QA_MAIN_SHA, APPROVED_RELEASE_QA_HEAD_SHA,
+    APPROVED_DECODER_QA_PR, APPROVED_DECODER_QA_BRANCH, APPROVED_DECODER_QA_FILES,
     R10_MAIN_SHA, PRIOR_RELEASE_SHA, PRIOR_ZIP_SHA256, REQUIRED_JOBS,
 )
 
@@ -37,15 +39,26 @@ class R10V055PublicationAuthorityTests(unittest.TestCase):
         self.repair_parent = V055_VERSION_MAIN_SHA
         self.repair_other_parent = APPROVED_REPAIR_HEAD_SHA
         self.qa_branch = APPROVED_RELEASE_QA_BRANCH
-        self.qa_merge = SHA
+        self.qa_merge = APPROVED_RELEASE_QA_MAIN_SHA
         self.qa_merged = True
-        self.qa_head = HEAD
+        self.qa_head = APPROVED_RELEASE_QA_HEAD_SHA
         self.qa_base = "main"
         self.qa_files = [{"filename": name, "status": "modified"}
                          for name in sorted(APPROVED_RELEASE_QA_SCOPE)]
         self.qa_changed_files = len(self.qa_files)
-        self.parent = APPROVED_ETW_MAIN_SHA
-        self.other_parent = HEAD
+        self.qa_parents = [APPROVED_ETW_MAIN_SHA, APPROVED_RELEASE_QA_HEAD_SHA]
+        self.decoder_number = APPROVED_DECODER_QA_PR
+        self.decoder_branch = APPROVED_DECODER_QA_BRANCH
+        self.decoder_merge = SHA
+        self.decoder_merged = True
+        self.decoder_head = HEAD
+        self.decoder_base = "main"
+        self.decoder_head_repo = REPOSITORY
+        self.decoder_base_repo = REPOSITORY
+        self.decoder_files = [{"filename": name, "status": status}
+                              for name, status in sorted(APPROVED_DECODER_QA_FILES.items())]
+        self.decoder_changed_files = len(self.decoder_files)
+        self.final_parents = [APPROVED_RELEASE_QA_MAIN_SHA, HEAD]
         self.jobs = [{"name": name, "status": "completed", "conclusion": "success"}
                      for name in sorted(REQUIRED_JOBS)]
         self.old_sha = PRIOR_RELEASE_SHA
@@ -85,8 +98,20 @@ class R10V055PublicationAuthorityTests(unittest.TestCase):
                 "changed_files": self.qa_changed_files,
             },
             prefix + f"pulls/{APPROVED_RELEASE_QA_PR}/files?per_page=100": self.qa_files,
+            prefix + "git/commits/" + APPROVED_RELEASE_QA_MAIN_SHA: {
+                "parents": [{"sha": parent} for parent in self.qa_parents],
+            },
+            prefix + f"pulls/{APPROVED_DECODER_QA_PR}": {
+                "number": self.decoder_number,
+                "merged": self.decoder_merged, "merge_commit_sha": self.decoder_merge,
+                "head": {"ref": self.decoder_branch, "sha": self.decoder_head,
+                         "repo": {"full_name": self.decoder_head_repo}},
+                "base": {"ref": self.decoder_base, "repo": {"full_name": self.decoder_base_repo}},
+                "changed_files": self.decoder_changed_files,
+            },
+            prefix + f"pulls/{APPROVED_DECODER_QA_PR}/files?per_page=100": self.decoder_files,
             prefix + "git/commits/" + SHA: {
-                "parents": [{"sha": self.parent}, {"sha": self.other_parent}],
+                "parents": [{"sha": parent} for parent in self.final_parents],
             },
             prefix + "actions/runs/123/jobs?per_page=100": {"jobs": self.jobs},
             prefix + "releases/tags/v0.5.4": {
@@ -114,6 +139,13 @@ class R10V055PublicationAuthorityTests(unittest.TestCase):
         self.assertEqual(receipt["version_pr"], 31)
         self.assertEqual(receipt["etw_repair_pr"], 32)
         self.assertEqual(receipt["release_qa_pr"], APPROVED_RELEASE_QA_PR)
+        self.assertEqual(receipt["release_qa_merge_sha"], APPROVED_RELEASE_QA_MAIN_SHA)
+        self.assertEqual(receipt["release_qa_head"], APPROVED_RELEASE_QA_HEAD_SHA)
+        self.assertEqual(receipt["decoder_qa_repair_pr"], APPROVED_DECODER_QA_PR)
+        self.assertEqual(receipt["decoder_qa_repair_head"], HEAD)
+        self.assertEqual(receipt["decoder_qa_repair_branch"], APPROVED_DECODER_QA_BRANCH)
+        self.assertEqual(receipt["decoder_qa_repair_base_main_sha"], APPROVED_RELEASE_QA_MAIN_SHA)
+        self.assertEqual(receipt["decoder_qa_repair_merge_sha"], SHA)
         self.assertEqual(receipt["r10_pr"], 30)
         self.assertEqual(receipt["required_jobs"], 8)
         self.assertEqual(receipt["main_sha"], SHA)
@@ -191,16 +223,16 @@ class R10V055PublicationAuthorityTests(unittest.TestCase):
         self.qa_merge = HEAD
         with self.assertRaisesRegex(ValueError, "APPROVED_V055_RELEASE_QA_MERGE_MISSING"):
             self.verify()
-        self.qa_merge = SHA
+        self.qa_merge = APPROVED_RELEASE_QA_MAIN_SHA
         self.qa_base = "release"
         with self.assertRaisesRegex(ValueError, "APPROVED_V055_RELEASE_QA_MERGE_MISSING"):
             self.verify()
         self.qa_base = "main"
-        self.parent = V055_VERSION_MAIN_SHA
+        self.qa_parents[0] = V055_VERSION_MAIN_SHA
         with self.assertRaisesRegex(ValueError, "V055_RELEASE_QA_MERGE_ANCESTRY_MISMATCH"):
             self.verify()
-        self.parent = APPROVED_ETW_MAIN_SHA
-        self.other_parent = "c" * 40
+        self.qa_parents[0] = APPROVED_ETW_MAIN_SHA
+        self.qa_parents[1] = "c" * 40
         with self.assertRaisesRegex(ValueError, "V055_RELEASE_QA_MERGE_ANCESTRY_MISMATCH"):
             self.verify()
 
@@ -215,6 +247,96 @@ class R10V055PublicationAuthorityTests(unittest.TestCase):
         self.qa_files[0]["status"] = "modified"
         self.qa_changed_files += 1
         with self.assertRaisesRegex(ValueError, "UNAPPROVED_V055_RELEASE_QA_FILE_SCOPE"):
+            self.verify()
+
+    def test_original_release_qa_head_and_merge_parent_count_are_immutable(self):
+        self.qa_head = HEAD
+        with self.assertRaisesRegex(ValueError, "APPROVED_V055_RELEASE_QA_MERGE_MISSING"):
+            self.verify()
+        self.qa_head = APPROVED_RELEASE_QA_HEAD_SHA
+        for parents in ([], [APPROVED_ETW_MAIN_SHA],
+                        [APPROVED_ETW_MAIN_SHA, APPROVED_RELEASE_QA_HEAD_SHA, HEAD]):
+            with self.subTest(parents=parents):
+                self.qa_parents = parents
+                with self.assertRaisesRegex(ValueError, "V055_RELEASE_QA_MERGE_ANCESTRY_MISMATCH"):
+                    self.verify()
+
+    def test_only_exact_same_repository_decoder_repair_pr_can_follow_release_qa(self):
+        for attribute, value in (
+            ("decoder_number", APPROVED_DECODER_QA_PR + 1),
+            ("decoder_number", float(APPROVED_DECODER_QA_PR)),
+            ("decoder_branch", "feature/bb-wave-02-r20-evidence-lifecycle"),
+            ("decoder_merged", False), ("decoder_merge", HEAD),
+            ("decoder_base", "release"),
+            ("decoder_head_repo", "fork/BlackBox-Rep.-Alva-"),
+            ("decoder_base_repo", "fork/BlackBox-Rep.-Alva-"),
+            ("decoder_head", "not-a-source-sha"), ("decoder_head", None),
+        ):
+            with self.subTest(field=attribute, value=value):
+                original = getattr(self, attribute)
+                setattr(self, attribute, value)
+                with self.assertRaisesRegex(ValueError, "APPROVED_V055_DECODER_QA_MERGE_MISSING"):
+                    self.verify()
+                setattr(self, attribute, original)
+
+    def test_decoder_repair_is_the_immediate_two_parent_main_merge(self):
+        for parents in ([], [APPROVED_RELEASE_QA_MAIN_SHA],
+                        [APPROVED_RELEASE_QA_MAIN_SHA, HEAD, "c" * 40],
+                        [APPROVED_ETW_MAIN_SHA, HEAD],
+                        [APPROVED_RELEASE_QA_MAIN_SHA, "c" * 40],
+                        [HEAD, APPROVED_RELEASE_QA_MAIN_SHA]):
+            with self.subTest(parents=parents):
+                self.final_parents = parents
+                with self.assertRaisesRegex(ValueError, "V055_DECODER_QA_MERGE_ANCESTRY_MISMATCH"):
+                    self.verify()
+
+    def test_decoder_repair_head_cannot_differ_from_the_reviewed_merge_parent(self):
+        self.decoder_head = "c" * 40
+        with self.assertRaisesRegex(ValueError, "V055_DECODER_QA_MERGE_ANCESTRY_MISMATCH"):
+            self.verify()
+
+    def test_decoder_repair_file_names_and_each_added_modified_status_are_exact(self):
+        original = copy.deepcopy(self.decoder_files)
+        for index, item in enumerate(original):
+            for wrong_status in ({"added", "modified", "removed", "renamed"} - {item["status"]}):
+                with self.subTest(path=item["filename"], wrong_status=wrong_status):
+                    self.decoder_files = copy.deepcopy(original)
+                    self.decoder_files[index]["status"] = wrong_status
+                    with self.assertRaisesRegex(ValueError, "UNAPPROVED_V055_DECODER_QA_FILE_SCOPE"):
+                        self.verify()
+        self.decoder_files = copy.deepcopy(original)
+        self.decoder_files[0]["filename"] = "src/blackbox_core/optional_jobs.py"
+        with self.assertRaisesRegex(ValueError, "UNAPPROVED_V055_DECODER_QA_FILE_SCOPE"):
+            self.verify()
+        self.decoder_files = copy.deepcopy(original)
+        self.decoder_files[0] = copy.deepcopy(self.decoder_files[1])
+        with self.assertRaisesRegex(ValueError, "UNAPPROVED_V055_DECODER_QA_FILE_SCOPE"):
+            self.verify()
+
+    def test_decoder_repair_scope_rejects_missing_extra_unreadable_and_bad_counts(self):
+        original = copy.deepcopy(self.decoder_files)
+        for files in (None, original[:-1],
+                      original + [{"filename": "docs/roadmap.md", "status": "added"}],
+                      [None, *original[1:]]):
+            with self.subTest(files=files):
+                self.decoder_files = files
+                with self.assertRaisesRegex(ValueError, "UNAPPROVED_V055_DECODER_QA_FILE_SCOPE"):
+                    self.verify()
+        self.decoder_files = original
+        for changed_files in (len(original) - 1, len(original) + 1, float(len(original)), None):
+            with self.subTest(changed_files=changed_files):
+                self.decoder_changed_files = changed_files
+                with self.assertRaisesRegex(ValueError, "UNAPPROVED_V055_DECODER_QA_FILE_SCOPE"):
+                    self.verify()
+
+    def test_old_main_success_and_a_later_wave_merge_cannot_authorize_decoder_repair(self):
+        with self.assertRaisesRegex(ValueError, "EXACT_MAIN_GREEN_CI_REQUIRED"):
+            self.verify({**RUN, "head_sha": APPROVED_RELEASE_QA_MAIN_SHA})
+        # Even a green current main must be this repair's exact merge, never
+        # a later descendant whose first parent happens to be the repair.
+        self.decoder_merge = "c" * 40
+        self.final_parents = ["c" * 40, HEAD]
+        with self.assertRaisesRegex(ValueError, "APPROVED_V055_DECODER_QA_MERGE_MISSING"):
             self.verify()
 
     def test_any_missing_failed_skipped_or_duplicate_mandatory_job_blocks(self):

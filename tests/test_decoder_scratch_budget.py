@@ -55,6 +55,63 @@ class ScratchBudgetContracts(unittest.TestCase):
         self.assertFalse(vanished.exists())
         self.assertEqual(self.keep.read_bytes(), b'keep')
 
+    def test_descendant_disappearing_during_iterator_advance_keeps_seen_and_sibling_bytes(self):
+        scratch = self.root / '.etlx-owned-helper'
+        scratch.mkdir()
+        transient = scratch / 'trace.etlx'
+        transient.write_bytes(b'observed')
+        sibling = self.root / 'other-owned-work'
+        sibling.mkdir()
+        (sibling / 'keep.bin').write_bytes(b'sibling')
+        real_scandir = os.scandir
+        # Close the real enumeration first so this fault fixture is portable
+        # even on systems where an open directory handle prevents removal.
+        with real_scandir(scratch) as scan:
+            observed_entry = next(scan)
+        advances = []
+        class VanishingScan:
+            def __enter__(self): return self
+            def __exit__(self, *args): return False
+            def __iter__(self): return self
+            def __next__(self):
+                advances.append(1)
+                if len(advances) == 1:
+                    return observed_entry
+                transient.unlink()
+                scratch.rmdir()
+                raise FileNotFoundError('DESCENDANT_REMOVED_DURING_ITERATION')
+        def scan(path):
+            return VanishingScan() if Path(path) == scratch else real_scandir(path)
+        with patch.object(service.os, 'scandir', side_effect=scan):
+            # Live-tree sampling is conservative: bytes already observed
+            # remain counted even if their scratch directory vanishes later.
+            self.assertEqual(service._check_work_bytes(self.root, DecodeBudget()), 19)
+        self.assertEqual(len(advances), 2)
+        self.assertFalse(scratch.exists())
+        self.assertEqual((sibling / 'keep.bin').read_bytes(), b'sibling')
+        self.assertEqual(self.keep.read_bytes(), b'keep')
+
+    def test_root_iterator_failure_and_iterator_permission_errors_are_not_swallowed(self):
+        class Entry:
+            path = str(self.keep)
+            def is_dir(self, **options): return False
+            def is_file(self): return True
+            def stat(self): return self_keep.stat()
+        self_keep = self.keep
+        for failure in (FileNotFoundError('ROOT_ITERATOR_LOST'), PermissionError('ROOT_ITERATOR_DENIED'),
+                        OSError('ROOT_ITERATOR_IO_ERROR')):
+            with self.subTest(error=type(failure).__name__):
+                class FailingScan:
+                    def __enter__(self): return self.entries()
+                    def __exit__(self, *args): return False
+                    def entries(self):
+                        yield Entry()
+                        raise failure
+                with patch.object(service.os, 'scandir', return_value=FailingScan()):
+                    with self.assertRaises(type(failure)) as caught:
+                        service._check_work_bytes(self.root, DecodeBudget())
+                self.assertIs(caught.exception, failure)
+
     def test_directory_permission_or_other_io_failure_is_not_swallowed(self):
         scratch = self.root / '.etlx-owned-helper'
         scratch.mkdir()
