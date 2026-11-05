@@ -29,6 +29,8 @@ APPROVED_ETW_MAIN_SHA = "d3b63fffa2981fb5f41150e24ee2d16e3c7ff573"
 APPROVED_REPAIR_HEAD_SHA = "596498968c771ef8b09c14c89b020fcae210e56a"
 APPROVED_RELEASE_QA_PR = 37
 APPROVED_RELEASE_QA_BRANCH = "fix/r10-v055-release-qa-20261105"
+APPROVED_RELEASE_QA_MAIN_SHA = "a80f393ce7486d6a87c141dfae464d7ce0540586"
+APPROVED_RELEASE_QA_HEAD_SHA = "f10729751c7a24aa578db919fb1f20904e00d7ea"
 APPROVED_RELEASE_QA_SCOPE = frozenset({
     ".github/workflows/shell-qa.yml",
     "tools/qa_decoder_apps.py",
@@ -36,6 +38,21 @@ APPROVED_RELEASE_QA_SCOPE = frozenset({
     "tools/publish_v055_after_ci.py",
     "tests/test_release_v055_authorization.py",
 })
+APPROVED_DECODER_QA_PR = 38
+APPROVED_DECODER_QA_BRANCH = "fix/r10-v055-trace-diagnostics-20261105"
+# This one repair retains two new QA files. It is not a directory allowlist:
+# added/modified/renamed/deleted statuses must match each exact reviewed path.
+APPROVED_DECODER_QA_FILES = {
+    ".github/workflows/shell-qa.yml": "modified",
+    ".github/workflows/release-v055.yml": "modified",
+    "tools/qa_decoder_apps.py": "modified",
+    "tests/test_decoder_apps_qa.py": "modified",
+    "tools/qa_decoder_budget_diagnostic.py": "added",
+    "tools/qa_schedule_capture.py": "modified",
+    "tools/fixtures/DecoderApps/cpu_file.wprp": "added",
+    "tools/publish_v055_after_ci.py": "modified",
+    "tests/test_release_v055_authorization.py": "modified",
+}
 PR_NUMBER = 30
 PRIOR_RELEASE_SHA = "74fe0f856776bcee018d79bfeec96f33d2ace0b2"
 PRIOR_ZIP_SHA256 = "01390ec18fbac40accc2ae2774c748994a5dcde7d29421dbdcdacb8555c2cdc4"
@@ -98,10 +115,12 @@ def approved_release_source(client, repo: str, sha: str, run: dict) -> dict:
             and repair_parents[1].get("sha") == APPROVED_REPAIR_HEAD_SHA,
             "V055_ETW_REPAIR_ANCESTRY_MISMATCH")
 
-    # The only additional authorized merge may be the owner's bounded
-    # release-QA correction; not a feature branch, generic main push or force.
+    # PR37 is now a fixed, already accepted ancestor. Never substitute PR38
+    # for it or allow any arbitrary descendant of its merge to be published.
     qa = client(f"repos/{repo}/pulls/{APPROVED_RELEASE_QA_PR}")
-    require(qa.get("merged") is True and qa.get("merge_commit_sha") == sha
+    require(qa.get("merged") is True
+            and qa.get("merge_commit_sha") == APPROVED_RELEASE_QA_MAIN_SHA
+            and (qa.get("head") or {}).get("sha") == APPROVED_RELEASE_QA_HEAD_SHA
             and (qa.get("head") or {}).get("ref") == APPROVED_RELEASE_QA_BRANCH
             and (qa.get("base") or {}).get("ref") == "main",
             "APPROVED_V055_RELEASE_QA_MERGE_MISSING")
@@ -111,12 +130,48 @@ def approved_release_source(client, repo: str, sha: str, run: dict) -> dict:
             and {item.get("filename") for item in changed} == APPROVED_RELEASE_QA_SCOPE
             and all(item.get("status") == "modified" for item in changed),
             "UNAPPROVED_V055_RELEASE_QA_FILE_SCOPE")
+    qa_commit = client(f"repos/{repo}/git/commits/{APPROVED_RELEASE_QA_MAIN_SHA}")
+    qa_parents = qa_commit.get("parents")
+    require(isinstance(qa_parents, list) and len(qa_parents) == 2
+            and qa_parents[0].get("sha") == APPROVED_ETW_MAIN_SHA
+            and qa_parents[1].get("sha") == APPROVED_RELEASE_QA_HEAD_SHA,
+            "V055_RELEASE_QA_MERGE_ANCESTRY_MISMATCH")
+
+    # Only the owner's specific decoder-acceptance repair may follow PR37.
+    # Current main, upstream CI and the final two-parent merge all bind to the
+    # same source; a later Wave merge, fast-forward or unrelated push fails.
+    decoder_qa = client(f"repos/{repo}/pulls/{APPROVED_DECODER_QA_PR}")
+    require(isinstance(decoder_qa, dict), "APPROVED_V055_DECODER_QA_MERGE_MISSING")
+    decoder_head = decoder_qa.get("head")
+    decoder_base = decoder_qa.get("base")
+    require(type(decoder_qa.get("number")) is int
+            and decoder_qa["number"] == APPROVED_DECODER_QA_PR
+            and decoder_qa.get("merged") is True and decoder_qa.get("merge_commit_sha") == sha
+            and isinstance(decoder_head, dict) and isinstance(decoder_base, dict)
+            and decoder_head.get("ref") == APPROVED_DECODER_QA_BRANCH
+            and decoder_base.get("ref") == "main"
+            and isinstance(decoder_head.get("repo"), dict)
+            and isinstance(decoder_base.get("repo"), dict)
+            and decoder_head["repo"].get("full_name") == repo
+            and decoder_base["repo"].get("full_name") == repo
+            and isinstance(decoder_head.get("sha"), str)
+            and re.fullmatch(r"[a-f0-9]{40}", decoder_head["sha"]),
+            "APPROVED_V055_DECODER_QA_MERGE_MISSING")
+    decoder_changed = client(f"repos/{repo}/pulls/{APPROVED_DECODER_QA_PR}/files?per_page=100")
+    require(isinstance(decoder_changed, list)
+            and type(decoder_qa.get("changed_files")) is int
+            and decoder_qa["changed_files"] == len(APPROVED_DECODER_QA_FILES) == len(decoder_changed)
+            and all(isinstance(item, dict) for item in decoder_changed)
+            and {item.get("filename") for item in decoder_changed} == set(APPROVED_DECODER_QA_FILES)
+            and all(item.get("status") == APPROVED_DECODER_QA_FILES[item["filename"]]
+                    for item in decoder_changed),
+            "UNAPPROVED_V055_DECODER_QA_FILE_SCOPE")
     final_commit = client(f"repos/{repo}/git/commits/{sha}")
     parents = final_commit.get("parents")
     require(isinstance(parents, list) and len(parents) == 2
-            and parents[0].get("sha") == APPROVED_ETW_MAIN_SHA
-            and parents[1].get("sha") == (qa.get("head") or {}).get("sha"),
-            "V055_RELEASE_QA_MERGE_ANCESTRY_MISMATCH")
+            and parents[0].get("sha") == APPROVED_RELEASE_QA_MAIN_SHA
+            and parents[1].get("sha") == decoder_head["sha"],
+            "V055_DECODER_QA_MERGE_ANCESTRY_MISMATCH")
     response = client(f"repos/{repo}/actions/runs/{run['id']}/jobs?per_page=100")
     jobs = response.get("jobs") if isinstance(response, dict) else None
     require(isinstance(jobs, list), "UPSTREAM_CI_JOBS_UNREADABLE")
@@ -147,7 +202,13 @@ def approved_release_source(client, repo: str, sha: str, run: dict) -> dict:
             "version_pr": 31, "version_head": APPROVED_VERSION_HEAD_SHA,
             "etw_repair_pr": 32, "etw_repair_head": APPROVED_REPAIR_HEAD_SHA,
             "release_qa_pr": APPROVED_RELEASE_QA_PR,
-            "release_qa_head": (qa.get("head") or {}).get("sha"),
+            "release_qa_head": APPROVED_RELEASE_QA_HEAD_SHA,
+            "release_qa_merge_sha": APPROVED_RELEASE_QA_MAIN_SHA,
+            "decoder_qa_repair_pr": APPROVED_DECODER_QA_PR,
+            "decoder_qa_repair_branch": APPROVED_DECODER_QA_BRANCH,
+            "decoder_qa_repair_head": decoder_head["sha"],
+            "decoder_qa_repair_base_main_sha": APPROVED_RELEASE_QA_MAIN_SHA,
+            "decoder_qa_repair_merge_sha": sha,
             "upstream_ci_run": run["id"], "required_jobs": len(found)}
 
 
@@ -211,6 +272,8 @@ def main() -> None:
             f.write(f"- R10 merge: {R10_MAIN_SHA}\n")
             f.write(f"- Version PR: #{verified['version_pr']}\n")
             f.write(f"- Bounded ETW repair PR: #{verified['etw_repair_pr']}\n")
+            f.write(f"- Fixed release QA PR: #{verified['release_qa_pr']}\n")
+            f.write(f"- Decoder acceptance repair PR: #{verified['decoder_qa_repair_pr']}\n")
             f.write(f"- Full main CI: {verified['upstream_ci_run']}\n")
             f.write(f"- Windows ZIP SHA-256: {digest}\n")
             f.write(f"- Official release: {published['url']}\n")

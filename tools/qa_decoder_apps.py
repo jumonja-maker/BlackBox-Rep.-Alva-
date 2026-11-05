@@ -338,12 +338,12 @@ def etw_observations(index, pids):
     return result
 
 
-def start_schedule(output):
+def start_schedule(output, *, profile="schedule"):
     from tools.qa_schedule_capture import OwnedScheduleCapture
     from blackbox_core.windows_research import privilege, wpr_tool
     if privilege()["mode"] != "ADMINISTRATOR" or not wpr_tool():
         raise NotExecuted("NATIVE_ETW_REQUIRES_WPR_AND_ADMINISTRATOR")
-    capture = OwnedScheduleCapture(output)
+    capture = OwnedScheduleCapture(output, profile=profile)
     capture.start()
     return capture
 
@@ -366,7 +366,7 @@ def finish_schedule(capture, output, helper, pids, *, waits=False):
             "capture_complete": "UNKNOWN", "root_cause": "NOT_ESTABLISHED"}
 
 
-def seven_zip(output, helper):
+def seven_zip(output, helper, *, profile="cpu_file"):
     binary = installed("7z", [Path(os.environ.get("ProgramFiles", "C:/Program Files")) / "7-Zip/7z.exe"])
     native = native_pe_identity(binary)
     identity = {**binary_identity(binary, version_args=["i"]), "native_image": native}
@@ -374,7 +374,7 @@ def seven_zip(output, helper):
     rng = random.Random(20261028)
     source.write_bytes(rng.randbytes(8 * 1024**2))
     digest = file_hash(source)
-    capture = start_schedule(output)
+    capture = start_schedule(output, profile=profile)
     proofs = []
     try:
         started = time.monotonic()

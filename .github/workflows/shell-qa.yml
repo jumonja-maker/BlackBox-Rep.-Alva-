@@ -209,7 +209,7 @@ jobs:
         run: python tools/qa_decoder_standard_token.py --helper decoder/BLACK.BOX-Decoder.exe --trace-root decoder-qa --output decoder-standard-token-qa
       - name: Real owned Windows Sleep, Event and Mutex waits
         run: python tools/qa_decoder_waits.py --helper decoder/BLACK.BOX-Decoder.exe --output decoder-waits-qa
-      - name: Controlled native scheduler-noise budget rejection (separate negative diagnostic)
+      - name: Controlled scheduler-noise A B expected rejection and complete 7-Zip acceptance
         timeout-minutes: 6
         run: python tools/qa_decoder_budget_diagnostic.py --helper decoder/BLACK.BOX-Decoder.exe --output decoder-budget-diagnostic --source-sha "${{ github.event.pull_request.head.sha || github.sha }}"
       - name: Actual third-party 7-Zip, PowerShell 7 and Notepad++ acceptance

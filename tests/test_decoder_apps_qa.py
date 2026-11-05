@@ -1,4 +1,4 @@
-"""Portable checks for the real-app QA download boundary, not Windows evidence."""
+"""Portable QA protocol/profile/download boundaries, not native Windows evidence."""
 from contextlib import closing, redirect_stdout
 from pathlib import Path
 import hashlib
@@ -11,12 +11,15 @@ import struct
 import tempfile
 import unittest
 from unittest.mock import patch
+import xml.etree.ElementTree as ET
 import zipfile
 
 from tools.qa_decoder_apps import (decode_trace, etw_observations, installed, native_pe_identity,
                                    observed_process_image, safe_extract)
 from tools.qa_decoder_budget_diagnostic import (PAIRS, parse_args, validate_noise_oracle,
-                                                validate_original_source, validate_rejection)
+    SEVENZIP_CAPABILITIES, validate_comparison, validate_original_source, validate_positive,
+    validate_progress, validate_rejection, validate_workload_activity)
+from tools.qa_schedule_capture import profile_definition
 
 
 class ControlledBudgetProtocolTests(unittest.TestCase):
@@ -78,6 +81,107 @@ class ControlledBudgetProtocolTests(unittest.TestCase):
                        {'metadata_input_sha256_matches': False}):
             with self.subTest(change=change), self.assertRaisesRegex(AssertionError, 'ORIGINAL_SOURCE_CHANGED'):
                 validate_original_source({**diagnostic, **change}, 'a' * 64, 100)
+
+    def test_positive_case_requires_complete_decode_and_all_original_capabilities(self):
+        result = {'status': 'PASS', 'capabilities': {key: 'PASS' for key in SEVENZIP_CAPABILITIES}}
+        meta = {'status': 'DECODED', 'rows': 120, 'import_completeness': 'ALL_EMITTED_RECORDS'}
+        validate_positive(result, meta)
+        for capability in SEVENZIP_CAPABILITIES:
+            with self.subTest(capability=capability), self.assertRaisesRegex(AssertionError, 'COMPLETE_ACCEPTANCE'):
+                validate_positive({**result, 'capabilities': {**result['capabilities'], capability: 'FAIL_NOT_OBSERVED'}}, meta)
+        with self.assertRaisesRegex(AssertionError, 'COMPLETE_ACCEPTANCE'):
+            validate_positive(result, {**meta, 'status': 'TRUNCATED'})
+        with self.assertRaisesRegex(AssertionError, 'COMPLETE_ACCEPTANCE'):
+            validate_positive({'status': 'PASS', 'capabilities': {}}, meta)
+
+    def test_progress_requires_exact_child_identity_and_monotonic_real_counters(self):
+        ready = {**self.oracle(), 'source_sha256': 'c' * 64, 'begin_qpc': 10}
+        progress = {'schema': 'blackbox.scheduler-noise-progress/1', 'pid': 123, 'created_100ns': '1000',
+            'source_sha256': 'c' * 64, 'qpc_frequency_hz': 10000000, 'sequence': 1, 'qpc': 20,
+            'sample_begin_qpc': 19, 'sample_end_qpc': 20,
+            'workers': [{'tid': 100 + n, 'handoffs': 100} for n in range(2 * PAIRS)], 'total_handoffs': 1600}
+        validate_progress(progress, ready)
+        validate_progress(progress, ready, progress)  # Polling the same immutable receipt is idempotent.
+        for change in ({'pid': 124}, {'created_100ns': '1001'}, {'source_sha256': 'd' * 64},
+                       {'qpc_frequency_hz': 1000}, {'qpc_frequency_hz': True}, {'sequence': 10000},
+                       {'total_handoffs': 1599}, {'sample_begin_qpc': 21}, {'sample_end_qpc': 19},
+                       {'sample_begin_qpc': 19.0}):
+            with self.subTest(change=change), self.assertRaisesRegex(AssertionError, 'PROGRESS_IDENTITY'):
+                validate_progress({**progress, **change}, ready)
+        regressed = json.loads(json.dumps(progress))
+        regressed['sequence'] = 2; regressed['qpc'] = 30
+        regressed['sample_begin_qpc'] = 29; regressed['sample_end_qpc'] = 30
+        regressed['workers'][0]['handoffs'] -= 1
+        regressed['workers'][1]['handoffs'] += 1
+        with self.assertRaisesRegex(AssertionError, 'PROGRESS_REGRESSED'):
+            validate_progress(regressed, ready, progress)
+        with self.assertRaisesRegex(AssertionError, 'SAMPLE_OVERLAP'):
+            validate_progress({**progress, 'sequence': 2, 'sample_begin_qpc': 19}, ready, progress)
+
+    def test_ab_admission_refuses_less_noise_fewer_roundtrips_or_source_changes(self):
+        common = {'input_sha256': 'a' * 64, 'input_bytes': 8 * 1024**2, 'application_sha256': 'b' * 64,
+            'native_image': {'code_kind': 'NATIVE_PE_NO_CLR_COM_DESCRIPTOR'}, 'helper_sha256': 'c' * 64,
+            'script_hashes': {'driver': 'd' * 64},
+            'source_identity': {'actual_source_sha': 'e' * 40, 'source_tree_sha': 'f' * 40},
+            'noise_cleanup': {'status': 'COMPLETED'}, 'capture_cleanup': {'status': 'STOPPED'},
+            'noise_workload_coverage': {'all_16_threads_bracket': True, 'threads_with_positive_handoff_delta': 16},
+            'roundtrips_verified': 2}
+        first = {**common, 'status': 'EXPECTED_NATIVE_BUDGET_REJECTION', 'noise_handoffs': 10000,
+            'capture_profile': {'name': 'schedule', 'xml_sha256': '1' * 64}}
+        second = {**common, 'status': 'COMPLETE_7ZIP_ACCEPTANCE', 'noise_handoffs': 20000,
+            'capture_profile': {'name': 'cpu_file', 'xml_sha256': '2' * 64},
+            'prelude': {'target_handoffs': 10000, 'observed_handoffs': 11000, 'wait_seconds': 1}}
+        validate_comparison(first, second)
+        for change in ({'noise_handoffs': 9999}, {'roundtrips_verified': 1}, {'application_sha256': '0' * 64},
+                       {'noise_workload_coverage': {'all_16_threads_bracket': False}},
+                       {'prelude': {**second['prelude'], 'wait_seconds': 16}}):
+            with self.subTest(change=change), self.assertRaises(AssertionError):
+                validate_comparison(first, {**second, **change})
+
+    def test_each_noise_thread_must_make_real_handoffs_inside_workload_interval(self):
+        first = {'sequence': 1, 'qpc': 20, 'sample_begin_qpc': 19, 'sample_end_qpc': 20,
+                 'qpc_frequency_hz': 10000000,
+                 'workers': [{'tid': 100 + n, 'handoffs': 100} for n in range(16)]}
+        last = {'sequence': 2, 'qpc': 30, 'sample_begin_qpc': 29, 'sample_end_qpc': 30,
+                'qpc_frequency_hz': 10000000,
+                'workers': [{'tid': 100 + n, 'handoffs': 101} for n in range(16)]}
+        clock = {'begin_qpc': 10, 'end_qpc': 40, 'qpc_frequency_hz': 10000000}
+        self.assertEqual(validate_workload_activity(first, last, clock)['threads_with_positive_handoff_delta'], 16)
+        with self.assertRaisesRegex(AssertionError, 'ALL_THREADS_ACTIVE'):
+            validate_workload_activity(first, {**last, 'qpc': 50, 'sample_end_qpc': 50}, clock)
+        for start, end in (({**first, 'sample_begin_qpc': 9}, last),
+                           (first, {**last, 'sample_end_qpc': 41}),
+                           ({**first, 'sample_begin_qpc': 10}, last),
+                           (first, {**last, 'sample_end_qpc': 40})):
+            # The former single qpc point is still inside [10, 40]. The
+            # counter-copy interval crosses the boundary and must be rejected.
+            with self.subTest(start=start['sample_begin_qpc'], end=end['sample_end_qpc']), \
+                    self.assertRaisesRegex(AssertionError, 'ALL_THREADS_ACTIVE'):
+                validate_workload_activity(start, end, clock)
+        last['workers'][0]['handoffs'] = 100
+        with self.assertRaisesRegex(AssertionError, 'ALL_THREADS_ACTIVE'):
+            validate_workload_activity(first, last, clock)
+
+
+class FixedQaProfileTests(unittest.TestCase):
+    def test_cpu_file_profile_preserves_native_oracle_sources_and_buffer_limits(self):
+        tools = Path(__file__).resolve().parents[1] / 'tools'
+        schedule = ET.parse(tools / profile_definition('schedule')[0]).getroot()
+        focused = ET.parse(tools / profile_definition('cpu_file')[0]).getroot()
+        keywords = lambda root: {item.attrib['Value'] for item in root.findall('.//SystemProvider/Keywords/Keyword')}
+        expected = {'ProcessThread', 'Loader', 'SampledProfile', 'FileIO', 'FileIOInit', 'DiskIO', 'DiskIOInit'}
+        self.assertEqual(keywords(focused), expected)
+        self.assertEqual(keywords(schedule), expected | {'CSwitch', 'ReadyThread'})
+        for root in (schedule, focused):
+            self.assertEqual([item.attrib['Value'] for item in root.findall('.//Stacks/Stack')], ['SampledProfile'])
+            self.assertEqual(root.find('.//SystemCollector/BufferSize').attrib['Value'], '128')
+            self.assertEqual(root.find('.//SystemCollector/Buffers').attrib['Value'], '256')
+            self.assertEqual(root.find('.//Profile').attrib['LoggingMode'], 'Memory')
+
+    def test_fixed_profile_map_rejects_untrusted_wpr_expressions_and_non_string_values(self):
+        for value in ('CPU.Verbose', 'schedule!OtherProfile', '../cpu_file', '', None, True, []):
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, 'UNKNOWN_FIXED_QA_CAPTURE_PROFILE'):
+                profile_definition(value)
 
 
 class ApplicationTraceDiagnosticTests(unittest.TestCase):

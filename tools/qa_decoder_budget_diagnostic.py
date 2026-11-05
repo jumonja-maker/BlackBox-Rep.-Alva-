@@ -1,4 +1,4 @@
-"""CI-only controlled native budget rejection, never positive app acceptance.
+"""CI-only native A/B: a rejected scheduler prefix and complete focused 7-Zip.
 
 The historical a80 release trace is unavailable: its cause remains unknown.
 All capture/decode/workload operations delegate to the existing real 7-Zip QA.
@@ -31,7 +31,13 @@ MAX_NOISE_RSS = 128 * 1024**2
 MAX_NOISE_LOG = 64 * 1024
 MAX_OUTPUT = 1152 * 1024**2
 MIN_NOISE_ROWS = 10000
+PRELUDE_SECONDS = 15
+MAX_PROGRESS_RECEIPTS = 281
 EXPECTED_REASON = 'APP_TRACE_NOT_COMPLETELY_DECODED'
+SEVENZIP_CAPABILITIES = frozenset({
+    'compression_extraction_hash_roundtrip', 'owned_native_image_identity', 'cpu_counters',
+    'etw_cpu_samples', 'etw_cpu_stacks', 'etw_file_operations', 'etw_threads', 'pid_lifetime_attribution',
+})
 
 
 def read_json(path, limit=32768):
@@ -126,7 +132,22 @@ def noise_child(output):
         proof['begin_qpc'] = counter(kernel)
         write_receipt(output / 'ready.json', {**proof, 'status': 'READY', 'workers': records})
         deadline = time.monotonic() + NOISE_SECONDS
+        sequence = 0; next_progress = time.monotonic()
         while not (output / 'stop.request').exists() and time.monotonic() < deadline and not errors:
+            if time.monotonic() >= next_progress:
+                sequence += 1
+                apps.require(sequence <= MAX_PROGRESS_RECEIPTS, 'NOISE_PROGRESS_FILE_BUDGET')
+                sample_begin = counter(kernel)
+                counts = [{'tid': record['tid'], 'handoffs': record['handoffs']} for record in records]
+                sample_end = counter(kernel)
+                write_receipt(output / f'progress-{sequence:04d}.json', {
+                    'schema': 'blackbox.scheduler-noise-progress/1', 'sequence': sequence,
+                    'pid': proof['pid'], 'created_100ns': proof['created_100ns'],
+                    'source_sha256': proof['source_sha256'], 'qpc_frequency_hz': proof['qpc_frequency_hz'],
+                    'qpc': sample_end, 'sample_begin_qpc': sample_begin, 'sample_end_qpc': sample_end,
+                    'workers': counts,
+                    'total_handoffs': sum(record['handoffs'] for record in counts)})
+                next_progress = time.monotonic() + .25
             time.sleep(.02)
         proof['stop_requested'] = (output / 'stop.request').exists()
     finally:
@@ -160,6 +181,7 @@ class NoiseOwner:
         self.output = output; self.owner = None; self.log = None; self.errors = []
         self.watcher_stop = threading.Event(); self.watcher = None
         self.started = None; self.max_rss = 0; self.cleanup = {'status': 'NOT_ESTABLISHED'}
+        self.prelude = {'target_handoffs': 0, 'wait_seconds': 0}
 
     def start(self):
         import psutil
@@ -198,10 +220,29 @@ class NoiseOwner:
             apps.require(self.owner.process.poll() is None and not self.errors and time.monotonic() < deadline,
                          'NOISE_READY_NOT_ESTABLISHED')
             time.sleep(.02)
-        ready = read_json(self.output / 'ready.json')
+        ready = read_json(self.output / 'ready.json'); self.ready = ready
         apps.require(ready.get('status') == 'READY' and ready.get('pid') == self.owner.process.pid and
                      ready.get('created_100ns') == self.identity['creation_time_filetime_ticks'] and
                      ready.get('source_sha256') == apps.file_hash(Path(__file__)), 'NOISE_IDENTITY_MISMATCH')
+
+    def await_handoffs(self, target, whole_deadline):
+        started = time.monotonic(); deadline = min(started + PRELUDE_SECONDS, whole_deadline)
+        previous = None
+        while time.monotonic() < deadline:
+            apps.require(not self.errors and self.owner.process.poll() is None, 'NOISE_PRELUDE_OWNER_FAILED')
+            paths = sorted(self.output.glob('progress-????.json'))
+            apps.require(len(paths) <= MAX_PROGRESS_RECEIPTS, 'NOISE_PROGRESS_FILE_BUDGET')
+            if paths:
+                path = paths[-1]; progress = read_json(path)
+                validate_progress(progress, self.ready, previous)
+                previous = progress
+                if progress['total_handoffs'] >= target:
+                    self.prelude = {'target_handoffs': target, 'observed_handoffs': progress['total_handoffs'],
+                        'wait_seconds': time.monotonic() - started, 'sequence': progress['sequence'],
+                        'receipt_sha256': apps.file_hash(path), 'receipt_bytes': path.stat().st_size}
+                    return
+            time.sleep(.02)
+        raise AssertionError('COMPARABLE_NOISE_PRELUDE_NOT_ESTABLISHED')
 
     def stop(self):
         if self.cleanup.get('status') == 'COMPLETED':
@@ -214,6 +255,11 @@ class NoiseOwner:
         self.oracle = read_json(self.output / 'oracle.json')
         validate_noise_oracle(self.oracle, self.owner.process.pid,
                               self.identity['creation_time_filetime_ticks'])
+        apps.require(self.oracle.get('source_sha256') == self.ready['source_sha256'] and
+            {w['tid']: w['created_100ns'] for w in self.oracle['workers']} ==
+            {w['tid']: w['created_100ns'] for w in self.ready['workers']} and
+            sum(w['handoffs'] for w in self.oracle['workers']) >= self.prelude.get('observed_handoffs', 0),
+            'NOISE_FINAL_IDENTITY_OR_PROGRESS_CHANGED')
         # Read the live Job Object before close can hide a leaked descendant.
         class Accounting(C.Structure):
             _fields_ = [('times', C.c_int64 * 4), ('page_faults', W.DWORD),
@@ -280,6 +326,73 @@ def validate_rejection(meta, actual_hash, native):
         'NATIVE_NOISE_ATTRIBUTION_NOT_ESTABLISHED')
 
 
+def validate_progress(progress, ready, previous=None):
+    workers = progress.get('workers')
+    apps.require(progress.get('schema') == 'blackbox.scheduler-noise-progress/1' and
+        progress.get('pid') == ready['pid'] and progress.get('created_100ns') == ready['created_100ns'] and
+        progress.get('source_sha256') == ready['source_sha256'] and
+        type(progress.get('qpc_frequency_hz')) is int and progress['qpc_frequency_hz'] > 0 and
+        progress['qpc_frequency_hz'] == ready['qpc_frequency_hz'] and
+        type(progress.get('sequence')) is int and 1 <= progress['sequence'] <= MAX_PROGRESS_RECEIPTS and
+        type(progress.get('qpc')) is int and type(progress.get('sample_begin_qpc')) is int and
+        type(progress.get('sample_end_qpc')) is int and
+        0 <= ready['begin_qpc'] <= progress['sample_begin_qpc'] <= progress['sample_end_qpc'] == progress['qpc'] and
+        type(workers) is list and len(workers) == 2 * PAIRS and
+        {w['tid'] for w in workers} == {w['tid'] for w in ready['workers']} and
+        all(type(w.get('handoffs')) is int and 0 <= w['handoffs'] <= 2**63 - 1 for w in workers) and
+        type(progress.get('total_handoffs')) is int and
+        progress['total_handoffs'] == sum(w['handoffs'] for w in workers), 'NOISE_PROGRESS_IDENTITY_OR_COUNTS')
+    if previous is not None:
+        old = {w['tid']: w['handoffs'] for w in previous['workers']}
+        apps.require(progress['sequence'] >= previous['sequence'] and progress['qpc'] >= previous['qpc'] and
+            all(w['handoffs'] >= old[w['tid']] for w in workers), 'NOISE_PROGRESS_REGRESSED')
+        apps.require((progress == previous if progress['sequence'] == previous['sequence'] else
+            progress['sample_begin_qpc'] >= previous['sample_end_qpc']), 'NOISE_PROGRESS_SAMPLE_OVERLAP')
+
+
+def validate_positive(result, meta):
+    capabilities = result.get('capabilities')
+    apps.require(result.get('status') == 'PASS' and type(capabilities) is dict and
+        set(capabilities) == SEVENZIP_CAPABILITIES and all(v == 'PASS' for v in capabilities.values()) and
+        meta.get('status') == 'DECODED' and type(meta.get('rows')) is int and meta['rows'] > 0 and
+        meta.get('import_completeness') == 'ALL_EMITTED_RECORDS', 'FOCUSED_7ZIP_COMPLETE_ACCEPTANCE_FAILED')
+
+
+def validate_workload_activity(first, last, clock):
+    before = {w['tid']: w['handoffs'] for w in first['workers']}
+    after = {w['tid']: w['handoffs'] for w in last['workers']}
+    apps.require(all(type(snapshot.get(key)) is int for snapshot in (first, last)
+        for key in ('sequence', 'sample_begin_qpc', 'sample_end_qpc', 'qpc_frequency_hz')) and
+        all(type(clock.get(key)) is int for key in ('begin_qpc', 'end_qpc', 'qpc_frequency_hz')) and
+        0 <= clock['begin_qpc'] < clock['end_qpc'] and clock['qpc_frequency_hz'] > 0 and
+        first['qpc_frequency_hz'] == last['qpc_frequency_hz'] == clock['qpc_frequency_hz'] and
+        first['sequence'] < last['sequence'] and
+        clock['begin_qpc'] < first['sample_begin_qpc'] <= first['sample_end_qpc'] <=
+        last['sample_begin_qpc'] <= last['sample_end_qpc'] < clock['end_qpc'] and
+        len(before) == 2 * PAIRS and set(before) == set(after) and
+        all(after[tid] > before[tid] for tid in before), 'NOISE_ALL_THREADS_ACTIVE_IN_WORKLOAD_NOT_ESTABLISHED')
+    return {'threads_with_positive_handoff_delta': len(before),
+            'handoffs_between_receipts': sum(after.values()) - sum(before.values()),
+            'first_sample_begin_qpc': first['sample_begin_qpc'], 'first_sample_end_qpc': first['sample_end_qpc'],
+            'last_sample_begin_qpc': last['sample_begin_qpc'], 'last_sample_end_qpc': last['sample_end_qpc']}
+
+
+def workload_activity(noise, clock):
+    paths = sorted(noise.output.glob('progress-????.json'))
+    apps.require(len(paths) <= MAX_PROGRESS_RECEIPTS, 'NOISE_PROGRESS_FILE_BUDGET')
+    selected = []; previous = None
+    for path in paths:
+        progress = read_json(path)
+        validate_progress(progress, noise.ready, previous); previous = progress
+        if clock['begin_qpc'] < progress['sample_begin_qpc'] <= progress['sample_end_qpc'] < clock['end_qpc']:
+            selected.append((path, progress))
+    apps.require(len(selected) >= 2, 'NOISE_WORKLOAD_PROGRESS_INTERVAL_MISSING')
+    first_path, first = selected[0]; last_path, last = selected[-1]
+    result = validate_workload_activity(first, last, clock)
+    return {**result, 'first_receipt_sha256': apps.file_hash(first_path),
+            'last_receipt_sha256': apps.file_hash(last_path)}
+
+
 def validate_original_source(diagnostic, actual_hash, actual_bytes):
     apps.require(diagnostic.get('schema') == 'blackbox.decoder-app-trace-diagnostic/1' and
         diagnostic.get('source_sha256') == actual_hash and
@@ -328,19 +441,23 @@ def native_attribution(index, meta, oracle, deadline):
     return result
 
 
-def run_diagnostic(args):
-    require_hosted_windows()
-    identity = source_identity(args.source_sha)
+def run_case(output, helper, source_sha, deadline, profile, target_handoffs=0):
+    identity = source_identity(source_sha)
     apps.require(identity['source_identity_status'] == 'VERIFIED_EXPECTED_HEAD', 'DIAGNOSTIC_SOURCE_IDENTITY')
-    output = args.output.resolve(); output.mkdir(parents=True, exist_ok=False)
+    output.mkdir(parents=True, exist_ok=False)
     work = output / '7zip'; work.mkdir()
     noise = NoiseOwner(output / 'noise')
     proof = {'schema': 'blackbox.native-budget-diagnostic/1', 'status': 'REPRODUCTION_NOT_ESTABLISHED',
         'source_identity': identity, 'historical_a80_cause': 'NOT_ESTABLISHED',
-        'positive_application_acceptance': 'NOT_ESTABLISHED', 'synthetic_etw': False}
+        'positive_application_acceptance': 'NOT_ESTABLISHED', 'synthetic_etw': False,
+        'requested_profile': profile}
     captures = []; original_factory = apps.start_schedule
     capture_cleanup = {'status': 'NOT_STARTED', 'cleanup_required': False}
-    deadline = time.monotonic() + 300
+    capture_profile = {}
+    workload_clock = {}
+    kernel = kernel_api()
+    frequency = counter(kernel, 'QueryPerformanceFrequency')
+    workload_clock['qpc_frequency_hz'] = frequency
 
     class Capture:
         def __init__(self, actual):
@@ -349,6 +466,7 @@ def run_diagnostic(args):
         def active(self):
             return self.actual.active
         def stop(self):
+            workload_clock['end_qpc'] = counter(kernel)
             result = self.actual.stop(); captures.append(result)
             capture_cleanup.update(status='STOPPED', cleanup_required=False)
             noise.stop()
@@ -366,12 +484,20 @@ def run_diagnostic(args):
                 if noise.owner:
                     noise.stop()
 
-    def factory(folder):
+    def factory(folder, *, profile='schedule'):
+        apps.require(profile == proof['requested_profile'], 'DIAGNOSTIC_PROFILE_NOT_FORWARDED')
         capture_cleanup.update(status='START_REQUESTED', cleanup_required=True)
-        actual = original_factory(folder)
+        actual = original_factory(folder, profile=profile)
         capture_cleanup.update(status='RECORDING', cleanup_required=True)
         try:
+            apps.require(actual.qa_profile == profile, 'DIAGNOSTIC_ACTUAL_PROFILE_MISMATCH')
+            capture_profile.update(name=actual.qa_profile, entry=actual.profile_entry,
+                                   xml_sha256=apps.file_hash(actual.profile_path))
             noise.start()
+            if target_handoffs:
+                noise.await_handoffs(target_handoffs, deadline)
+            apps.require(noise.ready['qpc_frequency_hz'] == frequency, 'DIAGNOSTIC_NOISE_COUNTER_MISMATCH')
+            workload_clock['begin_qpc'] = counter(kernel)
         except BaseException:
             try:
                 actual.cancel()
@@ -386,8 +512,9 @@ def run_diagnostic(args):
     try:
         apps.start_schedule = factory
         expected_assertion_observed = False
+        result = None
         try:
-            apps.seven_zip(work, args.helper.resolve(strict=True))
+            result = apps.seven_zip(work, helper, profile=profile)
         except AssertionError as error:
             apps.require(str(error) == EXPECTED_REASON, 'DIAGNOSTIC_UNEXPECTED_ACCEPTANCE_ERROR')
             expected_assertion_observed = True
@@ -407,8 +534,13 @@ def run_diagnostic(args):
         native = native_attribution(index, meta, noise.oracle, deadline)
         proof['native_attribution'] = native
         proof['expected_assertion_observed'] = expected_assertion_observed
-        apps.require(expected_assertion_observed, 'REPRODUCTION_NOT_ESTABLISHED')
-        validate_rejection(meta, source_hash, native)
+        if profile == 'schedule':
+            apps.require(expected_assertion_observed, 'REPRODUCTION_NOT_ESTABLISHED')
+            validate_rejection(meta, source_hash, native)
+        else:
+            apps.require(not expected_assertion_observed, 'FOCUSED_PROFILE_STILL_TRUNCATED')
+            validate_positive(result, meta)
+            apps.require(native['qpc_frequency_matches'], 'FOCUSED_TRACE_COUNTER_FREQUENCY_MISMATCH')
         roundtrips = workload.get('roundtrips_verified'); workloads = workload.get('workloads')
         apps.require(type(roundtrips) is int and 1 <= roundtrips <= 3 and type(workloads) is list
             and len(workloads) == 2 * roundtrips and all(p.get('exit_code') == 0 and
@@ -418,6 +550,10 @@ def run_diagnostic(args):
         apps.require(workload.get('input_sha256') == input_hash and workload.get('input_bytes') == 8 * 1024**2 and
             all(apps.file_hash(work / f'roundtrip-{n}' / 'input.bin') == input_hash for n in range(roundtrips)),
             'DIAGNOSTIC_ROUNDTRIP_HASH_MISMATCH')
+        apps.require(workload_clock['begin_qpc'] < workload_clock['end_qpc'] and
+            all(w['begin_qpc'] <= workload_clock['begin_qpc'] < workload_clock['end_qpc'] <= w['end_qpc']
+                for w in noise.oracle['workers']), 'NOISE_THREADS_DID_NOT_COVER_ENTIRE_WORKLOAD')
+        activity = workload_activity(noise, workload_clock)
         files = {'etl': source, 'index': index, 'decoder_summary': meta_path,
             'decoder_diagnostic': diagnostic_path, 'workload_oracle': oracle_path,
             'noise_ready': noise.output / 'ready.json', 'noise_oracle': noise.output / 'oracle.json'}
@@ -425,13 +561,29 @@ def run_diagnostic(args):
         apps.require(apps.file_hash(source) == source_hash and apps.file_hash(index) == index_hash and
             sum(p.stat().st_size for p in output.rglob('*') if p.is_file()) <= MAX_OUTPUT,
             'DIAGNOSTIC_SOURCE_CHANGED_OR_OUTPUT_BUDGET')
-        final_identity = source_identity(args.source_sha)
+        from tools.qa_schedule_capture import profile_definition
+        profile_relative = profile_definition(profile)[0]
+        profile_path = ROOT / 'tools' / profile_relative
+        apps.require(apps.file_hash(profile_path) == capture_profile['xml_sha256'], 'DIAGNOSTIC_PROFILE_CHANGED')
+        final_identity = source_identity(source_sha)
         apps.require(final_identity['source_identity_status'] == 'VERIFIED_EXPECTED_HEAD',
                      'DIAGNOSTIC_FINAL_SOURCE_IDENTITY')
-        proof.update(status='EXPECTED_NATIVE_BUDGET_REJECTION', decoder_status=meta['status'],
+        proof.update(status='EXPECTED_NATIVE_BUDGET_REJECTION' if profile == 'schedule' else 'COMPLETE_7ZIP_ACCEPTANCE',
+            decoder_status=meta['status'],
             rows=meta['rows'], native_attribution=native, noise_cleanup=noise.cleanup,
             roundtrips_verified=roundtrips, decoder_reported_lost_events=meta.get('decoder_reported_lost_events'),
-            evidence=hashes, final_source_identity=final_identity)
+            evidence=hashes, final_source_identity=final_identity, capture_profile=capture_profile,
+            input_sha256=input_hash, input_bytes=workload['input_bytes'],
+            application_sha256=workload['application']['sha256'], native_image=workload['application']['native_image'],
+            noise_workload_coverage={**workload_clock, 'qpc_frequency_hz': frequency,
+                                     'all_16_threads_bracket': True, **activity},
+            helper_sha256=apps.file_hash(helper),
+            script_hashes={'driver': apps.file_hash(Path(__file__)), 'apps': apps.file_hash(Path(apps.__file__)),
+                           'capture': apps.file_hash(ROOT / 'tools' / 'qa_schedule_capture.py')},
+            owned_processes=[{'pid': p['pid'], 'created_100ns': p['creation_time_filetime_ticks'],
+                              'owned_image_matches_requested': p['owned_image_matches_requested']} for p in workloads])
+        if profile == 'cpu_file':
+            proof.update(positive_application_acceptance='ALL_EIGHT_ORACLES_PASS', capabilities=result['capabilities'])
     except BaseException as error:
         proof.update(error_type=type(error).__name__, reason_code=apps._qa_code(str(error)))
     finally:
@@ -447,12 +599,60 @@ def run_diagnostic(args):
         proof['noise_cleanup'] = noise.cleanup
         if noise.cleanup.get('status') == 'COMPLETED':
             proof['noise_handoffs'] = sum(w['handoffs'] for w in noise.oracle['workers'])
+            proof['prelude'] = noise.prelude
+        apps.write_json(output / 'budget-diagnostic.json', proof)
+    return proof
+
+
+def validate_comparison(first, second):
+    apps.require(first.get('status') == 'EXPECTED_NATIVE_BUDGET_REJECTION' and
+        second.get('status') == 'COMPLETE_7ZIP_ACCEPTANCE', 'CONTROLLED_PROFILE_A_B_NOT_ESTABLISHED')
+    for key in ('input_sha256', 'input_bytes', 'application_sha256', 'native_image', 'helper_sha256', 'script_hashes'):
+        apps.require(first.get(key) == second.get(key) and first.get(key) is not None, 'CONTROLLED_A_B_SOURCE_CHANGED')
+    apps.require(first['source_identity']['actual_source_sha'] == second['source_identity']['actual_source_sha'] and
+        first['source_identity']['source_tree_sha'] == second['source_identity']['source_tree_sha'] and
+        first['capture_profile']['name'] == 'schedule' and second['capture_profile']['name'] == 'cpu_file' and
+        first['capture_profile']['xml_sha256'] != second['capture_profile']['xml_sha256'] and
+        type(first.get('noise_handoffs')) is int and type(second.get('noise_handoffs')) is int and
+        second['noise_handoffs'] >= first['noise_handoffs'] > 0 and
+        second['roundtrips_verified'] >= first['roundtrips_verified'] > 0 and
+        second['prelude']['target_handoffs'] == first['noise_handoffs'] and
+        second['prelude']['observed_handoffs'] >= first['noise_handoffs'] and
+        0 <= second['prelude']['wait_seconds'] <= PRELUDE_SECONDS and
+        all(case['noise_cleanup']['status'] == 'COMPLETED' and case['capture_cleanup']['status'] == 'STOPPED'
+            and case['noise_workload_coverage']['all_16_threads_bracket'] is True
+            and case['noise_workload_coverage']['threads_with_positive_handoff_delta'] == 2 * PAIRS
+            for case in (first, second)), 'CONTROLLED_A_B_NOISE_OR_CLEANUP_NOT_COMPARABLE')
+
+
+def run_diagnostic(args):
+    deadline = time.monotonic() + 300
+    require_hosted_windows()
+    output = args.output.resolve(); output.mkdir(parents=True, exist_ok=False)
+    proof = {'schema': 'blackbox.native-budget-profile-ab/1', 'status': 'REPRODUCTION_NOT_ESTABLISHED',
+             'historical_a80_cause': 'NOT_ESTABLISHED', 'cases': {}}
+    try:
+        helper = args.helper.resolve(strict=True)
+        first = run_case(output / 'a-schedule', helper, args.source_sha, deadline, 'schedule')
+        proof['cases']['A'] = first
+        apps.require(first['status'] == 'EXPECTED_NATIVE_BUDGET_REJECTION', 'CONTROLLED_A_REJECTION_NOT_ESTABLISHED')
+        apps.require(time.monotonic() < deadline, 'CONTROLLED_A_B_DEADLINE')
+        second = run_case(output / 'b-cpu-file', helper, args.source_sha, deadline, 'cpu_file', first['noise_handoffs'])
+        proof['cases']['B'] = second
+        validate_comparison(first, second)
+        apps.require(time.monotonic() < deadline, 'CONTROLLED_A_B_DEADLINE')
+        apps.require(sum(p.stat().st_size for p in output.rglob('*') if p.is_file()) <= MAX_OUTPUT,
+                     'CONTROLLED_A_B_COMBINED_OUTPUT_BUDGET')
+        proof['status'] = 'CONTROLLED_PROFILE_A_B_VERIFIED'
+    except BaseException as error:
+        proof.update(error_type=type(error).__name__, reason_code=apps._qa_code(str(error)))
+    finally:
         apps.write_json(output / 'budget-diagnostic.json', proof)
         print('CONTROLLED_NATIVE_BUDGET_DIAGNOSTIC ' + json.dumps(proof, sort_keys=True), flush=True)
         if os.environ.get('GITHUB_STEP_SUMMARY'):
             with Path(os.environ['GITHUB_STEP_SUMMARY']).open('a', encoding='utf-8') as stream:
-                stream.write('\n- Controlled native budget diagnostic ' + json.dumps(proof, sort_keys=True) + '\n')
-    return 0 if proof['status'] == 'EXPECTED_NATIVE_BUDGET_REJECTION' else 1
+                stream.write('\n- Controlled native profile A/B ' + json.dumps(proof, sort_keys=True) + '\n')
+    return 0 if proof['status'] == 'CONTROLLED_PROFILE_A_B_VERIFIED' else 1
 
 
 def parse_args(argv=None):

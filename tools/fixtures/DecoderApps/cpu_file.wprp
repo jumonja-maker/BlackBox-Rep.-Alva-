@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<WindowsPerformanceRecorder Version="1.0" Author="BLACK.BOX owned CI QA">
+  <Profiles>
+    <SystemCollector Id="CpuFileCollector" Name="BLACKBOX CPU file QA">
+      <BufferSize Value="128" />
+      <Buffers Value="256" />
+    </SystemCollector>
+    <SystemProvider Id="CpuFileProvider">
+      <Keywords>
+        <Keyword Value="ProcessThread" />
+        <Keyword Value="Loader" />
+        <Keyword Value="SampledProfile" />
+        <Keyword Value="FileIO" />
+        <Keyword Value="FileIOInit" />
+        <Keyword Value="DiskIO" />
+        <Keyword Value="DiskIOInit" />
+      </Keywords>
+      <Stacks><Stack Value="SampledProfile" /></Stacks>
+    </SystemProvider>
+    <Profile Id="BlackBoxCpuFile.Verbose.Memory" Name="BlackBoxCpuFile"
+             Description="Owned CPU stacks, process threads and file observations"
+             LoggingMode="Memory" DetailLevel="Verbose">
+      <Collectors>
+        <SystemCollectorId Value="CpuFileCollector">
+          <SystemProviderId Value="CpuFileProvider" />
+        </SystemCollectorId>
+      </Collectors>
+    </Profile>
+  </Profiles>
+</WindowsPerformanceRecorder>
