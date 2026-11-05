@@ -1086,6 +1086,7 @@ class ControlledBudgetProtocolTests(unittest.TestCase):
 
     def test_ab_admission_refuses_less_noise_fewer_roundtrips_or_source_changes(self):
         budget = {'workload_policy': 'CONTROLLED_NATIVE_60', 'requested_process_timeout_seconds': 60,
+            'requested_minimum_roundtrips': 1, 'roundtrips_verified': 2,
             'workloads': [{'pid': 100 + n, 'role': 'COMPRESS' if n % 2 == 0 else 'EXTRACT', 'cycle': n // 2,
                 'configured_timeout_seconds': 60, 'elapsed_monitor_seconds': 31 if n % 2 == 0 else .5,
                 'exit_code': 0} for n in range(4)]}
@@ -1094,6 +1095,7 @@ class ControlledBudgetProtocolTests(unittest.TestCase):
             'script_hashes': {'driver': 'd' * 64},
             'actual_native_module_encoding': 'PER_EVENT_MODULES_V1',
             'requested_workload_policy': 'CONTROLLED_NATIVE_60', 'requested_process_timeout_seconds': 60,
+            'requested_minimum_roundtrips': 1, 'requested_minimum_prelude_seconds': 0,
             'workload_budget': budget,
             'requested_noise_policy': {'implementation': 'NATIVE_WIN32', 'ttl_seconds': 90,
                                        'progress_limit': 361, 'owner_seconds': 105},
@@ -1107,10 +1109,14 @@ class ControlledBudgetProtocolTests(unittest.TestCase):
             'noise_workload_coverage': {'all_16_threads_bracket': True, 'threads_with_positive_handoff_delta': 16},
             'roundtrips_verified': 2}
         first = {**common, 'status': 'EXPECTED_NATIVE_BUDGET_NEGATIVE', 'noise_handoffs': 10000,
+            'prelude': {'target_handoffs': 0, 'requested_minimum_seconds': 0, 'wait_seconds': 0, 'status': 'NOT_REQUIRED'},
             'capture_profile': {'name': 'schedule', 'xml_sha256': '1' * 64}}
         second = {**common, 'status': 'COMPLETE_7ZIP_ACCEPTANCE', 'noise_handoffs': 20000,
+            'requested_minimum_roundtrips': 2,
+            'workload_budget': {**budget, 'requested_minimum_roundtrips': 2},
             'capture_profile': {'name': 'cpu_file', 'xml_sha256': '2' * 64},
-            'prelude': {'target_handoffs': 10000, 'observed_handoffs': 11000, 'wait_seconds': 1}}
+            'prelude': {'target_handoffs': 10000, 'observed_handoffs': 11000,
+                        'requested_minimum_seconds': 0, 'wait_seconds': 1, 'status': 'COMPLETED'}}
         validate_comparison(first, second)
         for change in ({'noise_handoffs': 9999}, {'roundtrips_verified': 1}, {'application_sha256': '0' * 64},
                        {'noise_workload_coverage': {'all_16_threads_bracket': False}},
@@ -1123,13 +1129,15 @@ class ControlledBudgetProtocolTests(unittest.TestCase):
                        {'noise_policy_receipts': {**common['noise_policy_receipts'],
                             'oracle': {**common['noise_policy_receipts']['oracle'], 'progress_limit': 361.0}}},
                        {'native_timing': {**common['native_timing'], 'work_end_qpc': 76000}},
-                       {'workload_budget': {**budget, 'workloads': [budget['workloads'][0],
+                       {'workload_budget': {**budget, 'requested_minimum_roundtrips': 2,
+                            'workloads': [budget['workloads'][0],
                             {**budget['workloads'][1], 'configured_timeout_seconds': 30}, *budget['workloads'][2:]]}}):
             with self.subTest(change=change), self.assertRaises(AssertionError):
                 validate_comparison(first, {**second, **change})
 
     def test_workload_policy_requires_actual_budget_and_duration_of_every_returned_process(self):
         workload = {'workload_policy': 'CONTROLLED_NATIVE_60', 'requested_process_timeout_seconds': 60,
+            'requested_minimum_roundtrips': 1, 'roundtrips_verified': 1,
             'workloads': [{'pid': 100 + n, 'role': 'COMPRESS' if n == 0 else 'EXTRACT', 'cycle': 0,
                 'configured_timeout_seconds': 60, 'elapsed_monitor_seconds': 31 if n == 0 else .5,
                 'exit_code': 0} for n in range(2)]}
@@ -2040,6 +2048,275 @@ class PreparedNativeBuildProtocolTests(unittest.TestCase):
             with self.assertRaises(AssertionError):
                 fixture.load_prepared_native_noise(output, self.head, expected_manifest_sha256='a' * 64)
             self.assertEqual(state['calls'], 0)
+
+
+class ControlledMinimumStimulusProtocolTests(unittest.TestCase):
+    """Fake clocks, files and role receipts test control flow, not Windows evidence."""
+
+    def invoke_seven_zip(self, root, *, minimum=None, cycle_seconds=5, fail_extract=False):
+        binary = root / 'protocol-only.exe'; binary.write_bytes(b'not an executable')
+        now = [0.0]; calls = []; capture = SimpleNamespace(active=False)
+        failure = AssertionError('APP_WORKLOAD_DEADLINE')
+        def run(argv, log, **kwargs):
+            calls.append((list(argv), dict(kwargs)))
+            now[0] += cycle_seconds / 2
+            if kwargs['role'] == 'EXTRACT':
+                if fail_extract:
+                    raise failure
+                destination = Path(argv[4][2:]); destination.mkdir()
+                (destination / 'input.bin').write_bytes((root / 'input.bin').read_bytes())
+            return {'pid': 100 + len(calls), 'exit_code': 0, 'owned_image_matches_requested': True,
+                    'cpu_seconds_observed': 1}
+        options = {} if minimum is None else {'minimum_roundtrips': minimum}
+        observations = {'cpu_samples': 1, 'cpu_samples_with_stacks': 1, 'file_events': 1,
+                        'thread_events': 1, 'pid_lifetimes_confirmed': True}
+        with patch('tools.qa_decoder_apps.installed', return_value=binary), \
+                patch('tools.qa_decoder_apps.native_pe_identity', return_value={}), \
+                patch('tools.qa_decoder_apps.binary_identity', return_value={'sha256': 'a' * 64}), \
+                patch('tools.qa_decoder_apps.random.Random', return_value=SimpleNamespace(
+                    randbytes=lambda count: b'explicit protocol input')) as rng, \
+                patch('tools.qa_decoder_apps.start_schedule', return_value=capture), \
+                patch('tools.qa_decoder_apps.monitored_run', side_effect=run), \
+                patch('tools.qa_decoder_apps.finish_schedule', return_value={'observations': observations}) as finish, \
+                patch('tools.qa_decoder_apps.time.monotonic', side_effect=lambda: now[0]):
+            if fail_extract:
+                with self.assertRaises(AssertionError) as caught:
+                    seven_zip(root, root / 'unused-helper', **options)
+                self.assertIs(caught.exception, failure); finish.assert_not_called()
+                result = None
+            else:
+                result = seven_zip(root, root / 'unused-helper', **options)
+            rng.assert_called_once_with(20261028)
+        return result, json.loads((root / 'workload-oracle.json').read_text()), calls
+
+    def test_completed_roundtrip_minimum_overrides_early_four_second_break_but_not_maximum(self):
+        for minimum, seconds, expected in ((None, 5, 1), (2, 5, 2), (3, 5, 3), (1, 1, 3)):
+            with self.subTest(minimum=minimum, cycle_seconds=seconds), tempfile.TemporaryDirectory() as tmp:
+                result, oracle, calls = self.invoke_seven_zip(Path(tmp), minimum=minimum, cycle_seconds=seconds)
+                requested = 1 if minimum is None else minimum
+                self.assertEqual(oracle['requested_minimum_roundtrips'], requested)
+                self.assertEqual(oracle['roundtrips_verified'], expected)
+                self.assertEqual(result['oracle']['requested_minimum_roundtrips'], requested)
+                self.assertEqual(result['oracle']['roundtrips_verified'], expected)
+                self.assertEqual(len(calls), 2 * expected)
+                for number, (argv, kwargs) in enumerate(calls):
+                    self.assertEqual(kwargs, {'role': 'COMPRESS' if number % 2 == 0 else 'EXTRACT', 'cycle': number // 2})
+                    if number % 2 == 0:
+                        self.assertEqual(argv[1:8], ['a', '-t7z', '-mx=7', '-mmt=2', '-bd', '-y', str(Path(tmp) / f'roundtrip-{number // 2}.7z')])
+                self.assertEqual(oracle['requested_process_timeout_seconds'], 30)
+
+    def test_failed_roundtrip_retains_requested_minimum_without_claiming_completed_work(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            result, oracle, calls = self.invoke_seven_zip(Path(tmp), minimum=2, fail_extract=True)
+            self.assertIsNone(result); self.assertEqual(len(calls), 2)
+            self.assertEqual(oracle['requested_minimum_roundtrips'], 2)
+            self.assertEqual(oracle['roundtrips_verified'], 0)
+            self.assertEqual(oracle['status'], 'INCOMPLETE_WORKLOAD_FAILURE')
+            self.assertEqual(oracle['failure_reason_code'], 'APP_WORKLOAD_DEADLINE')
+
+    def test_invalid_minima_fail_before_application_or_case_source_resource_work(self):
+        from tools import qa_decoder_budget_diagnostic as driver
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / 'must-not-exist'
+            with patch('tools.qa_decoder_apps.installed') as installed_app, \
+                    patch('tools.qa_decoder_apps.start_schedule') as capture, \
+                    patch.object(driver, 'source_identity') as identity:
+                for minimum in (True, False, 0, -1, 4, 2.0, '2', None):
+                    with self.subTest(minimum=minimum), self.assertRaisesRegex(AssertionError, 'INVALID_QA_MINIMUM_ROUNDTRIPS'):
+                        seven_zip(output, output / 'unused', minimum_roundtrips=minimum)
+                    with self.subTest(case_minimum=minimum), self.assertRaisesRegex(AssertionError, 'INVALID_QA_MINIMUM_ROUNDTRIPS'):
+                        driver.run_case(output, output / 'unused', 'a' * 40, 100, 'schedule', {},
+                            'ROW_BUDGET_NEGATIVE', minimum_roundtrips=minimum)
+                for minimum in (True, -1, 0, 9, 10.0, 11, None):
+                    with self.subTest(prelude_minimum=minimum), self.assertRaisesRegex(AssertionError, 'INVALID_CONTROLLED_STIMULUS_REQUEST'):
+                        driver.run_case(output, output / 'unused', 'a' * 40, 100, 'cpu_file',
+                            {'implementation': 'PYTHON_CTYPES_WIN32'}, 'OUTPUT_BUDGET_NEGATIVE',
+                            minimum_prelude_seconds=minimum)
+                installed_app.assert_not_called(); capture.assert_not_called(); identity.assert_not_called()
+            self.assertFalse(output.exists())
+
+    def invoke_prelude(self, *, target=16, minimum=10, whole_deadline=100, hash_advance=0, implementation='PYTHON_CTYPES_WIN32'):
+        templates = ProducerNoisePolicyProtocolTests(); ready = templates.ready(implementation)
+        path = Path('progress-0001.json'); now = [0.0]; read_times = []
+        noise = NoiseOwner(SimpleNamespace(glob=lambda pattern: [path]), {
+            'implementation': implementation, 'expected_native_handles': ready['expected_native_handles']})
+        noise.ready = ready
+        noise.owner = SimpleNamespace(process=SimpleNamespace(poll=lambda: None))
+        def read(unused):
+            read_times.append(now[0])
+            return templates.progress(ready, int(now[0]) + 1)
+        def sleep(seconds):
+            self.assertEqual(seconds, .02)
+            self.assertLess(now[0], 20, 'fake-clock guard prevents protocol-test hangs')
+            now[0] += 1
+        def hashed(unused):
+            now[0] += hash_advance
+            return 'c' * 64
+        with patch('tools.qa_decoder_budget_diagnostic.time.monotonic', side_effect=lambda: now[0]), \
+                patch('tools.qa_decoder_budget_diagnostic.time.sleep', side_effect=sleep), \
+                patch('tools.qa_decoder_budget_diagnostic.read_json', side_effect=read), \
+                patch('tools.qa_decoder_apps.file_hash', side_effect=hashed), \
+                patch('pathlib.Path.stat', return_value=SimpleNamespace(st_size=123)):
+            failure = None
+            try:
+                noise.await_handoffs(target, whole_deadline, minimum_seconds=minimum)
+            except AssertionError as error:
+                failure = error
+        return noise.prelude, read_times, failure
+
+    def test_early_target_cannot_complete_python_prelude_before_ten_seconds_and_native_stays_zero(self):
+        prelude, reads, failure = self.invoke_prelude()
+        self.assertIsNone(failure); self.assertEqual(prelude['status'], 'COMPLETED')
+        self.assertEqual(prelude['requested_minimum_seconds'], 10)
+        self.assertEqual(prelude['wait_seconds'], 10)
+        self.assertEqual(reads, list(range(11)))
+        self.assertGreaterEqual(prelude['observed_handoffs'], 16)
+        native, reads, failure = self.invoke_prelude(minimum=0, implementation='NATIVE_WIN32')
+        self.assertIsNone(failure); self.assertEqual(native['status'], 'COMPLETED')
+        self.assertEqual(native['requested_minimum_seconds'], 0)
+        self.assertEqual(native['wait_seconds'], 0); self.assertEqual(reads, [0])
+
+    def test_minimum_cannot_replace_handoff_target_or_existing_deadlines_including_slow_receipt(self):
+        for options, expected_wait in (({'target': 10000}, 15), ({'whole_deadline': 8}, 8), ({'hash_advance': 16}, 16)):
+            with self.subTest(options=options):
+                prelude, reads, failure = self.invoke_prelude(**options)
+                self.assertIsInstance(failure, AssertionError)
+                self.assertEqual(str(failure), 'COMPARABLE_NOISE_PRELUDE_NOT_ESTABLISHED')
+                self.assertEqual(prelude['status'], 'FAILED')
+                self.assertEqual(prelude['wait_seconds'], expected_wait)
+                self.assertTrue(reads)
+        noise = NoiseOwner(SimpleNamespace(glob=lambda pattern: self.fail('invalid minimum read files')), {
+            'implementation': 'NATIVE_WIN32', 'expected_native_handles': 32})
+        with patch('tools.qa_decoder_budget_diagnostic.time.monotonic') as clock:
+            for minimum in (True, -1, 10, 10.0, 11):
+                with self.subTest(native_minimum=minimum), self.assertRaisesRegex(AssertionError, 'INVALID_NOISE_PRELUDE_REQUEST'):
+                    noise.await_handoffs(16, 100, minimum_seconds=minimum)
+            clock.assert_not_called()
+
+    def comparison_pair(self, *, positive):
+        implementation = 'NATIVE_WIN32' if positive else 'PYTHON_CTYPES_WIN32'
+        policy = 'CONTROLLED_NATIVE_60' if positive else 'ORDINARY_30'; seconds = 60 if positive else 30
+        actual_noise_policy = noise_policy(implementation)
+        budget = {'workload_policy': policy, 'requested_process_timeout_seconds': seconds,
+            'requested_minimum_roundtrips': 1, 'roundtrips_verified': 2,
+            'workloads': [{'pid': 100 + n, 'role': 'COMPRESS' if n % 2 == 0 else 'EXTRACT', 'cycle': n // 2,
+                'configured_timeout_seconds': seconds, 'elapsed_monitor_seconds': 1, 'exit_code': 0} for n in range(4)]}
+        common = {'input_sha256': 'a' * 64, 'input_bytes': 8 * 1024**2, 'application_sha256': 'b' * 64,
+            'native_image': {'code_kind': 'NATIVE_PE_NO_CLR_COM_DESCRIPTOR'}, 'helper_sha256': 'c' * 64,
+            'script_hashes': {'driver': 'd' * 64}, 'actual_native_module_encoding': 'PER_EVENT_MODULES_V1',
+            'requested_workload_policy': policy, 'requested_process_timeout_seconds': seconds,
+            'requested_minimum_roundtrips': 1, 'requested_minimum_prelude_seconds': 0,
+            'workload_budget': budget, 'requested_noise_policy': actual_noise_policy,
+            'noise_policy_receipts': {phase: {key: actual_noise_policy[key] for key in ('implementation', 'ttl_seconds', 'progress_limit')}
+                                      for phase in ('ready', 'oracle')},
+            'native_timing': {'ready_qpc': 0, 'work_begin_qpc': 10000, 'work_end_qpc': 74000, 'qpc_frequency_hz': 1000},
+            'noise_producer': {'implementation': implementation, 'source_sha256': '3' * 64},
+            'source_identity': {'actual_source_sha': 'e' * 40, 'source_tree_sha': 'f' * 40},
+            'noise_cleanup': {'status': 'COMPLETED'}, 'capture_cleanup': {'status': 'STOPPED'},
+            'noise_workload_coverage': {'all_16_threads_bracket': True, 'threads_with_positive_handoff_delta': 16},
+            'roundtrips_verified': 2}
+        first = {**common, 'status': 'EXPECTED_NATIVE_BUDGET_NEGATIVE' if positive else 'EXPECTED_ROW_BUDGET_NEGATIVE',
+            'noise_handoffs': 10000, 'capture_profile': {'name': 'schedule', 'xml_sha256': '1' * 64},
+            'prelude': {'target_handoffs': 0, 'requested_minimum_seconds': 0, 'wait_seconds': 0, 'status': 'NOT_REQUIRED'}}
+        second = {**common, 'status': 'COMPLETE_7ZIP_ACCEPTANCE' if positive else 'EXPECTED_OUTPUT_BUDGET_NEGATIVE',
+            'noise_handoffs': 20000, 'capture_profile': {'name': 'cpu_file', 'xml_sha256': '2' * 64},
+            'requested_minimum_roundtrips': 2, 'requested_minimum_prelude_seconds': 0 if positive else 10,
+            'workload_budget': {**budget, 'requested_minimum_roundtrips': 2},
+            'actual_native_module_encoding': 'PER_EVENT_MODULES_V1' if positive else 'INLINE_V1',
+            'prelude': {'target_handoffs': 10000, 'observed_handoffs': 11000, 'requested_minimum_seconds': 0 if positive else 10,
+                        'wait_seconds': 1 if positive else 10, 'status': 'COMPLETED'}}
+        return first, second
+
+    def test_comparison_binds_exact_requests_observed_counts_and_python_only_ten_second_wait(self):
+        for positive in (False, True):
+            first, second = self.comparison_pair(positive=positive)
+            observed = validate_comparison(first, second, positive=positive)
+            self.assertEqual(observed['second_requested_minimum_roundtrips'], 2)
+            self.assertEqual(observed['second_minimum_prelude_seconds'], 0 if positive else 10)
+            for change in ({'requested_minimum_roundtrips': True}, {'requested_minimum_roundtrips': 1},
+                           {'roundtrips_verified': 3}, {'requested_minimum_prelude_seconds': 10 if positive else 0},
+                           {'prelude': {**second['prelude'], 'requested_minimum_seconds': True}},
+                           {'prelude': {**second['prelude'], 'wait_seconds': 16}},
+                           {'prelude': {**second['prelude'], 'observed_handoffs': 9999}},
+                           {'prelude': {**second['prelude'], 'status': 'FAILED'}},
+                           {'workload_budget': {**second['workload_budget'], 'roundtrips_verified': 3}}):
+                with self.subTest(positive=positive, change=change), self.assertRaises(AssertionError):
+                    validate_comparison(first, {**second, **change}, positive=positive)
+            if not positive:
+                with self.assertRaises(AssertionError):
+                    validate_comparison(first, {**second, 'prelude': {**second['prelude'], 'wait_seconds': 9.999}}, positive=False)
+        native = {'qpc_frequency_matches': True}
+        complete = {'status': 'DECODED', 'rows': 154022, 'import_completeness': 'ALL_EMITTED_RECORDS'}
+        with self.assertRaisesRegex(AssertionError, 'REJECTION_NOT_OBSERVED'):
+            validate_case_contract('OUTPUT_BUDGET_NEGATIVE', False, None, complete, 'a' * 64, native,
+                {'output_bytes': 362820931})
+        for capability in SEVENZIP_CAPABILITIES:
+            result = {'status': 'PASS', 'capabilities': {key: 'PASS' for key in SEVENZIP_CAPABILITIES}}
+            result['capabilities'][capability] = 'FAIL_NOT_OBSERVED'
+            with self.subTest(capability=capability), self.assertRaisesRegex(AssertionError, 'COMPLETE_ACCEPTANCE'):
+                validate_case_contract('COMPLETE_NATIVE_7ZIP', False, result, complete, 'a' * 64, native, {})
+
+    def test_driver_forwards_each_first_actual_count_and_only_python_b_minimum_prelude(self):
+        from tools import qa_decoder_budget_diagnostic as driver
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); helper = root / 'protocol-helper.exe'; helper.write_bytes(b'not an executable')
+            native = {'implementation': 'NATIVE_WIN32'}
+            cases = [{'status': 'EXPECTED_ROW_BUDGET_NEGATIVE', 'noise_handoffs': 10000, 'roundtrips_verified': 2},
+                     {'status': 'EXPECTED_OUTPUT_BUDGET_NEGATIVE'},
+                     {'status': 'EXPECTED_NATIVE_BUDGET_NEGATIVE', 'noise_handoffs': 20000, 'roundtrips_verified': 3},
+                     {'status': 'COMPLETE_7ZIP_ACCEPTANCE'}]
+            args = SimpleNamespace(output=root / 'output', helper=helper, source_sha='a' * 40,
+                                   prepared_native_build=False, prepared_build_sha256=None)
+            with patch.object(driver, 'require_hosted_windows'), \
+                    patch('tools.qa_decoder_noise_fixture.build_native_noise', return_value=native) as builder, \
+                    patch.object(driver, 'run_case', side_effect=cases) as run, \
+                    patch.object(driver, 'validate_comparison', return_value={'protocol_only': True}), \
+                    patch('tools.qa_decoder_apps.file_hash', return_value='b' * 64), \
+                    patch('tools.qa_decoder_apps.write_json'), \
+                    patch.object(driver.time, 'monotonic', return_value=0), \
+                    patch.dict(os.environ, {'GITHUB_STEP_SUMMARY': ''}), redirect_stdout(io.StringIO()):
+                self.assertEqual(driver.run_diagnostic(args), 0)  # Fake protocol flow only, not native acceptance.
+            builder.assert_called_once_with(args.output / 'native-build', args.source_sha)
+            self.assertEqual(run.call_count, 4)
+            self.assertEqual(run.call_args_list[0].kwargs, {})
+            self.assertEqual(run.call_args_list[2].kwargs, {})
+            self.assertEqual(run.call_args_list[1].args[-1], 10000)
+            self.assertEqual(run.call_args_list[1].kwargs, {'native_module_encoding': 'INLINE_V1',
+                'minimum_roundtrips': 2, 'minimum_prelude_seconds': 10})
+            self.assertEqual(run.call_args_list[3].args[-1], 20000)
+            self.assertEqual(run.call_args_list[3].kwargs, {'native_module_encoding': None,
+                'minimum_roundtrips': 3, 'minimum_prelude_seconds': 0})
+
+    def test_case_forwards_requested_count_to_real_workload_entry_and_retains_failure(self):
+        from tools import qa_decoder_budget_diagnostic as driver
+        for implementation, minimum, prelude in (('PYTHON_CTYPES_WIN32', 2, 10), ('NATIVE_WIN32', 3, 0)):
+            with self.subTest(implementation=implementation), tempfile.TemporaryDirectory() as tmp:
+                producer = {'implementation': implementation, 'source_sha256': 'a' * 64,
+                    'executable_sha256': 'b' * 64, 'expected_native_handles': 16 if prelude else 32}
+                options = {'minimum_roundtrips': minimum}
+                if prelude:
+                    options['native_module_encoding'] = 'INLINE_V1'
+                else:
+                    options['workload_policy'] = 'CONTROLLED_NATIVE_60'
+                output = Path(tmp) / 'case'; sentinel = AssertionError('PROTOCOL_WORKLOAD_ENTRY_FAILURE')
+                with patch.object(driver, 'source_identity', return_value={'source_identity_status': 'VERIFIED_EXPECTED_HEAD'}), \
+                        patch.object(driver, 'kernel_api', return_value=object()), \
+                        patch.object(driver, 'counter', return_value=1000), \
+                        patch.object(driver.NoiseOwner, 'start') as start, \
+                        patch.object(driver, 'collect_bounded_case_facts'), \
+                        patch.object(driver, 'collect_noise_stop_observation'), \
+                        patch('tools.qa_decoder_apps.seven_zip', side_effect=sentinel) as workload, \
+                        redirect_stdout(io.StringIO()):
+                    proof = driver.run_case(output, Path(tmp) / 'unused-helper', 'a' * 40, 100, 'cpu_file', producer,
+                        'OUTPUT_BUDGET_NEGATIVE' if prelude else 'COMPLETE_NATIVE_7ZIP', 10000,
+                        native_module_encoding='INLINE_V1' if prelude else None,
+                        minimum_roundtrips=minimum, minimum_prelude_seconds=prelude)
+                workload.assert_called_once_with(output / '7zip', Path(tmp) / 'unused-helper', profile='cpu_file', **options)
+                start.assert_not_called()
+                self.assertEqual(proof['status'], 'REPRODUCTION_NOT_ESTABLISHED')
+                self.assertEqual(proof['reason_code'], 'PROTOCOL_WORKLOAD_ENTRY_FAILURE')
+                self.assertEqual(proof['requested_minimum_roundtrips'], minimum)
+                self.assertEqual(proof['requested_minimum_prelude_seconds'], prelude)
 
 
 if __name__ == "__main__":

@@ -846,7 +846,14 @@ def finish_schedule(capture, output, helper, pids, *, waits=False, native_module
             "capture_complete": "UNKNOWN", "root_cause": "NOT_ESTABLISHED"}
 
 
-def seven_zip(output, helper, *, profile="cpu_file", native_module_encoding=None, workload_policy='ORDINARY_30'):
+def validate_minimum_roundtrips(value):
+    require(type(value) is int and 1 <= value <= 3, 'INVALID_QA_MINIMUM_ROUNDTRIPS')
+    return value
+
+
+def seven_zip(output, helper, *, profile="cpu_file", native_module_encoding=None, workload_policy='ORDINARY_30',
+              minimum_roundtrips=1):
+    validate_minimum_roundtrips(minimum_roundtrips)
     process_timeout = workload_policy_seconds(workload_policy)
     run_options = {'timeout': process_timeout} if workload_policy != 'ORDINARY_30' else {}
     binary = installed("7z", [Path(os.environ.get("ProgramFiles", "C:/Program Files")) / "7-Zip/7z.exe"])
@@ -876,11 +883,12 @@ def seven_zip(output, helper, *, profile="cpu_file", native_module_encoding=None
             require(file_hash(destination / source.name) == digest,
                     "SEVENZIP_ROUNDTRIP_HASH_MISMATCH")
             verified_roundtrips += 1
-            if time.monotonic() - started >= 4:
+            if time.monotonic() - started >= 4 and verified_roundtrips >= minimum_roundtrips:
                 break
         write_json(output / "workload-oracle.json", {
             "schema": "blackbox.sevenzip-workload-oracle/1", "application": identity,
             "workload_policy": workload_policy, "requested_process_timeout_seconds": process_timeout,
+            "requested_minimum_roundtrips": minimum_roundtrips,
             "input_bytes": source.stat().st_size, "input_sha256": digest,
             "roundtrips_verified": len(proofs) // 2, "workloads": proofs})
         options = {'native_module_encoding': native_module_encoding} if native_module_encoding is not None else {}
@@ -893,6 +901,7 @@ def seven_zip(output, helper, *, profile="cpu_file", native_module_encoding=None
                 write_json(output / "workload-oracle.json", {
                     "schema": "blackbox.sevenzip-workload-oracle/1", "status": "INCOMPLETE_WORKLOAD_FAILURE",
                     "workload_policy": workload_policy, "requested_process_timeout_seconds": process_timeout,
+                    "requested_minimum_roundtrips": minimum_roundtrips,
                     "application": identity, "input_bytes": source.stat().st_size, "input_sha256": digest,
                     "roundtrips_verified": verified_roundtrips, "workloads": proofs,
                     "failure_reason_code": _qa_code(str(error))})
@@ -918,6 +927,7 @@ def seven_zip(output, helper, *, profile="cpu_file", native_module_encoding=None
             "capabilities": {k: "PASS" if v else "FAIL_NOT_OBSERVED" for k, v in checks.items()},
             "application": identity, "workloads": proofs,
             "oracle": {"input_bytes": source.stat().st_size, "input_sha256": digest,
+                       "requested_minimum_roundtrips": minimum_roundtrips,
                        "roundtrips_verified": len(proofs) // 2}, **trace}
     return result
 

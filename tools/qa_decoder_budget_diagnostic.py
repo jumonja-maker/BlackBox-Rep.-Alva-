@@ -35,6 +35,8 @@ MAX_NOISE_LOG = 64 * 1024
 MAX_OUTPUT = 1152 * 1024**2
 MIN_NOISE_ROWS = 10000
 PRELUDE_SECONDS = 15
+# A real-noise stimulus floor, never a substitute for observing MAX_OUTPUT.
+PYTHON_BYTE_MINIMUM_PRELUDE_SECONDS = 10
 MAX_PROGRESS_RECEIPTS = 281
 EXPECTED_REASON = 'APP_TRACE_NOT_COMPLETELY_DECODED'
 SEVENZIP_CAPABILITIES = frozenset({
@@ -222,7 +224,8 @@ class NoiseOwner:
         self.policy_receipts = {'ready': 'NOT_ESTABLISHED', 'oracle': 'NOT_ESTABLISHED'}
         self.watcher_stop = threading.Event(); self.watcher = None
         self.started = None; self.max_rss = 0; self.cleanup = {'status': 'NOT_ESTABLISHED'}
-        self.prelude = {'target_handoffs': 0, 'wait_seconds': 0}
+        self.prelude = {'target_handoffs': 0, 'requested_minimum_seconds': 0,
+                        'wait_seconds': 0, 'status': 'NOT_REQUIRED'}
         self.stop_observation = {'child_exit_code': 'NOT_ESTABLISHED',
                                  'parent_stop_requested': False}
 
@@ -274,9 +277,14 @@ class NoiseOwner:
                          ('source_sha256', 'executable_sha256', 'implementation', 'expected_native_handles')),
                      'NOISE_IDENTITY_MISMATCH')
 
-    def await_handoffs(self, target, whole_deadline):
+    def await_handoffs(self, target, whole_deadline, *, minimum_seconds=0):
+        apps.require(type(target) is int and 0 <= target <= 2**63 - 1 and
+            type(minimum_seconds) is int and minimum_seconds in (0, PYTHON_BYTE_MINIMUM_PRELUDE_SECONDS) and
+            (minimum_seconds == 0 or self.producer['implementation'] == 'PYTHON_CTYPES_WIN32'),
+            'INVALID_NOISE_PRELUDE_REQUEST')
         started = time.monotonic(); deadline = min(started + PRELUDE_SECONDS, whole_deadline)
-        self.prelude = {'target_handoffs': target, 'wait_seconds': 0, 'status': 'IN_PROGRESS'}
+        self.prelude = {'target_handoffs': target, 'requested_minimum_seconds': minimum_seconds,
+                        'wait_seconds': 0, 'status': 'IN_PROGRESS'}
         previous = None
         try:
             while time.monotonic() < deadline:
@@ -288,9 +296,14 @@ class NoiseOwner:
                     validate_progress(progress, self.ready, previous, implementation=self.producer['implementation'])
                     previous = progress
                     self.prelude.update(observed_handoffs=progress['total_handoffs'],
-                        wait_seconds=time.monotonic() - started, sequence=progress['sequence'],
+                        sequence=progress['sequence'],
                         receipt_sha256=apps.file_hash(path), receipt_bytes=path.stat().st_size)
-                    if progress['total_handoffs'] >= target:
+                    apps.require(not self.errors and self.owner.process.poll() is None,
+                                 'NOISE_PRELUDE_OWNER_FAILED')
+                    observed = time.monotonic()
+                    self.prelude['wait_seconds'] = observed - started
+                    apps.require(observed < deadline, 'COMPARABLE_NOISE_PRELUDE_NOT_ESTABLISHED')
+                    if progress['total_handoffs'] >= target and observed - started >= minimum_seconds:
                         self.prelude['status'] = 'COMPLETED'
                         return
                 time.sleep(.02)
@@ -727,7 +740,7 @@ def collect_bounded_case_facts(proof, work, helper, clock):
             else:
                 application = value.get('application') if type(value.get('application')) is dict else {}
                 facts[key] = {name: scalar(value.get(name)) for name in
-                              ('input_sha256', 'input_bytes', 'roundtrips_verified', 'workload_policy',
+                              ('input_sha256', 'input_bytes', 'roundtrips_verified', 'requested_minimum_roundtrips', 'workload_policy',
                                'requested_process_timeout_seconds')}
                 facts[key]['application_sha256'] = scalar(application.get('sha256'))
                 entries = value.get('workloads')
@@ -951,10 +964,13 @@ def validate_workload_budget(workload, policy):
     seconds = apps.workload_policy_seconds(policy)
     apps.require(type(workload) is dict, 'CONTROLLED_WORKLOAD_BUDGET_NOT_OBSERVED')
     entries = workload.get('workloads')
+    minimum = apps.validate_minimum_roundtrips(workload.get('requested_minimum_roundtrips'))
     apps.require(workload.get('workload_policy') == policy and
+        type(workload.get('roundtrips_verified')) is int and
+        minimum <= workload['roundtrips_verified'] <= 3 and
         type(workload.get('requested_process_timeout_seconds')) is int and
         workload['requested_process_timeout_seconds'] == seconds and type(entries) is list and
-        len(entries) in (2, 4, 6) and all(type(item) is dict and
+        len(entries) in (2, 4, 6) and len(entries) == 2 * workload['roundtrips_verified'] and all(type(item) is dict and
             type(item.get('pid')) is int and 1 <= item['pid'] <= 2**32 - 1 and
             type(item.get('configured_timeout_seconds')) is int and item['configured_timeout_seconds'] == seconds and
             type(item.get('elapsed_monitor_seconds')) in (int, float) and
@@ -964,13 +980,21 @@ def validate_workload_budget(workload, policy):
             type(item.get('cycle')) is int and item['cycle'] == number // 2
             for number, item in enumerate(entries)), 'CONTROLLED_WORKLOAD_BUDGET_NOT_OBSERVED')
     return {'workload_policy': policy, 'requested_process_timeout_seconds': seconds,
+        'requested_minimum_roundtrips': minimum, 'roundtrips_verified': workload['roundtrips_verified'],
         'monitor_duration_scope': 'OBSERVED_MONITOR_DURATION_NOT_HARD_OS_DEADLINE',
         'workloads': [{key: item.get(key) for key in ('pid', 'role', 'cycle', 'exit_code',
                       'configured_timeout_seconds', 'elapsed_monitor_seconds')} for item in entries]}
 
 
 def run_case(output, helper, source_sha, deadline, profile, producer, expectation, target_handoffs=0,
-             *, native_module_encoding=None):
+             *, native_module_encoding=None, minimum_roundtrips=1, minimum_prelude_seconds=0):
+    apps.validate_minimum_roundtrips(minimum_roundtrips)
+    apps.require(type(target_handoffs) is int and 0 <= target_handoffs <= 2**63 - 1 and
+        type(minimum_prelude_seconds) is int and minimum_prelude_seconds in (0, PYTHON_BYTE_MINIMUM_PRELUDE_SECONDS) and
+        (minimum_prelude_seconds == 0 or producer['implementation'] == 'PYTHON_CTYPES_WIN32' and
+         expectation == 'OUTPUT_BUDGET_NEGATIVE'), 'INVALID_CONTROLLED_STIMULUS_REQUEST')
+    apps.require(minimum_prelude_seconds == (PYTHON_BYTE_MINIMUM_PRELUDE_SECONDS
+        if expectation == 'OUTPUT_BUDGET_NEGATIVE' else 0), 'INVALID_CONTROLLED_STIMULUS_REQUEST')
     identity = source_identity(source_sha)
     apps.require(identity['source_identity_status'] == 'VERIFIED_EXPECTED_HEAD', 'DIAGNOSTIC_SOURCE_IDENTITY')
     output.mkdir(parents=True, exist_ok=False)
@@ -983,6 +1007,8 @@ def run_case(output, helper, source_sha, deadline, profile, producer, expectatio
         'requested_profile': profile, 'expectation': expectation,
         'requested_workload_policy': workload_policy,
         'requested_process_timeout_seconds': apps.workload_policy_seconds(workload_policy),
+        'requested_minimum_roundtrips': minimum_roundtrips,
+        'requested_minimum_prelude_seconds': minimum_prelude_seconds,
         'requested_noise_policy': dict(noise.policy),
         'requested_native_module_encoding': native_module_encoding or 'DEFAULT',
         'noise_producer': {key: producer[key] for key in
@@ -1008,8 +1034,8 @@ def run_case(output, helper, source_sha, deadline, profile, producer, expectatio
                                    xml_sha256=apps.file_hash(actual.profile_path))
             proof['capture_profile'] = dict(capture_profile)
             noise.start()
-            if target_handoffs:
-                noise.await_handoffs(target_handoffs, deadline)
+            if target_handoffs or minimum_prelude_seconds:
+                noise.await_handoffs(target_handoffs, deadline, minimum_seconds=minimum_prelude_seconds)
             apps.require(noise.ready['qpc_frequency_hz'] == frequency, 'DIAGNOSTIC_NOISE_COUNTER_MISMATCH')
             workload_clock['begin_qpc'] = counter(kernel)
         except BaseException:
@@ -1038,7 +1064,9 @@ def run_case(output, helper, source_sha, deadline, profile, producer, expectatio
         expected_assertion_observed = False
         result = None
         try:
-            options = {'native_module_encoding': native_module_encoding} if native_module_encoding is not None else {}
+            options = {'minimum_roundtrips': minimum_roundtrips}
+            if native_module_encoding is not None:
+                options['native_module_encoding'] = native_module_encoding
             if workload_policy != 'ORDINARY_30':
                 options['workload_policy'] = workload_policy
             result = apps.seven_zip(work, helper, profile=profile, **options)
@@ -1065,6 +1093,9 @@ def run_case(output, helper, source_sha, deadline, profile, producer, expectatio
         proof['decoder_diagnostic'] = diagnostic
         roundtrips = workload.get('roundtrips_verified'); workloads = workload.get('workloads')
         proof['roundtrips_verified'] = roundtrips
+        apps.require(type(workload.get('requested_minimum_roundtrips')) is int and
+            workload['requested_minimum_roundtrips'] == minimum_roundtrips,
+            'CONTROLLED_MINIMUM_ROUNDTRIPS_NOT_FORWARDED')
         native = native_attribution(index, meta, noise.oracle, deadline,
                                     [p['pid'] for p in workloads])
         proof['native_attribution'] = native
@@ -1073,7 +1104,7 @@ def run_case(output, helper, source_sha, deadline, profile, producer, expectatio
             proof['capabilities'] = result.get('capabilities')
         else:
             proof['capabilities_assessment'] = 'NOT_EVALUATED_FULL_DECODE_REQUIRED; PREFIX_COUNTS_ARE_NOT_PASS'
-        apps.require(type(roundtrips) is int and 1 <= roundtrips <= 3 and type(workloads) is list
+        apps.require(type(roundtrips) is int and minimum_roundtrips <= roundtrips <= 3 and type(workloads) is list
             and len(workloads) == 2 * roundtrips and all(p.get('exit_code') == 0 and
             p.get('owned_image_matches_requested') is True for p in workloads) and
             any(p.get('cpu_seconds_observed', 0) > 0 for p in workloads), 'DIAGNOSTIC_REAL_7ZIP_WORKLOAD_MISSING')
@@ -1213,6 +1244,11 @@ def validate_comparison(first, second, *, positive=True):
         apps.require(case.get('requested_workload_policy') == policy and
             case.get('requested_process_timeout_seconds') == seconds, 'CONTROLLED_PAIR_WORKLOAD_POLICY_MISMATCH')
         validate_workload_budget(case.get('workload_budget', {}), policy)
+        apps.require(type(case.get('requested_minimum_roundtrips')) is int and
+            case['requested_minimum_roundtrips'] == case['workload_budget']['requested_minimum_roundtrips'] and
+            type(case.get('roundtrips_verified')) is int and
+            case['roundtrips_verified'] == case['workload_budget']['roundtrips_verified'],
+            'CONTROLLED_PAIR_ROUNDTRIP_RECEIPT_MISMATCH')
         validate_requested_noise_policy(case.get('requested_noise_policy'), implementation)
         receipts = case.get('noise_policy_receipts', {})
         for phase in ('ready', 'oracle'):
@@ -1224,6 +1260,18 @@ def validate_comparison(first, second, *, positive=True):
                 'qpc_frequency_hz': timing.get('qpc_frequency_hz')},
                 {'begin_qpc': timing.get('work_begin_qpc'), 'end_qpc': timing.get('work_end_qpc'),
                  'qpc_frequency_hz': timing.get('qpc_frequency_hz')}, complete=True)
+    minimum_prelude = 0 if positive else PYTHON_BYTE_MINIMUM_PRELUDE_SECONDS
+    apps.require(first.get('requested_minimum_roundtrips') == 1 and
+        second.get('requested_minimum_roundtrips') == first['roundtrips_verified'] and
+        type(first.get('requested_minimum_prelude_seconds')) is int and first['requested_minimum_prelude_seconds'] == 0 and
+        type(second.get('requested_minimum_prelude_seconds')) is int and
+        second['requested_minimum_prelude_seconds'] == minimum_prelude,
+        'CONTROLLED_PAIR_STIMULUS_REQUEST_MISMATCH')
+    first_prelude = first.get('prelude', {})
+    apps.require(type(first_prelude.get('target_handoffs')) is int and first_prelude['target_handoffs'] == 0 and
+        type(first_prelude.get('requested_minimum_seconds')) is int and first_prelude['requested_minimum_seconds'] == 0 and
+        type(first_prelude.get('wait_seconds')) is int and first_prelude['wait_seconds'] == 0 and
+        first_prelude.get('status') == 'NOT_REQUIRED', 'CONTROLLED_FIRST_PRELUDE_REQUEST_MISMATCH')
     for key in ('input_sha256', 'input_bytes', 'application_sha256', 'native_image', 'helper_sha256',
                 'script_hashes', 'noise_producer'):
         apps.require(first.get(key) == second.get(key) and first.get(key) is not None, 'CONTROLLED_A_B_SOURCE_CHANGED')
@@ -1234,9 +1282,15 @@ def validate_comparison(first, second, *, positive=True):
         type(first.get('noise_handoffs')) is int and type(second.get('noise_handoffs')) is int and
         second['noise_handoffs'] >= first['noise_handoffs'] > 0 and
         second['roundtrips_verified'] >= first['roundtrips_verified'] > 0 and
+        type(second['prelude'].get('target_handoffs')) is int and
         second['prelude']['target_handoffs'] == first['noise_handoffs'] and
+        type(second['prelude'].get('observed_handoffs')) is int and
         second['prelude']['observed_handoffs'] >= first['noise_handoffs'] and
-        0 <= second['prelude']['wait_seconds'] <= PRELUDE_SECONDS and
+        second['prelude'].get('status') == 'COMPLETED' and
+        type(second['prelude'].get('requested_minimum_seconds')) is int and
+        second['prelude']['requested_minimum_seconds'] == minimum_prelude and
+        type(second['prelude'].get('wait_seconds')) in (int, float) and
+        minimum_prelude <= second['prelude']['wait_seconds'] <= PRELUDE_SECONDS and
         all(case['noise_cleanup']['status'] == 'COMPLETED' and case['capture_cleanup']['status'] == 'STOPPED'
             and case['noise_workload_coverage']['all_16_threads_bracket'] is True
             and case['noise_workload_coverage']['threads_with_positive_handoff_delta'] == 2 * PAIRS
@@ -1245,6 +1299,10 @@ def validate_comparison(first, second, *, positive=True):
         second['actual_native_module_encoding'] == ('PER_EVENT_MODULES_V1' if positive else 'INLINE_V1'),
         'CONTROLLED_PAIR_TRANSPORT_NOT_ESTABLISHED')
     return {'workload_policy': policy, 'noise_policy_equal': True, 'noise_policy': expected_noise_policy,
+            'second_requested_minimum_roundtrips': second['requested_minimum_roundtrips'],
+            'second_observed_roundtrips': second['roundtrips_verified'],
+            'second_minimum_prelude_seconds': minimum_prelude,
+            'second_observed_prelude_seconds': second['prelude']['wait_seconds'],
             'native_timing_limits': {'ready_to_work_begin_seconds': 20, 'whole_workload_seconds': 65}
                 if positive else 'NOT_APPLICABLE_PYTHON_POLICY'}
 
@@ -1351,7 +1409,9 @@ def run_diagnostic(args):
             apps.require(time.monotonic() < deadline, 'CONTROLLED_A_B_DEADLINE')
             second = run_case(output / (label + '-cpu-file'), helper, args.source_sha, deadline,
                 'cpu_file', producer, 'COMPLETE_NATIVE_7ZIP' if positive else 'OUTPUT_BUDGET_NEGATIVE',
-                first['noise_handoffs'], native_module_encoding=None if positive else 'INLINE_V1')
+                first['noise_handoffs'], native_module_encoding=None if positive else 'INLINE_V1',
+                minimum_roundtrips=first['roundtrips_verified'],
+                minimum_prelude_seconds=0 if positive else PYTHON_BYTE_MINIMUM_PRELUDE_SECONDS)
             proof['cases'][label + '_cpu_file'] = second
             max_live = max(max_live, second.get('measured_live_qa_bytes_before_removal', 0))
             proof.setdefault('pair_policy_comparisons', {})[label] = validate_comparison(first, second, positive=positive)
