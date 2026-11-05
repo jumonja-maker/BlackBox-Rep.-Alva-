@@ -490,7 +490,10 @@ class WorkflowEngine:
                 row["state"] = "QUEUED"
                 self._not_before[node.node_id] = time.monotonic() + node.repeat_interval_seconds
             self._finish_lease(node, ctx.node_run_id, cleanup)
-            self._notify()
+            # Synchronous observers may request pause after a durable result.
+            # GUI transport coalesces these snapshots to one pending wake;
+            # dropping this boundary here could execute another iteration.
+            self._notify(force=True)
 
     def _exception(self, node, ctx, error):
         receipt = getattr(error, "run_receipt", None)
