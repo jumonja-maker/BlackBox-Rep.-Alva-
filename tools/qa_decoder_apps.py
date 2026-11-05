@@ -389,6 +389,10 @@ def seven_zip(output, helper):
                     "SEVENZIP_ROUNDTRIP_HASH_MISMATCH")
             if time.monotonic() - started >= 4:
                 break
+        write_json(output / "workload-oracle.json", {
+            "schema": "blackbox.sevenzip-workload-oracle/1", "application": identity,
+            "input_bytes": source.stat().st_size, "input_sha256": digest,
+            "roundtrips_verified": len(proofs) // 2, "workloads": proofs})
         trace = finish_schedule(capture, output, helper, [x["pid"] for x in proofs])
     finally:
         if capture.active:

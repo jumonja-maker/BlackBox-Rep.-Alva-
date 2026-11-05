@@ -15,6 +15,69 @@ import zipfile
 
 from tools.qa_decoder_apps import (decode_trace, etw_observations, installed, native_pe_identity,
                                    observed_process_image, safe_extract)
+from tools.qa_decoder_budget_diagnostic import (PAIRS, parse_args, validate_noise_oracle,
+                                                validate_original_source, validate_rejection)
+
+
+class ControlledBudgetProtocolTests(unittest.TestCase):
+    """Protocol fixtures only; real rejection additionally requires hosted ETW."""
+    def oracle(self):
+        return {'schema': 'blackbox.scheduler-noise/1', 'status': 'COMPLETED', 'pid': 123,
+            'created_100ns': '1000', 'pairs': PAIRS, 'stop_requested': True,
+            'all_threads_joined': True, 'native_handles_created': 2 * PAIRS,
+            'native_handles_closed': 2 * PAIRS, 'cleanup_required': False, 'errors': [],
+            'qpc_frequency_hz': 10000000, 'workers': [
+                {'tid': 100 + n, 'created_100ns': str(2000 + n), 'handoffs': 100,
+                 'begin_qpc': 10, 'end_qpc': 1000} for n in range(2 * PAIRS)]}
+
+    def test_noise_receipt_needs_every_join_handle_handoff_and_exact_process(self):
+        validate_noise_oracle(self.oracle(), 123, '1000')
+        for field, value in (('pid', 124), ('created_100ns', '1001'), ('all_threads_joined', False),
+                             ('native_handles_closed', 2 * PAIRS - 1), ('stop_requested', False),
+                             ('cleanup_required', True), ('errors', ['OWNED_EXIT_UNCONFIRMED'])):
+            with self.subTest(field=field):
+                oracle = self.oracle(); oracle[field] = value
+                with self.assertRaises(AssertionError):
+                    validate_noise_oracle(oracle, 123, '1000')
+        oracle = self.oracle(); oracle['workers'][0]['handoffs'] = 0
+        with self.assertRaisesRegex(AssertionError, 'REAL_HANDOFFS'):
+            validate_noise_oracle(oracle, 123, '1000')
+
+    def test_expected_prefix_alone_is_not_a_native_reproduction(self):
+        meta = {'status': 'TRUNCATED', 'rows': 250000, 'input_sha256': 'a' * 64,
+                'import_completeness': 'BOUNDED_PREFIX'}
+        native = {'switch_rows': 12000, 'ready_rows': 12000, 'noise_tids_observed': 16,
+                  'qpc_frequency_matches': True}
+        validate_rejection(meta, 'a' * 64, native)
+        for field, value in (('switch_rows', 0), ('ready_rows', 0),
+                             ('noise_tids_observed', 0), ('qpc_frequency_matches', False)):
+            with self.subTest(field=field), self.assertRaisesRegex(AssertionError, 'NATIVE_NOISE'):
+                validate_rejection(meta, 'a' * 64, {**native, field: value})
+        with self.assertRaisesRegex(AssertionError, 'NATIVE_NOISE'):
+            validate_rejection(meta, 'a' * 64, {**native, 'switch_rows': 1, 'ready_rows': 1})
+        for change in ({'status': 'DECODED'}, {'rows': 0}, {'input_sha256': 'b' * 64},
+                       {'import_completeness': 'ALL_EMITTED_RECORDS'}):
+            with self.subTest(change=change), self.assertRaisesRegex(AssertionError, 'REPRODUCTION_NOT_ESTABLISHED'):
+                validate_rejection({**meta, **change}, 'a' * 64, native)
+
+    def test_noise_child_cannot_take_parent_helper_or_source_arguments(self):
+        self.assertTrue(parse_args(['--noise-child', '--output', 'own-noise-root']).noise_child)
+        for arguments in (['--output', 'root'], ['--noise-child', '--output', 'root', '--helper', 'decoder'],
+                          ['--noise-child', '--output', 'root', '--source-sha', 'a' * 40]):
+            with self.subTest(arguments=arguments), redirect_stdout(io.StringIO()), \
+                    patch('sys.stderr', new_callable=io.StringIO), self.assertRaises(SystemExit) as error:
+                parse_args(arguments)
+            self.assertEqual(error.exception.code, 2)
+
+    def test_negative_prefix_still_requires_original_predecode_hash_and_size(self):
+        diagnostic = {'schema': 'blackbox.decoder-app-trace-diagnostic/1',
+            'source_sha256': 'a' * 64, 'source_bytes': 100, 'metadata_input_sha256_matches': True}
+        self.assertEqual(validate_original_source(diagnostic, 'a' * 64, 100), {
+            'source_sha256': 'a' * 64, 'source_bytes': 100, 'metadata_input_sha256_matches': True})
+        for change in ({'source_sha256': 'b' * 64}, {'source_bytes': 101}, {'source_bytes': 100.0},
+                       {'metadata_input_sha256_matches': False}):
+            with self.subTest(change=change), self.assertRaisesRegex(AssertionError, 'ORIGINAL_SOURCE_CHANGED'):
+                validate_original_source({**diagnostic, **change}, 'a' * 64, 100)
 
 
 class ApplicationTraceDiagnosticTests(unittest.TestCase):
