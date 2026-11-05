@@ -220,6 +220,15 @@ def run_graph(workflow, output, *, runtime=None, allow_partial=True, run_id=None
     store = WorkflowRunStore.create(output, workflow, run_id=run_id)
     engine = WorkflowEngine(workflow, catalog=catalog, store=store, runtime=runtime)
     snapshot = engine.run()
+    # Artifactless acceptance must preserve the actual failing boundary before
+    # an assertion exits the process and the hosted workspace disappears.
+    summary = {key: snapshot.get(key) for key in
+        ("run_id", "workflow_id", "definition_sha256", "state", "errors", "cleanup", "elapsed_seconds")}
+    summary["nodes"] = [{key: row.get(key) for key in
+        ("node_id", "state", "component_status", "execution_started", "reason_code", "cleanup")}
+        for row in snapshot["nodes"]]
+    print("R60_GRAPH_OUTCOME " + json.dumps(summary, sort_keys=True, ensure_ascii=True), flush=True)
+    save(Path(store.folder) / "qa-outcome.json", summary)
     allowed = ("COMPLETED", "PARTIAL") if allow_partial else ("COMPLETED",)
     require(snapshot["state"] in allowed, "R60_ACTUAL_GRAPH_DID_NOT_COMPLETE: " + str(snapshot["state"]))
     require(len(snapshot["nodes"]) == len(workflow.nodes), "R60_NATIVE_NODE_COUNT")
