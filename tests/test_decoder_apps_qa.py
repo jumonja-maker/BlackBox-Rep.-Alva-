@@ -10,7 +10,7 @@ import stat
 import struct
 import tempfile
 import time
-from types import MappingProxyType
+from types import MappingProxyType, SimpleNamespace
 import unittest
 from unittest.mock import patch
 import xml.etree.ElementTree as ET
@@ -25,7 +25,8 @@ from tools.qa_decoder_budget_diagnostic import (PAIRS, parse_args, validate_nois
 from tools.qa_decoder_budget_diagnostic import native_attribution
 from tools.qa_schedule_capture import profile_definition
 from tools.qa_decoder_noise_fixture import (_close_owner_with_checked_handles,
-    _compiler_worker_environment, _require_compiler_policy, _configured_compiler_environment)
+    _compiler_worker_environment, _require_compiler_policy, _configured_compiler_environment,
+    _stop_completed_compiler_job)
 
 
 class CheckedOwnerCloseProtocolTests(unittest.TestCase):
@@ -100,6 +101,114 @@ class CheckedOwnerCloseProtocolTests(unittest.TestCase):
         self.assertEqual(owner.close_calls, [False])
         self.assertEqual(owner.unregister_calls, 1)
         self.assertIs(owner.kernel.CloseHandle, original_close)
+
+
+class PlannedCompilerJobStopProtocolTests(unittest.TestCase):
+    """Pure fake Job/query/clock fixtures, never evidence of Windows cleanup."""
+    def owner(self, *, worker_exit=0, job=101, termination_result=1):
+        owner = CheckedOwnerCloseProtocolTests.Owner()
+        owner.job = job
+        owner.process = SimpleNamespace(poll=lambda: worker_exit)
+        owner.termination_calls = []
+        owner.query_calls = []
+        owner.observations = []
+        def terminate(handle, code):
+            owner.termination_calls.append((handle, code))
+            owner.events.append(('terminate', handle, code))
+            return termination_result
+        owner.kernel.TerminateJobObject = terminate
+        return owner
+
+    def invoke(self, owner, responses, *, build_deadline=90):
+        responses = list(responses)
+        clock = [0.0]
+        def now():
+            clock[0] += .125
+            return clock[0]
+        def query(kernel, handle):
+            self.assertIs(kernel, owner.kernel)
+            owner.query_calls.append(handle)
+            if len(owner.query_calls) > 32:
+                raise RuntimeError('PURE_PROTOCOL_QUERY_BOUND')
+            ok, active, error = responses[0]
+            if len(responses) > 1:
+                responses.pop(0)
+            owner.events.append(('query', ok, active))
+            return ok, SimpleNamespace(active_processes=active), error
+        def snapshot(actual_owner, phase, observations):
+            self.assertIs(actual_owner, owner)
+            actual_owner._noise_diagnostic_handles = []
+            observations.append({'phase': phase})
+            owner.events.append(('snapshot', phase))
+        with patch('tools.qa_decoder_noise_fixture._compiler_snapshot', side_effect=snapshot), \
+                patch('tools.qa_decoder_noise_fixture._job_accounting', side_effect=query), \
+                patch('tools.qa_decoder_noise_fixture.time.monotonic', side_effect=now), \
+                patch('tools.qa_decoder_noise_fixture.time.sleep'):
+            return _stop_completed_compiler_job(owner, build_deadline=build_deadline,
+                                                observations=owner.observations)
+
+    def assert_owner_still_owns_handles(self, owner, expected_job=101):
+        self.assertEqual(owner.job, expected_job)
+        self.assertFalse(owner._closed)
+        self.assertTrue(owner.registered)
+        self.assertEqual(owner.close_calls, [])
+        self.assertEqual(owner.unregister_calls, 0)
+
+    def test_live_nonzero_or_missing_job_cannot_be_stopped_as_successful_compilation(self):
+        for worker_exit, job in ((None, 101), (1, 101), (0, None)):
+            with self.subTest(worker_exit=worker_exit, job=job):
+                owner = self.owner(worker_exit=worker_exit, job=job)
+                with self.assertRaises(AssertionError) as caught:
+                    self.invoke(owner, [(True, 0, 0)])
+                self.assertEqual(caught.exception.compiler_planned_shutdown['status'], 'FAILED')
+                self.assertEqual(owner.termination_calls, [])
+                self.assertEqual(owner.query_calls, [])
+                self.assertEqual(owner.observations, [])
+                self.assert_owner_still_owns_handles(owner, job)
+
+    def test_active_job_is_terminated_then_observed_empty_without_closing_owner(self):
+        owner = self.owner()
+        receipt = self.invoke(owner, [(True, 2, 0), (True, 1, 0), (True, 0, 0)])
+        self.assertEqual(receipt['status'], 'COMPLETED')
+        self.assertEqual(receipt['method'], 'PLANNED_OWNED_SDK_BACKGROUND_SHUTDOWN_AFTER_SUCCESSFUL_COMPILATION')
+        self.assertTrue(receipt['termination_requested'])
+        self.assertTrue(receipt['termination_succeeded'])
+        self.assertEqual(receipt['active_job_processes_before_stop'], 2)
+        self.assertEqual(receipt['active_job_processes_after_stop'], 0)
+        self.assertFalse(receipt['natural_background_exit_claimed'])
+        self.assertEqual(owner.termination_calls, [(101, 1)])
+        self.assertTrue(all(handle == 101 for handle in owner.query_calls))
+        self.assertLess(owner.events.index(('terminate', 101, 1)), owner.events.index(('query', True, 0)))
+        self.assert_owner_still_owns_handles(owner)
+
+    def test_already_empty_job_needs_no_termination_and_retains_its_owner(self):
+        owner = self.owner()
+        receipt = self.invoke(owner, [(True, 0, 0)])
+        self.assertEqual(receipt['status'], 'COMPLETED')
+        self.assertFalse(receipt['termination_requested'])
+        self.assertIsNone(receipt['termination_succeeded'])
+        self.assertEqual(owner.termination_calls, [])
+        self.assertEqual(receipt['active_job_processes_after_stop'], 0)
+        self.assert_owner_still_owns_handles(owner)
+
+    def test_failed_termination_query_still_active_or_expired_deadline_cannot_pass(self):
+        cases = [
+            ('termination_false', 0, [(True, 2, 0)], 90),
+            ('initial_query_failed', 1, [(False, 0, 5)], 90),
+            ('query_failed_after_termination', 1, [(True, 2, 0), (False, 0, 5)], 90),
+            ('still_active', 1, [(True, 2, 0)], 90),
+            ('already_expired', 1, [(True, 0, 0)], 0),
+        ]
+        for label, termination_result, responses, deadline in cases:
+            with self.subTest(fixture=label):
+                owner = self.owner(termination_result=termination_result)
+                with self.assertRaises(AssertionError) as caught:
+                    self.invoke(owner, responses, build_deadline=deadline)
+                receipt = caught.exception.compiler_planned_shutdown
+                self.assertEqual(receipt['status'], 'FAILED')
+                self.assertFalse(receipt['natural_background_exit_claimed'])
+                self.assertNotEqual(receipt['active_job_processes_after_stop'], 0)
+                self.assert_owner_still_owns_handles(owner)
 
 
 class CompilerEnvironmentPolicyProtocolTests(unittest.TestCase):

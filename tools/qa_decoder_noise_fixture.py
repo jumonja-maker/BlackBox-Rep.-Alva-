@@ -258,6 +258,51 @@ def _close_owner_with_checked_handles(owner):
         kernel.CloseHandle = real_close
 
 
+def _stop_completed_compiler_job(owner, *, build_deadline, observations):
+    """Stop this dedicated SDK Job after the caller validates completed output."""
+    receipt = {'status': 'NOT_STARTED',
+               'method': 'PLANNED_OWNED_SDK_BACKGROUND_SHUTDOWN_AFTER_SUCCESSFUL_COMPILATION',
+               'termination_requested': False, 'termination_succeeded': None,
+               'active_job_processes_before_stop': None, 'active_job_processes_after_stop': None,
+               'natural_background_exit_claimed': False}
+    try:
+        process = getattr(owner, 'process', None)
+        require(process is not None and process.poll() == 0, 'NATIVE_NOISE_COMPILER_SUCCESS_REQUIRED_FOR_PLANNED_STOP')
+        kernel = owner.kernel; handle = owner.job
+        require(handle, 'NATIVE_NOISE_COMPILER_JOB_MISSING')
+        stop_deadline = min(time.monotonic() + 2, build_deadline)
+        _compiler_snapshot(owner, 'BEFORE_PLANNED_SHUTDOWN', observations)
+        require(not owner._noise_diagnostic_handles, 'NATIVE_NOISE_COMPILER_DIAGNOSTIC_HANDLE_CLOSE_UNCONFIRMED')
+        require(time.monotonic() < stop_deadline, 'NATIVE_NOISE_COMPILER_PLANNED_STOP_DEADLINE')
+        ok, accounting, error = _job_accounting(kernel, handle)
+        receipt['last_job_query_winerror'] = error
+        require(ok, 'NATIVE_NOISE_COMPILER_JOB_QUERY_UNCONFIRMED')
+        receipt['active_job_processes_before_stop'] = accounting.active_processes
+        receipt['status'] = 'PLANNED_SHUTDOWN_IN_PROGRESS'
+        if accounting.active_processes:
+            receipt['termination_requested'] = True
+            receipt['termination_succeeded'] = bool(kernel.TerminateJobObject(handle, 1))
+            require(receipt['termination_succeeded'], 'NATIVE_NOISE_COMPILER_PLANNED_STOP_UNCONFIRMED')
+        while True:
+            require(time.monotonic() < stop_deadline, 'NATIVE_NOISE_COMPILER_PLANNED_STOP_DEADLINE')
+            ok, accounting, error = _job_accounting(kernel, handle)
+            receipt['last_job_query_winerror'] = error
+            require(ok, 'NATIVE_NOISE_COMPILER_JOB_QUERY_UNCONFIRMED')
+            receipt['active_job_processes_after_stop'] = accounting.active_processes
+            if accounting.active_processes == 0:
+                break
+            time.sleep(.02)
+        _compiler_snapshot(owner, 'PLANNED_SHUTDOWN_EMPTY', observations)
+        require(not owner._noise_diagnostic_handles, 'NATIVE_NOISE_COMPILER_DIAGNOSTIC_HANDLES_REMAIN')
+        require(time.monotonic() < stop_deadline, 'NATIVE_NOISE_COMPILER_PLANNED_STOP_DEADLINE')
+        receipt['status'] = 'COMPLETED'
+        return receipt
+    except BaseException as error:
+        receipt['status'] = 'FAILED'
+        error.compiler_planned_shutdown = receipt
+        raise
+
+
 def _close_compiler(owner, *, force, observations, build_deadline):
     """Observe actual exit and empty Job before its close can hide descendants."""
     kernel = owner.kernel
@@ -355,6 +400,8 @@ def build_native_noise(output: Path, source_sha: str) -> dict:
     cleanup = {'status': 'NOT_ESTABLISHED', 'cleanup_required': True}
     observations = []
     opt_out_policy = {'request_status': 'NOT_REQUESTED', 'worker_verification_status': 'NOT_ESTABLISHED'}
+    planned_shutdown = {'status': 'NOT_REQUESTED'}
+    completed_output_proof = {'status': 'NOT_ESTABLISHED', 'post_shutdown_revalidated': False}
     try:
         require(time.monotonic() < build_deadline, 'NATIVE_NOISE_COMPILER_DEADLINE')
         environment = _compiler_worker_environment(os.environ)
@@ -379,9 +426,6 @@ def build_native_noise(output: Path, source_sha: str) -> dict:
                     'NATIVE_NOISE_COMPILER_OUTPUT_BUDGET')
             time.sleep(.05)
         code = owner.process.wait(timeout=3)
-        cleanup = _close_compiler(owner, force=False, observations=observations, build_deadline=build_deadline)
-        closed = True
-        stream.close()
         require(log_path.stat().st_size <= MAX_BUILD_LOG and
                 sum(path.stat().st_size for path in output.rglob('*') if path.is_file()) <= MAX_BUILD_BYTES,
                 'NATIVE_NOISE_FINAL_BUILD_BUDGET')
@@ -395,22 +439,46 @@ def build_native_noise(output: Path, source_sha: str) -> dict:
         # guards. This verifies propagation, not that MSVC honours every knob.
         opt_out_policy['worker_verification_status'] = 'WORKER_AND_COMPILER_ENVIRONMENT_VERIFIED'
         pdb = _built_pdb(output / 'scheduler-noise.pdb')
+        executable_digest = file_hash(executable)
         require(time.monotonic() < build_deadline, 'NATIVE_NOISE_COMPILER_DEADLINE')
+        completed_output_proof.update(status='VERIFIED_BEFORE_PLANNED_STOP', source_sha256=digest,
+                                      executable_sha256=executable_digest, native_image=native, native_pdb=pdb)
+        # The worker and its cl/link invocation have completed successfully.
+        # SDK background work has an explicit owned-Job stop lifecycle; its
+        # natural exit is never an acceptance claim or a process-name exception.
+        planned_shutdown = _stop_completed_compiler_job(owner, build_deadline=build_deadline,
+                                                        observations=observations)
+        cleanup = _close_compiler(owner, force=False, observations=observations, build_deadline=build_deadline)
+        closed = True
+        stream.close()
+        require(file_hash(executable) == executable_digest and
+                _built_pdb(output / 'scheduler-noise.pdb') == pdb and file_hash(source) == digest and
+                source_identity(source_sha).get('source_identity_status') == 'VERIFIED_EXPECTED_HEAD',
+                'NATIVE_NOISE_COMPLETED_BUILD_OUTPUT_CHANGED')
+        require(log_path.stat().st_size <= MAX_BUILD_LOG and
+                sum(path.stat().st_size for path in output.rglob('*') if path.is_file()) <= MAX_BUILD_BYTES,
+                'NATIVE_NOISE_FINAL_BUILD_BUDGET')
+        require(time.monotonic() < build_deadline, 'NATIVE_NOISE_COMPILER_DEADLINE')
+        completed_output_proof['post_shutdown_revalidated'] = True
         result = {'schema': 'blackbox.native-noise-build/1', 'status': 'PASS',
                   'executable': str(executable), 'source_sha256': digest,
-                  'executable_sha256': file_hash(executable), 'implementation': 'NATIVE_WIN32',
+                  'executable_sha256': executable_digest, 'implementation': 'NATIVE_WIN32',
                   'expected_native_handles': 32, 'event_handles': 16, 'thread_handles': 16,
                   'source_identity': identity, 'native_image': native, 'native_pdb': pdb, 'cleanup': cleanup,
                   'compiler_job_observations': observations,
                   'compiler_opt_out_policy': opt_out_policy,
+                  'compiler_planned_shutdown': planned_shutdown,
+                  'completed_output_proof': completed_output_proof,
                   'compiler_job_assignment_verified_before_go': True}
         save(output / 'build.json', result)
         print('NATIVE_NOISE_FIXTURE_BUILD ' + json.dumps({key: result[key] for key in (
             'schema', 'status', 'source_sha256', 'executable_sha256', 'implementation',
             'expected_native_handles', 'source_identity', 'native_image', 'native_pdb', 'cleanup',
-            'compiler_job_observations', 'compiler_opt_out_policy')}, sort_keys=True), flush=True)
+            'compiler_job_observations', 'compiler_opt_out_policy', 'compiler_planned_shutdown',
+            'completed_output_proof')}, sort_keys=True), flush=True)
         return result
     except BaseException as error:
+        planned_shutdown = getattr(error, 'compiler_planned_shutdown', planned_shutdown)
         # Newer owners preserve a failed constructor's cleanup capability on
         # the exception, before this function's assignment could have occurred.
         if owner is None and isinstance(getattr(error, 'owner', None), OwnedProcess):
@@ -451,6 +519,8 @@ def build_native_noise(output: Path, source_sha: str) -> dict:
                    'source_sha256': digest, 'source_identity': identity,
                    'compiler_job_observations': observations,
                    'compiler_opt_out_policy': opt_out_policy,
+                   'compiler_planned_shutdown': planned_shutdown,
+                   'completed_output_proof': completed_output_proof,
                    'compiler_exit_code': getattr(getattr(owner, 'process', None), 'returncode', None),
                    'compiler_diagnostics_tail': _compiler_tail(log_path, output)}
         # Print the final cleanup receipt even if persisting it subsequently
