@@ -31,6 +31,11 @@ typedef struct Worker {
     unsigned long long created;
     volatile LONG64 handoffs;
     LONG64 begin_qpc, end_qpc;
+    int boost_disabled_before, boost_disabled_after;
+    int relative_priority_before, relative_priority_after;
+    int boost_before_observed, boost_after_observed;
+    int priority_before_observed, priority_after_observed;
+    int boost_control_verified;
 } Worker;
 
 static Worker workers[WORKERS];
@@ -47,6 +52,8 @@ static int stop_requested, all_joined;
 static int receipt_io_failed;
 static char json_buffer[JSON_CAP];
 static size_t json_used;
+static const char *thread_boost_policy = "INHERITED";
+static int disable_worker_boost;
 
 static void fail(const char *code) {
     LONG slot = InterlockedIncrement(&error_count) - 1;
@@ -152,9 +159,69 @@ static void common(const char *schema) {
            "\"expected_native_handles\":32,\"ttl_seconds\":%u,\"progress_limit\":%u,"
            "\"pid\":%lu,\"created_100ns\":\"%llu\","
            "\"source_sha256\":\"%s\",\"executable_sha256\":\"%s\","
-           "\"qpc_frequency_hz\":%lld", schema, (unsigned)TTL_SECONDS, (unsigned)MAX_PROGRESS,
+           "\"qpc_frequency_hz\":%lld,\"thread_boost_policy\":\"%s\","
+           "\"thread_boost_observation_scope\":\"OWNED_WORKERS_BEFORE_READY_RELEASE_CACHED_NOT_CONTINUOUS\"",
+           schema, (unsigned)TTL_SECONDS, (unsigned)MAX_PROGRESS,
            (unsigned long)process_id, process_created,
-           NOISE_SOURCE_SHA256, executable_sha256, frequency);
+           NOISE_SOURCE_SHA256, executable_sha256, frequency, thread_boost_policy);
+}
+
+static void worker_boost_json(const Worker *worker) {
+    append(",\"boost_disabled_before\":%s,\"boost_disabled_after\":%s,",
+           worker->boost_before_observed ? (worker->boost_disabled_before ? "true" : "false") : "null",
+           worker->boost_after_observed ? (worker->boost_disabled_after ? "true" : "false") : "null");
+    append("\"relative_priority_before\":");
+    if (worker->priority_before_observed) append("%d", worker->relative_priority_before);
+    else append("null");
+    append(",\"relative_priority_after\":");
+    if (worker->priority_after_observed) append("%d", worker->relative_priority_after);
+    else append("null");
+    append(",\"boost_control_verified\":%s", worker->boost_control_verified ? "true" : "false");
+}
+
+static int configure_worker_boost(Worker *worker) {
+    BOOL before = FALSE, after = FALSE;
+    int relative;
+    /* Candidate diagnostic control, not equivalent legacy interference or
+     * evidence of the cause of an earlier application deadline. Only these
+     * already-owned worker handles are queried/changed, before work release.
+     */
+    if (!GetThreadPriorityBoost(worker->thread, &before)) {
+        fail("NATIVE_NOISE_BOOST_BEFORE_QUERY_FAILED"); return 0;
+    }
+    worker->boost_disabled_before = before != FALSE;
+    worker->boost_before_observed = 1;
+    relative = GetThreadPriority(worker->thread);
+    if (relative == THREAD_PRIORITY_ERROR_RETURN) {
+        fail("NATIVE_NOISE_PRIORITY_BEFORE_QUERY_FAILED"); return 0;
+    }
+    worker->relative_priority_before = relative;
+    worker->priority_before_observed = 1;
+    if (disable_worker_boost && !SetThreadPriorityBoost(worker->thread, TRUE)) {
+        fail("NATIVE_NOISE_BOOST_DISABLE_FAILED"); return 0;
+    }
+    if (!GetThreadPriorityBoost(worker->thread, &after)) {
+        fail("NATIVE_NOISE_BOOST_AFTER_QUERY_FAILED"); return 0;
+    }
+    worker->boost_disabled_after = after != FALSE;
+    worker->boost_after_observed = 1;
+    relative = GetThreadPriority(worker->thread);
+    if (relative == THREAD_PRIORITY_ERROR_RETURN) {
+        fail("NATIVE_NOISE_PRIORITY_AFTER_QUERY_FAILED"); return 0;
+    }
+    worker->relative_priority_after = relative;
+    worker->priority_after_observed = 1;
+    if (worker->relative_priority_before != worker->relative_priority_after) {
+        fail("NATIVE_NOISE_BASE_PRIORITY_CHANGED"); return 0;
+    }
+    if (disable_worker_boost ? !worker->boost_disabled_after :
+        worker->boost_disabled_before != worker->boost_disabled_after) {
+        fail(disable_worker_boost ? "NATIVE_NOISE_BOOST_DISABLE_UNCONFIRMED" :
+                                   "NATIVE_NOISE_INHERITED_BOOST_CHANGED");
+        return 0;
+    }
+    worker->boost_control_verified = 1;
+    return 1;
 }
 
 static void worker_json(int final) {
@@ -166,6 +233,7 @@ static void worker_json(int final) {
                "\"begin_qpc\":%lld", i ? "," : "", (unsigned long)worker->tid,
                worker->created, InterlockedCompareExchange64(&worker->handoffs, 0, 0), worker->begin_qpc);
         if (final) append(",\"end_qpc\":%lld", worker->end_qpc);
+        worker_boost_json(worker);
         append("}");
     }
     append("]");
@@ -273,6 +341,8 @@ static int run(void) {
     if (InterlockedCompareExchange(&ready_count, 0, 0) != WORKERS || error_count) {
         fail("NATIVE_NOISE_READY_BARRIER_FAILED"); goto cleanup;
     }
+    for (i = 0; i < WORKERS; ++i)
+        if (!configure_worker_boost(&workers[i])) goto cleanup;
     begin_qpc = qpc();
     common("blackbox.scheduler-noise/1");
     append(",\"status\":\"READY\",\"pairs\":8,\"begin_qpc\":%lld", begin_qpc);
@@ -299,8 +369,10 @@ static int run(void) {
                    "\"sample_end_qpc\":%lld,\"workers\":[", sequence, last, first, last);
             for (i = 0; i < WORKERS; ++i) {
                 total += counts[i];
-                append("%s{\"tid\":%lu,\"handoffs\":%lld}", i ? "," : "",
+                append("%s{\"tid\":%lu,\"handoffs\":%lld", i ? "," : "",
                        (unsigned long)workers[i].tid, counts[i]);
+                worker_boost_json(&workers[i]);
+                append("}");
             }
             append("],\"total_handoffs\":%lld}\n", total);
             if (_snwprintf_s(name, 64, _TRUNCATE, L"progress-%04u.json", sequence) < 0 || !receipt(name)) {
@@ -369,9 +441,16 @@ int wmain(int argc, wchar_t **argv) {
     wchar_t actions[16], environment[32];
     DWORD a = GetEnvironmentVariableW(L"GITHUB_ACTIONS", actions, 16);
     DWORD e = GetEnvironmentVariableW(L"RUNNER_ENVIRONMENT", environment, 32);
-    if (argc != 3 || wcscmp(argv[1], L"--output") != 0 || !a || a >= 16 || !e || e >= 32 ||
+    if ((argc != 3 && argc != 5) || wcscmp(argv[1], L"--output") != 0 || !a || a >= 16 || !e || e >= 32 ||
         wcscmp(actions, L"true") != 0 || wcscmp(environment, L"github-hosted") != 0 ||
         !source_hash_valid() || !argv[2][0] || wcslen(argv[2]) >= PATH_CAP - 64) return 2;
+    if (argc == 5) {
+        if (wcscmp(argv[3], L"--thread-boost-policy") != 0) return 2;
+        if (wcscmp(argv[4], L"DISABLED") == 0) {
+            disable_worker_boost = 1;
+            thread_boost_policy = "DISABLED";
+        } else if (wcscmp(argv[4], L"INHERITED") != 0) return 2;
+    }
     if (wcscpy_s(output_root, PATH_CAP, argv[2]) != 0 || !CreateDirectoryW(output_root, NULL)) return 2;
     return run();
 }
