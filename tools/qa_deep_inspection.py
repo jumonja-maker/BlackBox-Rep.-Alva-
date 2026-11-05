@@ -818,6 +818,34 @@ def exited_target_check(output: Path, executable: Path, helper: Path | None) -> 
             probe.close(kill=True)
 
 
+
+def verify_normal_helper_shutdown(output: Path, probe: Probe, helper: Path | None) -> dict:
+    """A separate *non-crashed* Helper must still ACK cleanly and really exit."""
+    from blackbox_core.deep_contracts import ActionRequest
+    from blackbox_core.deep_service import InspectorService
+    service = InspectorService(journal_root=output / "normal-final-shutdown", helper_executable=helper)
+    observed = None
+    helper_pid = None
+    try:
+        identity = service.identity(probe.process.pid)
+        observed = service.execute(ActionRequest("modules", identity))
+        helper_pid = service.helper_pid
+        require(observed.get("status") in ("COMPLETED", "INCOMPLETE_EVIDENCE") and
+                helper_pid not in (None, os.getpid(), probe.process.pid),
+                "NORMAL_FROZEN_HELPER_OBSERVATION_NOT_VERIFIED")
+    finally:
+        closed = service.close()
+    status = service.session_status()
+    require(closed.get("status") == "COMPLETED" and service.helper is None and
+            status.get("helper_pid") is None and status.get("state") == "INACTIVE" and
+            status.get("cleanup_required") is False,
+            "NORMAL_FROZEN_HELPER_CLOSE_ACK_OR_EXIT_UNCONFIRMED")
+    return {"status": "PASS", "helper_pid": helper_pid,
+            "observation_status": observed["status"], "close_status": closed["status"],
+            "helper_exit_confirmed": True, "cleanup_required": False}
+
+
+
 def run_acceptance(output: Path, executable: Path, helper: Path | None, *, require_medium_integrity=False) -> dict:
     from blackbox_core.windows_research import privilege
     require_hosted_windows()
@@ -857,6 +885,7 @@ def run_acceptance(output: Path, executable: Path, helper: Path | None, *, requi
         proof["before_after_journal"] = acceptance.compare_and_journal()
         proof["helper_crash"] = acceptance.crash_recovery()
         proof["target_exit_race"] = exited_target_check(output, executable, helper)
+        proof["normal_helper_close"] = verify_normal_helper_shutdown(output, probe, helper)
         proof["operation_count"] = len(acceptance.operations)
         proof["status"] = "PASS"
     except BaseException as error:
@@ -875,8 +904,34 @@ def run_acceptance(output: Path, executable: Path, helper: Path | None, *, requi
             try:
                 proof["helper_cleanup"] = acceptance.service.close()
                 if proof["status"] == "PASS":
-                    require(proof["helper_cleanup"].get("status") == "COMPLETED",
-                            "NORMAL_HELPER_FINAL_CLEANUP_UNCONFIRMED")
+                    crash = proof.get("helper_crash", {})
+                    crashed_close = crash.get("service_recovery", {}).get("status")
+                    if (crash.get("status") == "PASS" and crashed_close == "RECOVERY_UNCONFIRMED"
+                            and crash.get("target_progress_verified") is True
+                            and crash.get("selected_bytes_restored_verified") is True
+                            and crash.get("own_thread_resumed_verified") is True):
+                        # The owned Helper was deliberately killed. Guardian/target
+                        # recovery was independently observed, but no authenticated
+                        # close ACK exists. The application MUST preserve that
+                        # uncertainty rather than falsely claiming normal cleanup.
+                        remaining = acceptance.service.session_status()
+                        require(proof["helper_cleanup"].get("status") == "RECOVERY_UNCONFIRMED"
+                                and acceptance.service.helper is None
+                                and remaining.get("helper_pid") is None
+                                and remaining.get("state") == "CLEANUP_REQUIRED"
+                                and remaining.get("cleanup_required") is True
+                                and remaining.get("active") is False
+                                and proof.get("normal_helper_close", {}).get("status") == "PASS",
+                                "CRASH_RECOVERY_FAIL_CLOSED_STATE_NOT_PRESERVED")
+                        proof["post_crash_cleanup"] = {
+                            "status": "EXPECTED_RECOVERY_UNCONFIRMED",
+                            "original_helper_exit_verified": True,
+                            "owned_target_recovery_independently_verified": True,
+                            "replacement_normal_helper_cleanup": "PASS",
+                            "unknown_cleanup_ack_retained": True}
+                    else:
+                        require(proof["helper_cleanup"].get("status") == "COMPLETED",
+                                "NORMAL_HELPER_FINAL_CLEANUP_UNCONFIRMED")
             except BaseException as error:
                 proof.update(status="FAIL", cleanup_error=type(error).__name__, cleanup_reason=str(error)[:1000])
         if probe is not None:
