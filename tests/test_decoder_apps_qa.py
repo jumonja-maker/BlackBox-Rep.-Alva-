@@ -2421,6 +2421,106 @@ class PreludeFailureAndBudgetCompositionTests(unittest.TestCase):
             abort.assert_not_called()
 
 
+class NativePositiveCapturePreparationTests(unittest.TestCase):
+    """Order/failure protocol fixtures; never substitute for real native A/B."""
+    def invoke(self, *, role='native_positive', fault=None):
+        from tools import qa_decoder_budget_diagnostic as driver
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary); order=[]; caught=[]
+            failure=PermissionError(13, 'PROTOCOL_PREPARATION_FAILURE'); failure.winerror=5
+            boundary=AssertionError('PROTOCOL_AFTER_FACTORY')
+            native=role!='python_byte'; profile='schedule' if role=='native_row' else 'cpu_file'
+            expectation={'native_positive':'COMPLETE_NATIVE_7ZIP', 'native_row':'NATIVE_BUDGET_NEGATIVE',
+                         'python_byte':'OUTPUT_BUDGET_NEGATIVE'}[role]
+            actual=SimpleNamespace(active=False,qa_profile=profile,profile_entry='fixed',profile_path=root/'profile.wprp')
+            def cancel():
+                order.append('wpr_cancel'); actual.active=False
+            actual.cancel=cancel
+            def original(folder, **options):
+                order.append('wpr_start')
+                if fault=='wpr': raise failure
+                actual.active=True
+                return actual
+            def start(noise):
+                order.append('noise_start')
+                noise.owner=SimpleNamespace(process=SimpleNamespace(poll=lambda:None))
+                noise.ready={'qpc_frequency_hz':1000,'begin_qpc':900}
+            def prelude(noise, target, deadline, **options):
+                order.append('prelude')
+                self.assertEqual(target,1000); self.assertEqual(options['minimum_seconds'],0 if native else 10)
+                if fault=='prelude': raise failure
+                noise.prelude={'status':'COMPLETED','target_handoffs':target,'observed_handoffs':2000}
+            def stop(noise):
+                order.append('noise_stop')
+                noise.oracle={'workers':[{'handoffs':1} for _ in range(16)]}
+                noise.cleanup={'status':'COMPLETED'}
+            def workload(output, helper, **options):
+                capture=None
+                try:
+                    capture=driver.apps.start_schedule(output,profile=profile)
+                    order.append('workload_begin')
+                    raise boundary  # Stop after proving factory ordering; no fake acceptance.
+                except BaseException as error:
+                    caught.append(error)
+                    raise
+                finally:
+                    if capture is not None: capture.cancel()
+            producer={'implementation':'NATIVE_WIN32' if native else 'PYTHON_CTYPES_WIN32',
+                      'source_sha256':'a'*64,'executable_sha256':'b'*64,'expected_native_handles':32 if native else 16}
+            with patch.object(driver,'source_identity',return_value={'source_identity_status':'VERIFIED_EXPECTED_HEAD'}), \
+                    patch.object(driver,'kernel_api',return_value=object()), \
+                    patch.object(driver,'counter',return_value=1000), \
+                    patch.object(driver.time,'monotonic',return_value=0), \
+                    patch('tools.qa_decoder_apps.start_schedule',side_effect=original) as factory, \
+                    patch('tools.qa_decoder_apps.seven_zip',side_effect=workload), \
+                    patch('tools.qa_decoder_apps.file_hash',return_value='c'*64), \
+                    patch.object(driver.NoiseOwner,'start',autospec=True,side_effect=start), \
+                    patch.object(driver.NoiseOwner,'await_handoffs',autospec=True,side_effect=prelude), \
+                    patch.object(driver.NoiseOwner,'stop',autospec=True,side_effect=stop), \
+                    patch.object(driver.NoiseOwner,'abort') as abort, \
+                    patch.object(driver,'collect_bounded_case_facts'), \
+                    patch.object(driver,'collect_noise_stop_observation'),redirect_stdout(io.StringIO()):
+                proof=driver.run_case(root/'case',root/'helper.exe','a'*40,100,profile,producer,expectation,
+                    0 if role=='native_row' else 1000, minimum_prelude_seconds=0 if native else 10,
+                    native_module_encoding=None if native else 'INLINE_V1')
+            abort.assert_not_called()
+            self.assertEqual(proof['status'],'REPRODUCTION_NOT_ESTABLISHED')
+            return proof,order,caught,failure,boundary,factory.call_count
+
+    def test_native_positive_prepares_then_starts_capture_before_workload(self):
+        proof,order,caught,_,boundary,count=self.invoke()
+        self.assertEqual(order,['noise_start','prelude','wpr_start','workload_begin','noise_stop','wpr_cancel'])
+        self.assertEqual(caught,[boundary]);self.assertEqual(count,1)
+        lifecycle=proof['capture_lifecycle']
+        self.assertEqual(lifecycle['prelude_capture_scope'],'NATIVE_POSITIVE_PREPARATION_BEFORE_WPR')
+        self.assertLessEqual(lifecycle['prelude_completed_qpc'],lifecycle['capture_start_request_qpc'])
+        self.assertLessEqual(lifecycle['capture_start_complete_qpc'],proof['noise_workload_qpc_bounds']['begin_qpc'])
+        self.assertEqual(proof['capture_cleanup'],{'status':'CANCELLED','cleanup_required':False})
+
+    def test_native_positive_prelude_failure_never_starts_wpr_and_normally_stops_noise(self):
+        proof,order,caught,failure,_,count=self.invoke(fault='prelude')
+        self.assertEqual(order,['noise_start','prelude','noise_stop']);self.assertEqual(count,0)
+        self.assertEqual(len(caught),1);self.assertIs(caught[0],failure)
+        self.assertEqual(proof['capture_cleanup'],{'status':'NOT_STARTED','cleanup_required':False})
+        self.assertEqual(proof['capture_lifecycle']['primary_error']['phase'],'NOISE_START_OR_PRELUDE')
+
+    def test_native_positive_wpr_start_failure_keeps_primary_and_noise_cleanup(self):
+        proof,order,caught,failure,_,count=self.invoke(fault='wpr')
+        self.assertEqual(order,['noise_start','prelude','wpr_start','noise_stop']);self.assertEqual(count,1)
+        self.assertEqual(len(caught),1);self.assertIs(caught[0],failure)
+        self.assertEqual(proof['capture_lifecycle']['primary_error']['phase'],'WPR_START')
+        self.assertTrue(proof['capture_cleanup']['cleanup_required'])
+        self.assertEqual(proof['noise_cleanup']['status'],'COMPLETED')
+
+    def test_python_byte_prelude_stays_recorded_and_native_row_order_stays_unchanged(self):
+        for role,expected in [('python_byte',['wpr_start','noise_start','prelude','workload_begin','noise_stop','wpr_cancel']),
+                              ('native_row',['wpr_start','noise_start','workload_begin','noise_stop','wpr_cancel'])]:
+            with self.subTest(role=role):
+                proof,order,_,_,_,_=self.invoke(role=role)
+                self.assertEqual(order,expected)
+                self.assertEqual(proof['capture_lifecycle']['prelude_capture_scope'],'PRELUDE_RECORDED_WITHIN_WPR')
+
+
 class OwnedGuiQueueProtocolTests(unittest.TestCase):
     """Fake User32 contract tests, not evidence of a real responsive window."""
     def user(self, *, pid=77, tid=88, post_success=True, query_success=True):

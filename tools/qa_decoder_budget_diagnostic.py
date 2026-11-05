@@ -950,7 +950,7 @@ class BudgetCapture:
 
     @property
     def active(self):
-        return self.actual.active
+        return self.actual is not None and self.actual.active
 
     def remember(self, error, phase):
         fact = bounded_failure(error, phase)
@@ -1089,7 +1089,7 @@ class BudgetCapture:
         if self.noise.owner:
             self.stop_noise()
         result = None
-        if self.actual.active:
+        if self.actual is not None and self.actual.active:
             try:
                 result = self.actual.cancel()
                 apps.require(not self.actual.active, 'DIAGNOSTIC_WPR_CANCEL_UNCONFIRMED')
@@ -1167,23 +1167,51 @@ def run_case(output, helper, source_sha, deadline, profile, producer, expectatio
 
     def factory(folder, *, profile='schedule'):
         apps.require(profile == proof['requested_profile'], 'DIAGNOSTIC_PROFILE_NOT_FORWARDED')
-        capture_cleanup.update(status='START_REQUESTED', cleanup_required=True)
-        actual = original_factory(folder, profile=profile)
-        capture_cleanup.update(status='RECORDING', cleanup_required=True)
-        capture = BudgetCapture(actual, noise, workload_clock, capture_cleanup, captures,
+        capture = BudgetCapture(None, noise, workload_clock, capture_cleanup, captures,
                                 lambda: counter(kernel), capture_lifecycle)
-        try:
-            apps.require(actual.qa_profile == profile, 'DIAGNOSTIC_ACTUAL_PROFILE_MISMATCH')
-            capture_profile.update(name=actual.qa_profile, entry=actual.profile_entry,
-                                   xml_sha256=apps.file_hash(actual.profile_path))
-            proof['capture_profile'] = dict(capture_profile)
+        prepare_before_capture = (producer['implementation'] == 'NATIVE_WIN32' and
+                                  expectation == 'COMPLETE_NATIVE_7ZIP')
+        capture_lifecycle['prelude_capture_scope'] = ('NATIVE_POSITIVE_PREPARATION_BEFORE_WPR'
+            if prepare_before_capture else 'PRELUDE_RECORDED_WITHIN_WPR')
+        phase = 'NOISE_START_OR_PRELUDE'
+
+        def prepare_noise():
             noise.start()
             if target_handoffs or minimum_prelude_seconds:
                 noise.await_handoffs(target_handoffs, deadline, minimum_seconds=minimum_prelude_seconds)
             apps.require(noise.ready['qpc_frequency_hz'] == frequency, 'DIAGNOSTIC_NOISE_COUNTER_MISMATCH')
+            capture_lifecycle['prelude_completed_qpc'] = counter(kernel)
+            apps.require(time.monotonic() < deadline, 'CONTROLLED_CAPTURE_PREPARATION_DEADLINE')
+
+        try:
+            # A's accumulated count is B's fixture setup, not application work.
+            # All workers keep running unthrottled through WPR start and the
+            # entire unchanged workload; interior coverage remains mandatory.
+            # Python's intentional byte-negative prelude stays inside WPR.
+            if prepare_before_capture:
+                prepare_noise()
+            phase = 'WPR_START'
+            capture_cleanup.update(status='START_REQUESTED', cleanup_required=True)
+            capture_lifecycle['capture_start_request_qpc'] = counter(kernel)
+            actual = original_factory(folder, profile=profile)
+            capture.actual = actual
+            capture_lifecycle['capture_start_complete_qpc'] = counter(kernel)
+            capture_cleanup.update(status='RECORDING', cleanup_required=True)
+            apps.require(actual.active and actual.qa_profile == profile, 'DIAGNOSTIC_ACTUAL_PROFILE_MISMATCH')
+            capture_profile.update(name=actual.qa_profile, entry=actual.profile_entry,
+                                   xml_sha256=apps.file_hash(actual.profile_path))
+            proof['capture_profile'] = dict(capture_profile)
+            phase = 'NOISE_START_OR_PRELUDE'
+            if not prepare_before_capture:
+                prepare_noise()
             workload_clock['begin_qpc'] = counter(kernel)
+            apps.require(capture_lifecycle['capture_start_request_qpc'] <=
+                capture_lifecycle['capture_start_complete_qpc'] <= workload_clock['begin_qpc'] and
+                (not prepare_before_capture or capture_lifecycle['prelude_completed_qpc'] <=
+                    capture_lifecycle['capture_start_request_qpc']), 'DIAGNOSTIC_CAPTURE_PREPARATION_ORDER')
+            apps.require(time.monotonic() < deadline, 'CONTROLLED_CAPTURE_PREPARATION_DEADLINE')
         except BaseException as error:
-            capture.remember(error, 'NOISE_START_OR_PRELUDE')
+            capture.remember(error, phase)
             capture.cancel()  # Normal noise stop, then WPR cancel; rethrows the original.
             raise
         if producer['implementation'] == 'NATIVE_WIN32':
