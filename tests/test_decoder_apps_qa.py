@@ -23,6 +23,81 @@ from tools.qa_decoder_budget_diagnostic import (PAIRS, parse_args, validate_nois
     validate_output_observation, seal_and_remove_large_evidence, collect_bounded_case_facts)
 from tools.qa_decoder_budget_diagnostic import native_attribution
 from tools.qa_schedule_capture import profile_definition
+from tools.qa_decoder_noise_fixture import _close_owner_with_checked_handles
+
+
+class CheckedOwnerCloseProtocolTests(unittest.TestCase):
+    """Fake owner/kernel fault fixtures only: no native process or handle evidence."""
+    class Owner:
+        def __init__(self, native_result=73, owner_error=None):
+            self.job = 101
+            self._closed = False
+            self.registered = True
+            self.unregister_calls = 0
+            self.close_calls = []
+            self.events = []
+            self.received_native_result = None
+            self.owner_error = owner_error
+
+            class Kernel:
+                pass
+            self.kernel = Kernel()
+            def native_close(handle):
+                self.events.append(('native_close', handle))
+                return native_result
+            self.kernel.CloseHandle = native_close
+
+        def close(self, *, kill=False):
+            self.close_calls.append(kill)
+            self.events.append(('owner_close', kill))
+            # Model the existing owner, which advances its state after the
+            # call. A FALSE must interrupt it before these assignments.
+            self.received_native_result = self.kernel.CloseHandle(self.job)
+            self.job = None
+            self._closed = True
+            # Model the normal cleanup hook required by the future R20 owner.
+            self.registered = False
+            self.unregister_calls += 1
+            self.events.append(('normal_unregister',))
+            if self.owner_error is not None:
+                raise self.owner_error
+
+    def test_delegates_to_owner_close_and_keeps_normal_cleanup_hook_and_native_result(self):
+        owner = self.Owner()
+        original_close = owner.kernel.CloseHandle
+        _close_owner_with_checked_handles(owner)
+        self.assertEqual(owner.close_calls, [False])
+        self.assertEqual(owner.events, [('owner_close', False), ('native_close', 101), ('normal_unregister',)])
+        self.assertEqual(owner.received_native_result, 73)
+        self.assertEqual(owner.unregister_calls, 1)
+        self.assertFalse(owner.registered)
+        self.assertIsNone(owner.job)
+        self.assertTrue(owner._closed)
+        self.assertIs(owner.kernel.CloseHandle, original_close)
+
+    def test_native_false_interrupts_owner_before_job_state_or_registry_is_cleared(self):
+        owner = self.Owner(native_result=0)
+        original_close = owner.kernel.CloseHandle
+        with self.assertRaisesRegex(AssertionError, 'NATIVE_NOISE_COMPILER_JOB_CLOSE_FAILED'):
+            _close_owner_with_checked_handles(owner)
+        self.assertEqual(owner.close_calls, [False])
+        self.assertEqual(owner.events, [('owner_close', False), ('native_close', 101)])
+        self.assertEqual(owner.job, 101)
+        self.assertFalse(owner._closed)
+        self.assertTrue(owner.registered)
+        self.assertEqual(owner.unregister_calls, 0)
+        self.assertIs(owner.kernel.CloseHandle, original_close)
+
+    def test_owner_exception_is_preserved_and_wrapper_is_restored(self):
+        failure = RuntimeError('OWNER_CLEANUP_HOOK_FAILED')
+        owner = self.Owner(owner_error=failure)
+        original_close = owner.kernel.CloseHandle
+        with self.assertRaises(RuntimeError) as caught:
+            _close_owner_with_checked_handles(owner)
+        self.assertIs(caught.exception, failure)
+        self.assertEqual(owner.close_calls, [False])
+        self.assertEqual(owner.unregister_calls, 1)
+        self.assertIs(owner.kernel.CloseHandle, original_close)
 
 
 class ControlledBudgetProtocolTests(unittest.TestCase):
