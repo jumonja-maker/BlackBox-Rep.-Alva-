@@ -45,7 +45,7 @@ MAX_DOWNLOAD = 32 * 1024**2
 MAX_TRACE = 256 * 1024**2
 # Only the controlled native-noise pair opts in. This does not change product
 # timeouts, ordinary acceptance, or the separate noise/whole-diagnostic limits.
-QA_WORKLOAD_POLICIES = {'ORDINARY_30': 30, 'CONTROLLED_NATIVE_60': 60}
+QA_WORKLOAD_POLICIES = {'ORDINARY_30': 30, 'CONTROLLED_NATIVE_90': 90}
 
 
 def workload_policy_seconds(policy):

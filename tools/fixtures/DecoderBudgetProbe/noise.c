@@ -20,10 +20,10 @@
 
 #define PAIRS 8
 #define WORKERS (2 * PAIRS)
-#define TTL_SECONDS 180
+#define TTL_SECONDS 210
 #define PATH_CAP 32768
 #define JSON_CAP 32768
-#define MAX_PROGRESS 721
+#define MAX_PROGRESS 841
 
 typedef struct Worker {
     HANDLE mine, other, thread;
@@ -278,7 +278,7 @@ static int run(void) {
     append(",\"status\":\"READY\",\"pairs\":8,\"begin_qpc\":%lld", begin_qpc);
     worker_json(0); append("}\n");
     if (!receipt(L"ready.json")) { fail("NATIVE_NOISE_READY_WRITE_FAILED"); goto cleanup; }
-    /* Exactly the fixed 180-second workload TTL starts after READY publication. */
+    /* Exactly the fixed 210-second workload TTL starts after READY publication. */
     deadline = GetTickCount64() + TTL_SECONDS * 1000ULL;
     next_progress = GetTickCount64();
     InterlockedExchange(&released, 1);

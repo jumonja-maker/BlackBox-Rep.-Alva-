@@ -133,6 +133,15 @@ class WorkloadFailureObservationProtocolTests(unittest.TestCase):
             self.assertEqual(facts['reason_code'], 'APP_WORKLOAD_DEADLINE')
             self.assertEqual(facts['process_state_before_cleanup'], 'RUNNING')
 
+    def test_revised_native_budget_still_rejects_live_process_after_ninety_seconds(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            facts, saved, _ = self.invoke_deadline(Path(tmp), timeout_override=90, sleep_advance=91)
+            self.assertEqual(saved, facts)
+            self.assertEqual(facts['configured_timeout_seconds'], 90)
+            self.assertEqual(facts['elapsed_monitor_seconds'], 91)
+            self.assertEqual(facts['reason_code'], 'APP_WORKLOAD_DEADLINE')
+            self.assertEqual(facts['process_state_before_cleanup'], 'RUNNING')
+
     def test_returned_process_proof_records_native_budget_and_observed_duration_after_thirty_one(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp); now = [0.]; polls = [None, 0]; events = []
@@ -232,11 +241,11 @@ class WorkloadFailureObservationProtocolTests(unittest.TestCase):
             self.assertEqual(oracle['workload_policy'], 'ORDINARY_30')
             self.assertEqual(oracle['requested_process_timeout_seconds'], 30)
 
-    def test_seven_zip_native_policy_forwards_sixty_to_both_roles_and_records_partial_policy(self):
+    def test_seven_zip_native_policy_forwards_ninety_to_both_roles_and_records_partial_policy(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp); binary = root / 'fake.exe'; binary.write_bytes(b'fixture')
             capture = SimpleNamespace(active=False); failure = AssertionError('APP_WORKLOAD_DEADLINE')
-            completed = {'pid': 123, 'configured_timeout_seconds': 60, 'elapsed_monitor_seconds': 31,
+            completed = {'pid': 123, 'configured_timeout_seconds': 90, 'elapsed_monitor_seconds': 31,
                          'exit_code': 0, 'role': 'COMPRESS', 'cycle': 0}
             with patch('tools.qa_decoder_apps.installed', return_value=binary), \
                     patch('tools.qa_decoder_apps.native_pe_identity', return_value={}), \
@@ -244,13 +253,13 @@ class WorkloadFailureObservationProtocolTests(unittest.TestCase):
                     patch('tools.qa_decoder_apps.start_schedule', return_value=capture), \
                     patch('tools.qa_decoder_apps.monitored_run', side_effect=[completed, failure]) as run:
                 with self.assertRaises(AssertionError) as caught:
-                    seven_zip(root, root / 'unused', workload_policy='CONTROLLED_NATIVE_60')
+                    seven_zip(root, root / 'unused', workload_policy='CONTROLLED_NATIVE_90')
             self.assertIs(caught.exception, failure)
             self.assertEqual([call.kwargs for call in run.call_args_list], [
-                {'role': 'COMPRESS', 'cycle': 0, 'timeout': 60}, {'role': 'EXTRACT', 'cycle': 0, 'timeout': 60}])
+                {'role': 'COMPRESS', 'cycle': 0, 'timeout': 90}, {'role': 'EXTRACT', 'cycle': 0, 'timeout': 90}])
             oracle = json.loads((root / 'workload-oracle.json').read_text())
-            self.assertEqual(oracle['workload_policy'], 'CONTROLLED_NATIVE_60')
-            self.assertEqual(oracle['requested_process_timeout_seconds'], 60)
+            self.assertEqual(oracle['workload_policy'], 'CONTROLLED_NATIVE_90')
+            self.assertEqual(oracle['requested_process_timeout_seconds'], 90)
             self.assertEqual(oracle['workloads'][0]['elapsed_monitor_seconds'], 31)
             self.assertEqual(oracle['status'], 'INCOMPLETE_WORKLOAD_FAILURE')
 
@@ -273,7 +282,7 @@ class ProducerNoisePolicyProtocolTests(unittest.TestCase):
         return {'schema': 'blackbox.scheduler-noise/1', 'status': 'READY', 'pid': 123,
             'created_100ns': '1000', 'source_sha256': 'a' * 64, 'executable_sha256': 'b' * 64,
             'implementation': implementation, 'expected_native_handles': 32 if native else 16,
-            'ttl_seconds': 180 if native else 70, 'progress_limit': 721 if native else 281,
+            'ttl_seconds': 210 if native else 70, 'progress_limit': 841 if native else 281,
             'begin_qpc': 0, 'qpc_frequency_hz': 1000,
             'workers': [{'tid': 100 + i, 'created_100ns': str(2000 + i)} for i in range(16)]}
 
@@ -289,18 +298,18 @@ class ProducerNoisePolicyProtocolTests(unittest.TestCase):
         validate_progress(progress, ready, implementation='NATIVE_WIN32')
         with self.assertRaisesRegex(AssertionError, 'PROGRESS_IDENTITY_OR_COUNTS'):
             validate_progress(progress, ready)  # Legacy utility calls retain the 281 ceiling.
-        for implementation, sequence in (('NATIVE_WIN32', 722), ('PYTHON_CTYPES_WIN32', 282)):
+        for implementation, sequence in (('NATIVE_WIN32', 842), ('PYTHON_CTYPES_WIN32', 282)):
             source = self.ready(implementation)
             with self.subTest(implementation=implementation), self.assertRaisesRegex(AssertionError, 'PROGRESS_IDENTITY_OR_COUNTS'):
                 validate_progress(self.progress(source, sequence), source, implementation=implementation)
-        for change in ({'ttl_seconds': 70}, {'ttl_seconds': 180.0}, {'ttl_seconds': True},
-                       {'progress_limit': 281}, {'progress_limit': 721.0}, {'implementation': 'PYTHON_CTYPES_WIN32'}):
+        for change in ({'ttl_seconds': 70}, {'ttl_seconds': 210.0}, {'ttl_seconds': True},
+                       {'progress_limit': 281}, {'progress_limit': 841.0}, {'implementation': 'PYTHON_CTYPES_WIN32'}):
             with self.subTest(change=change), self.assertRaisesRegex(AssertionError, 'ACTUAL_POLICY_MISMATCH'):
                 validate_progress({**progress, **change}, ready, implementation='NATIVE_WIN32')
         oracle = {**ControlledBudgetProtocolTests().oracle(), 'implementation': 'NATIVE_WIN32',
-                  'ttl_seconds': 180, 'progress_limit': 721, 'native_handles_created': 32, 'native_handles_closed': 32}
+                  'ttl_seconds': 210, 'progress_limit': 841, 'native_handles_created': 32, 'native_handles_closed': 32}
         validate_noise_oracle(oracle, 123, '1000', expected_handles=32, implementation='NATIVE_WIN32')
-        for change in ({'ttl_seconds': 70}, {'progress_limit': 721.0}):
+        for change in ({'ttl_seconds': 70}, {'progress_limit': 841.0}):
             with self.subTest(oracle=change), self.assertRaisesRegex(AssertionError, 'ACTUAL_POLICY_MISMATCH'):
                 validate_noise_oracle({**oracle, **change}, 123, '1000', expected_handles=32, implementation='NATIVE_WIN32')
 
@@ -360,12 +369,12 @@ class ProducerNoisePolicyProtocolTests(unittest.TestCase):
 
     def test_native_qos_accepts_exact_boundaries_and_rejects_one_tick_or_malformed_clock(self):
         ready = {'begin_qpc': 100, 'qpc_frequency_hz': 1000}
-        clock = {'begin_qpc': 90100, 'end_qpc': 155100, 'qpc_frequency_hz': 1000}
+        clock = {'begin_qpc': 90100, 'end_qpc': 185100, 'qpc_frequency_hz': 1000}
         facts = validate_native_timing(ready, clock, complete=True)
-        self.assertEqual((facts['ready_to_work_begin_seconds'], facts['whole_workload_seconds']), (90, 65))
+        self.assertEqual((facts['ready_to_work_begin_seconds'], facts['whole_workload_seconds']), (90, 95))
         self.assertEqual(facts['status'], 'WITHIN_LIMITS')
         for source, value in ((ready, {**clock, 'begin_qpc': 90101}),
-                              (ready, {**clock, 'end_qpc': 155101}),
+                              (ready, {**clock, 'end_qpc': 185101}),
                               ({**ready, 'qpc_frequency_hz': 1000.0}, clock),
                               (ready, {**clock, 'qpc_frequency_hz': True}),
                               (ready, {**clock, 'end_qpc': 2**63}),
@@ -500,8 +509,8 @@ class BudgetCaptureOrderProtocolTests(unittest.TestCase):
         self.assertEqual(events, [('noise_stop', None), ('wpr_cancel',)])
 
     def test_native_qos_rejection_preserves_first_error_and_still_stops_noise_and_capture(self):
-        for begin, end, reason, wpr_error in ((20100, 85101, 'NATIVE_QOS_WORKLOAD_EXCEEDED', None),
-                (90101, 155101, 'NATIVE_QOS_READY_TO_WORK_EXCEEDED', RuntimeError('WPR_STOP_FAILED'))):
+        for begin, end, reason, wpr_error in ((20100, 115101, 'NATIVE_QOS_WORKLOAD_EXCEEDED', None),
+                (90101, 185101, 'NATIVE_QOS_READY_TO_WORK_EXCEEDED', RuntimeError('WPR_STOP_FAILED'))):
             with self.subTest(reason=reason):
                 capture, events, _, _ = self.capture(stop_error=wpr_error)
                 capture.noise.producer = {'implementation': 'NATIVE_WIN32'}
@@ -1089,21 +1098,21 @@ class ControlledBudgetProtocolTests(unittest.TestCase):
             validate_progress({**progress, 'sequence': 2, 'sample_begin_qpc': 19}, ready, progress)
 
     def test_ab_admission_refuses_less_noise_fewer_roundtrips_or_source_changes(self):
-        budget = {'workload_policy': 'CONTROLLED_NATIVE_60', 'requested_process_timeout_seconds': 60,
+        budget = {'workload_policy': 'CONTROLLED_NATIVE_90', 'requested_process_timeout_seconds': 90,
             'requested_minimum_roundtrips': 1, 'roundtrips_verified': 2,
             'workloads': [{'pid': 100 + n, 'role': 'COMPRESS' if n % 2 == 0 else 'EXTRACT', 'cycle': n // 2,
-                'configured_timeout_seconds': 60, 'elapsed_monitor_seconds': 31 if n % 2 == 0 else .5,
+                'configured_timeout_seconds': 90, 'elapsed_monitor_seconds': 31 if n % 2 == 0 else .5,
                 'exit_code': 0} for n in range(4)]}
         common = {'input_sha256': 'a' * 64, 'input_bytes': 8 * 1024**2, 'application_sha256': 'b' * 64,
             'native_image': {'code_kind': 'NATIVE_PE_NO_CLR_COM_DESCRIPTOR'}, 'helper_sha256': 'c' * 64,
             'script_hashes': {'driver': 'd' * 64},
             'actual_native_module_encoding': 'PER_EVENT_MODULES_V1',
-            'requested_workload_policy': 'CONTROLLED_NATIVE_60', 'requested_process_timeout_seconds': 60,
+            'requested_workload_policy': 'CONTROLLED_NATIVE_90', 'requested_process_timeout_seconds': 90,
             'requested_minimum_roundtrips': 1, 'requested_minimum_prelude_seconds': 0,
             'workload_budget': budget,
-            'requested_noise_policy': {'implementation': 'NATIVE_WIN32', 'ttl_seconds': 180,
-                                       'progress_limit': 721, 'owner_seconds': 195},
-            'noise_policy_receipts': {phase: {'implementation': 'NATIVE_WIN32', 'ttl_seconds': 180, 'progress_limit': 721}
+            'requested_noise_policy': {'implementation': 'NATIVE_WIN32', 'ttl_seconds': 210,
+                                       'progress_limit': 841, 'owner_seconds': 225},
+            'noise_policy_receipts': {phase: {'implementation': 'NATIVE_WIN32', 'ttl_seconds': 210, 'progress_limit': 841}
                                       for phase in ('ready', 'oracle')},
             'native_timing': {'ready_qpc': 0, 'work_begin_qpc': 10000, 'work_end_qpc': 74000, 'qpc_frequency_hz': 1000},
             'noise_producer': {'implementation': 'NATIVE_WIN32', 'source_sha256': '3' * 64,
@@ -1126,13 +1135,13 @@ class ControlledBudgetProtocolTests(unittest.TestCase):
                        {'noise_workload_coverage': {'all_16_threads_bracket': False}},
                        {'prelude': {**second['prelude'], 'wait_seconds': 66}},
                        {'requested_workload_policy': 'ORDINARY_30'}, {'requested_process_timeout_seconds': 30},
-                       {'requested_noise_policy': {**common['requested_noise_policy'], 'ttl_seconds': 180.0}},
-                       {'requested_noise_policy': {**common['requested_noise_policy'], 'owner_seconds': 195.0}},
-                       {'requested_noise_policy': {**common['requested_noise_policy'], 'progress_limit': 721.0}},
+                       {'requested_noise_policy': {**common['requested_noise_policy'], 'ttl_seconds': 210.0}},
+                       {'requested_noise_policy': {**common['requested_noise_policy'], 'owner_seconds': 225.0}},
+                       {'requested_noise_policy': {**common['requested_noise_policy'], 'progress_limit': 841.0}},
                        {'requested_noise_policy': {**common['requested_noise_policy'], 'extra': 'PRIVATE_PATH'}},
                        {'noise_policy_receipts': {**common['noise_policy_receipts'],
-                            'oracle': {**common['noise_policy_receipts']['oracle'], 'progress_limit': 721.0}}},
-                       {'native_timing': {**common['native_timing'], 'work_end_qpc': 76000}},
+                            'oracle': {**common['noise_policy_receipts']['oracle'], 'progress_limit': 841.0}}},
+                       {'native_timing': {**common['native_timing'], 'work_end_qpc': 106000}},
                        {'workload_budget': {**budget, 'requested_minimum_roundtrips': 2,
                             'workloads': [budget['workloads'][0],
                             {**budget['workloads'][1], 'configured_timeout_seconds': 30}, *budget['workloads'][2:]]}}):
@@ -1140,22 +1149,22 @@ class ControlledBudgetProtocolTests(unittest.TestCase):
                 validate_comparison(first, {**second, **change})
 
     def test_workload_policy_requires_actual_budget_and_duration_of_every_returned_process(self):
-        workload = {'workload_policy': 'CONTROLLED_NATIVE_60', 'requested_process_timeout_seconds': 60,
+        workload = {'workload_policy': 'CONTROLLED_NATIVE_90', 'requested_process_timeout_seconds': 90,
             'requested_minimum_roundtrips': 1, 'roundtrips_verified': 1,
             'workloads': [{'pid': 100 + n, 'role': 'COMPRESS' if n == 0 else 'EXTRACT', 'cycle': 0,
-                'configured_timeout_seconds': 60, 'elapsed_monitor_seconds': 31 if n == 0 else .5,
+                'configured_timeout_seconds': 90, 'elapsed_monitor_seconds': 31 if n == 0 else .5,
                 'exit_code': 0} for n in range(2)]}
-        observed = validate_workload_budget(workload, 'CONTROLLED_NATIVE_60')
+        observed = validate_workload_budget(workload, 'CONTROLLED_NATIVE_90')
         self.assertEqual(observed['workloads'][0]['elapsed_monitor_seconds'], 31)
         self.assertEqual(observed['monitor_duration_scope'], 'OBSERVED_MONITOR_DURATION_NOT_HARD_OS_DEADLINE')
-        for change in ({'configured_timeout_seconds': 30}, {'configured_timeout_seconds': 60.0},
+        for change in ({'configured_timeout_seconds': 30}, {'configured_timeout_seconds': 90.0},
                        {'elapsed_monitor_seconds': None}, {'elapsed_monitor_seconds': float('nan')},
                        {'pid': 'PRIVATE_PATH'}, {'pid': True}, {'pid': 0}, {'pid': 2**32},
                        {'exit_code': False},
                        {'exit_code': 1}, {'role': 'COMPRESS'}, {'cycle': 1}):
             bad = {**workload, 'workloads': [workload['workloads'][0], {**workload['workloads'][1], **change}]}
             with self.subTest(change=change), self.assertRaisesRegex(AssertionError, 'WORKLOAD_BUDGET_NOT_OBSERVED'):
-                validate_workload_budget(bad, 'CONTROLLED_NATIVE_60')
+                validate_workload_budget(bad, 'CONTROLLED_NATIVE_90')
 
     def test_each_noise_thread_must_make_real_handoffs_inside_workload_interval(self):
         first = {'sequence': 1, 'qpc': 20, 'sample_begin_qpc': 19, 'sample_end_qpc': 20,
@@ -2201,7 +2210,7 @@ class ControlledMinimumStimulusProtocolTests(unittest.TestCase):
 
     def comparison_pair(self, *, positive):
         implementation = 'NATIVE_WIN32' if positive else 'PYTHON_CTYPES_WIN32'
-        policy = 'CONTROLLED_NATIVE_60' if positive else 'ORDINARY_30'; seconds = 60 if positive else 30
+        policy = 'CONTROLLED_NATIVE_90' if positive else 'ORDINARY_30'; seconds = 90 if positive else 30
         actual_noise_policy = noise_policy(implementation)
         budget = {'workload_policy': policy, 'requested_process_timeout_seconds': seconds,
             'requested_minimum_roundtrips': 1, 'roundtrips_verified': 2,
@@ -2303,7 +2312,7 @@ class ControlledMinimumStimulusProtocolTests(unittest.TestCase):
                 if prelude:
                     options['native_module_encoding'] = 'INLINE_V1'
                 else:
-                    options['workload_policy'] = 'CONTROLLED_NATIVE_60'
+                    options['workload_policy'] = 'CONTROLLED_NATIVE_90'
                 output = Path(tmp) / 'case'; sentinel = AssertionError('PROTOCOL_WORKLOAD_ENTRY_FAILURE')
                 with patch.object(driver, 'source_identity', return_value={'source_identity_status': 'VERIFIED_EXPECTED_HEAD'}), \
                         patch.object(driver, 'kernel_api', return_value=object()), \

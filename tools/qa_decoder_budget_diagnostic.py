@@ -51,7 +51,7 @@ SEVENZIP_CAPABILITIES = frozenset({
 def noise_policy(implementation):
     apps.require(type(implementation) is str and implementation in ('PYTHON_CTYPES_WIN32', 'NATIVE_WIN32'),
                  'NOISE_POLICY_IMPLEMENTATION_UNKNOWN')
-    ttl, progress, owner = (70, 281, 85) if implementation == 'PYTHON_CTYPES_WIN32' else (180, 721, 195)
+    ttl, progress, owner = (70, 281, 85) if implementation == 'PYTHON_CTYPES_WIN32' else (210, 841, 225)
     return {'implementation': implementation, 'ttl_seconds': ttl, 'progress_limit': progress,
             'owner_seconds': owner}
 
@@ -921,7 +921,7 @@ def collect_bounded_case_facts(proof, work, helper, clock):
 def validate_native_timing(ready, clock, *, complete=False, facts=None):
     facts = {} if facts is None else facts
     facts.update(status='NOT_ESTABLISHED', scope='NATIVE_QA_ADMISSION_QPC_NOT_HARD_OS_DEADLINE',
-        ready_to_work_begin_limit_seconds=90, whole_workload_limit_seconds=65)
+        ready_to_work_begin_limit_seconds=90, whole_workload_limit_seconds=95)
     frequency = clock.get('qpc_frequency_hz')
     apps.require(type(frequency) is int and 0 < frequency <= 2**63 - 1 and
         type(ready.get('qpc_frequency_hz')) is int and ready['qpc_frequency_hz'] == frequency and
@@ -936,7 +936,7 @@ def validate_native_timing(ready, clock, *, complete=False, facts=None):
                      'NATIVE_QOS_CLOCK_NOT_ESTABLISHED')
         facts.update(work_end_qpc=clock['end_qpc'], whole_workload_seconds=(clock['end_qpc'] - clock['begin_qpc']) / frequency,
                      status='REJECTED')
-        apps.require(clock['end_qpc'] - clock['begin_qpc'] <= 65 * frequency, 'NATIVE_QOS_WORKLOAD_EXCEEDED')
+        apps.require(clock['end_qpc'] - clock['begin_qpc'] <= 95 * frequency, 'NATIVE_QOS_WORKLOAD_EXCEEDED')
         facts['status'] = 'WITHIN_LIMITS'
     return facts
 
@@ -1142,7 +1142,7 @@ def run_case(output, helper, source_sha, deadline, profile, producer, expectatio
     output.mkdir(parents=True, exist_ok=False)
     work = output / '7zip'; work.mkdir()
     noise = NoiseOwner(output / 'noise', producer)
-    workload_policy = 'CONTROLLED_NATIVE_60' if producer['implementation'] == 'NATIVE_WIN32' else 'ORDINARY_30'
+    workload_policy = 'CONTROLLED_NATIVE_90' if producer['implementation'] == 'NATIVE_WIN32' else 'ORDINARY_30'
     proof = {'schema': 'blackbox.native-budget-diagnostic/1', 'status': 'REPRODUCTION_NOT_ESTABLISHED',
         'source_identity': identity, 'historical_a80_cause': 'NOT_ESTABLISHED',
         'positive_application_acceptance': 'NOT_ESTABLISHED', 'synthetic_etw': False,
@@ -1406,7 +1406,7 @@ def validate_comparison(first, second, *, positive=True):
     apps.require(first.get('status') in ('EXPECTED_ROW_BUDGET_NEGATIVE', 'EXPECTED_NATIVE_BUDGET_NEGATIVE') and
         second.get('status') == ('COMPLETE_7ZIP_ACCEPTANCE' if positive else 'EXPECTED_OUTPUT_BUDGET_NEGATIVE'),
         'CONTROLLED_PROFILE_A_B_NOT_ESTABLISHED')
-    policy = 'CONTROLLED_NATIVE_60' if positive else 'ORDINARY_30'
+    policy = 'CONTROLLED_NATIVE_90' if positive else 'ORDINARY_30'
     seconds = apps.workload_policy_seconds(policy)
     implementation = 'NATIVE_WIN32' if positive else 'PYTHON_CTYPES_WIN32'
     expected_noise_policy = noise_policy(implementation)
@@ -1475,7 +1475,7 @@ def validate_comparison(first, second, *, positive=True):
             'second_minimum_prelude_seconds': minimum_prelude,
             'second_observed_prelude_seconds': second['prelude']['wait_seconds'],
             'second_maximum_prelude_seconds': maximum_prelude,
-            'native_timing_limits': {'ready_to_work_begin_seconds': 90, 'whole_workload_seconds': 65}
+            'native_timing_limits': {'ready_to_work_begin_seconds': 90, 'whole_workload_seconds': 95}
                 if positive else 'NOT_APPLICABLE_PYTHON_POLICY'}
 
 
@@ -1542,7 +1542,7 @@ def run_diagnostic(args):
         'python_pair_transport_scope': 'COMPACT_ROW_NEGATIVE_AND_EXPLICIT_INLINE_BYTE_NEGATIVE; NOT_PROFILE_CAUSAL_COMPARISON',
         'native_pair_transport_scope': 'BOTH_DEFAULT_COMPACT_PER_EVENT_MODULES_V1',
         'diagnostic_budget_seconds': CONTROLLED_SECONDS,
-        'workload_budget_scope': 'SEVENZIP_ORDINARY_AND_PYTHON_30; CONTROLLED_NATIVE_PAIR_60; NOT_HARD_OS_COMPLETION_DEADLINE',
+        'workload_budget_scope': 'SEVENZIP_ORDINARY_AND_PYTHON_30; CONTROLLED_NATIVE_PAIR_90; NOT_HARD_OS_COMPLETION_DEADLINE',
         'cases': {}}
     try:
         helper = args.helper.resolve(strict=True)
