@@ -10,6 +10,7 @@ from ctypes import wintypes as W
 import json
 import os
 import struct
+import threading
 import time
 
 from .deep_contracts import MAX_MESSAGE_BYTES, bounded_json
@@ -165,8 +166,17 @@ class PipeChannel:
         self.kernel = _kernel()
         self._input = bytearray()
         self._frame_size = None
+        self._close_lock = threading.RLock()
+        self._close_retry_allowed = True
+        self.cleanup_evidence = {"confirmed": False, "status": "NOT_CLOSED",
+                                 "scope": "DIAGNOSTIC_PIPE_HANDLE"}
+
+    def _usable(self):
+        if self.handle is None or not self._close_retry_allowed:
+            raise IPCError("DIAGNOSTIC_PIPE_CLOSED_OR_OWNERSHIP_LOST")
 
     def peer_pid(self, *, server: bool) -> int:
+        self._usable()
         pid = W.ULONG()
         api = self.kernel.GetNamedPipeClientProcessId if server else self.kernel.GetNamedPipeServerProcessId
         if not api(self.handle, C.byref(pid)):
@@ -174,6 +184,7 @@ class PipeChannel:
         return pid.value
 
     def _read(self, count: int, *, deadline: float, cancel_event=None) -> bytes:
+        self._usable()
         while len(self._input) < count:
             check_deadline(deadline, cancel_event)
             buffer = C.create_string_buffer(min(16384, count - len(self._input)))
@@ -191,6 +202,7 @@ class PipeChannel:
         return output
 
     def send(self, message: dict, *, deadline: float, cancel_event=None) -> None:
+        self._usable()
         raw = bounded_json(message)
         payload = struct.pack("<I", len(raw)) + raw
         offset = 0
@@ -221,10 +233,37 @@ class PipeChannel:
             raise IPCError("DIAGNOSTIC_FRAME_NOT_OBJECT")
         return data
 
-    def close(self) -> None:
-        if self.handle is not None:
-            self.kernel.CloseHandle(self.handle)
-            self.handle = None
+    def close(self) -> dict:
+        with self._close_lock:
+            if self.handle is None:
+                return dict(self.cleanup_evidence)
+            if not self._close_retry_allowed:
+                error = IPCError(6, "DIAGNOSTIC_PIPE_HANDLE_OWNERSHIP_LOST")
+            else:
+                try:
+                    closed = bool(self.kernel.CloseHandle(self.handle))
+                except BaseException as primary:
+                    code = getattr(primary, "winerror", None)
+                    self._close_retry_allowed = code != 6
+                    error = IPCError(code or 0, "DIAGNOSTIC_PIPE_CLOSE_UNCONFIRMED")
+                    error.__cause__ = primary
+                else:
+                    if closed:
+                        self.handle = None
+                        self._input.clear()
+                        self._frame_size = None
+                        self.cleanup_evidence = {"confirmed": True, "status": "CONFIRMED",
+                            "scope": "DIAGNOSTIC_PIPE_HANDLE", "retained": 0}
+                        return dict(self.cleanup_evidence)
+                    code = C.get_last_error()
+                    self._close_retry_allowed = code != 6
+                    error = IPCError(code, "DIAGNOSTIC_PIPE_CLOSE_UNCONFIRMED")
+            self.cleanup_evidence = {"confirmed": False, "status": "RECOVERY_UNCONFIRMED",
+                "scope": "DIAGNOSTIC_PIPE_HANDLE", "owner_retained": True,
+                "retry_allowed": self._close_retry_allowed, "winerror": error.errno}
+            error.cleanup_unconfirmed = error.owner_retained = True
+            error.owner = self
+            raise error
 
 
 class PipeServer(PipeChannel):
@@ -303,6 +342,11 @@ def connect_pipe(name: str, expected_server_pid: int, *, deadline: float) -> Pip
         if channel.peer_pid(server=False) != expected_server_pid:
             raise IPCError("UNEXPECTED_DIAGNOSTIC_PIPE_SERVER")
         return channel
-    except BaseException:
-        channel.close()
+    except BaseException as primary:
+        try:
+            channel.close()
+        except BaseException as cleanup_error:
+            primary.native_owner = channel
+            primary.cleanup_unconfirmed = primary.owner_retained = True
+            primary.add_note("DIAGNOSTIC_PIPE_CLEANUP_UNCONFIRMED: " + str(cleanup_error)[:400])
         raise

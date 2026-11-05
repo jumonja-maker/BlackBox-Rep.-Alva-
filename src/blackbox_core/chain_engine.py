@@ -18,6 +18,7 @@ from uuid import uuid4
 from .chain_contracts import (Artifact, NodeOutcome, RUN_SCHEMA, TERMINAL,
     WorkflowDefinition, WorkflowError, canonical, require)
 from .chain_io import verify_artifact, owned_output_bytes
+from .chain_profiles import verify_source_scope
 from .chain_validation import evaluate_condition, get_ports, validate_parameters, validate_workflow
 
 
@@ -374,23 +375,38 @@ class WorkflowEngine:
 
     def _dispatch(self, node, ctx, inputs):
         ctx.check()
-        for value in inputs.values():
-            for artifact in value if isinstance(value, tuple) else (value,):
-                verify_artifact(artifact, cancel=ctx.cancel, deadline=ctx.deadline)
         profile = self._preview["effective_profile"]
         expected = profile.get("target")
-        allowed_sources = set(profile.get("source_ids", []))
+        allowed_sources = profile.get("source_ids", [])
+        known = self._published_artifacts() if allowed_sources else ()
+        actual_inputs = []
         for value in inputs.values():
             for artifact in value if isinstance(value, tuple) else (value,):
+                verify_source_scope(artifact, allowed_sources, known_artifacts=known,
+                                    cancel=ctx.cancel, deadline=ctx.deadline)
+                actual_inputs.append(artifact)
                 if artifact.kind == "PROCESS" and expected is not None:
                     require(artifact.value.get("identity") == expected, "WORKFLOW_PROFILE_TARGET_MISMATCH")
-                if allowed_sources and artifact.kind not in ("RECEIPT", "BOOLEAN", "PROCESS"):
-                    require(bool(artifact.sources) and all(source.get("source_id") in allowed_sources for source in artifact.sources),
-                            "WORKFLOW_PROFILE_SOURCE_NOT_ALLOWED")
+        ctx.input_artifacts = tuple(actual_inputs)
         parameters = validate_parameters(self.catalog[node.tool_id], node.parameters)
         ctx.check()
         ctx.component_dispatch_started = True
         return self.catalog[node.tool_id].execute(ctx, inputs, parameters)
+
+    def _published_artifacts(self):
+        """Only bounded results actually published by this workflow execution."""
+        values = []
+        with self._lock:
+            for row in self._records.values():
+                if row["state"] not in ("COMPLETED", "PARTIAL"):
+                    continue
+                for items in row.get("outputs", {}).values():
+                    for value in items:
+                        if value.get("kind") in ("RECEIPT", "BOOLEAN", "PROCESS"):
+                            continue
+                        require(len(values) < 4096, "WORKFLOW_PROFILE_LINEAGE_BUDGET")
+                        values.append(Artifact.from_dict(value))
+        return tuple(values)
 
     def _result(self, node, ctx, result, partial=False):
         require(isinstance(result, NodeOutcome), "WORKFLOW_COMPONENT_OUTCOME_REQUIRED")
@@ -399,6 +415,9 @@ class WorkflowEngine:
         outputs = {}
         errors = []
         specs = get_ports(node, self.catalog)[1]
+        profile = self._preview["effective_profile"]
+        allowed = profile.get("source_ids", [])
+        known = self._published_artifacts() if allowed else ()
         for port, value in result.outputs.items():
             try:
                 require(port in specs, "WORKFLOW_UNDECLARED_RESULT_PORT")
@@ -409,15 +428,12 @@ class WorkflowEngine:
                             "WORKFLOW_RESULT_TYPE_MISMATCH")
                     # Published references survive even a subsequent validation failure.
                     outputs.setdefault(port, []).append(artifact.to_dict())
-                    profile = self._preview["effective_profile"]
                     if artifact.kind == "PROCESS" and profile.get("target") is not None:
                         require(artifact.value.get("identity") == profile["target"], "WORKFLOW_PROFILE_TARGET_MISMATCH")
-                    allowed = profile.get("source_ids", [])
-                    if allowed and artifact.kind not in ("RECEIPT", "BOOLEAN", "PROCESS"):
-                        require(bool(artifact.sources) and all(s.get("source_id") in allowed for s in artifact.sources),
-                                "WORKFLOW_PROFILE_SOURCE_NOT_ALLOWED")
-                    if not (artifact.kind == "DEEP_RESULT" and not artifact.value.get("_path")):
-                        verify_artifact(artifact, deadline=time.monotonic() + min(30, max(.1, ctx.remaining_seconds())))
+                    if allowed or not (artifact.kind == "DEEP_RESULT" and not artifact.value.get("_path")):
+                        verify_source_scope(artifact, allowed, known_artifacts=known,
+                            inputs=getattr(ctx, "input_artifacts", ()), output_dir=ctx.output_dir,
+                            deadline=time.monotonic() + min(30, max(.1, ctx.remaining_seconds())))
             except Exception as error:
                 errors.append(getattr(error, "code", "WORKFLOW_RESULT_REFERENCE_UNCONFIRMED"))
         receipt = result.receipt
@@ -498,6 +514,8 @@ class WorkflowEngine:
             self._pause.set()
             return
         ctx = self._context(node, 0, deadline)
+        ctx.input_artifacts = tuple(artifact for value in inputs.values()
+                                   for artifact in (value if isinstance(value, tuple) else (value,)))
         row = self._records[node.node_id]
         row.update(node_run_id=ctx.node_run_id, started_monotonic_ns=time.monotonic_ns())
         if node.kind == "CONDITION":

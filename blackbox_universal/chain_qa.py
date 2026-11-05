@@ -34,7 +34,10 @@ def run_chain_gui(app, window, output, evidence_root, source_sha):
             app.processEvents()
             if predicate():
                 return
-            QTest.qWait(5)
+            # Let the real Python/QThread workers run between Qt event pumps.
+            # Keep the original deadline; this is cooperative scheduling, not
+            # an extension of any diagnostic or acceptance budget.
+            time.sleep(.005)
         raise AssertionError(code)
 
     def background(call):

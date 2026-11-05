@@ -4,7 +4,7 @@ from __future__ import annotations
 from pathlib import Path
 from uuid import uuid4
 
-from .chain_contracts import (MAX_RUN_SECONDS, MAX_WORKERS, PROFILE_SCHEMA, WorkflowError,
+from .chain_contracts import (MAX_DEPTH, MAX_RUN_SECONDS, MAX_WORKERS, PROFILE_SCHEMA, WorkflowError,
     identifier, json_data, number, parse_json, require)
 from .library_files import atomic_json
 from .session_v2 import safe_path
@@ -124,3 +124,137 @@ def save_profile(profile, path):
 
 def load_profile(path):
     return validate_profile(parse_json(safe_path(Path(path)).read_bytes()))
+
+
+def verify_source_scope(artifact, source_ids, *, known_artifacts=(), inputs=None,
+                        output_dir=None, cancel=None, deadline=None):
+    """Check selected byte roots without rewriting component source identities.
+
+    A derived source ID may differ from a selected file's SHA. Its dependency
+    references must match actual published workflow artifacts and resolve to
+    selected, rehashed roots. New derived files must belong to this invocation;
+    a source label or a copied ``upstream_artifacts`` list alone grants nothing.
+    This is a descriptive workflow boundary, not OS authority or causal proof.
+    """
+    from .chain_contracts import Artifact, canonical
+    from .chain_io import verify_artifact
+    if not isinstance(artifact, Artifact):
+        artifact = Artifact.from_dict(artifact)
+    verify_artifact(artifact, cancel=cancel, deadline=deadline)
+    if not source_ids or artifact.kind in ("RECEIPT", "BOOLEAN", "PROCESS"):
+        return {"scope": "WORKFLOW_PLAN_ONLY_NOT_AUTHORIZATION", "byte_roots": []}
+    require(type(source_ids) in (list, tuple) and len(source_ids) <= 256 and
+            all(type(value) is str for value in source_ids), "INVALID_PROFILE_SELECTION")
+    allowed = set(source_ids)
+    # A selected SHA cannot be reinterpreted as an arbitrary metadata alias
+    # attached to different bytes by an imported source declaration.
+    aliases = {value for value in allowed if not (len(value) == 64 and
+               all(character in "0123456789abcdefABCDEF" for character in value))}
+    registry, roots, visiting, verified = {}, {}, set(), {canonical(artifact.to_dict())}
+
+    def normalized(value):
+        row = value.to_dict()
+        row["value"] = {key: item for key, item in row["value"].items() if key != "upstream_artifacts"}
+        return canonical(row)
+
+    for value in known_artifacts:
+        value = value if isinstance(value, Artifact) else Artifact.from_dict(value)
+        require(len(registry) < 4096 or value.artifact_id in registry, "WORKFLOW_PROFILE_LINEAGE_BUDGET")
+        previous = registry.get(value.artifact_id)
+        require(previous is None or normalized(previous) == normalized(value),
+                "WORKFLOW_ARTIFACT_ID_CONTRADICTION")
+        registry[value.artifact_id] = value
+
+    def dependencies(value):
+        members = value.value.get("items", []) if value.kind == "EVIDENCE_SET" else []
+        upstream = value.value.get("upstream_artifacts", [])
+        require(type(members) is list and type(upstream) is list and len(members) + len(upstream) <= 1024,
+                "WORKFLOW_PROFILE_LINEAGE_BUDGET")
+        return [Artifact.from_dict(row) for row in [*upstream, *members]]
+
+    def published(reference):
+        existing = registry.get(reference.artifact_id)
+        require(existing is not None and normalized(existing) == normalized(reference),
+                "WORKFLOW_PROFILE_UNPUBLISHED_SOURCE_LINEAGE")
+        return existing
+
+    def selected(value):
+        digest = value.value.get("sha256")
+        if type(digest) is not str or not value.value.get("_path"):
+            return False
+        if digest in allowed:
+            return True
+        # An arbitrary source ID is usable only when it explicitly names these
+        # same revalidated bytes, not a child source embedded in a case file.
+        return any(type(source) is dict and source.get("source_id") in aliases and
+                   source.get("source_sha256", source.get("sha256")) == digest
+                   for source in value.sources)
+
+    def resolve(value, *, fresh=False, depth=0):
+        require(depth <= MAX_DEPTH, "WORKFLOW_PROFILE_LINEAGE_BUDGET")
+        key = value.artifact_id
+        if key in roots:
+            return roots[key]
+        require(key not in visiting, "WORKFLOW_PROFILE_SOURCE_LINEAGE_CYCLE")
+        visiting.add(key)
+        try:
+            raw = canonical(value.to_dict())
+            if raw not in verified:
+                verify_artifact(value, cancel=cancel, deadline=deadline)
+                verified.add(raw)
+            require(value.kind not in ("RECEIPT", "BOOLEAN", "PROCESS", "PROCESS_SET"),
+                    "WORKFLOW_PROFILE_SOURCE_NOT_ALLOWED")
+            own_selected = selected(value)
+            refs = dependencies(value)
+            gathered = set()
+            for reference in refs:
+                gathered.update(resolve(published(reference), depth=depth + 1))
+            for auxiliary in value.value.get("auxiliary_files", []):
+                require(auxiliary.get("sha256") in allowed, "WORKFLOW_PROFILE_AUXILIARY_SOURCE_NOT_ALLOWED")
+                gathered.add(auxiliary["sha256"])
+            if own_selected:
+                gathered.add(value.value["sha256"])
+            else:
+                require(bool(refs) and bool(gathered), "WORKFLOW_PROFILE_SOURCE_NOT_ALLOWED")
+                if fresh and value.kind != "EVIDENCE_SET":
+                    path = safe_path(Path(value.value["_path"])) if value.value.get("_path") else None
+                    owned = path is not None and output_dir is not None and path.is_relative_to(safe_path(Path(output_dir)))
+                    # Actual unchanged passthrough files can retain their source
+                    # path; a newly created unrelated external file cannot.
+                    same_file = any(all(value.value.get(field) == source.value.get(field) for field in
+                        ("_path", "sha256", "bytes", "file_identity", "files")) and path is not None
+                        for source in (inputs or ()))
+                    require(owned or same_file, "WORKFLOW_PROFILE_UNOWNED_DERIVED_SOURCE")
+            roots[key] = gathered
+            return gathered
+        finally:
+            visiting.remove(key)
+
+    if inputs is None:
+        # A dispatch input is either a selected file or an actual previously
+        # published result. Revalidate full stored lineage, including references
+        # omitted by the adapters' intentionally flat dependency representation.
+        existing = registry.get(artifact.artifact_id)
+        if existing is not None:
+            require(normalized(existing) == normalized(artifact), "WORKFLOW_PROFILE_UNPUBLISHED_SOURCE_LINEAGE")
+            artifact = existing
+        else:
+            require(selected(artifact), "WORKFLOW_PROFILE_SOURCE_NOT_ALLOWED")
+        accepted = resolve(artifact)
+    else:
+        existing = registry.get(artifact.artifact_id)
+        require(existing is None or normalized(existing) == normalized(artifact),
+                "WORKFLOW_ARTIFACT_ID_CONTRADICTION")
+        permitted, pending = set(), list(inputs)
+        while pending:
+            value = pending.pop()
+            if value.artifact_id in permitted:
+                continue
+            require(len(permitted) < 4096, "WORKFLOW_PROFILE_LINEAGE_BUDGET")
+            permitted.add(value.artifact_id)
+            pending.extend(dependencies(value))
+        refs = dependencies(artifact)
+        require(all(reference.artifact_id in permitted for reference in refs),
+                "WORKFLOW_PROFILE_SOURCE_OUTSIDE_CALL_INPUTS")
+        accepted = resolve(artifact, fresh=True)
+    return {"scope": "VERIFIED_SELECTED_BYTE_ROOTS_NOT_PRODUCER_AUTHENTICATION", "byte_roots": sorted(accepted)}

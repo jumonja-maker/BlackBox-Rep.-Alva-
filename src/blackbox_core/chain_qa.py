@@ -272,10 +272,15 @@ def saved_evidence_graph(evidence):
     source("recorded-trace", "TRACE", sources["trace"])
     add("decoder", "decode_trace")
     connect("recorded-trace", "source", "decoder", "trace")
+    previous = "decoder"
     for tool in ("waits", "file_io", "disk_io"):
         add(tool, tool, {"pid": sources["fixture"]["pid"]})
-        connect("decoder", "index", tool, "index")
+        connect(previous, "index", tool, "index")
         exports(tool, "report", tool + "-export")
+        previous = tool
+    add("trace-critical-path", "critical_path")
+    connect(previous, "index", "trace-critical-path", "case")
+    exports("trace-critical-path", "report", "trace-critical-path-export")
     source("saved-graph", "CASE", sources["case_index"])
     add("reopen-graph", "load_graph")
     connect("saved-graph", "source", "reopen-graph", "source")
@@ -512,6 +517,8 @@ def run_embedded(output, evidence_root, source_sha, diagnostic_helper=None, *, s
     try:
         workflow, sources = saved_evidence_graph(evidence)
         store, snapshot, records, journal = run_graph(workflow, output / "runs")
+        from .chain_qa_faults import run_actual_faults, verify_io_critical_path
+        proof["io_critical_path"] = verify_io_critical_path(workflow, records)
         require(all(file_hash(Path(path)) == digest for path, digest in sources.items()),
                 "R60_ORIGINAL_SOURCES_CHANGED")
         executed = {}
@@ -533,6 +540,8 @@ def run_embedded(output, evidence_root, source_sha, diagnostic_helper=None, *, s
                 "R60_NATIVE_FIXTURE_BINARY_CHANGED")
         live_check = standard_live_graph if standard_token else native_live_graph
         proof["live"] = live_check(output / "live", executable, source_sha, diagnostic_helper)
+        proof["actual_negative_chains"] = run_actual_faults(output / "actual-negative-chains", executable,
+            source_sha, trace_path=Path(source_manifest["trace"]), diagnostic_helper=diagnostic_helper)
         proof["final_source_identity"] = source_proof(source_sha)
         proof["status"] = "PASS"
     except BaseException as error:

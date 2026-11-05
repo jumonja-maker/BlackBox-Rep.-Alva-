@@ -49,7 +49,10 @@ class ChainEditorTests(unittest.TestCase):
             self.app.processEvents()
             if not self.panel.bridge.busy:
                 return
-            QTest.qWait(5)
+            # A native/SQLite worker must be able to reacquire Python's GIL.
+            # Qt's nested qWait loop can starve it on Windows; the existing
+            # asynchronous GUI fixtures yield with sleep for the same reason.
+            time.sleep(.005)
         worker = self.panel.bridge.worker
         engine = getattr(worker, "engine", None)
         print("CHAIN_GUI_TIMEOUT_BOUNDARY", {

@@ -1,5 +1,6 @@
 """R60 native ownership regressions; execute only on GitHub-hosted runners."""
 from contextlib import ExitStack
+from copy import deepcopy
 import ctypes as C
 import json
 import os
@@ -17,6 +18,104 @@ from blackbox_core.deep_contracts import ActionRequest, ProcessIdentity
 from blackbox_core.deep_helper import DiagnosticActionEngine
 from blackbox_core.deep_service import InspectorService
 from blackbox_core.deep_debug import DebugSession
+from blackbox_core.deep_elevation import HelperProcess
+from blackbox_core.deep_ipc import IPCError, PipeChannel
+
+
+class TransportCapabilityCleanupTests(unittest.TestCase):
+    """Injected Win32/wrapper boundaries; real HANDLE closure is tested by Q21."""
+    def native_helper(self, results):
+        kernel = Mock()
+        kernel.CloseHandle.side_effect = results
+        helper = HelperProcess(handle=911, pid=123)
+        return helper, kernel
+
+    def test_helper_native_false_close_retains_exact_owner_until_successful_retry(self):
+        helper, kernel = self.native_helper([False, True])
+        with patch("blackbox_core.deep_elevation.C.WinDLL", return_value=kernel, create=True), \
+                patch.object(C, "get_last_error", return_value=5, create=True):
+            with self.assertRaisesRegex(OSError, "HELPER_PROCESS_HANDLE_CLOSE_UNCONFIRMED") as caught:
+                helper.close_handle()
+            self.assertIs(caught.exception.owner, helper)
+            self.assertTrue(caught.exception.cleanup_unconfirmed)
+            self.assertEqual(helper.handle, 911)
+            self.assertFalse(helper.cleanup_evidence["confirmed"])
+            self.assertTrue(helper.close_handle()["confirmed"])
+            self.assertIsNone(helper.handle)
+            self.assertTrue(helper.close_handle()["confirmed"])
+        self.assertEqual([call.args for call in kernel.CloseHandle.call_args_list], [(911,), (911,)])
+
+    def test_helper_invalid_handle_failure_never_closes_a_reused_numeric_slot(self):
+        helper, kernel = self.native_helper([False])
+        with patch("blackbox_core.deep_elevation.C.WinDLL", return_value=kernel, create=True), \
+                patch.object(C, "get_last_error", return_value=6, create=True):
+            with self.assertRaises(OSError):
+                helper.close_handle()
+            with self.assertRaisesRegex(OSError, "HELPER_HANDLE_OWNERSHIP_LOST"):
+                helper.close_handle()
+            with self.assertRaisesRegex(OSError, "HELPER_HANDLE_OWNERSHIP_LOST"):
+                helper.alive()
+        kernel.CloseHandle.assert_called_once_with(911)
+        self.assertFalse(helper.cleanup_evidence["confirmed"])
+
+    def test_popen_handle_uses_checked_wrapper_and_never_raw_close_or_gc_double_close(self):
+        class Handle:
+            # Models CPython Handle.Close: closed is set before _winapi raises.
+            closed = False
+            calls = 0
+            fail = True
+            def Close(self):
+                if not self.closed:
+                    self.closed = True
+                    self.calls += 1
+                    if self.fail:
+                        raise OSError(5, "INJECTED_NATIVE_CLOSE_DENIAL")
+        handle = Handle()
+        process = types.SimpleNamespace(pid=123, _handle=handle, returncode=0)
+        helper = HelperProcess(process=process)
+        with patch("blackbox_core.deep_elevation.C.WinDLL", create=True) as native_dll:
+            with self.assertRaisesRegex(OSError, "HELPER_POPEN_HANDLE_CLOSE_UNCONFIRMED"):
+                helper.close_handle()
+            self.assertFalse(handle.closed, "known failed native close must remain retryable")
+            self.assertIs(helper.process._handle, handle)
+            handle.fail = False
+            self.assertTrue(helper.close_handle()["confirmed"])
+            self.assertTrue(handle.closed)
+            handle.Close()  # The same wrapper's later finalizer is now a no-op.
+            helper.close_handle()
+            native_dll.assert_not_called()
+        self.assertEqual(handle.calls, 2)
+
+    def test_pipe_false_close_retains_handle_then_consumes_only_successful_close(self):
+        kernel = Mock()
+        kernel.CloseHandle.side_effect = [False, True]
+        with patch("blackbox_core.deep_ipc._kernel", return_value=kernel), \
+                patch.object(C, "get_last_error", return_value=5, create=True):
+            channel = PipeChannel(912)
+            with self.assertRaisesRegex(IPCError, "DIAGNOSTIC_PIPE_CLOSE_UNCONFIRMED") as caught:
+                channel.close()
+            self.assertIs(caught.exception.owner, channel)
+            self.assertEqual(channel.handle, 912)
+            self.assertFalse(channel.cleanup_evidence["confirmed"])
+            self.assertTrue(channel.close()["confirmed"])
+            self.assertIsNone(channel.handle)
+            channel.close()
+        self.assertEqual([call.args for call in kernel.CloseHandle.call_args_list], [(912,), (912,)])
+
+    def test_pipe_invalid_handle_does_not_retry_or_use_a_potentially_reused_slot(self):
+        kernel = Mock()
+        kernel.CloseHandle.return_value = False
+        with patch("blackbox_core.deep_ipc._kernel", return_value=kernel), \
+                patch.object(C, "get_last_error", return_value=6, create=True):
+            channel = PipeChannel(913)
+            with self.assertRaises(IPCError):
+                channel.close()
+            with self.assertRaisesRegex(IPCError, "OWNERSHIP_LOST"):
+                channel.close()
+            with self.assertRaisesRegex(IPCError, "OWNERSHIP_LOST"):
+                channel.send({"kind": "fixture"}, deadline=time.monotonic() + 1)
+        kernel.CloseHandle.assert_called_once_with(913)
+        kernel.WriteFile.assert_not_called()
 
 
 class QueryCleanupTests(unittest.TestCase):
@@ -345,6 +444,117 @@ class ServiceCleanupTests(unittest.TestCase):
         self.assertTrue(reference["owns_session"])
         self.assertTrue(self.service._native_owner_matches("run-A", reference))
         self.assertIsNotNone(self.service.helper)
+
+    def test_fresh_readonly_call_closed_inside_dispatch_keeps_cleanup_only_ack_without_rewriting_query(self):
+        from io import BytesIO
+        kernel = Mock()
+        kernel.WaitForSingleObject.return_value = 0
+        kernel.CloseHandle.return_value = True
+        query = {"operation_id": "fixture-lost-query", "operation": "threads", "status": "OPERATION_FAILED",
+                 "run_receipt": {"contract_version": 1, "run_id": "fixture-lost-query",
+                    "execution_started": None, "cleanup": {"confirmed": False, "status": "NOT_COLLECTED"}}}
+        stream = BytesIO()
+        def dispatch_then_close(request, cancel_event=None):
+            self.lease()
+            self.service.helper = HelperProcess(handle=921, pid=self.helper_identity.pid)
+            self.service._channel = PipeChannel(922)
+            self.service._recovery_stream = stream
+            self.service.journal.append(deepcopy(query))
+            self.service._discard_helper(force=True)
+            return deepcopy(query)
+        with patch("blackbox_core.deep_elevation.C.WinDLL", return_value=kernel, create=True), \
+                patch("blackbox_core.deep_ipc._kernel", return_value=kernel), \
+                patch.object(self.service, "execute", side_effect=dispatch_then_close) as execute:
+            answer = self.service.execute_owned(ActionRequest("threads", self.target), owner_run_id="run-A")
+            ref = answer["native_context_ownership"]
+            self.assertTrue(ref["cleanup_only"])
+            self.assertTrue(self.service._native_owner_matches("run-A", ref))
+            self.assertIsNone(ref["helper_identity"])
+            self.assertEqual(ref["closed_context"]["helper_identity"], self.helper_identity.to_dict())
+            before = deepcopy(self.service.journal.timeline()[0])
+            refused = self.service.execute_owned(ActionRequest("threads", self.target),
+                owner_run_id="run-A", expected_context=ref)
+            self.assertEqual(refused["status"], "CONFIRMATION_REQUIRED")
+            self.assertEqual(refused["next_action"], "RELEASE_CLOSED_NATIVE_CONTEXT_BEFORE_NEW_ACTION")
+            execute.assert_called_once()
+            released = self.service.release_native_context("run-A", expected_context=ref)
+        self.assertTrue(released["cleanup"]["confirmed"])
+        self.assertEqual(released["cleanup"]["scope"], "CHAIN_OWNED_NATIVE_CONTEXT")
+        self.assertIsNone(self.service._native_context_owner)
+        history = self.service.journal.timeline()
+        self.assertEqual(next(row for row in history if row.get("operation_id") == "fixture-lost-query"), before)
+        self.assertTrue(any(row.get("source") == "READ_ONLY_NATIVE_OWNER_CLEANUP_ACKNOWLEDGEMENT"
+                            for row in history))
+        self.assertEqual(answer["run_receipt"], query["run_receipt"])
+        self.assertIsNone(answer["run_receipt"]["execution_started"])
+        self.assertFalse(answer["run_receipt"]["cleanup"]["confirmed"])
+        self.assertTrue(stream.closed)
+        self.assertEqual([call.args for call in kernel.CloseHandle.call_args_list], [(922,), (921,)])
+
+    def test_startup_primary_failure_survives_pipe_cleanup_failure_and_retains_actual_owner(self):
+        primary = PermissionError("EXACT_HANDSHAKE_PRIMARY_FAILURE")
+        pipe, helper = Mock(), Mock(pid=self.helper_identity.pid)
+        pipe.name = "fixture-owned-pipe"
+        pipe.accept.side_effect = primary
+        pipe.close.side_effect = IPCError(5, "INJECTED_PIPE_CLOSE_DENIED")
+        helper.alive.return_value = True
+        helper.close_handle.return_value = {"confirmed": True, "scope": "EXPLICIT_FIXTURE_HANDLE_BOUNDARY"}
+        fake_os = types.SimpleNamespace(name="nt", path=os.path, getpid=os.getpid)
+        with patch("blackbox_core.deep_service.os", fake_os), \
+                patch("blackbox_core.deep_service.PipeServer", return_value=pipe), \
+                patch.object(self.service, "identity", return_value=self.target), \
+                patch.object(self.service.broker, "launch", return_value=helper):
+            try:
+                with self.assertRaises(PermissionError) as caught:
+                    self.service._start_session(self.target, ["threads"], elevated=False)
+                self.assertIs(caught.exception, primary)
+                self.assertIs(caught.exception.owner, self.service)
+                self.assertTrue(caught.exception.cleanup_unconfirmed)
+                self.assertTrue(any("INJECTED_PIPE_CLOSE_DENIED" in note
+                                    for note in caught.exception.__notes__))
+                self.assertIs(self.service.helper, helper)
+                self.assertIs(self.service._channel, pipe)
+                self.assertTrue(self.service._owner_retained)
+                self.assertTrue(self.service._cleanup_unconfirmed)
+                self.assertEqual(self.service._admin_state, "CLEANUP_REQUIRED")
+            finally:
+                # Explicit product retry closes its retained actual file stream;
+                # the test never closes a product-owned resource on its behalf.
+                pipe.close.side_effect = None
+                pipe.close.return_value = {"confirmed": True, "scope": "EXPLICIT_FIXTURE_PIPE_BOUNDARY"}
+                helper.alive.return_value = False
+                self.service._discard_helper(force=True)
+        self.assertIsNone(self.service.helper)
+        self.assertIsNone(self.service._channel)
+        self.assertIsNone(self.service._recovery_stream)
+        helper.close_handle.assert_called_once()
+
+    def test_fresh_closed_context_has_no_os_cleanup_ack_if_effects_or_close_proof_are_unknown(self):
+        from io import BytesIO
+        for effects, pipe_ack in ((True, True), (False, False)):
+            with self.subTest(effects=effects, pipe_ack=pipe_ack):
+                kernel = Mock()
+                kernel.WaitForSingleObject.return_value = 0
+                kernel.CloseHandle.return_value = True
+                def dispatch_then_close(request, cancel_event=None):
+                    self.lease()
+                    self.service.helper = HelperProcess(handle=923, pid=self.helper_identity.pid)
+                    channel = PipeChannel(924)
+                    self.service._channel = channel
+                    self.service._recovery_stream = BytesIO()
+                    self.service._interventions_started = effects
+                    if not pipe_ack:
+                        # Boundary injection: a return without checked closure
+                        # cannot produce a resource-release acknowledgement.
+                        channel.close = lambda: None
+                    self.service._discard_helper(force=True)
+                    return {"status": "RECOVERY_UNCONFIRMED", "data": {}}
+                with patch("blackbox_core.deep_elevation.C.WinDLL", return_value=kernel, create=True), \
+                        patch("blackbox_core.deep_ipc._kernel", return_value=kernel), \
+                        patch.object(self.service, "execute", side_effect=dispatch_then_close):
+                    answer = self.service.execute_owned(ActionRequest("threads", self.target), owner_run_id="run-A")
+                self.assertIsNone(answer["native_context_ownership"])
+                self.assertIsNone(self.service._closed_native_cleanup)
 
     def test_new_target_in_borrowed_admin_lease_releases_only_owned_target_with_actual_ack(self):
         self.lease(target=False, managed=True)

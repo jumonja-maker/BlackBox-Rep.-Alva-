@@ -112,8 +112,10 @@ jobs:
           printf 'R60 contracts: %s\nSource: %s\nRunner: %s\nRun: %s attempt %s\n' "$RESULT" "$SOURCE_SHA" "$RUNNER_OS" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" >> "$GITHUB_STEP_SUMMARY"
 
   native:
-    needs: scope
-    if: needs.scope.outputs.native == 'true'
+    needs: [scope, contracts]
+    if: >-
+      always() && needs.scope.result == 'success' && needs.scope.outputs.native == 'true' &&
+      (needs.scope.outputs.contracts != 'true' || needs.contracts.result == 'success')
     name: R60 actual Windows source / frozen / RU-EN DPI / native
     runs-on: windows-latest
     # Initial composed bound: two real full core runs, two medium-token runs,
