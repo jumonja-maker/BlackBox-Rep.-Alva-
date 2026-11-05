@@ -9,6 +9,7 @@ import argparse
 from contextlib import closing
 import ctypes as C
 from ctypes import wintypes as W
+import hashlib
 import json
 import math
 import os
@@ -86,17 +87,118 @@ def bounded_failure(error, phase, leaf=None):
     return fact
 
 
+class ReceiptFileTime(C.Structure):
+    _fields_ = [('dwLowDateTime', C.c_uint32), ('dwHighDateTime', C.c_uint32)]
+
+
+class ReceiptFileInfo(C.Structure):
+    _fields_ = [('attributes', C.c_uint32), ('created', ReceiptFileTime), ('accessed', ReceiptFileTime),
+                ('written', ReceiptFileTime), ('volume', C.c_uint32), ('size_high', C.c_uint32),
+                ('size_low', C.c_uint32), ('links', C.c_uint32), ('index_high', C.c_uint32), ('index_low', C.c_uint32)]
+
+
+_RETAINED_RECEIPT_HANDLES = []
+
+
+def _receipt_phase(context, phase):
+    if context is not None:
+        context['phase'] = phase
+
+
+def _receipt_signature(info):
+    return (info.attributes, info.volume, info.size_high, info.size_low, info.links,
+            info.index_high, info.index_low, info.created.dwHighDateTime, info.created.dwLowDateTime,
+            info.written.dwHighDateTime, info.written.dwLowDateTime)
+
+
+def _windows_receipt_bytes(path, limit, context):
+    """One read-only handle that is compatible with an in-flight rename."""
+    apps.require(len(_RETAINED_RECEIPT_HANDLES) < 8, 'RECEIPT_HANDLE_RECOVERY_REQUIRED')
+    kernel = C.WinDLL('kernel32', use_last_error=True, winmode=0x800)
+    kernel.CreateFileW.argtypes = [W.LPCWSTR, W.DWORD, W.DWORD, C.c_void_p, W.DWORD, W.DWORD, W.HANDLE]
+    kernel.CreateFileW.restype = W.HANDLE
+    kernel.GetFileType.argtypes = [W.HANDLE]; kernel.GetFileType.restype = W.DWORD
+    kernel.GetFileInformationByHandle.argtypes = [W.HANDLE, C.POINTER(ReceiptFileInfo)]
+    kernel.GetFileInformationByHandle.restype = W.BOOL
+    kernel.ReadFile.argtypes = [W.HANDLE, C.c_void_p, W.DWORD, C.POINTER(W.DWORD), C.c_void_p]
+    kernel.ReadFile.restype = W.BOOL
+    kernel.CloseHandle.argtypes = [W.HANDLE]; kernel.CloseHandle.restype = W.BOOL
+    _receipt_phase(context, 'RECEIPT_OPEN')
+    # READ|WRITE|DELETE are sharing permissions, not requested write/delete access.
+    handle = kernel.CreateFileW(str(path), 0x80000000, 1 | 2 | 4, None, 3, 0x00200000, None)
+    if handle in (None, 0, C.c_void_p(-1).value):
+        raise C.WinError(C.get_last_error())
+    primary = None
+    try:
+        _receipt_phase(context, 'RECEIPT_HANDLE_STAT')
+        apps.require(kernel.GetFileType(handle) == 1, 'DIAGNOSTIC_RECEIPT_NOT_DISK_FILE')
+        before = ReceiptFileInfo()
+        if not kernel.GetFileInformationByHandle(handle, C.byref(before)):
+            raise C.WinError(C.get_last_error())
+        size = (before.size_high << 32) | before.size_low
+        apps.require(not before.attributes & (0x10 | 0x400) and before.links == 1,
+                     'DIAGNOSTIC_RECEIPT_NOT_REGULAR_PRIVATE_FILE')
+        apps.require(0 < size <= limit, 'DIAGNOSTIC_RECEIPT_SIZE')
+        signature = _receipt_signature(before)
+        _receipt_phase(context, 'RECEIPT_READ')
+        buffer = C.create_string_buffer(size + 1); count = W.DWORD()
+        if not kernel.ReadFile(handle, buffer, size + 1, C.byref(count), None):
+            raise C.WinError(C.get_last_error())
+        apps.require(count.value == size, 'DIAGNOSTIC_RECEIPT_CHANGED_DURING_READ')
+        _receipt_phase(context, 'RECEIPT_REVALIDATE')
+        after = ReceiptFileInfo()
+        if not kernel.GetFileInformationByHandle(handle, C.byref(after)):
+            raise C.WinError(C.get_last_error())
+        apps.require(_receipt_signature(after) == signature, 'DIAGNOSTIC_RECEIPT_CHANGED_DURING_READ')
+        return buffer.raw[:count.value]
+    except BaseException as error:
+        primary = error
+        raise
+    finally:
+        close_error = None
+        try:
+            if not kernel.CloseHandle(handle):
+                close_error = C.WinError(C.get_last_error())
+        except BaseException as error:
+            close_error = error
+        if close_error is not None:
+            _RETAINED_RECEIPT_HANDLES.append((kernel, handle))
+            if primary is not None:
+                primary.add_note('RECEIPT_HANDLE_CLOSE_UNCONFIRMED')
+            else:
+                _receipt_phase(context, 'RECEIPT_CLOSE')
+                raise close_error
+
+
+def _posix_receipt_bytes(path, limit, context):
+    _receipt_phase(context, 'RECEIPT_STAT')
+    before = path.lstat()
+    apps.require(stat.S_ISREG(before.st_mode) and before.st_nlink == 1 and 0 < before.st_size <= limit,
+                 'DIAGNOSTIC_RECEIPT_SIZE_OR_TYPE')
+    _receipt_phase(context, 'RECEIPT_READ')
+    with path.open('rb') as stream:
+        opened = os.fstat(stream.fileno())
+        apps.require((opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns, opened.st_nlink) ==
+                     (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_nlink),
+                     'DIAGNOSTIC_RECEIPT_CHANGED_DURING_READ')
+        raw = stream.read(limit + 1)
+        after = os.fstat(stream.fileno())
+        apps.require((opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns, opened.st_nlink) ==
+                     (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_nlink) and len(raw) == before.st_size,
+                     'DIAGNOSTIC_RECEIPT_CHANGED_DURING_READ')
+    return raw
+
+
 def read_json(path, limit=32768, *, phase_context=None):
-    if phase_context is not None:
-        phase_context['phase'] = 'RECEIPT_STAT'
-    apps.require(0 < path.stat().st_size <= limit, 'DIAGNOSTIC_RECEIPT_SIZE')
-    if phase_context is not None:
-        phase_context['phase'] = 'RECEIPT_READ'
-    raw = path.read_text(encoding='utf-8')
-    if phase_context is not None:
-        phase_context['phase'] = 'RECEIPT_PARSE'
-    value = json.loads(raw)
+    apps.require(type(limit) is int and 0 < limit <= 256 * 1024, 'DIAGNOSTIC_RECEIPT_READ_LIMIT')
+    raw = (_windows_receipt_bytes(path, limit, phase_context) if os.name == 'nt'
+           else _posix_receipt_bytes(path, limit, phase_context))
+    _receipt_phase(phase_context, 'RECEIPT_PARSE')
+    value = json.loads(raw.decode('utf-8'))
     apps.require(type(value) is dict, 'DIAGNOSTIC_RECEIPT_TYPE')
+    if phase_context is not None:
+        phase_context.update(receipt_sha256=hashlib.sha256(raw).hexdigest(), receipt_bytes=len(raw),
+                             snapshot_scope='ONE_READONLY_HANDLE_BYTES_JSON_SIZE_SHA_NO_REOPEN')
     return value
 
 
@@ -320,15 +422,20 @@ class NoiseOwner:
                 if paths:
                     path = paths[-1]
                     context.update(phase='READ_PROGRESS_RECEIPT', leaf=path.name)
+                    for key in ('receipt_sha256', 'receipt_bytes', 'snapshot_scope'):
+                        context.pop(key, None)
                     progress = read_json(path, phase_context=context)
                     context['phase'] = 'VALIDATE_PROGRESS'
                     validate_progress(progress, self.ready, previous, implementation=self.producer['implementation'])
                     previous = progress
                     self.prelude.update(observed_handoffs=progress['total_handoffs'], sequence=progress['sequence'])
-                    context['phase'] = 'HASH_PROGRESS'
-                    self.prelude['receipt_sha256'] = apps.file_hash(path)
-                    context['phase'] = 'STAT_PROGRESS'
-                    self.prelude['receipt_bytes'] = path.stat().st_size
+                    apps.require(type(context.get('receipt_bytes')) is int and 0 < context['receipt_bytes'] <= 32768 and
+                        type(context.get('receipt_sha256')) is str and
+                        re.fullmatch(r'[a-f0-9]{64}', context['receipt_sha256']) and
+                        context.get('snapshot_scope') == 'ONE_READONLY_HANDLE_BYTES_JSON_SIZE_SHA_NO_REOPEN',
+                        'PROGRESS_SNAPSHOT_UNCONFIRMED')
+                    self.prelude.update(receipt_sha256=context['receipt_sha256'], receipt_bytes=context['receipt_bytes'],
+                        receipt_snapshot_scope='ONE_READONLY_HANDLE_BYTES_JSON_SIZE_SHA_NO_REOPEN')
                     context['phase'] = 'OWNER_RECHECK'
                     apps.require(not self.errors and self.owner.process.poll() is None,
                                  'NOISE_PRELUDE_OWNER_FAILED')
@@ -1254,6 +1361,11 @@ def run_case(output, helper, source_sha, deadline, profile, producer, expectatio
             if key not in proof:
                 proof[key] = 'NOT_ESTABLISHED'
                 proof.setdefault('fact_errors', {}).setdefault(key, 'NOT_ESTABLISHED_DEPENDENT_FACT_UNAVAILABLE')
+        proof['receipt_reader_cleanup'] = {'scope': 'PRIVATE_WIN32_RECEIPT_HANDLES_ONLY',
+            'retained_handles': len(_RETAINED_RECEIPT_HANDLES),
+            'status': 'RECOVERY_UNCONFIRMED' if _RETAINED_RECEIPT_HANDLES else 'NO_UNCONFIRMED_RECEIPT_HANDLES'}
+        if _RETAINED_RECEIPT_HANDLES:
+            proof.update(status='REPRODUCTION_NOT_ESTABLISHED', cleanup_required=True)
         try:
             apps.write_json(output / 'budget-diagnostic.json', proof)
         except Exception as error:
@@ -1457,12 +1569,20 @@ def run_diagnostic(args):
             live = sum(p.stat().st_size for p in output.rglob('*') if p.is_file())
             max_live = max(max_live, live)
             apps.require(live <= MAX_OUTPUT and time.monotonic() < deadline, 'CONTROLLED_FINAL_PREPARED_DEADLINE_OR_BUDGET')
+        apps.require(not _RETAINED_RECEIPT_HANDLES, 'RECEIPT_HANDLE_RECOVERY_REQUIRED')
         proof.update(status='CONTROLLED_NEGATIVE_BUDGETS_AND_NATIVE_A_B_VERIFIED',
                      max_measured_live_qa_bytes=max_live)
     except BaseException as error:
         proof.update(status='REPRODUCTION_NOT_ESTABLISHED', error_type=type(error).__name__,
                      reason_code=apps._qa_code(str(error)))
     finally:
+        proof['receipt_reader_cleanup'] = {'scope': 'PRIVATE_WIN32_RECEIPT_HANDLES_ONLY',
+            'retained_handles': len(_RETAINED_RECEIPT_HANDLES),
+            'status': 'RECOVERY_UNCONFIRMED' if _RETAINED_RECEIPT_HANDLES else 'NO_UNCONFIRMED_RECEIPT_HANDLES'}
+        if _RETAINED_RECEIPT_HANDLES:
+            if proof.get('status') == 'CONTROLLED_NEGATIVE_BUDGETS_AND_NATIVE_A_B_VERIFIED':
+                proof['reason_code'] = 'RECEIPT_HANDLE_RECOVERY_REQUIRED'
+            proof.update(status='REPRODUCTION_NOT_ESTABLISHED', cleanup_required=True)
         elapsed = time.monotonic() - started
         proof['observed_elapsed_until_final_report_seconds'] = elapsed if 0 <= elapsed <= 2**63 - 1 else 'NOT_ESTABLISHED'
         proof['observed_elapsed_scope'] = 'BEFORE_JSON_WRITE_AND_STDOUT_NOT_HARD_OS'

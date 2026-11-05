@@ -335,8 +335,12 @@ class ProducerNoisePolicyProtocolTests(unittest.TestCase):
                     'implementation': implementation, 'expected_native_handles': ready['expected_native_handles']})
                 noise.ready = ready
                 noise.owner = SimpleNamespace(process=SimpleNamespace(poll=lambda: None), close=lambda **kwargs: None)
+                def read_progress(path, *, phase_context):
+                    phase_context.update(receipt_bytes=123, receipt_sha256='c' * 64,
+                        snapshot_scope='ONE_READONLY_HANDLE_BYTES_JSON_SIZE_SHA_NO_REOPEN')
+                    return self.progress(ready, 300)
                 with patch('tools.qa_decoder_budget_diagnostic.time.monotonic', return_value=0.), \
-                        patch('tools.qa_decoder_budget_diagnostic.read_json', return_value=self.progress(ready, 300)), \
+                        patch('tools.qa_decoder_budget_diagnostic.read_json', side_effect=read_progress), \
                         patch('tools.qa_decoder_apps.file_hash', return_value='c' * 64), \
                         patch('pathlib.Path.stat', return_value=SimpleNamespace(st_size=123)):
                     if implementation == 'NATIVE_WIN32':
@@ -2144,13 +2148,15 @@ class ControlledMinimumStimulusProtocolTests(unittest.TestCase):
         noise.owner = SimpleNamespace(process=SimpleNamespace(poll=lambda: None))
         def read(unused, **options):
             read_times.append(now[0])
+            now[0] += hash_advance  # Cost of acquiring/validating one complete snapshot.
+            options['phase_context'].update(receipt_bytes=123, receipt_sha256='c' * 64,
+                snapshot_scope='ONE_READONLY_HANDLE_BYTES_JSON_SIZE_SHA_NO_REOPEN')
             return templates.progress(ready, int(now[0]) + 1)
         def sleep(seconds):
             self.assertEqual(seconds, .02)
             self.assertLess(now[0], 80, 'fake-clock guard prevents protocol-test hangs')
             now[0] += 1
         def hashed(unused):
-            now[0] += hash_advance
             return 'c' * 64
         with patch('tools.qa_decoder_budget_diagnostic.time.monotonic', side_effect=lambda: now[0]), \
                 patch('tools.qa_decoder_budget_diagnostic.time.sleep', side_effect=sleep), \
@@ -2348,10 +2354,11 @@ class PreludeFailureAndBudgetCompositionTests(unittest.TestCase):
                     {'implementation': 'NATIVE_WIN32', 'expected_native_handles': 32})
                 noise.ready = ready
                 noise.owner = SimpleNamespace(process=SimpleNamespace(poll=lambda: None))
+                def fail_read(path, *, phase_context):
+                    phase_context['phase'] = phase
+                    raise failure
                 with patch.object(driver.time, 'monotonic', return_value=0), \
-                        patch('pathlib.Path.stat', side_effect=failure if phase == 'RECEIPT_STAT' else None,
-                              return_value=SimpleNamespace(st_size=10)), \
-                        patch('pathlib.Path.read_text', side_effect=failure), \
+                        patch.object(driver, 'read_json', side_effect=fail_read), \
                         patch('tools.qa_decoder_apps.file_hash') as hashed:
                     with self.assertRaises(PermissionError) as caught:
                         noise.await_handoffs(1000, 100)
@@ -2492,6 +2499,94 @@ class OwnedGuiQueueProtocolTests(unittest.TestCase):
                 patch.object(apps, 'send_owned', return_value=12), \
                 self.assertRaisesRegex(AssertionError, 'DOCUMENT_READY_NOT_ESTABLISHED'):
             apps.await_owned_length(owner, 101, 12, 1, 'VERIFY_DOCUMENT_LENGTH')
+
+
+class ImmutableReceiptSnapshotTests(unittest.TestCase):
+    """Private-file contracts; fake kernel faults are not native workload proof."""
+    def test_actual_private_file_bytes_json_hash_and_size_are_one_snapshot(self):
+        from tools import qa_decoder_budget_diagnostic as driver
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / 'progress-0001.json'
+            raw = b'{"counter":1}\r\n'; path.write_bytes(raw); context = {}
+            self.assertEqual(driver.read_json(path, phase_context=context), {'counter': 1})
+            self.assertEqual(context['receipt_bytes'], len(raw))
+            self.assertEqual(context['receipt_sha256'], hashlib.sha256(raw).hexdigest())
+            self.assertEqual(context['snapshot_scope'], 'ONE_READONLY_HANDLE_BYTES_JSON_SIZE_SHA_NO_REOPEN')
+            self.assertFalse(driver._RETAINED_RECEIPT_HANDLES)
+            path.unlink()  # File lifecycle check; checked CloseHandle is the Windows close proof.
+            self.assertFalse(path.exists())
+
+    def test_oversize_and_malformed_private_files_still_fail_without_retained_handles(self):
+        from tools import qa_decoder_budget_diagnostic as driver
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / 'progress-0001.json'; path.write_bytes(b'{"counter":1}')
+            with self.assertRaisesRegex(AssertionError, 'DIAGNOSTIC_RECEIPT_SIZE'):
+                driver.read_json(path, limit=2)
+            path.write_bytes(b'{')
+            with self.assertRaises(json.JSONDecodeError): driver.read_json(path)
+            self.assertFalse(driver._RETAINED_RECEIPT_HANDLES)
+            path.unlink()
+
+    def kernel(self, driver, raw, *, read_ok=True, close_ok=True, close_raises=False, changed=False, attributes=32):
+        class Function:
+            def __init__(self, call): self.call = call
+            def __call__(self, *args): return self.call(*args)
+        calls = []; infos = [0]
+        def create(*args): calls.append(('open', *args)); return 51
+        def info(handle, pointer):
+            infos[0] += 1; row = pointer._obj
+            row.attributes=attributes; row.links=1; row.volume=7; row.index_low=9
+            row.size_high=0; row.size_low=len(raw); row.created.dwLowDateTime=10
+            row.written.dwLowDateTime=20 + int(changed and infos[0] > 1)
+            row.accessed.dwLowDateTime=infos[0]  # Reading may legitimately change access time.
+            calls.append(('info', handle)); return 1
+        def read(handle, buffer, size, count, overlapped):
+            calls.append(('read', handle, size)); driver.C.memmove(buffer, raw, len(raw))
+            count._obj.value=len(raw); return int(read_ok)
+        def close(handle):
+            calls.append(('close', handle))
+            if close_raises: raise RuntimeError('PRIVATE_KERNEL_CLOSE_FAILURE')
+            return int(close_ok)
+        return SimpleNamespace(CreateFileW=Function(create), GetFileType=Function(lambda handle: 1),
+            GetFileInformationByHandle=Function(info), ReadFile=Function(read), CloseHandle=Function(close)), calls
+
+    def invoke_windows(self, **options):
+        from tools import qa_decoder_budget_diagnostic as driver
+        raw=b'{"counter":1}\r\n'; kernel,calls=self.kernel(driver,raw,**options)
+        def winerror(code):
+            failure=PermissionError(13, 'PRIVATE_KERNEL_PATH_WITHHELD'); failure.winerror=code
+            return failure
+        retained=[]; context={}; result=None; error=None
+        with patch.object(driver.C,'WinDLL',return_value=kernel,create=True), \
+                patch.object(driver.C,'get_last_error',return_value=32,create=True), \
+                patch.object(driver.C,'WinError',side_effect=winerror,create=True), \
+                patch.object(driver,'_RETAINED_RECEIPT_HANDLES',retained):
+            try: result=driver._windows_receipt_bytes(Path('progress-0001.json'),32768,context)
+            except BaseException as failure: error=failure
+        return driver,raw,result,error,retained,context,calls
+
+    def test_win32_open_requests_readonly_access_and_all_sharing_with_checked_close(self):
+        driver,raw,result,error,retained,context,calls=self.invoke_windows()
+        self.assertIsNone(error); self.assertEqual(result,raw); self.assertEqual(retained,[])
+        self.assertEqual(driver.C.sizeof(driver.ReceiptFileInfo),52)
+        opened=calls[0]
+        self.assertEqual((opened[2],opened[3],opened[5],opened[6]),(0x80000000,7,3,0x00200000))
+        self.assertEqual([row[0] for row in calls],['open','info','read','info','close'])
+        self.assertEqual(calls[-1],('close',51))
+
+    def test_win32_read_change_reparse_and_close_failures_never_become_success(self):
+        for options in ({'read_ok':False},{'changed':True},{'attributes':0x400},{'close_ok':False},{'close_raises':True}):
+            with self.subTest(options=options):
+                _,_,result,error,retained,context,calls=self.invoke_windows(**options)
+                self.assertIsNone(result); self.assertIsNotNone(error)
+                self.assertEqual(sum(row[0]=='close' for row in calls),1)
+                self.assertEqual(len(retained),int(options.get('close_ok') is False or options.get('close_raises') is True))
+        for options in ({'close_ok':False},{'close_raises':True}):
+            with self.subTest(primary_read_failure=True,options=options):
+                _,_,result,error,retained,context,calls=self.invoke_windows(read_ok=False,**options)
+                self.assertIsInstance(error,PermissionError); self.assertEqual(error.winerror,32)
+                self.assertEqual(len(retained),1)
+                self.assertTrue(any('RECEIPT_HANDLE_CLOSE_UNCONFIRMED' in note for note in error.__notes__))
 
 
 if __name__ == "__main__":
