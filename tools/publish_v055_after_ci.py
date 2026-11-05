@@ -25,6 +25,17 @@ V055_VERSION_MAIN_SHA = "0bfbb56bcd3a5deaa7d72f1bc995ac890c8a00e9"
 APPROVED_RELEASE_BRANCH = "release/r10-v055-20261104"
 APPROVED_VERSION_HEAD_SHA = "7eb741a1b05d259ab0998c69e53df5620589e570"
 APPROVED_REPAIR_BRANCH = "fix/r10-v055-complete-etw-20261104"
+APPROVED_ETW_MAIN_SHA = "d3b63fffa2981fb5f41150e24ee2d16e3c7ff573"
+APPROVED_REPAIR_HEAD_SHA = "596498968c771ef8b09c14c89b020fcae210e56a"
+APPROVED_RELEASE_QA_PR = 37
+APPROVED_RELEASE_QA_BRANCH = "fix/r10-v055-release-qa-20261105"
+APPROVED_RELEASE_QA_SCOPE = frozenset({
+    ".github/workflows/shell-qa.yml",
+    "tools/qa_decoder_apps.py",
+    "tools/qa_deep_inspection.py",
+    "tools/publish_v055_after_ci.py",
+    "tests/test_release_v055_authorization.py",
+})
 PR_NUMBER = 30
 PRIOR_RELEASE_SHA = "74fe0f856776bcee018d79bfeec96f33d2ace0b2"
 PRIOR_ZIP_SHA256 = "01390ec18fbac40accc2ae2774c748994a5dcde7d29421dbdcdacb8555c2cdc4"
@@ -72,22 +83,40 @@ def approved_release_source(client, repo: str, sha: str, run: dict) -> dict:
             and version_parents[0].get("sha") == R10_MAIN_SHA
             and version_parents[1].get("sha") == APPROVED_VERSION_HEAD_SHA,
             "V055_VERSION_MERGE_ANCESTRY_MISMATCH")
-    pulls = client(f"repos/{repo}/pulls?state=closed&per_page=100")
-    require(isinstance(pulls, list), "INVALID_CLOSED_PR_LIST")
-    matches = [
-        p for p in pulls
-        if p.get("merged_at") and p.get("merge_commit_sha") == sha
-        and (p.get("head") or {}).get("ref") == APPROVED_REPAIR_BRANCH
-        and (p.get("base") or {}).get("ref") == "main"
-        and type(p.get("number")) is int
-    ]
-    require(len(matches) == 1, "OWNER_APPROVED_V055_ETW_REPAIR_MERGE_MISSING")
-    commit = client(f"repos/{repo}/git/commits/{sha}")
-    parents = commit.get("parents")
+    # Preserve the exact owner-approved ETW repair as a fixed ancestor.
+    repair = client(f"repos/{repo}/pulls/32")
+    require(repair.get("merged") is True
+            and repair.get("merge_commit_sha") == APPROVED_ETW_MAIN_SHA
+            and (repair.get("head") or {}).get("sha") == APPROVED_REPAIR_HEAD_SHA
+            and (repair.get("head") or {}).get("ref") == APPROVED_REPAIR_BRANCH
+            and (repair.get("base") or {}).get("ref") == "main",
+            "APPROVED_ETW_REPAIR_MERGE_CHANGED")
+    repair_commit = client(f"repos/{repo}/git/commits/{APPROVED_ETW_MAIN_SHA}")
+    repair_parents = repair_commit.get("parents")
+    require(isinstance(repair_parents, list) and len(repair_parents) == 2
+            and repair_parents[0].get("sha") == V055_VERSION_MAIN_SHA
+            and repair_parents[1].get("sha") == APPROVED_REPAIR_HEAD_SHA,
+            "V055_ETW_REPAIR_ANCESTRY_MISMATCH")
+
+    # The only additional authorized merge may be the owner's bounded
+    # release-QA correction; not a feature branch, generic main push or force.
+    qa = client(f"repos/{repo}/pulls/{APPROVED_RELEASE_QA_PR}")
+    require(qa.get("merged") is True and qa.get("merge_commit_sha") == sha
+            and (qa.get("head") or {}).get("ref") == APPROVED_RELEASE_QA_BRANCH
+            and (qa.get("base") or {}).get("ref") == "main",
+            "APPROVED_V055_RELEASE_QA_MERGE_MISSING")
+    changed = client(f"repos/{repo}/pulls/{APPROVED_RELEASE_QA_PR}/files?per_page=100")
+    require(isinstance(changed, list) and
+            qa.get("changed_files") == len(APPROVED_RELEASE_QA_SCOPE) == len(changed)
+            and {item.get("filename") for item in changed} == APPROVED_RELEASE_QA_SCOPE
+            and all(item.get("status") == "modified" for item in changed),
+            "UNAPPROVED_V055_RELEASE_QA_FILE_SCOPE")
+    final_commit = client(f"repos/{repo}/git/commits/{sha}")
+    parents = final_commit.get("parents")
     require(isinstance(parents, list) and len(parents) == 2
-            and parents[0].get("sha") == V055_VERSION_MAIN_SHA
-            and parents[1].get("sha") == matches[0]["head"]["sha"],
-            "V055_REPAIR_MERGE_ANCESTRY_MISMATCH")
+            and parents[0].get("sha") == APPROVED_ETW_MAIN_SHA
+            and parents[1].get("sha") == (qa.get("head") or {}).get("sha"),
+            "V055_RELEASE_QA_MERGE_ANCESTRY_MISMATCH")
     response = client(f"repos/{repo}/actions/runs/{run['id']}/jobs?per_page=100")
     jobs = response.get("jobs") if isinstance(response, dict) else None
     require(isinstance(jobs, list), "UPSTREAM_CI_JOBS_UNREADABLE")
@@ -116,8 +145,9 @@ def approved_release_source(client, repo: str, sha: str, run: dict) -> dict:
             "PREVIOUS_RELEASE_ZIP_CHANGED")
     return {"main_sha": sha, "r10_pr": PR_NUMBER,
             "version_pr": 31, "version_head": APPROVED_VERSION_HEAD_SHA,
-            "etw_repair_pr": matches[0]["number"],
-            "etw_repair_head": matches[0]["head"]["sha"],
+            "etw_repair_pr": 32, "etw_repair_head": APPROVED_REPAIR_HEAD_SHA,
+            "release_qa_pr": APPROVED_RELEASE_QA_PR,
+            "release_qa_head": (qa.get("head") or {}).get("sha"),
             "upstream_ci_run": run["id"], "required_jobs": len(found)}
 
 
