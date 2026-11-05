@@ -196,7 +196,8 @@ class InspectorService:
 
     def _native_context_identity(self):
         return {"generation": self._native_context_generation,
-                "helper_identity": self._helper_identity.to_dict() if self._helper_identity else None,
+                "helper_identity": (self._helper_identity.to_dict()
+                                    if self.helper is not None and self._helper_identity else None),
                 "target": self._target.to_dict() if self._target else None,
                 "operations": sorted(self._scope)}
 
@@ -227,7 +228,7 @@ class InspectorService:
                            and time.monotonic() < self._expires
                            and not self._owner_retained and not self._cleanup_unconfirmed)
                 borrow = (mode == "execute" and healthy and request is not None
-                          and DEEP_ACTIONS[request.operation].mode == "OBSERVE"
+                          and DEEP_ACTIONS[request.operation].mode in ("OBSERVE", "INSPECT")
                           and not DEEP_ACTIONS[request.operation].confirmation_required
                           and self._target == request.target and request.operation in self._scope)
                 bind_empty = (mode == "bind" and healthy and self._admin_session_managed

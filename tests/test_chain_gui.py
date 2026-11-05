@@ -4,6 +4,7 @@ Controlled consent doubles below test races; native effects are covered by the
 separate source/frozen hosted harness and are never inferred from these doubles.
 """
 from copy import deepcopy
+import faulthandler
 import os
 from pathlib import Path
 import tempfile
@@ -19,7 +20,7 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QMessageBox, QWidget
 
 from blackbox_core.deep_contracts import ProcessIdentity
-from blackbox_universal.chain_builder import ObjectParameterEditor, ConditionParameterEditor
+from blackbox_universal.chain_builder import ObjectParameterEditor, ConditionParameterEditor, OptionalParameterEditor
 from blackbox_universal.deep_inspector_bridge import DeepInspectorBridge, _DeepTask
 from blackbox_universal.deep_inspector_panel import OverviewInspectorPanel
 from blackbox_universal.window import UniversalWindow
@@ -49,6 +50,15 @@ class ChainEditorTests(unittest.TestCase):
             if not self.panel.bridge.busy:
                 return
             QTest.qWait(5)
+        worker = self.panel.bridge.worker
+        engine = getattr(worker, "engine", None)
+        print("CHAIN_GUI_TIMEOUT_BOUNDARY", {
+            "operation": getattr(worker, "operation", None),
+            "engine_state": getattr(engine, "_state", None),
+            "node_states": {key: value.get("state") for key, value in
+                            getattr(engine, "_records", {}).items()},
+            "qt_worker_running": worker.isRunning() if worker is not None else False}, flush=True)
+        faulthandler.dump_traceback(all_threads=True)
         self.fail("CHAIN_GUI_WORKER_DID_NOT_FINISH")
 
     def tearDown(self):
@@ -244,6 +254,44 @@ class ChainEditorTests(unittest.TestCase):
         self.assertTrue(self.panel._fields["_allow_partial"].isChecked())
         self.assertIn("частич", self.panel._fields["_allow_partial"].toolTip())
 
+    def test_applying_wait_options_preserves_missing_filter_instead_of_implicit_zero(self):
+        node = self.add("waits")
+        optional = self.panel._fields["end_ms"]
+        self.assertIsInstance(optional, OptionalParameterEditor)
+        self.assertFalse(optional.enabled.isChecked())
+        self.panel._fields["_allow_partial"].click()
+        self.panel.apply_button.click()
+        for key in ("process_instance", "tid", "start_ms", "end_ms"):
+            self.assertNotIn(key, node["parameters"])
+        optional = self.panel._fields["end_ms"]
+        optional.enabled.click()
+        optional.field.setValue(0)
+        self.panel.apply_button.click()
+        self.assertEqual(node["parameters"]["end_ms"], 0)
+        self.window._set_language("RU")
+        self.assertTrue(self.panel._fields["end_ms"].enabled.isChecked())
+        self.assertEqual(self.panel._fields["end_ms"].field.value(), 0)
+
+    def test_derived_evidence_boolean_ne_is_preserved_and_range_operator_is_rejected(self):
+        node = self.add("CONDITION")
+        editor = self.panel._fields["condition"]
+        row = editor.rows[0]
+        row["field"].setCurrentText("has_evidence")
+        row["type"].setCurrentIndex(row["type"].findData("boolean"))
+        row["boolean"].setCurrentIndex(row["boolean"].findData(True))
+        row["operator"].setCurrentIndex(row["operator"].findData("NE"))
+        self.panel.apply_button.click()
+        self.assertEqual(node["parameters"], {"condition": {"has_evidence": False}})
+        row = self.panel._fields["condition"].rows[0]
+        row["operator"].setCurrentIndex(row["operator"].findData("GT"))
+        self.panel.apply_button.click()
+        self.assertIn("BOOLEAN_EVIDENCE_CONDITION_REQUIRES_EQ_OR_NE", self.panel.status.text())
+        self.assertEqual(node["parameters"], {"condition": {"has_evidence": False}})
+        self.window._set_language("EN")
+        self.assertIn("saved source", self.panel.source_ids.toolTip())
+        self.window._set_language("RU")
+        self.assertIn("сохранённого источника", self.panel.source_ids.toolTip())
+
     def test_maximum_graph_can_be_edited_and_validated_while_qt_pumps(self):
         example = self.add("process_select")
         self.panel.document["nodes"] = [dict(deepcopy(example), node_id="large_" + str(index),
@@ -263,7 +311,7 @@ class ChainEditorTests(unittest.TestCase):
         self.panel.validate_button.click()
         self.wait_idle()
         self.assertTrue(self.results[-1][2])
-        self.assertIn("NODE", self.results[-1][2])
+        self.assertEqual("WORKFLOW_GRAPH_SIZE_BUDGET", self.results[-1][2])
         self.assertFalse(self.window.probe.active)
 
 
@@ -274,6 +322,7 @@ class GuardBridge(QObject):
     idle = Signal()
     closed = Signal(object)
     recovery_required = Signal(object)
+    admin_status_changed = Signal(object)
 
     def __init__(self):
         super().__init__()
@@ -292,9 +341,29 @@ class GuardBridge(QObject):
         self.target, self.generation = (pid, created), self.generation + 1
         self.target_changed.emit()
 
-    def authorize_target(self, operations):
-        self.calls.append(("authorize_target", operations))
+    def authorize_target(self, operations, **kwargs):
+        self.calls.append(("authorize_target", operations, kwargs))
         return True
+
+    def elevate(self, operations, **kwargs):
+        self.calls.append(("elevate", operations, kwargs))
+        return True
+
+    def end_admin(self):
+        self.calls.append(("end_admin", {}, {}))
+        return True
+
+    def retry_cleanup(self):
+        self.calls.append(("retry_cleanup", {}, {}))
+        return True
+
+    def export(self, destination):
+        self.calls.append(("export", {"destination": destination}, {}))
+        return True
+
+    def shutdown(self):
+        self.calls.append(("shutdown", {}, {}))
+        self.closed.emit({"status": "COMPLETED", "data": {"cleanup": "NO_SESSION"}})
 
     def cancel(self):
         pass

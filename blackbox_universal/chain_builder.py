@@ -237,6 +237,21 @@ class ObjectParameterEditor(QWidget):
         return result
 
 
+class OptionalParameterEditor(QWidget):
+    """Keep an omitted numeric/boolean filter distinct from an explicit zero."""
+    def __init__(self, field, present, parent=None, *, language="EN"):
+        super().__init__(parent)
+        self.field = field
+        self.enabled = QCheckBox("Указать" if language == "RU" else "Set value")
+        self.enabled.setChecked(present)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(self.enabled)
+        layout.addWidget(field, 1)
+        field.setEnabled(present)
+        self.enabled.toggled.connect(field.setEnabled)
+
+
 class ConditionParameterEditor(QWidget):
     """Typed bounded predicates over actual receipt/artifact metadata."""
     def __init__(self, condition, parent=None, *, language="EN"):
@@ -371,7 +386,9 @@ class ConditionParameterEditor(QWidget):
             if path in ("has_evidence", "sufficient"):
                 if type(value) is not bool:
                     raise ValueError("BOOLEAN_CONDITION_VALUE_REQUIRED")
-                clauses.append({path: value})
+                if operator not in ("EQ", "NE"):
+                    raise ValueError("BOOLEAN_EVIDENCE_CONDITION_REQUIRES_EQ_OR_NE")
+                clauses.append({path: not value if operator == "NE" else value})
             else:
                 clauses.append({"field": path, "op": operator, **({} if operator == "EXISTS" else {"value": value})})
         mode = self.combination.currentData()
@@ -1087,6 +1104,10 @@ class ChainBuilderPanel(QWidget):
                 widget.setMaxLength(8192)
                 widget.setProperty("parameter_type", kind)
                 widget.setProperty("integer64", kind in ("int", "integer"))
+            if (not spec.get("required", False) and "default" not in spec
+                    and isinstance(widget, (QSpinBox, QDoubleSpinBox, QCheckBox, QComboBox))):
+                widget = OptionalParameterEditor(widget, key in parameters, self.parameter_page,
+                                                  language=self.window.language)
             label = spec.get("label_ru") if self.window.language == "RU" else spec.get("label")
             label = str(label or spec.get("label") or PARAMETER_LABELS.get(key, (key, key))[1 if self.window.language == "RU" else 0])
             self._form_row(key, label, widget)
@@ -1134,11 +1155,16 @@ class ChainBuilderPanel(QWidget):
         for key, widget in self._fields.items():
             if key.startswith("_"):
                 continue
+            if isinstance(widget, OptionalParameterEditor):
+                if not widget.enabled.isChecked():
+                    continue
+                widget = widget.field
             if isinstance(widget, (ObjectParameterEditor, ConditionParameterEditor)):
                 try:
                     value = widget.value()
-                except ValueError:
-                    self.status.setText(self.tr2("Check the numeric parameter values.", "Проверьте числовые параметры."))
+                except ValueError as error:
+                    self.status.setText(self.tr2("Check the typed parameter: ", "Проверьте типизированный параметр: ")
+                                        + str(error)[:300])
                     return
             elif isinstance(widget, QComboBox):
                 value = widget.currentData()
@@ -1373,6 +1399,8 @@ class ChainBuilderPanel(QWidget):
 
     def retranslate(self):
         def capture(widget):
+            if isinstance(widget, OptionalParameterEditor):
+                return (widget.enabled.isChecked(), capture(widget.field))
             if isinstance(widget, ConditionParameterEditor):
                 return widget.draft()
             if isinstance(widget, ObjectParameterEditor):
@@ -1385,6 +1413,10 @@ class ChainBuilderPanel(QWidget):
                 return widget.isChecked()
             return widget.value()
         def restore(widget, value):
+            if isinstance(widget, OptionalParameterEditor):
+                widget.enabled.setChecked(value[0])
+                restore(widget.field, value[1])
+                return
             if isinstance(widget, ConditionParameterEditor):
                 widget.restore_draft(value)
                 return
@@ -1410,6 +1442,11 @@ class ChainBuilderPanel(QWidget):
             except RuntimeError:
                 pass
         self.canvas.language = self.window.language
+        self.source_ids.setToolTip(self.tr2(
+            "Use the saved source's exact SHA-256 shown in node outputs. Sessions use their aggregate fingerprint. "
+            "This does not select or authorize a live PID/creation FILETIME.",
+            "Укажите точный SHA-256 сохранённого источника из выходов узла. Для сеанса используется совокупный хеш. "
+            "Это не выбирает и не разрешает живой PID/FILETIME создания."))
         for index, pair in enumerate((("All Windows", "Вся Windows"), ("Selected application", "Выбранное приложение"),
                                       ("Specific investigation", "Конкретное расследование"))):
             self.profile.setItemText(index, self.tr2(*pair))

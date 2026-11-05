@@ -1,4 +1,5 @@
 """Persisted-intent recovery and source immutability; no native PASS claims."""
+from contextlib import closing
 from copy import deepcopy
 import hashlib
 import json
@@ -102,7 +103,7 @@ class RecoveryTests(unittest.TestCase):
                                 store=store)
         self.assertEqual(engine.run()["state"], "COMPLETED")
         journal = next(Path(store.folder).rglob("deep-inspection.sqlite3"))
-        with sqlite3.connect(journal) as db:
+        with closing(sqlite3.connect(journal)) as db, db:
             db.execute("UPDATE actions SET record_sha256=? WHERE sequence=(SELECT max(sequence) FROM actions)",
                        ("0" * 64,))
         with self.assertRaises((ValueError, RuntimeError)):
@@ -159,7 +160,7 @@ class StoreBoundaryTests(unittest.TestCase):
         stamp = sidecar.stat()
         journal = self.store.folder / "journal" / "deep-inspection.sqlite3"
         previous = "0" * 64
-        with sqlite3.connect(journal) as db:
+        with closing(sqlite3.connect(journal)) as db, db:
             rows = db.execute("SELECT sequence,record_json FROM actions ORDER BY sequence").fetchall()
             for sequence, raw in rows:
                 record = json.loads(raw)

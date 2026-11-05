@@ -83,20 +83,24 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y libegl1 libopengl0 libxcb-cursor0 libxkbcommon-x11-0
       - name: Install exact locked application dependencies
+        id: dependencies
         run: |
           python -m pip install --require-hashes -r ${{ matrix.lock }}
           python -m pip install --no-build-isolation --no-deps -e .
       - name: R60 full contract, scheduler, recovery, profiles, adapters, reports and real Qt editor tests
         run: python -m unittest discover -s tests -p 'test_chain_*.py' -v
       - name: Existing native ownership and R10 permission regressions
+        if: always() && steps.dependencies.outcome == 'success'
         shell: bash
         run: |
           set -euo pipefail
-          python -m unittest discover -s tests -p 'test_deep_debug.py' -v
-          python -m unittest discover -s tests -p 'test_deep_service.py' -v
-          python -m unittest discover -s tests -p 'test_r10_admin_helper.py' -v
-          python -m unittest discover -s tests -p 'test_r10_admin_service.py' -v
+          failed=0
+          for pattern in test_deep_debug.py test_deep_service.py test_r10_admin_helper.py test_r10_admin_service.py; do
+            python -m unittest discover -s tests -p "$pattern" -v || failed=1
+          done
+          exit "$failed"
       - name: Undefined-name gate
+        if: always() && steps.dependencies.outcome == 'success'
         run: python tools/check_undefined_names.py --report r60-undefined-names.json
       - name: Retain bounded exact-source execution identity in the job summary
         if: always()

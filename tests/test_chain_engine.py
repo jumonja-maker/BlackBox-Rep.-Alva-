@@ -157,6 +157,123 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(calls, 2)
         self.assertEqual(result[0]["state"], "COMPLETED")
 
+    def test_effectful_invocation_never_overlaps_readonly_in_either_ready_order(self):
+        # Both queue orders matter: effects must wait for running reads, and
+        # newly ready reads must wait for a running effect. No native effects
+        # are performed by these explicit boundary fixtures.
+        for first, second in (("effect", "read"), ("read", "effect")):
+            with self.subTest(first=first):
+                lock = threading.Lock()
+                entered, release, second_entered = (threading.Event() for _ in range(3))
+                active, overlaps, calls = set(), [], []
+                def execute(ctx, inputs, parameters):
+                    with lock:
+                        if active:
+                            overlaps.append((tuple(sorted(active)), ctx.node_id))
+                        active.add(ctx.node_id)
+                        calls.append(ctx.node_id)
+                    try:
+                        if ctx.node_id == first:
+                            entered.set()
+                            self.assertTrue(release.wait(3), "fixture release was not signalled")
+                        else:
+                            second_entered.set()
+                        return outcome(ctx)
+                    finally:
+                        with lock:
+                            active.remove(ctx.node_id)
+                document = workflow([{"node_id": name, "tool_id": name} for name in (first, second)]).to_dict()
+                document["profile"] = {"profile_id": "application", "overrides": {"allow_effectful": True}}
+                definition = WorkflowDefinition.from_dict(document)
+                engine, _store = self.engine(definition, {
+                    "read": adapter("read", execute),
+                    "effect": adapter("effect", execute, read_only=False)})
+                thread, results, errors = self.run_thread(engine)
+                try:
+                    self.assertTrue(entered.wait(3), "first declared invocation did not start")
+                    self.assertFalse(second_entered.wait(.15), "effect overlapped the read-only branch")
+                finally:
+                    release.set()
+                thread.join(timeout=5)
+                self.assertFalse(thread.is_alive())
+                self.assertEqual(errors, [])
+                self.assertEqual(overlaps, [])
+                self.assertEqual(calls, [first, second])
+                self.assertEqual(results[0]["state"], "COMPLETED")
+
+    def test_cancel_reopened_checkpoint_runs_cleanup_without_forward_dispatch(self):
+        calls, finalized = [], []
+        def execute(ctx, inputs, parameters):
+            calls.append(ctx.node_id)
+            return outcome(ctx)
+        def finish(ctx):
+            # Cleanup has its own live budget; cancelling diagnostics must not
+            # cancel the actual release boundary before it can be observed.
+            self.assertFalse(ctx.cancel.is_set())
+            finalized.append(ctx.run_id)
+            return {"status": "COMPLETED", "cleanup": {"confirmed": True, "status": "CONFIRMED",
+                "scope": "EXPLICIT_UNIT_CLEANUP_BOUNDARY_NOT_NATIVE_ACCEPTANCE"}}
+        definition = workflow([{"node_id": "saved", "tool_id": "read"},
+            {"node_id": "checkpoint", "kind": "CHECKPOINT", "budget_seconds": 1},
+            {"node_id": "after", "tool_id": "consume"}], [
+                edge("saved", "checkpoint", port="receipt", target="after"),
+                edge("saved", "after"), edge("checkpoint", "after", port="continue", target="when")])
+        catalog = {"read": adapter("read", execute),
+            "consume": adapter("consume", execute, inputs={"input": PortSpec(("REPORT",))})}
+        runtime = SimpleNamespace(finish_run=finish)
+        engine, store = self.engine(definition, catalog, runtime=runtime)
+        paused = engine.run()
+        self.assertEqual(paused["state"], "WAITING_FOR_HUMAN")
+        preserved = deepcopy(node_records(paused)["saved"])
+        self.assertEqual(finalized, [], "a checkpoint must retain its owner until explicit resume/cancel")
+        reopened = WorkflowEngine.restore(WorkflowRunStore.open(store.folder), catalog=catalog, runtime=runtime)
+        reopened.request_cancel()
+        cancelled = reopened.resume()
+        self.assertEqual(cancelled["state"], "CANCELLED")
+        self.assertEqual(calls, ["saved"])
+        self.assertEqual(finalized, [store.run_id])
+        self.assertTrue(cancelled["cleanup"]["confirmed"])
+        records = node_records(cancelled)
+        self.assertEqual(records["saved"], preserved)
+        self.assertEqual(records["checkpoint"]["state"], "CANCELLED")
+        self.assertEqual(records["checkpoint"]["outputs"], {})
+        self.assertEqual(records["after"]["state"], "CANCELLED")
+        self.assertIsNone(records["after"]["run_receipt"])
+        self.assertEqual(len([event for event in store.read_events() if event["event"] == "run.cleanup"]), 1)
+
+    def test_nested_known_retained_receipt_reenters_same_owner_then_actual_finalizer_releases(self):
+        calls, finalized, original_receipts = [], [], []
+        retained = {"confirmed": False, "status": "RETAINED", "scope": "TARGET_BOUND_DEBUG_CONTEXT",
+            "evidence": {"ownership_known": True, "scope": "EXPLICIT_UNIT_OWNER_NOT_NATIVE_ACCEPTANCE"}}
+        def execute(ctx, inputs, parameters):
+            calls.append(ctx.node_id)
+            result = outcome(ctx)
+            result.cleanup = deepcopy(retained)
+            result.receipt["cleanup"] = deepcopy(retained)
+            original_receipts.append(deepcopy(result.receipt))
+            return result
+        def finish(ctx):
+            finalized.append(ctx.run_id)
+            return {"status": "COMPLETED", "cleanup": {"confirmed": True, "status": "CONFIRMED",
+                "scope": "CHAIN_OWNED_NATIVE_CONTEXT", "evidence": {"fixture": True}}}
+        definition = workflow([{"node_id": "first", "tool_id": "owned"},
+            {"node_id": "next", "tool_id": "consume"}], [edge("first", "next")])
+        resource = ("EXISTING_DEEP_INSPECTOR_OWNER",)
+        catalog = {"owned": adapter("owned", execute, resources=resource),
+            "consume": adapter("consume", execute, inputs={"input": PortSpec(("REPORT",))}, resources=resource)}
+        engine, store = self.engine(definition, catalog, runtime=SimpleNamespace(finish_run=finish))
+        snapshot = engine.run()
+        self.assertEqual(calls, ["first", "next"], "known retained ownership must permit its same-run successor")
+        self.assertEqual(finalized, [store.run_id])
+        self.assertEqual(snapshot["state"], "COMPLETED")
+        self.assertTrue(snapshot["cleanup"]["confirmed"])
+        records = node_records(snapshot)
+        for position, name in enumerate(("first", "next")):
+            self.assertEqual(records[name]["run_receipt"], original_receipts[position])
+            self.assertEqual(records[name]["cleanup"], retained)
+            self.assertFalse(records[name]["run_receipt"]["cleanup"]["confirmed"],
+                "later finalization must not rewrite the earlier retained-resource receipt")
+
     def test_failed_branch_does_not_erase_independent_completed_evidence(self):
         called = []
         def execute(ctx, inputs, parameters):

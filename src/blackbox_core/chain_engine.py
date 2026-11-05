@@ -48,6 +48,8 @@ class _Workers:
     def __init__(self, count):
         self.tasks = queue.Queue(maxsize=count)
         self.threads = []
+        self._shutdown = False
+        self._close_lock = threading.Lock()
         for ordinal in range(count):
             thread = threading.Thread(target=self._work, name="blackbox-chain-" + str(ordinal), daemon=True)
             thread.start()
@@ -71,8 +73,13 @@ class _Workers:
         return future
 
     def close(self):
-        for _ in self.threads:
-            self.tasks.put(None)
+        with self._close_lock:
+            if not self._shutdown:
+                # At most one invocation per worker is submitted. A retained
+                # busy pool is closed only by its drainer after real returns.
+                for _ in self.threads:
+                    self.tasks.put_nowait(None)
+                self._shutdown = True
         for thread in self.threads:
             thread.join(timeout=.2)
         return not any(thread.is_alive() for thread in self.threads)
@@ -168,6 +175,15 @@ class WorkflowEngine:
 
     @classmethod
     def restore(cls, store, *, catalog, runtime=None):
+        retained = _RETAINED_WORKERS.get(store.run_id)
+        if retained is not None:
+            owner = retained[0]
+            require(Path(owner.store.folder) == Path(store.folder) and
+                    owner.definition.fingerprint == store.definition.fingerprint,
+                    "WORKFLOW_LIVE_OWNER_HISTORY_MISMATCH")
+            # This is the same still-live runtime capability, not adoption of
+            # an owner reconstructed from a saved reference. Opening stays passive.
+            return owner
         engine = cls(store.definition, catalog=catalog, store=store, runtime=runtime)
         saved = store.load_state()
         engine._state = saved.get("state", "QUEUED")
@@ -570,7 +586,8 @@ class WorkflowEngine:
                 for key in list(_LEASES):
                     owner = _LEASES[key]
                     if key in ("EXISTING_DEEP_INSPECTOR_OWNER", "R60_EFFECTFUL_EXECUTION") and \
-                            owner["run_id"] == self.store.run_id and not owner["active"] and owner["status"] == "RETAINED":
+                            owner["run_id"] == self.store.run_id and not owner["active"] and \
+                            (owner["status"] == "RETAINED" or cleanup.get("scope") == "CHAIN_OWNED_NATIVE_CONTEXT"):
                         del _LEASES[key]
         else:
             self._errors.append({"code": "WORKFLOW_RUNTIME_CLEANUP_UNCONFIRMED"})
@@ -599,6 +616,9 @@ class WorkflowEngine:
                     "status": "LATE_OWNER_BOUNDARY_OBSERVED", "worker_exit_confirmed": exited,
                     "scope": "LATE_ACTUAL_COMPLETION_NOT_RETROACTIVE_SUCCESS"}
                 self._run_state("RECOVERY_UNCONFIRMED")
+                if self._cleanup["confirmed"] is not True:
+                    self._retained_drained = True
+                    return
             except BaseException:
                 # Failed durable readback/cleanup leaves this exact owner pinned.
                 return
@@ -624,6 +644,8 @@ class WorkflowEngine:
     def _drive(self, *, resuming, on_event):
         with self._lock:
             require(not self._driving, "WORKFLOW_ALREADY_RUNNING")
+            if self.store.run_id in _RETAINED_WORKERS and not getattr(self, "_retained_drained", False):
+                return self._return_snapshot()
             if self._state in ("COMPLETED", "CANCELLED", "FAILED", "RECOVERY_UNCONFIRMED", "PARTIAL") and not self._cancel.is_set():
                 return self._return_snapshot()
             require(resuming or self._state == "QUEUED", "WORKFLOW_EXPLICIT_RESUME_REQUIRED")
@@ -648,6 +670,9 @@ class WorkflowEngine:
                     "scope": "CANCELLED_PAUSED_RUN_ACTUAL_OWNERS_ONLY", "worker_exit_confirmed": True}
                 uncertain = any(row["state"] == "RECOVERY_UNCONFIRMED" for row in self._records.values())
                 self._run_state("RECOVERY_UNCONFIRMED" if not clean or uncertain else "CANCELLED")
+                if clean and self.store.run_id in _RETAINED_WORKERS:
+                    self.store.unpin_writer()
+                    _RETAINED_WORKERS.pop(self.store.run_id, None)
                 return self._return_snapshot()
             self._preview = validate_workflow(self.definition, self.catalog, runtime=self.runtime)
             if not self._preview["ready"]:
