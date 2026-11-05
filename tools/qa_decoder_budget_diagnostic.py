@@ -698,6 +698,80 @@ def collect_bounded_case_facts(proof, work, helper, clock):
                 facts[name] = 'NOT_ESTABLISHED'; errors[name] = apps._qa_code(str(error))
 
 
+class BudgetCapture:
+    """Stop noise at the workload boundary; always flush the owned WPR session."""
+    def __init__(self, actual, noise, clock, cleanup, captures, end_counter, lifecycle):
+        self.actual = actual; self.noise = noise; self.clock = clock
+        self.cleanup = cleanup; self.captures = captures; self.end_counter = end_counter
+        self.lifecycle = lifecycle; self.first_error = None; self.noise_stop_attempted = False
+
+    @property
+    def active(self):
+        return self.actual.active
+
+    def remember(self, error, phase):
+        fact = {'phase': phase, 'error_type': type(error).__name__, 'reason_code': apps._qa_code(str(error))}
+        if self.first_error is None:
+            self.first_error = error
+            self.lifecycle['primary_error'] = fact
+        elif error is not self.first_error:
+            errors = self.lifecycle.setdefault('secondary_errors', [])
+            if len(errors) < 8:
+                errors.append(fact)
+
+    def stop_noise(self):
+        if self.noise_stop_attempted or self.noise.cleanup.get('status') == 'COMPLETED':
+            return
+        self.noise_stop_attempted = True
+        self.lifecycle['noise_stop_attempted'] = True
+        try:
+            self.noise.stop()
+        except BaseException as error:
+            self.remember(error, 'NOISE_STOP')
+
+    def stop(self):
+        if self.first_error is not None:
+            raise self.first_error
+        try:
+            self.clock['end_qpc'] = self.end_counter()
+        except BaseException as error:
+            self.remember(error, 'WORKLOAD_END_CLOCK')
+        self.stop_noise()
+        result = None
+        try:
+            result = self.actual.stop()
+            self.captures.append(result)
+            apps.require(not self.actual.active, 'DIAGNOSTIC_WPR_STOP_UNCONFIRMED')
+            self.cleanup.update(status='STOPPED', cleanup_required=False)
+        except BaseException as error:
+            self.cleanup.update(status='UNCONFIRMED', cleanup_required=True)
+            self.remember(error, 'WPR_STOP')
+        if self.first_error is not None:
+            raise self.first_error
+        return result
+
+    def cancel(self):
+        # apps.seven_zip calls this from its finally. Retain the triggering
+        # exception even if cancellation or the first noise stop also fails.
+        pending = sys.exc_info()[1]
+        if self.first_error is None and pending is not None:
+            self.remember(pending, 'APPLICATION')
+        result = None
+        if self.actual.active:
+            try:
+                result = self.actual.cancel()
+                apps.require(not self.actual.active, 'DIAGNOSTIC_WPR_CANCEL_UNCONFIRMED')
+                self.cleanup.update(status='CANCELLED', cleanup_required=False)
+            except BaseException as error:
+                self.cleanup.update(status='UNCONFIRMED', cleanup_required=True)
+                self.remember(error, 'WPR_CANCEL')
+        if self.noise.owner:
+            self.stop_noise()
+        if self.first_error is not None:
+            raise self.first_error
+        return result
+
+
 def run_case(output, helper, source_sha, deadline, profile, producer, expectation, target_handoffs=0,
              *, native_module_encoding=None):
     identity = source_identity(source_sha)
@@ -715,36 +789,12 @@ def run_case(output, helper, source_sha, deadline, profile, producer, expectatio
         'evidence': {}}
     captures = []; original_factory = apps.start_schedule
     capture_cleanup = {'status': 'NOT_STARTED', 'cleanup_required': False}
+    capture_lifecycle = {'secondary_errors': []}
     capture_profile = {}
     workload_clock = {}
     kernel = kernel_api()
     frequency = counter(kernel, 'QueryPerformanceFrequency')
     workload_clock['qpc_frequency_hz'] = frequency
-
-    class Capture:
-        def __init__(self, actual):
-            self.actual = actual
-        @property
-        def active(self):
-            return self.actual.active
-        def stop(self):
-            workload_clock['end_qpc'] = counter(kernel)
-            result = self.actual.stop(); captures.append(result)
-            capture_cleanup.update(status='STOPPED', cleanup_required=False)
-            noise.stop()
-            return result
-        def cancel(self):
-            try:
-                result = self.actual.cancel()
-                apps.require(not self.actual.active, 'DIAGNOSTIC_WPR_CANCEL_UNCONFIRMED')
-                capture_cleanup.update(status='CANCELLED', cleanup_required=False)
-                return result
-            except BaseException:
-                capture_cleanup.update(status='UNCONFIRMED', cleanup_required=True)
-                raise
-            finally:
-                if noise.owner:
-                    noise.stop()
 
     def factory(folder, *, profile='schedule'):
         apps.require(profile == proof['requested_profile'], 'DIAGNOSTIC_PROFILE_NOT_FORWARDED')
@@ -770,7 +820,8 @@ def run_case(output, helper, source_sha, deadline, profile, producer, expectatio
                 capture_cleanup.update(status='UNCONFIRMED', cleanup_required=True)
                 raise
             raise
-        return Capture(actual)
+        return BudgetCapture(actual, noise, workload_clock, capture_cleanup, captures,
+                             lambda: counter(kernel), capture_lifecycle)
 
     try:
         apps.start_schedule = factory
@@ -874,6 +925,7 @@ def run_case(output, helper, source_sha, deadline, profile, producer, expectatio
     finally:
         apps.start_schedule = original_factory
         proof['capture_cleanup'] = capture_cleanup
+        proof['capture_lifecycle'] = capture_lifecycle
         if capture_cleanup['cleanup_required']:
             proof.update(status='REPRODUCTION_NOT_ESTABLISHED', cleanup_required=True)
         if noise.cleanup.get('status') != 'COMPLETED':

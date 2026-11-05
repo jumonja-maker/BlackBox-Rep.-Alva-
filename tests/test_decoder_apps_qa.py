@@ -20,7 +20,7 @@ from tools.qa_decoder_apps import (decode_trace, etw_observations, installed, na
                                    native_output_path, observed_module_encoding,
                                    observed_process_image, safe_extract)
 from tools.qa_decoder_budget_diagnostic import (PAIRS, parse_args, validate_noise_oracle,
-    NoiseOwner,
+    NoiseOwner, BudgetCapture,
     SEVENZIP_CAPABILITIES, validate_comparison, validate_original_source, validate_positive,
     validate_progress, validate_rejection, validate_workload_activity, validate_case_contract,
     validate_output_observation, seal_and_remove_large_evidence, collect_bounded_case_facts)
@@ -29,6 +29,114 @@ from tools.qa_schedule_capture import profile_definition
 from tools.qa_decoder_noise_fixture import (_close_owner_with_checked_handles,
     _compiler_worker_environment, _require_compiler_policy, _configured_compiler_environment,
     _stop_completed_compiler_job)
+
+
+class BudgetCaptureOrderProtocolTests(unittest.TestCase):
+    """Fault-injected protocol ordering only, not WPR or native evidence."""
+    def capture(self, *, noise_error=None, stop_error=None, cancel_error=None):
+        events = []; clock = {'begin_qpc': 100}; captures = []; lifecycle = {'secondary_errors': []}
+        cleanup = {'status': 'RECORDING', 'cleanup_required': True}
+        noise = SimpleNamespace(owner=object(), cleanup={'status': 'NOT_ESTABLISHED'})
+        def stop_noise():
+            events.append(('noise_stop', clock.get('end_qpc')))
+            if noise_error is not None:
+                raise noise_error
+            noise.cleanup = {'status': 'COMPLETED'}
+        noise.stop = stop_noise
+        actual = SimpleNamespace(active=True)
+        result = {'path': 'owned.etl'}
+        def stop_wpr():
+            events.append(('wpr_stop', clock.get('end_qpc')))
+            if stop_error is not None:
+                raise stop_error
+            actual.active = False
+            return result
+        def cancel_wpr():
+            events.append(('wpr_cancel',))
+            if cancel_error is not None:
+                raise cancel_error
+            actual.active = False
+        def end_counter():
+            events.append(('workload_end',))
+            return 200
+        actual.stop = stop_wpr; actual.cancel = cancel_wpr
+        capture = BudgetCapture(actual, noise, clock, cleanup, captures, end_counter, lifecycle)
+        return capture, events, captures, result
+
+    def test_same_workload_boundary_then_orderly_noise_then_real_capture_stop(self):
+        capture, events, captures, result = self.capture()
+        self.assertIs(capture.stop(), result)
+        self.assertEqual(events, [('workload_end',), ('noise_stop', 200), ('wpr_stop', 200)])
+        self.assertEqual(captures, [result])
+        self.assertEqual(capture.cleanup, {'status': 'STOPPED', 'cleanup_required': False})
+        self.assertEqual(capture.noise.cleanup['status'], 'COMPLETED')
+        capture.cancel()
+        self.assertEqual(len(events), 3)
+
+    def test_noise_failure_still_stops_wpr_and_cannot_retry_normal_noise_stop(self):
+        failure = AssertionError('NOISE_EXIT_NOT_CONFIRMED')
+        capture, events, captures, result = self.capture(noise_error=failure)
+        with self.assertRaises(AssertionError) as caught:
+            capture.stop()
+        self.assertIs(caught.exception, failure)
+        self.assertEqual(events, [('workload_end',), ('noise_stop', 200), ('wpr_stop', 200)])
+        self.assertEqual(captures, [result])
+        self.assertEqual(capture.cleanup['status'], 'STOPPED')
+        self.assertEqual(capture.noise.cleanup['status'], 'NOT_ESTABLISHED')
+        with self.assertRaises(AssertionError) as repeated:
+            capture.cancel()
+        self.assertIs(repeated.exception, failure)
+        self.assertEqual(len(events), 3)
+
+    def test_noise_first_failure_survives_wpr_stop_and_finally_cancel_failures(self):
+        failure = AssertionError('NOISE_EXIT_NOT_CONFIRMED')
+        capture, events, captures, _ = self.capture(noise_error=failure,
+            stop_error=RuntimeError('WPR_STOP_FAILED'), cancel_error=OSError('WPR_CANCEL_FAILED'))
+        with self.assertRaises(AssertionError) as caught:
+            try:
+                capture.stop()
+            finally:
+                if capture.active:
+                    capture.cancel()
+        self.assertIs(caught.exception, failure)
+        self.assertEqual(events, [('workload_end',), ('noise_stop', 200), ('wpr_stop', 200), ('wpr_cancel',)])
+        self.assertEqual(captures, [])
+        self.assertEqual(capture.cleanup, {'status': 'UNCONFIRMED', 'cleanup_required': True})
+        self.assertEqual(capture.lifecycle['primary_error']['reason_code'], 'NOISE_EXIT_NOT_CONFIRMED')
+        self.assertEqual([item['phase'] for item in capture.lifecycle['secondary_errors']], ['WPR_STOP', 'WPR_CANCEL'])
+        self.assertEqual(capture.noise.cleanup['status'], 'NOT_ESTABLISHED')
+
+    def test_wpr_failure_is_not_replaced_and_completed_noise_is_not_stopped_again(self):
+        failure = RuntimeError('WPR_STOP_FAILED')
+        capture, events, captures, _ = self.capture(stop_error=failure)
+        with self.assertRaises(RuntimeError) as caught:
+            try:
+                capture.stop()
+            finally:
+                if capture.active:
+                    capture.cancel()
+        self.assertIs(caught.exception, failure)
+        self.assertEqual(events, [('workload_end',), ('noise_stop', 200), ('wpr_stop', 200), ('wpr_cancel',)])
+        self.assertEqual(capture.noise.cleanup['status'], 'COMPLETED')
+        self.assertEqual(capture.cleanup, {'status': 'CANCELLED', 'cleanup_required': False})
+        self.assertEqual(captures, [])
+
+    def test_existing_application_failure_survives_cancel_and_noise_failure(self):
+        failure = ValueError('APP_WORKLOAD_FAILED')
+        capture, events, captures, _ = self.capture(noise_error=RuntimeError('NOISE_STOP_FAILED'),
+            cancel_error=OSError('WPR_CANCEL_FAILED'))
+        with self.assertRaises(ValueError) as caught:
+            try:
+                raise failure
+            finally:
+                if capture.active:
+                    capture.cancel()
+        self.assertIs(caught.exception, failure)
+        self.assertEqual(events, [('wpr_cancel',), ('noise_stop', None)])
+        self.assertEqual(capture.lifecycle['primary_error']['phase'], 'APPLICATION')
+        self.assertEqual([item['phase'] for item in capture.lifecycle['secondary_errors']], ['WPR_CANCEL', 'NOISE_STOP'])
+        self.assertTrue(capture.cleanup['cleanup_required'])
+        self.assertEqual(captures, [])
 
 
 class NoiseStopObservationProtocolTests(unittest.TestCase):
