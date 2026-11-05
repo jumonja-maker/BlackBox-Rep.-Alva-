@@ -264,12 +264,30 @@ def observe_native_output(path):
                 type(footer.get("rows")) is int and 0 <= footer["rows"] <= 250000 and
                 size == path.stat().st_size, "NATIVE_OBSERVATION_FOOTER_OR_SIZE")
         facts.update(status="OBSERVED", footer={key: footer[key] for key in ("status", "rows")})
+        reason = footer.get('truncation_reason', 'UNKNOWN')
+        facts['native_truncation_reason'] = reason if reason in (None, 'MAX_EVENTS', 'MAX_OUTPUT', 'UNKNOWN') else 'UNRECOGNIZED'
     except Exception as error:
         facts["observation_error_code"] = _qa_code(str(error))
     return facts
 
 
-def _emit_trace_diagnostic(source, output, meta, digest, source_bytes, native_observation=None):
+def native_output_path(argv):
+    """Recognize only the two documented native decode launch shapes."""
+    if not isinstance(argv, (list, tuple)) or len(argv) not in (3, 4) or not all(isinstance(arg, str) for arg in argv):
+        return None
+    if len(argv) == 4 and argv[3] != '--inline-modules':
+        return None
+    return Path(argv[2])
+
+
+def observed_module_encoding(meta):
+    engine = meta.get('engine') if type(meta.get('engine')) is dict else {}
+    value = engine.get('frame_module_encoding', 'INLINE_V1')
+    return value if value in ('INLINE_V1', 'PER_EVENT_MODULES_V1') else 'UNRECOGNIZED'
+
+
+def _emit_trace_diagnostic(source, output, meta, digest, source_bytes, native_observation=None,
+                           native_module_encoding=None):
     """Log only fixed enums, bounded counts and the original source digest."""
     def count(value):
         return value if type(value) is int and 0 <= value <= 2**63 - 1 else None
@@ -297,6 +315,8 @@ def _emit_trace_diagnostic(source, output, meta, digest, source_bytes, native_ob
         "events_with_errors": count(meta.get("events_with_errors")),
         "bounded_events": count(meta.get("bounded_events")),
         "event_limit": count(reliability.get("event_limit")),
+        "requested_native_module_encoding": native_module_encoding or "DEFAULT",
+        "actual_native_module_encoding": observed_module_encoding(meta),
     }
     if native_observation:
         detail["native_output_bytes"] = count(native_observation.get("output_bytes"))
@@ -311,7 +331,9 @@ def _emit_trace_diagnostic(source, output, meta, digest, source_bytes, native_ob
             stream.write("\n- Third-party trace decode " + record + "\n")
 
 
-def decode_trace(source, output, helper):
+def decode_trace(source, output, helper, *, native_module_encoding=None):
+    require(native_module_encoding is None or type(native_module_encoding) is str and
+            native_module_encoding in ('INLINE_V1', 'PER_EVENT_MODULES_V1'), 'INVALID_QA_NATIVE_MODULE_ENCODING')
     require(0 < source.stat().st_size <= MAX_TRACE, "ACTUAL_TRACE_SIZE_BUDGET")
     source_bytes = source.stat().st_size
     digest = file_hash(source)
@@ -320,7 +342,7 @@ def decode_trace(source, output, helper):
 
     class ObservedNativeDecoder(OwnedProcess):
         def __init__(self, args, **kwargs):
-            self._native_output = Path(args[2]) if isinstance(args, (list, tuple)) and len(args) == 3 else None
+            self._native_output = native_output_path(args)
             super().__init__(args, **kwargs)
             self._observation_done = False
 
@@ -343,7 +365,8 @@ def decode_trace(source, output, helper):
     try:
         with patch("blackbox_core.decoder_service.helper_path", return_value=helper), \
                 patch("blackbox_core.optional_jobs.OwnedProcess", ObservedNativeDecoder):
-            meta = decode_file(source, index, timeout=90)
+            options = {'native_module_encoding': native_module_encoding} if native_module_encoding is not None else {}
+            meta = decode_file(source, index, timeout=90, **options)
     finally:
         try:
             write_json(output / "native-output-observation.json", {
@@ -351,7 +374,8 @@ def decode_trace(source, output, helper):
         except Exception as error:
             print("NATIVE_OUTPUT_OBSERVATION_WRITE_FAILED " + _qa_code(str(error)), flush=True)
     write_json(output / "decoder-summary.json", meta)
-    _emit_trace_diagnostic(source, output, meta, digest, source_bytes, observations[0] if observations else None)
+    _emit_trace_diagnostic(source, output, meta, digest, source_bytes, observations[0] if observations else None,
+                           native_module_encoding)
     require(meta["status"] == "DECODED" and meta["rows"] > 0,
             "APP_TRACE_NOT_COMPLETELY_DECODED")
     require(file_hash(source) == digest and meta["input_sha256"] == digest,
@@ -409,10 +433,11 @@ def start_schedule(output, *, profile="schedule"):
     return capture
 
 
-def finish_schedule(capture, output, helper, pids, *, waits=False):
+def finish_schedule(capture, output, helper, pids, *, waits=False, native_module_encoding=None):
     raw = capture.stop()
     source = output / raw["path"]
-    index, meta, identity = decode_trace(source, output, helper)
+    options = {'native_module_encoding': native_module_encoding} if native_module_encoding is not None else {}
+    index, meta, identity = decode_trace(source, output, helper, **options)
     observations = etw_observations(index, pids)
     from blackbox_core.decoder_waits import build_wait_report
     reports = []
@@ -427,7 +452,7 @@ def finish_schedule(capture, output, helper, pids, *, waits=False):
             "capture_complete": "UNKNOWN", "root_cause": "NOT_ESTABLISHED"}
 
 
-def seven_zip(output, helper, *, profile="cpu_file"):
+def seven_zip(output, helper, *, profile="cpu_file", native_module_encoding=None):
     binary = installed("7z", [Path(os.environ.get("ProgramFiles", "C:/Program Files")) / "7-Zip/7z.exe"])
     native = native_pe_identity(binary)
     identity = {**binary_identity(binary, version_args=["i"]), "native_image": native}
@@ -454,7 +479,8 @@ def seven_zip(output, helper, *, profile="cpu_file"):
             "schema": "blackbox.sevenzip-workload-oracle/1", "application": identity,
             "input_bytes": source.stat().st_size, "input_sha256": digest,
             "roundtrips_verified": len(proofs) // 2, "workloads": proofs})
-        trace = finish_schedule(capture, output, helper, [x["pid"] for x in proofs])
+        options = {'native_module_encoding': native_module_encoding} if native_module_encoding is not None else {}
+        trace = finish_schedule(capture, output, helper, [x["pid"] for x in proofs], **options)
     finally:
         if capture.active:
             capture.cancel()

@@ -17,13 +17,15 @@ import time
 from .decoder_profiles import ProfileBuilder, read_profiles
 from .decoder_clock import TraceClockAudit
 from .decoder_cpu import validate_cpu_sample, CpuSampleAudit
-from .decoder_modules import ModuleCatalog, read_modules
+from .decoder_modules import ModuleCatalog, read_modules, validate_module_frame
 from .decoder_waits import validate_schedule_event
 from .decoder_io import validate_io_observation, validate_io_clock
 from .decoder_limits import (DecodeBudget, MAX_INDEX_BYTES, MAX_PAGE_BYTES,
                              MAX_SUMMARY_BYTES, check_json_shape)
 
 PROTOCOL = "blackbox.trace-event/1"
+FRAME_MODULE_INLINE = "INLINE_V1"
+FRAME_MODULE_PER_EVENT = "PER_EVENT_MODULES_V1"
 MAX_LINE = 256 * 1024
 MAX_EVENTS = 250_000
 APP_ID = 0x42424431
@@ -109,6 +111,80 @@ def validate_event(row, expected):
     validate_cpu_sample(row)
     validate_schedule_event(row)
     validate_io_observation(row)
+
+
+def _native_frame_module_encoding(header):
+    # An absent capability is the original, fully inline v1 transport. Never
+    # interpret references from an unannounced or future encoding implicitly.
+    encoding = header.get("frame_module_encoding", FRAME_MODULE_INLINE)
+    if encoding not in (FRAME_MODULE_INLINE, FRAME_MODULE_PER_EVENT):
+        raise ValueError("UNSUPPORTED_FRAME_MODULE_ENCODING")
+    return encoding
+
+
+def _expand_native_frame_modules(row, encoding):
+    """Restore the original event before validation, hashing or persistence.
+
+    The dictionary is local to this one event and can contain at most one
+    descriptor per frame. Referenced descriptors still pass the existing full
+    module/address/process/load-window validator; transport never establishes a
+    binding or changes an observation's trust.
+    """
+    frames = row.get("frames")
+    has_table = "frame_modules" in row
+    has_refs = type(frames) is list and any(
+        type(frame) is dict and "module_ref" in frame for frame in frames)
+    if encoding != FRAME_MODULE_PER_EVENT:
+        if has_table or has_refs:
+            raise ValueError("UNANNOUNCED_FRAME_MODULE_TRANSPORT")
+        return row
+    # Compact-mode producers may retain an inline event when it is smaller.
+    if not has_table:
+        if has_refs:
+            raise ValueError("MISSING_FRAME_MODULE_TABLE")
+        return row
+    table = row["frame_modules"]
+    if (type(frames) is not list or len(frames) > 128 or
+            type(table) is not list or not 1 <= len(table) <= 128 or
+            any(type(module) is not dict for module in table)):
+        raise ValueError("INVALID_FRAME_MODULE_TABLE")
+    expanded = []
+    used = set()
+    for frame in frames:
+        if type(frame) is not dict:
+            raise ValueError("INVALID_FRAME")
+        if "module_ref" not in frame:
+            expanded.append(frame)
+            continue
+        ref = frame["module_ref"]
+        if ("module" in frame or type(ref) is not int or
+                not 0 <= ref < len(table)):
+            raise ValueError("INVALID_FRAME_MODULE_REFERENCE")
+        if type(frame.get("address")) is not str:
+            raise ValueError("INVALID_FRAME")
+        # Replace the reference at the original field position as well: even
+        # the existing events.data JSON text retains its inline key order.
+        restored = {("module" if key == "module_ref" else key):
+                    (dict(table[ref]) if key == "module_ref" else value)
+                    for key, value in frame.items()}
+        # Validate each descriptor once before a reference could amplify a
+        # nested/non-scalar value. ModuleCatalog still validates every restored
+        # frame/address below, including repeated references.
+        if ref not in used:
+            validate_module_frame(row, restored)
+        expanded.append(restored)
+        used.add(ref)
+    if len(used) != len(table):
+        raise ValueError("UNUSED_FRAME_MODULE_DESCRIPTOR")
+    result = {key: value for key, value in row.items() if key != "frame_modules"}
+    result["frames"] = expanded
+    check_json_shape(result)
+    # Retain the logical-event limit as well as the bounded wire-line limit.
+    # ASCII canonical JSON is also the representation persisted by this index.
+    logical = json.dumps(result, ensure_ascii=True, allow_nan=False, separators=(",", ":"))
+    if len(logical) > MAX_LINE:
+        raise ValueError("EXPANDED_EVENT_OUTPUT_BUDGET")
+    return result
 
 
 class GCAdapter:
@@ -316,6 +392,7 @@ def build_index(source, output, *, input_sha256, format_name, cancel=None,
         cpu_audit = CpuSampleAudit()
         modules = ModuleCatalog(db)
         engine_header = None
+        frame_module_encoding = FRAME_MODULE_INLINE
         footer = None
         rows = 0
         transaction_bytes = 0
@@ -330,6 +407,7 @@ def build_index(source, output, *, input_sha256, format_name, cancel=None,
                     engine_header.get("protocol") != PROTOCOL or
                     engine_header.get("input_sha256") != input_sha256):
                 raise ValueError("INVALID_DECODER_HEADER_OR_INPUT_HASH")
+            frame_module_encoding = _native_frame_module_encoding(engine_header)
         for row in records:
             budget.check("INDEX")
             if row.get("type") == "footer" and format_name != ".jsonl":
@@ -342,6 +420,8 @@ def build_index(source, output, *, input_sha256, format_name, cancel=None,
                     raise ValueError("DECODER_EVENT_BUDGET")
                 footer = {"status": "TRUNCATED", "rows": rows}
                 break
+            if format_name != ".jsonl":
+                row = _expand_native_frame_modules(row, frame_module_encoding)
             validate_event(row, rows + 1)
             validate_io_clock(row, engine_header)
             modules.accept(row)

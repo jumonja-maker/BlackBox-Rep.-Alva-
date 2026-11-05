@@ -5,6 +5,7 @@ No environment contents are printed or persisted in the receipt.
 """
 from __future__ import annotations
 
+import argparse
 import ctypes as C
 from ctypes import wintypes as W
 import json
@@ -533,6 +534,19 @@ def build_native_noise(output: Path, source_sha: str) -> dict:
         raise
 
 
+def _main(arguments=None):
+    arguments = list(sys.argv[1:] if arguments is None else arguments)
+    if '--compile-worker' in arguments:
+        require(len(arguments) == 2 and arguments[0] == '--compile-worker', 'NATIVE_NOISE_BUILD_WORKER_ARGUMENTS')
+        return _compile_worker(Path(arguments[1]))
+    parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
+    parser.add_argument('--build-fixture', action='store_true', required=True)
+    parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--source-sha', required=True)
+    options = parser.parse_args(arguments)
+    build_native_noise(options.output, options.source_sha)
+    return 0
+
+
 if __name__ == '__main__':
-    require(len(sys.argv) == 3 and sys.argv[1] == '--compile-worker', 'NATIVE_NOISE_BUILD_WORKER_ARGUMENTS')
-    raise SystemExit(_compile_worker(Path(sys.argv[2])))
+    raise SystemExit(_main())

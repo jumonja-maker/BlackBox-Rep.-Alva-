@@ -17,6 +17,7 @@ import xml.etree.ElementTree as ET
 import zipfile
 
 from tools.qa_decoder_apps import (decode_trace, etw_observations, installed, native_pe_identity, observe_native_output,
+                                   native_output_path, observed_module_encoding,
                                    observed_process_image, safe_extract)
 from tools.qa_decoder_budget_diagnostic import (PAIRS, parse_args, validate_noise_oracle,
     SEVENZIP_CAPABILITIES, validate_comparison, validate_original_source, validate_positive,
@@ -403,6 +404,7 @@ class ControlledBudgetProtocolTests(unittest.TestCase):
         common = {'input_sha256': 'a' * 64, 'input_bytes': 8 * 1024**2, 'application_sha256': 'b' * 64,
             'native_image': {'code_kind': 'NATIVE_PE_NO_CLR_COM_DESCRIPTOR'}, 'helper_sha256': 'c' * 64,
             'script_hashes': {'driver': 'd' * 64},
+            'actual_native_module_encoding': 'PER_EVENT_MODULES_V1',
             'noise_producer': {'implementation': 'NATIVE_WIN32', 'source_sha256': '3' * 64,
                                'executable_sha256': '4' * 64, 'expected_native_handles': 32},
             'source_identity': {'actual_source_sha': 'e' * 40, 'source_tree_sha': 'f' * 40},
@@ -477,6 +479,16 @@ class ControlledBudgetProtocolTests(unittest.TestCase):
 
 class NativeOutputAndRetentionProtocolTests(unittest.TestCase):
     """Only file/protocol fixtures; actual decoder/Windows evidence comes from CI."""
+    def test_observer_accepts_only_default_or_exact_explicit_inline_argv(self):
+        self.assertEqual(native_output_path(['helper.exe', 'input.etl', 'decoded.jsonl']), Path('decoded.jsonl'))
+        self.assertEqual(native_output_path(['helper.exe', 'input.etl', 'decoded.jsonl', '--inline-modules']),
+                         Path('decoded.jsonl'))
+        for argv in (['helper.exe', 'input.etl'], ['helper.exe', 'input.etl', 'decoded.jsonl', '--other'],
+                     ['helper.exe', 'input.etl', 'decoded.jsonl', '--INLINE-MODULES'],
+                     ['helper.exe', 'input.etl', 'decoded.jsonl', '--inline-modules', 'extra']):
+            with self.subTest(arity=len(argv), last=argv[-1]):
+                self.assertIsNone(native_output_path(argv))
+
     def test_partial_failure_facts_preserve_primary_error_and_exclude_paths_payload_and_args(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp); work = root / '7zip'; work.mkdir()
@@ -620,7 +632,8 @@ class FixedQaProfileTests(unittest.TestCase):
 
 class ApplicationTraceDiagnosticTests(unittest.TestCase):
     def exercise_decode(self, *, status="DECODED", rows=12, metadata_hash=None,
-                        changed_source=False, expected_failure=None, hostile_counts=False):
+                        changed_source=False, expected_failure=None, hostile_counts=False,
+                        native_module_encoding=None):
         # This is an explicit metadata-handling regression. decode_file is
         # mocked; actual ETW/EventPipe and third-party workloads remain CI gates.
         with tempfile.TemporaryDirectory() as tmp:
@@ -640,6 +653,8 @@ class ApplicationTraceDiagnosticTests(unittest.TestCase):
                 "reliability": {"event_limit": 250000},
                 "engine": {"protocol": "blackbox.trace-event/1"},
                 "profiles": {"private_note": "PRIVATE_METADATA_MUST_NOT_APPEAR_IN_LOGS"}}
+            if native_module_encoding is not None:
+                meta['engine']['frame_module_encoding'] = native_module_encoding
             if hostile_counts:
                 meta.update(events_with_stacks="PRIVATE_COUNTER_MUST_NOT_APPEAR_IN_LOGS",
                             events_with_errors=True, bounded_events=2**100)
@@ -653,15 +668,16 @@ class ApplicationTraceDiagnosticTests(unittest.TestCase):
             terminal = io.StringIO()
             helper = root / "decoder-helper.exe"
             result = None
+            options = {'native_module_encoding': native_module_encoding} if native_module_encoding is not None else {}
             with patch("tools.qa_decoder_apps.decode_file", side_effect=decoded) as decoder, \
                     patch.dict(os.environ, {"GITHUB_STEP_SUMMARY": str(summary_path)}), \
                     redirect_stdout(terminal):
                 if expected_failure:
                     with self.assertRaisesRegex(AssertionError, expected_failure):
-                        decode_trace(source, output, helper)
+                        decode_trace(source, output, helper, **options)
                 else:
-                    result = decode_trace(source, output, helper)
-            decoder.assert_called_once_with(source, output / "decoded.sqlite3", timeout=90)
+                    result = decode_trace(source, output, helper, **options)
+            decoder.assert_called_once_with(source, output / "decoded.sqlite3", timeout=90, **options)
             self.assertEqual(json.loads((output / "decoder-summary.json").read_text(encoding="utf-8")), meta)
             diagnostic = json.loads((output / "decoder-diagnostic.json").read_text(encoding="utf-8"))
             logged = terminal.getvalue()
@@ -685,6 +701,16 @@ class ApplicationTraceDiagnosticTests(unittest.TestCase):
         self.assertEqual(diagnostic["source_format"], ".etl")
         for field in ("events_with_stacks", "events_with_errors", "bounded_events", "event_limit"):
             self.assertIsNone(diagnostic[field])
+
+    def test_explicit_native_transport_is_forwarded_and_reported_without_changing_default_kwargs(self):
+        for encoding in ('INLINE_V1', 'PER_EVENT_MODULES_V1'):
+            with self.subTest(encoding=encoding):
+                _, _, diagnostic = self.exercise_decode(native_module_encoding=encoding)
+                self.assertEqual(diagnostic['requested_native_module_encoding'], encoding)
+                self.assertEqual(diagnostic['actual_native_module_encoding'], encoding)
+        _, _, default = self.exercise_decode()
+        self.assertEqual(default['requested_native_module_encoding'], 'DEFAULT')
+        self.assertEqual(observed_module_encoding({'engine': {}}), 'INLINE_V1')
 
     def test_truncated_trace_remains_failure_and_saves_actual_prefix_metadata(self):
         _, _, diagnostic = self.exercise_decode(status="TRUNCATED", rows=250000,

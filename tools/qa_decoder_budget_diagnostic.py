@@ -618,7 +618,8 @@ def collect_bounded_case_facts(proof, work, helper, clock):
                 facts[name] = 'NOT_ESTABLISHED'; errors[name] = apps._qa_code(str(error))
 
 
-def run_case(output, helper, source_sha, deadline, profile, producer, expectation, target_handoffs=0):
+def run_case(output, helper, source_sha, deadline, profile, producer, expectation, target_handoffs=0,
+             *, native_module_encoding=None):
     identity = source_identity(source_sha)
     apps.require(identity['source_identity_status'] == 'VERIFIED_EXPECTED_HEAD', 'DIAGNOSTIC_SOURCE_IDENTITY')
     output.mkdir(parents=True, exist_ok=False)
@@ -628,6 +629,7 @@ def run_case(output, helper, source_sha, deadline, profile, producer, expectatio
         'source_identity': identity, 'historical_a80_cause': 'NOT_ESTABLISHED',
         'positive_application_acceptance': 'NOT_ESTABLISHED', 'synthetic_etw': False,
         'requested_profile': profile, 'expectation': expectation,
+        'requested_native_module_encoding': native_module_encoding or 'DEFAULT',
         'noise_producer': {key: producer[key] for key in
             ('implementation', 'source_sha256', 'executable_sha256', 'expected_native_handles')},
         'evidence': {}}
@@ -695,7 +697,8 @@ def run_case(output, helper, source_sha, deadline, profile, producer, expectatio
         expected_assertion_observed = False
         result = None
         try:
-            result = apps.seven_zip(work, helper, profile=profile)
+            options = {'native_module_encoding': native_module_encoding} if native_module_encoding is not None else {}
+            result = apps.seven_zip(work, helper, profile=profile, **options)
         except AssertionError as error:
             if str(error) != EXPECTED_REASON:
                 raise
@@ -713,7 +716,8 @@ def run_case(output, helper, source_sha, deadline, profile, producer, expectatio
         observation_path = work / 'native-output-observation.json'
         observation = read_json(observation_path)
         proof.update(decoder_status=meta['status'], rows=meta['rows'], noise_cleanup=noise.cleanup,
-                     decoder_reported_lost_events=meta.get('decoder_reported_lost_events'))
+                     decoder_reported_lost_events=meta.get('decoder_reported_lost_events'),
+                     actual_native_module_encoding=apps.observed_module_encoding(meta))
         proof['native_output_observation'] = observation
         proof['decoder_diagnostic'] = diagnostic
         roundtrips = workload.get('roundtrips_verified'); workloads = workload.get('workloads')
@@ -774,6 +778,9 @@ def run_case(output, helper, source_sha, deadline, profile, producer, expectatio
                      'DIAGNOSTIC_CAPTURE_OR_OWNER_UNCONFIRMED')
         proof['original_source_receipt'] = validate_original_source(diagnostic, source_hash, source.stat().st_size)
         proof['native_output'] = validate_output_observation(observation, meta)
+        apps.require(proof['actual_native_module_encoding'] ==
+            ('INLINE_V1' if native_module_encoding == 'INLINE_V1' else 'PER_EVENT_MODULES_V1'),
+            'REQUESTED_NATIVE_MODULE_ENCODING_NOT_OBSERVED')
         decision = validate_case_contract(expectation, expected_assertion_observed, result, meta,
                                          source_hash, native, proof['native_output'])
         if expectation == 'COMPLETE_NATIVE_7ZIP':
@@ -860,6 +867,9 @@ def validate_comparison(first, second, *, positive=True):
             and case['noise_workload_coverage']['all_16_threads_bracket'] is True
             and case['noise_workload_coverage']['threads_with_positive_handoff_delta'] == 2 * PAIRS
             for case in (first, second)), 'CONTROLLED_A_B_NOISE_OR_CLEANUP_NOT_COMPARABLE')
+    apps.require(first['actual_native_module_encoding'] == 'PER_EVENT_MODULES_V1' and
+        second['actual_native_module_encoding'] == ('PER_EVENT_MODULES_V1' if positive else 'INLINE_V1'),
+        'CONTROLLED_PAIR_TRANSPORT_NOT_ESTABLISHED')
 
 
 def run_diagnostic(args):
@@ -870,6 +880,8 @@ def run_diagnostic(args):
         'historical_a80_cause': 'NOT_ESTABLISHED', 'previous_7f45_result': 'FAILED_FOCUSED_PROFILE_STILL_TRUNCATED',
         'evidence_footprint_scope': 'LIVE_OWNED_QA_TREE; EXISTING_PRODUCTION_PRIVATE_IMPORT_BUDGET_IS_SEPARATE',
         'subwindow_delta_scope': 'REPORT_ONLY; UNEQUAL_QPC_WINDOWS_ARE_NOT_A_CAUSAL_RATE_COMPARISON',
+        'python_pair_transport_scope': 'COMPACT_ROW_NEGATIVE_AND_EXPLICIT_INLINE_BYTE_NEGATIVE; NOT_PROFILE_CAUSAL_COMPARISON',
+        'native_pair_transport_scope': 'BOTH_DEFAULT_COMPACT_PER_EVENT_MODULES_V1',
         'cases': {}}
     try:
         helper = args.helper.resolve(strict=True)
@@ -892,7 +904,7 @@ def run_diagnostic(args):
             apps.require(time.monotonic() < deadline, 'CONTROLLED_A_B_DEADLINE')
             second = run_case(output / (label + '-cpu-file'), helper, args.source_sha, deadline,
                 'cpu_file', producer, 'COMPLETE_NATIVE_7ZIP' if positive else 'OUTPUT_BUDGET_NEGATIVE',
-                first['noise_handoffs'])
+                first['noise_handoffs'], native_module_encoding=None if positive else 'INLINE_V1')
             proof['cases'][label + '_cpu_file'] = second
             max_live = max(max_live, second.get('measured_live_qa_bytes_before_removal', 0))
             validate_comparison(first, second, positive=positive)

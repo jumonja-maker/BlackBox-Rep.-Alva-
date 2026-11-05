@@ -6,7 +6,8 @@ import sys
 import tempfile
 import time
 
-from .decoder_index import build_index, file_hash
+from .decoder_index import (FRAME_MODULE_INLINE, FRAME_MODULE_PER_EVENT,
+                            build_index, file_hash)
 from .decoder_limits import DecodeBudget, MAX_INPUT_BYTES, MAX_WORK_BYTES, failure_details
 
 
@@ -35,8 +36,10 @@ def _local_file(path):
     return path
 
 
-def decode_file(path, destination, *, cancel=None, timeout=180):
+def decode_file(path, destination, *, cancel=None, timeout=180, native_module_encoding=None):
     from .session_v2 import safe_path
+    if native_module_encoding not in (None, FRAME_MODULE_INLINE, FRAME_MODULE_PER_EVENT):
+        raise ValueError("UNSUPPORTED_FRAME_MODULE_ENCODING")
     budget = DecodeBudget(cancel, timeout)
     budget.check("VALIDATE")
     path = _local_file(path)
@@ -72,9 +75,12 @@ def decode_file(path, destination, *, cancel=None, timeout=180):
             env = {**os.environ, "DOTNET_CLI_TELEMETRY_OPTOUT": "1", "DOTNET_GCHeapHardLimit": "40000000",
                    "_NT_SYMBOL_PATH": "", "_NT_ALT_SYMBOL_PATH": ""}
             owner = None
+            command = [str(tool), str(snapshot), str(decoded)]
+            if native_module_encoding == FRAME_MODULE_INLINE:
+                command.append("--inline-modules")
             with (root / "decoder.log").open("xb") as log:
                 try:
-                    owner = OwnedProcess([str(tool), str(snapshot), str(decoded)], stdout=log, stderr=log,
+                    owner = OwnedProcess(command, stdout=log, stderr=log,
                                          env=env, detach_console=True)
                     process = psutil.Process(owner.process.pid)
                     try: process.nice(psutil.BELOW_NORMAL_PRIORITY_CLASS if os.name == "nt" else 5)

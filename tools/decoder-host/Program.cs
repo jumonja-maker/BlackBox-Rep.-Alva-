@@ -173,6 +173,76 @@ internal static class Program
             raw_payload_bytes = e.EventDataLength, bounded = clipped, errors, semantic,
             stack_status = stackStatus, frames };
     }
+
+    static string EventLine(object row, bool inlineModules)
+    {
+        // The expanded logical event retains the original per-record limit.
+        // Wire interning must never admit a record that previously exceeded it.
+        string line = JsonSerializer.Serialize(row, Json);
+        int expandedBytes = Encoding.UTF8.GetByteCount(line);
+        if (expandedBytes > 256 * 1024) throw new InvalidDataException("EVENT_OUTPUT_BUDGET");
+        if (inlineModules || !line.Contains("\"module\":", StringComparison.Ordinal)) return line;
+
+        using var document = JsonDocument.Parse(line, new JsonDocumentOptions { MaxDepth = 24 });
+        var frames = document.RootElement.GetProperty("frames");
+        var modules = new List<JsonElement>();
+        var moduleIndexes = new Dictionary<string, int>(StringComparer.Ordinal);
+        var references = new List<int?>();
+        foreach (var frame in frames.EnumerateArray())
+        {
+            if (!frame.TryGetProperty("module", out var module) || module.ValueKind != JsonValueKind.Object)
+            {
+                references.Add(null);
+                continue;
+            }
+            // Include every field, explicit null, process instance and load
+            // window in identity; never intern by a basename or image address.
+            string identity = module.GetRawText();
+            if (!moduleIndexes.TryGetValue(identity, out int index))
+            {
+                index = modules.Count;
+                moduleIndexes.Add(identity, index);
+                modules.Add(module);
+            }
+            references.Add(index);
+        }
+        if (modules.Count == 0) return line;
+
+        using var candidate = new MemoryStream();
+        using (var writer = new Utf8JsonWriter(candidate))
+        {
+            writer.WriteStartObject();
+            foreach (var property in document.RootElement.EnumerateObject())
+            {
+                if (property.Name != "frames") { property.WriteTo(writer); continue; }
+                writer.WritePropertyName("frames");
+                writer.WriteStartArray();
+                int frameIndex = 0;
+                foreach (var frame in frames.EnumerateArray())
+                {
+                    int? reference = references[frameIndex++];
+                    writer.WriteStartObject();
+                    foreach (var field in frame.EnumerateObject())
+                    {
+                        if (field.Name == "module" && reference.HasValue)
+                            writer.WriteNumber("module_ref", reference.Value);
+                        else field.WriteTo(writer);
+                    }
+                    writer.WriteEndObject();
+                }
+                writer.WriteEndArray();
+            }
+            writer.WritePropertyName("frame_modules");
+            writer.WriteStartArray();
+            foreach (var module in modules) module.WriteTo(writer);
+            writer.WriteEndArray();
+            writer.WriteEndObject();
+        }
+        // One table per event (at most the existing 128 frames), no global
+        // cache or references across events. Keep inline output if it is smaller.
+        return candidate.Length < expandedBytes ? Encoding.UTF8.GetString(candidate.ToArray()) : line;
+    }
+
     static int Main(string[] args)
     {
         if (args.Length == 1 && args[0] == "--version")
@@ -182,7 +252,12 @@ internal static class Program
                 version = typeof(TraceEvent).Assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion }));
             return 0;
         }
-        if (args.Length != 2) { Console.Error.WriteLine("USAGE: BLACK.BOX-Decoder input.etl|input.nettrace output.jsonl"); return 2; }
+        if (args.Length != 2 && (args.Length != 3 || args[2] != "--inline-modules"))
+        {
+            Console.Error.WriteLine("USAGE: BLACK.BOX-Decoder input.etl|input.nettrace output.jsonl [--inline-modules]");
+            return 2;
+        }
+        bool inlineModules = args.Length == 3;
         string input = Path.GetFullPath(args[0]), output = Path.GetFullPath(args[1]);
         string? scratch = null;
         try
@@ -212,24 +287,31 @@ internal static class Program
                 utc_encoding = "DOTNET_DATETIME_100NS_TICKS_NOT_CAPTURE_ACCURACY",
                 trace_to_blackbox_session_clock_alignment = "NOT_ESTABLISHED",
                 native_module_contract = "blackbox.trace-module/1",
+                frame_module_encoding = inlineModules ? "INLINE_V1" : "PER_EVENT_MODULES_V1",
                 trace_counter_frequency_hz = SourceCounterFrequency(log),
                 trace_counter_kind = "TRACEEVENT_SOURCE_COUNTER",
                 trace_counter_frequency_provenance = "TRACEEVENT_4_0_PERSISTED_SOURCE_METADATA",
                 thread_schedule_contract = "blackbox.thread-schedule/1", io_contract = "blackbox.trace-io/1",
                 capture_loss = (int?)null, cpu_sample_contract = "blackbox.cpu-sample/1", symbol_policy = "NO_SYMBOL_SERVER_OR_SOURCE_DOWNLOAD" }, Json));
             long count = 0; bool limited = false;
+            string? truncationReason = null;
             foreach (var e in log.Events)
             {
-                if (count >= MaxEvents || stream.Position > MaxOutput) { limited = true; break; }
+                if (count >= MaxEvents || stream.Position > MaxOutput)
+                {
+                    limited = true;
+                    truncationReason = count >= MaxEvents ? "MAX_EVENTS" : "MAX_OUTPUT";
+                    break;
+                }
                 var row = Row(e, ++count, log);
-                string line = JsonSerializer.Serialize(row, Json);
-                if (Encoding.UTF8.GetByteCount(line) > 256 * 1024) throw new InvalidDataException("EVENT_OUTPUT_BUDGET");
+                string line = EventLine(row, inlineModules);
                 writer.WriteLine(line);
                 if (count % 256 == 0) writer.Flush();
             }
             if (Hash(input) != before) throw new IOException("INPUT_CHANGED");
             writer.WriteLine(JsonSerializer.Serialize(new { type = "footer", protocol = Protocol,
                 rows = count, status = limited ? "TRUNCATED" : "DECODED",
+                truncation_reason = truncationReason,
                 decoder_reported_lost_events = log.EventsLost, capture_loss = (int?)null,
                 scope = "TRACELOG_PROJECTION_NOT_PROOF_OF_COMPLETE_CAPTURE" }, Json));
             return 0;

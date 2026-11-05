@@ -40,8 +40,8 @@ APPROVED_RELEASE_QA_SCOPE = frozenset({
 })
 APPROVED_DECODER_QA_PR = 38
 APPROVED_DECODER_QA_BRANCH = "fix/r10-v055-trace-diagnostics-20261105"
-# This one repair retains four new QA files. It is not a directory allowlist:
-# added/modified/renamed/deleted statuses must match each exact reviewed path.
+# This repair includes the lossless native-module transport fix and its QA.
+# This is not a directory allowlist: statuses must match each reviewed path.
 APPROVED_DECODER_QA_FILES = {
     ".github/workflows/shell-qa.yml": "modified",
     ".github/workflows/release-v055.yml": "modified",
@@ -54,6 +54,12 @@ APPROVED_DECODER_QA_FILES = {
     "tools/fixtures/DecoderApps/cpu_file.wprp": "added",
     "tools/publish_v055_after_ci.py": "modified",
     "tests/test_release_v055_authorization.py": "modified",
+    "tools/decoder-host/Program.cs": "modified",
+    "src/blackbox_core/decoder_index.py": "modified",
+    "src/blackbox_core/decoder_service.py": "modified",
+    "tests/test_decoder_frame_module_transport.py": "added",
+    "tools/qa_decoder_patch.py": "modified",
+    "tests/test_native_etl_release_completeness.py": "modified",
 }
 PR_NUMBER = 30
 PRIOR_RELEASE_SHA = "74fe0f856776bcee018d79bfeec96f33d2ace0b2"
