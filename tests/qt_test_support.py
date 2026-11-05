@@ -13,7 +13,9 @@ def close_and_drain(window,app,timeout=10):
         owners=(getattr(probe,n,None) for n in ("_pending_windows","_pending_detailed","_pending_v2"))
         native_pending=any(getattr(o,"thread",None) is not None and o.thread.is_alive() for o in owners)
         helper_alive=bool(getattr(probe,"alive",False))
-        if not probe.active and not native_pending and not helper_alive and all(getattr(window,n,None) is None for n in names):
+        chain = getattr(getattr(window, "chain_builder_panel", None), "bridge", None)
+        chain_pending = bool(chain is not None and chain.busy)
+        if not probe.active and not native_pending and not helper_alive and not chain_pending and all(getattr(window,n,None) is None for n in names):
             window.close()
             app.processEvents()
             return

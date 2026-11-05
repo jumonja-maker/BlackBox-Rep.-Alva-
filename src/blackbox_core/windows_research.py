@@ -107,7 +107,7 @@ def enable_debug_privilege():
 _pending_wct=[]
 
 
-def wait_chain(tid, *, timeout_s=0.25):
+def wait_chain(tid, *, timeout_s=0.25, cleanup_observer=None):
     if os.name!="nt":return {"status":"UNSUPPORTED_PLATFORM","source":"WIN32_WCT","nodes":[]}
     # Keep callback, count and arrays alive until the callback has RETURNED.
     # Timed-out native callbacks are retained; a bounded helper process owns them.
@@ -147,6 +147,12 @@ def wait_chain(tid, *, timeout_s=0.25):
     handle=api.OpenThreadWaitChainSession(1,callback)
     if not handle:return {"source":"WIN32_WCT","status":_status(C.get_last_error()),"nodes":[]}
     _pending_wct.append(state)
+    def release():
+        # The void API's return is the actual callback-drained boundary.
+        api.CloseThreadWaitChainSession(handle)
+        _pending_wct[:]=[r for r in _pending_wct if r is not state]
+        return True
+    if cleanup_observer is not None:cleanup_observer("OPENED",release)
     try:
         C.set_last_error(0)
         api.GetThreadWaitChain(handle,0,7,tid,C.byref(state["count"]),state["nodes"],C.byref(state["cycle"]))
@@ -157,8 +163,8 @@ def wait_chain(tid, *, timeout_s=0.25):
     finally:
         # This API returns after outstanding callbacks have called and
         # returned; only then may their Python references/arrays be released.
-        api.CloseThreadWaitChainSession(handle)
-        _pending_wct.remove(state)
+        release()
+        if cleanup_observer is not None:cleanup_observer("CLOSED_CALLBACKS_DRAINED",release)
 
 
 def _write_dump_bounded(write,stream,*,attempts=3):

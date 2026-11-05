@@ -64,6 +64,45 @@ class _DeepTask(QThread):
         # status reads in the service deliberately do not refresh the pipe.
         return reader(refresh=True)
 
+    def _owned(self, command, kind, operation):
+        """Choose the R60 ownership guard before any legacy target selector."""
+        owner = command["native_owner_run_id"]
+        expected = command.get("expected_context")
+        if kind == "owned_release":
+            return self.service.release_native_context(owner, expected_context=expected)
+        target = self._target()
+        expected_target = command.get("expected_target")
+        if expected_target is not None:
+            actual = target.to_dict()
+            if (type(expected_target) is not dict or type(expected_target.get("pid")) is not int
+                    or type(expected_target.get("created_100ns")) is not int
+                    or actual.get("pid") != expected_target["pid"]
+                    or actual.get("created_100ns") != expected_target["created_100ns"]):
+                raise ProcessLookupError("WORKFLOW_EXACT_PROCESS_IDENTITY_CHANGED")
+        if kind in ("elevate", "authorize_target"):
+            if kind == "elevate":
+                session = self._session_status() or {}
+                if (session.get("admin_session_managed") and session.get("state") == "ACTIVE"
+                        and session.get("elevated_verified") is True):
+                    answer = {"status": "COMPLETED", "data": {}}
+                else:
+                    answer = self.service.start_admin_session_owned(owner_run_id=owner,
+                        expected_context=expected, confirmed=True, cancel_event=self.cancel_event)
+                if answer.get("status") != "COMPLETED":
+                    return answer
+                expected = answer.get("native_context_ownership") or expected
+            answer = self.service.bind_target_owned(target, command["operations"], owner_run_id=owner,
+                expected_context=expected, confirmed=True, cancel_event=self.cancel_event)
+        else:
+            from blackbox_core.deep_contracts import ActionRequest
+            request = ActionRequest(operation="capabilities" if kind == "capabilities" else operation,
+                target=target, parameters=command.get("parameters", {}),
+                confirmed=command.get("confirmed", False),
+                timeout_seconds=command.get("timeout_seconds", 15))
+            answer = self.service.execute_owned(request, owner_run_id=owner,
+                expected_context=expected, cancel_event=self.cancel_event)
+        return dict(answer, target=target.to_dict())
+
     def run(self):
         command = self.command
         kind = command["kind"]
@@ -91,6 +130,8 @@ class _DeepTask(QThread):
                     result = self.service.end_admin_session()
                 elif kind == "export":
                     result = self.service.export_journal(command["destination"], cancel_event=self.cancel_event)
+                elif command.get("native_owner_run_id"):
+                    result = self._owned(command, kind, operation)
                 else:
                     target = self._target()
                     selector = getattr(self.service, "set_target", None)
@@ -158,12 +199,23 @@ class _DeepTask(QThread):
         result["generation"] = command["generation"]
         result["request_kind"] = kind
         result["request_tag"] = command.get("tag", "")
+        if command.get("native_owner_run_id"):
+            result["native_owner_run_id"] = command["native_owner_run_id"]
+        if command.get("native_owner_run_id") and self.service is not None:
+            journal = getattr(self.service, "journal", None)
+            if getattr(journal, "path", None) is not None:
+                # Actual owner reference only; the R60 worker makes the SQLite
+                # snapshot after this operation has completed.
+                result["_journal_path"] = str(journal.path)
         self.result_ready.emit(result)
 
 
 class DeepInspectorBridge(QObject):
     """Lazy diagnostic owner with independent lease and target generations."""
     result_ready = Signal(object)
+    # Owner-only receipts remain observable after a UI target generation change.
+    # Legacy widgets still receive only current-generation results below.
+    owned_result_ready = Signal(object)
     busy_changed = Signal(bool)
     target_changed = Signal()
     admin_status_changed = Signal(object)
@@ -251,12 +303,15 @@ class DeepInspectorBridge(QObject):
         task.start()
         return True
 
-    def submit(self, operation, parameters=None, *, confirmed=False, tag="", timeout_seconds=15):
+    def submit(self, operation, parameters=None, *, confirmed=False, tag="", timeout_seconds=15,
+               native_owner_run_id=None, expected_context=None, expected_target=None):
         if self.busy or self._closing or self.target is None:
             return False
         return self._start({"kind": "action", "operation": operation,
                             "parameters": parameters or {}, "confirmed": confirmed,
-                            "tag": tag, "timeout_seconds": timeout_seconds})
+                            "tag": tag, "timeout_seconds": timeout_seconds,
+                            "native_owner_run_id": native_owner_run_id, "expected_context": expected_context,
+                            "expected_target": expected_target})
 
     def capabilities(self):
         if self.busy or self._closing or self.target is None:
@@ -272,15 +327,25 @@ class DeepInspectorBridge(QObject):
         self._publish_admin_status()
         return self._start({"kind": "start_admin"})
 
-    def elevate(self, operations):
+    def elevate(self, operations, *, native_owner_run_id=None, expected_context=None, expected_target=None, tag=""):
         if self.busy or self._closing or self.target is None:
             return False
-        return self._start({"kind": "elevate", "operations": list(operations)})
+        return self._start({"kind": "elevate", "operations": list(operations), "tag": tag,
+                            "native_owner_run_id": native_owner_run_id, "expected_context": expected_context,
+                            "expected_target": expected_target})
 
-    def authorize_target(self, operations):
+    def authorize_target(self, operations, *, native_owner_run_id=None, expected_context=None, expected_target=None, tag=""):
         if self.busy or self._closing or self.target is None:
             return False
-        return self._start({"kind": "authorize_target", "operations": list(operations)})
+        return self._start({"kind": "authorize_target", "operations": list(operations), "tag": tag,
+                            "native_owner_run_id": native_owner_run_id, "expected_context": expected_context,
+                            "expected_target": expected_target})
+
+    def release_native_context(self, owner_run_id, expected_context, *, tag=""):
+        if self.worker is not None or self._closing or self._service is None:
+            return False
+        return self._start({"kind": "owned_release", "operation": "target.release", "tag": tag,
+                            "native_owner_run_id": owner_run_id, "expected_context": expected_context})
 
     def end_admin(self):
         if self.busy or self._closing or self._service is None:
@@ -367,6 +432,12 @@ class DeepInspectorBridge(QObject):
                 self.cleanup_required = True
                 self._close_result = dict(result, status="RECOVERY_UNCONFIRMED")
         kind = result.get("request_kind")
+        if result.get("native_owner_run_id"):
+            self.owned_result_ready.emit(result)
+        if (kind == "owned_release" and result.get("status") == "COMPLETED"
+                and (result.get("cleanup") or {}).get("confirmed") is True):
+            self.cleanup_required = False
+            self._close_result = None
         if kind in ("close", "clear_target"):
             self._close_result = result
             if result.get("status") not in ("COMPLETED", "DETACHED"):

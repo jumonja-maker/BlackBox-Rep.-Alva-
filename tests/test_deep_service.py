@@ -194,6 +194,8 @@ class DeepEngineBoundaryTests(unittest.TestCase):
     def setUp(self):
         self.identity = ProcessIdentity(42, 133000000000000001, "controlled.exe")
         self.inspector = Mock()
+        self.inspector.close.return_value = {"status": "COMPLETED", "data": {
+            "cleanup": {"confirmed": True, "status": "CONFIRMED"}}}
         self.engine = DiagnosticActionEngine(self.identity, ["profile.etw", "capabilities", "dump"],
                                              inspector_factory=lambda target: self.inspector)
 
@@ -232,7 +234,8 @@ class DeepEngineBoundaryTests(unittest.TestCase):
         self.engine.debug = Mock()
         self.engine.debug.close.side_effect = [
             {"status": "RECOVERY_UNCONFIRMED", "data": {"owner_retained": True, "retry_cleanup_required": True}},
-            {"status": "COMPLETED", "data": {"state": "DETACHED"}},
+            {"status": "COMPLETED", "data": {"state": "DETACHED"},
+             "native_owner_cleanup": {"confirmed": True, "worker_exit_confirmed": True}},
         ]
         retained = self.engine.close()
         self.assertTrue(retained["data"]["owner_retained"])

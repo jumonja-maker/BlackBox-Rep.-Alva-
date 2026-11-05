@@ -28,7 +28,7 @@ from PySide6.QtWidgets import (
     QAbstractItemView, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QSpinBox, QFileDialog, QFrame,
     QGridLayout, QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit,
     QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QPushButton,
-    QScrollArea, QStackedWidget, QTableWidget, QTableWidgetItem,
+    QScrollArea, QStackedWidget, QTabWidget, QTableWidget, QTableWidgetItem,
     QVBoxLayout, QWidget,
 )
 
@@ -148,6 +148,9 @@ class UniversalWindow(QMainWindow):
             Path(QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppLocalDataLocation) or tempfile.gettempdir()) /
             "BLACKBOX-Investigations")
         self._graph_close_pending = False
+        self._chain_close_complete = False
+        self._chain_root = (Path(output_root) / "workflows" if output_root is not None else
+                            self._investigation_root.parent / "BLACKBOX-Workflows")
         self._thread_detail_worker: ThreadDetailWorker | None = None
         self._thread_detail_payload = None
         self._thread_detail_state = "default"
@@ -511,7 +514,19 @@ class UniversalWindow(QMainWindow):
         self.recent_messages.setMaximumHeight(138)
         notes.content.addWidget(self.recent_messages)
         content.addWidget(notes)
-        return page
+        # Keep both embedding shells and all existing monitor/deep attributes.
+        # Chain Builder is an internal Overview tab, never a seventh page.
+        from .chain_builder import ChainBuilderPanel
+        self.overview_tabs = QTabWidget()
+        self.overview_tabs.setObjectName("overviewWorkspaces")
+        self.overview_tabs.addTab(page, "Observation / Investigation")
+        self.chain_builder_panel = ChainBuilderPanel(self, self._chain_root)
+        self.chain_builder_panel.bridge.closed.connect(self._chain_closed)
+        self.overview_tabs.addTab(self.chain_builder_panel, "Chain Builder")
+        wrapper, wrapper_layout = _page()
+        wrapper_layout.setContentsMargins(0, 0, 0, 0)
+        wrapper_layout.addWidget(self.overview_tabs)
+        return wrapper
 
     def _build_processes(self) -> QWidget:
         page, content = _page()
@@ -829,7 +844,26 @@ class UniversalWindow(QMainWindow):
         self.library_panel.open_requested.connect(self._open_library_recording)
         content.insertWidget(1,self.library_toggle)
         content.insertWidget(2,self.library_panel)
+        from .chain_builder import ChainHistoryPanel
+        self.chain_history_panel = ChainHistoryPanel(self, self.chain_builder_panel)
+        self.chain_history_panel.hide()
+        self.chain_history_toggle = _button("DIAGNOSTIC CHAIN HISTORY")
+        self.chain_history_toggle.setObjectName("chainHistoryToggle")
+        self.chain_history_toggle.setCheckable(True)
+        self.chain_history_toggle.toggled.connect(self.chain_history_panel.setVisible)
+        self.chain_history_toggle.toggled.connect(self._chain_history_visible)
+        content.insertWidget(1, self.chain_history_toggle)
+        content.insertWidget(2, self.chain_history_panel)
         return page
+
+    def _chain_history_visible(self, visible):
+        if visible:
+            self.chain_builder_panel.bridge.submit("history", root=str(self._chain_root))
+
+    def _chain_closed(self):
+        self._chain_close_complete = True
+        if self._pending_close:
+            QTimer.singleShot(0, self.close)
 
     def _build_settings(self) -> QWidget:
         page, content = _page()
@@ -1019,6 +1053,13 @@ class UniversalWindow(QMainWindow):
             self.deep_inspector_panel.retranslate()
             self.deep_inspector_toggle.setText("ГЛУБОКОЕ ИССЛЕДОВАНИЕ" if language == "RU" else "DEEP INSPECTION")
             self._refresh_admin_controls()
+        if hasattr(self, "chain_builder_panel"):
+            self.chain_builder_panel.retranslate()
+            self.overview_tabs.setTabText(0, "Наблюдение / Расследование" if language == "RU" else "Observation / Investigation")
+            self.overview_tabs.setTabText(1, "Конструктор цепочек" if language == "RU" else "Chain Builder")
+        if hasattr(self, "chain_history_panel"):
+            self.chain_history_panel.retranslate()
+            self.chain_history_toggle.setText("ИСТОРИЯ ДИАГНОСТИЧЕСКИХ ЦЕПОЧЕК" if language == "RU" else "DIAGNOSTIC CHAIN HISTORY")
         if self.stack.currentIndex() == self._page_ids["reports"]:
             self._update_report_preview()
 
@@ -2577,6 +2618,11 @@ class UniversalWindow(QMainWindow):
         QMessageBox.warning(self, "BLACK.BOX — RECOVERY_UNCONFIRMED", message)
 
     def closeEvent(self, event) -> None:
+        if hasattr(self, "chain_builder_panel") and not self._chain_close_complete:
+            self._pending_close = True
+            self.chain_builder_panel.bridge.shutdown()
+            event.ignore()
+            return
         if hasattr(self, "investigation_graph_panel") and self.investigation_graph_panel.bridge.busy:
             self._graph_close_pending = True
             self.investigation_graph_panel.cancel_for_window_close()

@@ -33,7 +33,8 @@ class AdminHelperLeaseTests(unittest.TestCase):
             owner.operations = frozenset(operations)
             owner.interventions_started = False
             owner.execute.return_value = {"operation": "threads", "status": "COMPLETED", "data": {"rows": []}}
-            owner.close.return_value = {"status": "COMPLETED", "data": {}}
+            owner.close.return_value = {"status": "COMPLETED", "data": {
+                "cleanup": {"confirmed": True, "status": "CONFIRMED"}}}
             self.engines.append(owner)
             return owner
 
@@ -90,7 +91,8 @@ class AdminHelperLeaseTests(unittest.TestCase):
 
         def exit_during_cleanup():
             self.live.pop(self.b.pid)
-            return {"status": "COMPLETED", "data": {}}
+            return {"status": "COMPLETED", "data": {
+                "cleanup": {"confirmed": True, "status": "CONFIRMED"}}}
 
         old.close.side_effect = exit_during_cleanup
         with self.assertRaisesRegex(NativeError, "PROCESS_INSTANCE_CHANGED"):
@@ -103,7 +105,8 @@ class AdminHelperLeaseTests(unittest.TestCase):
         old = self.context.engine
         expires = self.context.expires
         old.close.side_effect = [{"status": "RECOVERY_UNCONFIRMED", "data": {"errors": ["restore failed"]}},
-                                 {"status": "COMPLETED", "data": {}}]
+                                 {"status": "COMPLETED", "data": {
+                                     "cleanup": {"confirmed": True, "status": "CONFIRMED"}}}]
         failed = self.bind(self.b)
         self.assertEqual(failed["status"], "RECOVERY_UNCONFIRMED")
         self.assertTrue(failed["retains_service"])
@@ -259,7 +262,8 @@ class AdminHelperProtocolTests(unittest.TestCase):
                 kernel.WaitForSingleObject.return_value = 258
                 engine.target, engine.operations = target, frozenset({"threads"})
                 engine.close.return_value = {"status": "COMPLETED" if complete else "RECOVERY_UNCONFIRMED",
-                                             "data": {} if complete else {"owner_retained": True}}
+                                             "data": {"cleanup": {"confirmed": True, "status": "CONFIRMED"}}
+                                             if complete else {"owner_retained": True}}
                 channel.receive.side_effect = [
                     {"kind": "init", "nonce": nonce, "parent": parent.to_dict(), "target": None,
                      "operations": ["threads"], "session_mode": "ADMIN_LEASE", "require_admin": True,

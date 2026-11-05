@@ -82,6 +82,11 @@ def _result(status: str = "COMPLETED", **values: Any) -> dict[str, Any]:
     return {"status": status, "data": {}, "limitations": [], **values}
 
 
+def _checked_close_handle(api, handle):
+    close = getattr(type(api), "_close_owned_handle", None)
+    return close(api, handle) if callable(close) else bool(api.k.CloseHandle(handle))
+
+
 class _Context:
     """AMD64 CONTEXT requires a 16-byte aligned address, including under ctypes."""
     def __init__(self) -> None:
@@ -128,6 +133,7 @@ class _WinAPI:
         self.identity = identity
         self.handle = None
         self.debug_handle = None
+        self._retained_handles = []
         self._access = 0x100000 | 0x1000
         prototypes = {
             "OpenProcess": (w.HANDLE, [w.DWORD, w.BOOL, w.DWORD]),
@@ -180,8 +186,11 @@ class _WinAPI:
             if not architecture(self.handle, ctypes.byref(machine), ctypes.byref(native_machine)):
                 self.fail("IS_WOW64_PROCESS2")
             _require_native_amd64(machine.value, native_machine.value)
-        except BaseException:
-            self.close()
+        except BaseException as exc:
+            cleanup = self.close()
+            if not cleanup["confirmed"]:
+                exc.native_owner = self
+                exc.native_owner_cleanup = cleanup
             raise
 
     def fail(self, label: str) -> None:
@@ -205,9 +214,9 @@ class _WinAPI:
             self.verify()
         except BaseException:
             self.handle = previous
-            self.k.CloseHandle(replacement)
+            _checked_close_handle(self, replacement)
             raise
-        self.k.CloseHandle(previous)
+        _checked_close_handle(self, previous)
         self._access = new_access
 
     def break_process(self) -> None:
@@ -237,7 +246,7 @@ class _WinAPI:
             self.fail("DUPLICATE_DEBUG_PROCESS_HANDLE")
         previous, self.debug_handle = self.debug_handle, owned.value
         if previous:
-            self.k.CloseHandle(previous)
+            _checked_close_handle(self, previous)
 
     def creation(self, handle: Any, *, thread: bool = False) -> int:
         from ctypes import wintypes as w
@@ -276,7 +285,7 @@ class _WinAPI:
                 raise DebugError("PROCESS_CHANGED", "THREAD_EXITED")
             return handle, actual
         except BaseException:
-            self.k.CloseHandle(handle)
+            _checked_close_handle(self, handle)
             raise
 
     def read(self, address: int, size: int) -> bytes:
@@ -372,13 +381,46 @@ class _WinAPI:
         if not self.k.SetThreadContext(handle, context.pointer):
             self.fail("SET_THREAD_CONTEXT")
 
-    def close(self) -> None:
-        if self.debug_handle:
-            self.k.CloseHandle(self.debug_handle)
-            self.debug_handle = None
-        if self.handle:
-            self.k.CloseHandle(self.handle)
-            self.handle = None
+    def _close_owned_handle(self, handle):
+        retained = getattr(self, "_retained_handles", None)
+        if retained is None:
+            self._retained_handles = retained = []
+        previous = next((r for r in retained if r["handle"] is handle), None)
+        if previous is not None and previous.get("retry_allowed") is False:
+            return False
+        try:
+            closed = bool(self.k.CloseHandle(handle))
+            error = None if closed else getattr(ctypes, "get_last_error", lambda: None)()
+            reason = "CLOSE_HANDLE_NOT_ACKNOWLEDGED"
+        except Exception as exc:
+            closed, error, reason = False, getattr(exc, "winerror", None), str(exc)[:160]
+        if closed:
+            if previous is not None:
+                retained.remove(previous)
+        else:
+            failure = previous if previous is not None else {"handle": handle}
+            failure.update(winerror=error, reason=reason, retry_allowed=error != 6)
+            if previous is None:
+                retained.append(failure)
+        return closed
+
+    def close(self) -> dict[str, Any]:
+        # Failed exact owned handles remain reachable; successful closes are
+        # consumed once. Never mask the primary debug/restore failure by raising.
+        attempted = []
+        for name in ("debug_handle", "handle"):
+            handle = getattr(self, name, None)
+            if handle:
+                attempted.append(handle)
+                if self._close_owned_handle(handle):
+                    setattr(self, name, None)
+        for resource in tuple(getattr(self, "_retained_handles", ())):
+            if not any(resource["handle"] is handle for handle in attempted):
+                self._close_owned_handle(resource["handle"])
+        remaining = getattr(self, "_retained_handles", ())
+        return {"confirmed": not remaining and not self.handle and not self.debug_handle,
+            "scope": "DEBUG_OWNER_WIN32_HANDLES", "retained": len(remaining),
+            "failures": [{k: v for k, v in resource.items() if k != "handle"} for resource in remaining]}
 
 
 @dataclass
@@ -401,6 +443,7 @@ class DebugSession:
         self._worker: threading.Thread | None = None
         self._start_lock = threading.Lock()
         self._api: _WinAPI | None = None
+        self._api_close_ack: dict[str, Any] | None = None
         self._attached = False
         self._event: _DebugEvent | None = None
         self._event_continue = DBG_CONTINUE
@@ -457,16 +500,31 @@ class DebugSession:
             # the native worker. Only its acknowledged cleanup result can
             # replace the previously returned unconfirmed status.
             if self._close_command is not None and self._close_command.done.is_set():
-                self._close_result = self._close_command.result or _result(
-                    "RECOVERY_UNCONFIRMED", error="EMPTY_CLEANUP_RESULT")
-                if self._close_result.get("data", {}).get("owner_retained") is True:
+                self._close_result = self._finish_close(self._close_command.result or _result(
+                    "RECOVERY_UNCONFIRMED", error="EMPTY_CLEANUP_RESULT"), time.monotonic())
+                if (self._close_result.get("data", {}).get("owner_retained") is True
+                        and not self._close_result.get("data", {}).get("cleanup_acknowledgement_pending")):
                     self._closed = False  # Only a new cleanup retry may release the held event.
             return self._close_result or self._fatal or _result(
                 "RECOVERY_UNCONFIRMED", error="DEBUG_CLEANUP_RESULT_NOT_OBSERVED",
                 data={"state": self.state})
         if self._worker is None:
             self._closed = True
-            self._close_result = _result(data={"state": "DETACHED", "owned_resources_remaining": 0})
+            self._close_result = _result(data={"state": "DETACHED", "owned_resources_remaining": 0},
+                native_owner_cleanup={"confirmed": True, "worker_exit_confirmed": True,
+                                      "scope": "DEBUG_OWNER_NOT_STARTED"})
+            return self._close_result
+        if (self._worker.is_alive() is False and self._api is not None
+                and not (self._attached or self._event or self._breakpoints or self._changes
+                         or self._suspensions or self._stepping or self._guard)):
+            # Only handle cleanup is retryable after the owning thread exited;
+            # never repeat native debug/memory effects on another thread.
+            acknowledgement = self._close_api_handles()
+            self._close_result = _result("COMPLETED" if acknowledgement["confirmed"] else "RECOVERY_UNCONFIRMED",
+                data={"state": self.state, "owned_resources_remaining": 0,
+                      "owner_retained": not acknowledgement["confirmed"]},
+                native_owner_cleanup={**acknowledgement, "worker_exit_confirmed": True})
+            self._closed = acknowledgement["confirmed"]
             return self._close_result
         command = _Command("_close", {}, time.monotonic() + 10, None, threading.Event())
         try:
@@ -475,6 +533,7 @@ class DebugSession:
             return _result("RECOVERY_UNCONFIRMED", error="CLEANUP_QUEUE_FULL",
                            data={"state": self.state, "owner_retained": True, "retry_cleanup_required": True})
         self._close_command = command
+        close_deadline = time.monotonic() + 12
         command.done.wait(12)
         self._closed = True
         if not command.done.is_set():
@@ -482,10 +541,44 @@ class DebugSession:
                 data={"state": self.state, "owner_retained": True, "retry_cleanup_required": True,
                       "cleanup_acknowledgement_pending": True})
         else:
-            self._close_result = command.result or _result("RECOVERY_UNCONFIRMED", error="EMPTY_CLEANUP_RESULT")
-            if self._close_result.get("data", {}).get("owner_retained") is True:
+            self._close_result = self._finish_close(command.result or _result(
+                "RECOVERY_UNCONFIRMED", error="EMPTY_CLEANUP_RESULT"), close_deadline)
+            if (self._close_result.get("data", {}).get("owner_retained") is True
+                    and not self._close_result.get("data", {}).get("cleanup_acknowledgement_pending")):
                 self._closed = False
         return self._close_result
+
+    def _close_api_handles(self):
+        try:
+            acknowledgement = self._api.close()
+            confirmed = isinstance(acknowledgement, dict) and acknowledgement.get("confirmed") is True
+        except Exception as exc:
+            acknowledgement, confirmed = {"reason": str(exc)[:200]}, False
+        self._api_close_ack = {"confirmed": confirmed, "handles_closed": confirmed,
+            "scope": "DEBUG_OWNER_WIN32_HANDLES", "evidence": acknowledgement if isinstance(acknowledgement, dict) else None}
+        return self._api_close_ack
+
+    def _finish_close(self, answer, deadline):
+        proof = answer.get("native_owner_cleanup")
+        if not isinstance(proof, dict) or proof.get("handles_closed") is not True:
+            if answer.get("status") == "COMPLETED":
+                return {**answer, "status": "RECOVERY_UNCONFIRMED",
+                    "error": answer.get("error") or "DEBUG_OWNER_CLEANUP_ACK_NOT_VERIFIED",
+                    "data": {**answer.get("data", {}), "reported_operation_status": "COMPLETED",
+                             "owner_retained": True, "retry_cleanup_required": True},
+                    "native_owner_cleanup": {"confirmed": False, "worker_exit_confirmed": False,
+                                             "scope": "DEBUG_OWNER_NATIVE_RESOURCES"}}
+            return answer
+        if self._worker is not None and self._worker.is_alive() is not False:
+            self._worker.join(timeout=max(0, deadline - time.monotonic()))
+        exited = self._worker is not None and self._worker.is_alive() is False
+        final = {**answer, "data": dict(answer.get("data", {})),
+                 "native_owner_cleanup": {**proof, "confirmed": exited, "worker_exit_confirmed": exited}}
+        if not exited:
+            final["status"] = "RECOVERY_UNCONFIRMED"
+            final["data"].update(owner_retained=True, retry_cleanup_required=True,
+                                 cleanup_acknowledgement_pending=True)
+        return final
 
     def _run(self) -> None:
         try:
@@ -500,8 +593,18 @@ class DebugSession:
                         if command.operation == "_close":
                             command.result = self._cleanup()
                             self._fatal = command.result if command.result["status"] != "COMPLETED" else None
-                            if command.result.get("data", {}).get("owner_retained") is not True:
-                                self._stopping.set()
+                            if command.result["status"] == "COMPLETED" and not command.result.get("data", {}).get("owner_retained"):
+                                acknowledgement = self._close_api_handles()
+                                command.result["native_owner_cleanup"] = {**acknowledgement, "confirmed": False,
+                                                                          "worker_exit_confirmed": False}
+                                if acknowledgement["confirmed"]:
+                                    self._stopping.set()
+                                else:
+                                    command.result["status"] = "RECOVERY_UNCONFIRMED"
+                                    command.result.setdefault("data", {}).update(owner_retained=True, retry_cleanup_required=True)
+                                    command.result.setdefault("error", "DEBUG_OWNER_HANDLE_CLEANUP_UNCONFIRMED")
+                            elif command.result.get("data", {}).get("owner_retained") is not True:
+                                command.result.setdefault("data", {}).update(owner_retained=True, retry_cleanup_required=True)
                         else:
                             self._check(command)
                             command.result = self._dispatch(command)
@@ -519,6 +622,22 @@ class DebugSession:
                             command.result = _result("OPERATION_FAILED", error=f"{type(exc).__name__}: {exc}",
                                                      data={"state": self.state})
                     finally:
+                        if isinstance(command.result, dict) and command.operation != "_close":
+                            # Capture on the native owning thread before the
+                            # command ACK; no new handle query or memory payload.
+                            command.result["native_retained_resources"] = {
+                                "state": self.state, "attached": self._attached,
+                                "owned_suspensions": len(self._suspensions),
+                                "breakpoints": len(self._breakpoints),
+                                "pending_memory_changes": len(self._changes),
+                                "guardian_retained": self._guard is not None,
+                                "process_handle_retained": bool(self._api and getattr(self._api, "handle", None)),
+                                "debug_handle_retained": bool(self._api and getattr(self._api, "debug_handle", None)),
+                                "failed_handle_closes": len(getattr(self._api, "_retained_handles", ()))}
+                            if getattr(self._api, "_retained_handles", ()):
+                                command.result.setdefault("data", {}).update(owner_retained=True,
+                                    retry_cleanup_required=True, reported_operation_status=command.result["status"])
+                                command.result["status"] = "RECOVERY_UNCONFIRMED"
                         command.done.set()
                 if self._attached and self._event is None:
                     try:
@@ -531,18 +650,35 @@ class DebugSession:
                         else:
                             raise
         except BaseException as exc:
+            if self._api is None and getattr(exc, "native_owner", None) is not None:
+                self._api = exc.native_owner
             self.state = "ERROR"
             self._fatal = _result("RECOVERY_UNCONFIRMED" if self._attached else "OPERATION_FAILED",
                                   error=f"DEBUG_WORKER_FAILED: {type(exc).__name__}: {exc}")
         finally:
             if not self._stopping.is_set() and self._api:
-                cleanup = self._cleanup()
+                try:
+                    cleanup = self._cleanup()
+                except BaseException as exc:
+                    # Even an unexpected cleanup failure must publish the
+                    # pending command ACKs and reach checked handle cleanup.
+                    # Keep the original failure as separate evidence.
+                    cleanup = _result("RECOVERY_UNCONFIRMED",
+                        error="DEBUG_WORKER_CLEANUP_FAILED: " + type(exc).__name__ + ": " + str(exc)[:1000],
+                        data={"owner_retained": True, "retry_cleanup_required": True,
+                              "primary_failure": self._fatal})
                 if self._fatal is None or cleanup["status"] != "COMPLETED":
                     self._fatal = cleanup
                 else:
                     self._fatal["cleanup"] = cleanup
-            if self._api:
-                self._api.close()
+            if self._api and not (self._api_close_ack and self._api_close_ack.get("confirmed")):
+                acknowledgement = self._close_api_handles()
+                if not acknowledgement["confirmed"]:
+                    primary = self._fatal or _result("RECOVERY_UNCONFIRMED")
+                    primary.setdefault("data", {}).update(owner_retained=True, retry_cleanup_required=True)
+                    primary["native_owner_cleanup"] = {**acknowledgement, "confirmed": False,
+                                                       "worker_exit_confirmed": False}
+                    self._fatal = primary
             while True:
                 try:
                     command = self._queue.get_nowait()
@@ -574,7 +710,7 @@ class DebugSession:
         if self._event:
             result["stopped_tid"] = self._event.tid
             handle, created = self._api.thread(self._event.tid, rights=0)
-            self._api.k.CloseHandle(handle)
+            _checked_close_handle(self._api, handle)
             result["thread_created_100ns"] = created
         if self._guard:
             result["guardian_pid"] = self._guard.pid
@@ -731,7 +867,7 @@ class DebugSession:
             # system-managed debug handles; WaitForDebugEvent retains them.
             file_handle = struct.unpack_from("<Q", raw, 0)[0]
             if file_handle and file_handle != 0xFFFFFFFFFFFFFFFF:
-                self._api.k.CloseHandle(file_handle)
+                _checked_close_handle(self._api, file_handle)
             if event.code == 3 and event.pid == self.identity.pid:
                 self._api.retain_debug_process_handle(struct.unpack_from("<Q", raw, 8)[0])
         if event.pid != self.identity.pid:
@@ -778,7 +914,7 @@ class DebugSession:
                     raise DebugError("RECOVERY_UNCONFIRMED", "BREAKPOINT_RIP_REWIND_READBACK_FAILED")
                 item["hit_context"]["phase"] = "rewind_verified"
             finally:
-                self._api.k.CloseHandle(handle)
+                _checked_close_handle(self._api, handle)
             self._event = event
             self._event_continue = DBG_CONTINUE
             self.state = "PAUSED"
@@ -795,7 +931,7 @@ class DebugSession:
                     context.set32(68, context.get32(68) & ~0x100)
                     self._api.set_context(handle, context)
             finally:
-                self._api.k.CloseHandle(handle)
+                _checked_close_handle(self._api, handle)
             breakpoint = self._breakpoints.get(step.get("breakpoint_id"))
             if breakpoint and breakpoint["enabled"]:
                 breakpoint.pop("hit_context", None)
@@ -857,7 +993,7 @@ class DebugSession:
                 context.set32(68, context.get32(68) | 0x100)
                 self._api.set_context(handle, context)
             finally:
-                self._api.k.CloseHandle(handle)
+                _checked_close_handle(self._api, handle)
         try:
             self._check(command)
         except DebugError:
@@ -886,7 +1022,7 @@ class DebugSession:
         try:
             registers = self._api.context(handle).public()
         finally:
-            self._api.k.CloseHandle(handle)
+            _checked_close_handle(self._api, handle)
         return _result(data={"source": "LIVE_WINDOWS_DEBUG_EVENT", "tid": tid, "stopped_tid": tid,
                              "thread_created_100ns": actual, "registers": registers,
                              "state": self.state})
@@ -962,7 +1098,7 @@ class DebugSession:
             # first acknowledged hit-context record. Retry identity capture
             # only while the actual debug event is still held by this thread.
             handle, created = self._api.thread(self._event.tid)
-            self._api.k.CloseHandle(handle)
+            _checked_close_handle(self._api, handle)
             hit = {"tid": self._event.tid, "created_100ns": created,
                    "rip_before": item["address"] + 1, "phase": "rewind_pending"}
             item["hit_context"] = hit
@@ -984,7 +1120,7 @@ class DebugSession:
                 raise DebugError("RECOVERY_UNCONFIRMED", "BREAKPOINT_RIP_RESTORE_READBACK_FAILED")
             hit["phase"] = "rewind_verified"
         finally:
-            self._api.k.CloseHandle(handle)
+            _checked_close_handle(self._api, handle)
 
     def _suspend(self, p: dict[str, Any], *, command: _Command | None = None) -> dict[str, Any]:
         tid = _positive(p.get("tid"), "tid", 0xFFFFFFFF)
@@ -1005,7 +1141,7 @@ class DebugSession:
                 self._check(command)
         except DebugError:
             del self._suspensions[identifier]  # The OS count has not changed.
-            self._api.k.CloseHandle(handle)
+            _checked_close_handle(self._api, handle)
             self._sync_guard()
             raise
         previous = self._api.k.SuspendThread(handle)
@@ -1014,7 +1150,7 @@ class DebugSession:
                 self._api.fail("SUSPEND_THREAD")
             except DebugError:
                 del self._suspensions[identifier]
-                self._api.k.CloseHandle(handle)
+                _checked_close_handle(self._api, handle)
                 self._sync_guard()
                 raise
         item.update(phase="active", previous_count=previous)
@@ -1046,7 +1182,7 @@ class DebugSession:
         previous = self._api.k.ResumeThread(item["handle"])
         if previous == 0xFFFFFFFF or previous == 0:
             raise DebugError("RECOVERY_UNCONFIRMED", "OWNED_THREAD_RESUME_UNCONFIRMED")
-        self._api.k.CloseHandle(item["handle"])
+        _checked_close_handle(self._api, item["handle"])
         del self._suspensions[identifier]
         self._sync_guard()
         return _result(data={"suspension_id": identifier, "owned_decrement": 1,
@@ -1185,7 +1321,7 @@ class DebugSession:
                         if self._api.context(handle).get32(68) & 0x100:
                             raise DebugError("RECOVERY_UNCONFIRMED", "TRAP_FLAG_RESTORE_READBACK_FAILED")
                 finally:
-                    self._api.k.CloseHandle(handle)
+                    _checked_close_handle(self._api, handle)
                 self._stepping = None
             except BaseException as exc:
                 record_caught_failure("TRAP_FLAG", exc)
@@ -1244,8 +1380,10 @@ class DebugSession:
                 self._paused_breakpoint = None
                 self._pause_requested = False
                 if self._api.debug_handle:
-                    self._api.k.CloseHandle(self._api.debug_handle)
-                    self._api.debug_handle = None
+                    if _checked_close_handle(self._api, self._api.debug_handle):
+                        self._api.debug_handle = None
+                    else:
+                        errors.append("DEBUG_PROCESS_HANDLE_CLOSE_NOT_ACKNOWLEDGED")
         self.state = "RECOVERY_UNCONFIRMED" if errors else "DETACHED"
         if self._guard:
             try:
@@ -1257,7 +1395,7 @@ class DebugSession:
                 self.state = "RECOVERY_UNCONFIRMED"
         for item in self._suspensions.values():
             if item.get("handle"):
-                self._api.k.CloseHandle(item["handle"])
+                _checked_close_handle(self._api, item["handle"])
                 item["handle"] = None
         return _result("RECOVERY_UNCONFIRMED" if errors else "COMPLETED",
                        data={"state": self.state, "attached": self._attached,
