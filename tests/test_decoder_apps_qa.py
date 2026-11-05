@@ -1,7 +1,10 @@
 """Portable checks for the real-app QA download boundary, not Windows evidence."""
-from contextlib import closing
+from contextlib import closing, redirect_stdout
 from pathlib import Path
+import hashlib
+import io
 import json
+import os
 import sqlite3
 import stat
 import struct
@@ -10,8 +13,94 @@ import unittest
 from unittest.mock import patch
 import zipfile
 
-from tools.qa_decoder_apps import (etw_observations, installed, native_pe_identity,
+from tools.qa_decoder_apps import (decode_trace, etw_observations, installed, native_pe_identity,
                                    observed_process_image, safe_extract)
+
+
+class ApplicationTraceDiagnosticTests(unittest.TestCase):
+    def exercise_decode(self, *, status="DECODED", rows=12, metadata_hash=None,
+                        changed_source=False, expected_failure=None, hostile_counts=False):
+        # This is an explicit metadata-handling regression. decode_file is
+        # mocked; actual ETW/EventPipe and third-party workloads remain CI gates.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "PRIVATE_PATH_MUST_NOT_APPEAR_IN_LOGS.etl"
+            original = b"explicit trace-metadata fixture, not actual ETW"
+            source.write_bytes(original)
+            digest = hashlib.sha256(original).hexdigest()
+            output = root / "7zip"
+            output.mkdir()
+            summary_path = root / "isolated-job-summary.txt"
+            meta = {"status": status, "rows": rows,
+                "input_sha256": digest if metadata_hash is None else metadata_hash,
+                "import_completeness": "BOUNDED_PREFIX" if status == "TRUNCATED" else "ALL_EMITTED_RECORDS",
+                "decoder_reported_lost_events": None, "events_with_stacks": 7,
+                "events_with_errors": 0, "bounded_events": 1,
+                "reliability": {"event_limit": 250000},
+                "engine": {"protocol": "blackbox.trace-event/1"},
+                "profiles": {"private_note": "PRIVATE_METADATA_MUST_NOT_APPEAR_IN_LOGS"}}
+            if hostile_counts:
+                meta.update(events_with_stacks="PRIVATE_COUNTER_MUST_NOT_APPEAR_IN_LOGS",
+                            events_with_errors=True, bounded_events=2**100)
+                meta["reliability"] = {"event_limit": -1}
+
+            def decoded(*args, **kwargs):
+                if changed_source:
+                    source.write_bytes(b"different original source bytes")
+                return meta
+
+            terminal = io.StringIO()
+            helper = root / "decoder-helper.exe"
+            result = None
+            with patch("tools.qa_decoder_apps.decode_file", side_effect=decoded) as decoder, \
+                    patch.dict(os.environ, {"GITHUB_STEP_SUMMARY": str(summary_path)}), \
+                    redirect_stdout(terminal):
+                if expected_failure:
+                    with self.assertRaisesRegex(AssertionError, expected_failure):
+                        decode_trace(source, output, helper)
+                else:
+                    result = decode_trace(source, output, helper)
+            decoder.assert_called_once_with(source, output / "decoded.sqlite3", timeout=90)
+            self.assertEqual(json.loads((output / "decoder-summary.json").read_text(encoding="utf-8")), meta)
+            diagnostic = json.loads((output / "decoder-diagnostic.json").read_text(encoding="utf-8"))
+            logged = terminal.getvalue()
+            self.assertTrue(logged.startswith("THIRD_PARTY_DECODER_TRACE_DETAIL "))
+            self.assertEqual(json.loads(logged.split(" ", 1)[1]), diagnostic)
+            summary = summary_path.read_text(encoding="utf-8")
+            self.assertEqual(json.loads(summary.split("Third-party trace decode ", 1)[1]), diagnostic)
+            for private in (str(source), str(root), "PRIVATE_PATH", "PRIVATE_METADATA", "PRIVATE_COUNTER"):
+                self.assertNotIn(private, logged + summary + json.dumps(diagnostic))
+            self.assertEqual(diagnostic["source_sha256"], digest)
+            self.assertEqual(diagnostic["source_bytes"], len(original))
+            self.assertEqual(diagnostic["decoder_status"], status)
+            self.assertEqual(diagnostic["rows"], rows)
+            return result, meta, diagnostic
+
+    def test_complete_trace_keeps_full_metadata_and_emits_safe_diagnostic(self):
+        result, meta, diagnostic = self.exercise_decode(hostile_counts=True)
+        self.assertIs(result[1], meta)
+        self.assertTrue(diagnostic["metadata_input_sha256_matches"])
+        self.assertEqual(diagnostic["application"], "7-Zip")
+        self.assertEqual(diagnostic["source_format"], ".etl")
+        for field in ("events_with_stacks", "events_with_errors", "bounded_events", "event_limit"):
+            self.assertIsNone(diagnostic[field])
+
+    def test_truncated_trace_remains_failure_and_saves_actual_prefix_metadata(self):
+        _, _, diagnostic = self.exercise_decode(status="TRUNCATED", rows=250000,
+            expected_failure="APP_TRACE_NOT_COMPLETELY_DECODED")
+        self.assertEqual(diagnostic["import_completeness"], "BOUNDED_PREFIX")
+        self.assertEqual(diagnostic["event_limit"], 250000)
+
+    def test_zero_decoded_rows_remain_failure_with_saved_diagnostic(self):
+        self.exercise_decode(rows=0, expected_failure="APP_TRACE_NOT_COMPLETELY_DECODED")
+
+    def test_metadata_hash_mismatch_remains_failure(self):
+        _, _, diagnostic = self.exercise_decode(metadata_hash="f" * 64,
+            expected_failure="APP_TRACE_HASH_CHANGED")
+        self.assertFalse(diagnostic["metadata_input_sha256_matches"])
+
+    def test_changed_original_still_fails_and_reports_original_hash_and_size(self):
+        self.exercise_decode(changed_source=True, expected_failure="APP_TRACE_HASH_CHANGED")
 
 
 class ApplicationImageIdentityTests(unittest.TestCase):

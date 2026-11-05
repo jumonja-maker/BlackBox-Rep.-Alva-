@@ -244,17 +244,57 @@ def monitored_run(args, log, *, env=None, timeout=30):
     return proof
 
 
+def _emit_trace_diagnostic(source, output, meta, digest, source_bytes):
+    """Log only fixed enums, bounded counts and the original source digest."""
+    def count(value):
+        return value if type(value) is int and 0 <= value <= 2**63 - 1 else None
+
+    reliability = meta.get("reliability")
+    reliability = reliability if isinstance(reliability, dict) else {}
+    detail = {
+        "schema": "blackbox.decoder-app-trace-diagnostic/1",
+        "application": {"7zip": "7-Zip", "powershell": "PowerShell 7",
+                        "notepad": "Notepad++"}.get(output.name, "UNSPECIFIED"),
+        "source_format": source.suffix.lower() if source.suffix.lower() in
+                         (".etl", ".nettrace", ".jsonl") else "UNSPECIFIED",
+        "source_sha256": digest if isinstance(digest, str) and
+                         re.fullmatch(r"[a-f0-9]{64}", digest) else None,
+        "source_bytes": count(source_bytes),
+        "decoder_status": meta.get("status") if meta.get("status") in
+                          ("DECODED", "TRUNCATED") else "UNRECOGNIZED",
+        "rows": count(meta.get("rows")),
+        "metadata_input_sha256_matches": meta.get("input_sha256") == digest,
+        "import_completeness": meta.get("import_completeness") if
+            meta.get("import_completeness") in ("ALL_EMITTED_RECORDS", "BOUNDED_PREFIX")
+            else "UNRECOGNIZED",
+        "decoder_reported_lost_events": count(meta.get("decoder_reported_lost_events")),
+        "events_with_stacks": count(meta.get("events_with_stacks")),
+        "events_with_errors": count(meta.get("events_with_errors")),
+        "bounded_events": count(meta.get("bounded_events")),
+        "event_limit": count(reliability.get("event_limit")),
+    }
+    write_json(output / "decoder-diagnostic.json", detail)
+    record = json.dumps(detail, sort_keys=True, allow_nan=False)
+    print("THIRD_PARTY_DECODER_TRACE_DETAIL " + record, flush=True)
+    summary = os.environ.get("GITHUB_STEP_SUMMARY")
+    if summary:
+        with Path(summary).open("a", encoding="utf-8") as stream:
+            stream.write("\n- Third-party trace decode " + record + "\n")
+
+
 def decode_trace(source, output, helper):
     require(0 < source.stat().st_size <= MAX_TRACE, "ACTUAL_TRACE_SIZE_BUDGET")
+    source_bytes = source.stat().st_size
     digest = file_hash(source)
     index = output / "decoded.sqlite3"
     with patch("blackbox_core.decoder_service.helper_path", return_value=helper):
         meta = decode_file(source, index, timeout=90)
+    write_json(output / "decoder-summary.json", meta)
+    _emit_trace_diagnostic(source, output, meta, digest, source_bytes)
     require(meta["status"] == "DECODED" and meta["rows"] > 0,
             "APP_TRACE_NOT_COMPLETELY_DECODED")
     require(file_hash(source) == digest and meta["input_sha256"] == digest,
             "APP_TRACE_HASH_CHANGED")
-    write_json(output / "decoder-summary.json", meta)
     return index, meta, {"path": str(source), "sha256": digest,
                          "bytes": source.stat().st_size, "index": str(index)}
 
