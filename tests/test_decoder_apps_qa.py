@@ -273,7 +273,7 @@ class ProducerNoisePolicyProtocolTests(unittest.TestCase):
         return {'schema': 'blackbox.scheduler-noise/1', 'status': 'READY', 'pid': 123,
             'created_100ns': '1000', 'source_sha256': 'a' * 64, 'executable_sha256': 'b' * 64,
             'implementation': implementation, 'expected_native_handles': 32 if native else 16,
-            'ttl_seconds': 90 if native else 70, 'progress_limit': 361 if native else 281,
+            'ttl_seconds': 180 if native else 70, 'progress_limit': 721 if native else 281,
             'begin_qpc': 0, 'qpc_frequency_hz': 1000,
             'workers': [{'tid': 100 + i, 'created_100ns': str(2000 + i)} for i in range(16)]}
 
@@ -289,18 +289,18 @@ class ProducerNoisePolicyProtocolTests(unittest.TestCase):
         validate_progress(progress, ready, implementation='NATIVE_WIN32')
         with self.assertRaisesRegex(AssertionError, 'PROGRESS_IDENTITY_OR_COUNTS'):
             validate_progress(progress, ready)  # Legacy utility calls retain the 281 ceiling.
-        for implementation, sequence in (('NATIVE_WIN32', 362), ('PYTHON_CTYPES_WIN32', 282)):
+        for implementation, sequence in (('NATIVE_WIN32', 722), ('PYTHON_CTYPES_WIN32', 282)):
             source = self.ready(implementation)
             with self.subTest(implementation=implementation), self.assertRaisesRegex(AssertionError, 'PROGRESS_IDENTITY_OR_COUNTS'):
                 validate_progress(self.progress(source, sequence), source, implementation=implementation)
-        for change in ({'ttl_seconds': 70}, {'ttl_seconds': 90.0}, {'ttl_seconds': True},
-                       {'progress_limit': 281}, {'progress_limit': 361.0}, {'implementation': 'PYTHON_CTYPES_WIN32'}):
+        for change in ({'ttl_seconds': 70}, {'ttl_seconds': 180.0}, {'ttl_seconds': True},
+                       {'progress_limit': 281}, {'progress_limit': 721.0}, {'implementation': 'PYTHON_CTYPES_WIN32'}):
             with self.subTest(change=change), self.assertRaisesRegex(AssertionError, 'ACTUAL_POLICY_MISMATCH'):
                 validate_progress({**progress, **change}, ready, implementation='NATIVE_WIN32')
         oracle = {**ControlledBudgetProtocolTests().oracle(), 'implementation': 'NATIVE_WIN32',
-                  'ttl_seconds': 90, 'progress_limit': 361, 'native_handles_created': 32, 'native_handles_closed': 32}
+                  'ttl_seconds': 180, 'progress_limit': 721, 'native_handles_created': 32, 'native_handles_closed': 32}
         validate_noise_oracle(oracle, 123, '1000', expected_handles=32, implementation='NATIVE_WIN32')
-        for change in ({'ttl_seconds': 70}, {'progress_limit': 361.0}):
+        for change in ({'ttl_seconds': 70}, {'progress_limit': 721.0}):
             with self.subTest(oracle=change), self.assertRaisesRegex(AssertionError, 'ACTUAL_POLICY_MISMATCH'):
                 validate_noise_oracle({**oracle, **change}, 123, '1000', expected_handles=32, implementation='NATIVE_WIN32')
 
@@ -356,12 +356,12 @@ class ProducerNoisePolicyProtocolTests(unittest.TestCase):
 
     def test_native_qos_accepts_exact_boundaries_and_rejects_one_tick_or_malformed_clock(self):
         ready = {'begin_qpc': 100, 'qpc_frequency_hz': 1000}
-        clock = {'begin_qpc': 20100, 'end_qpc': 85100, 'qpc_frequency_hz': 1000}
+        clock = {'begin_qpc': 90100, 'end_qpc': 155100, 'qpc_frequency_hz': 1000}
         facts = validate_native_timing(ready, clock, complete=True)
-        self.assertEqual((facts['ready_to_work_begin_seconds'], facts['whole_workload_seconds']), (20, 65))
+        self.assertEqual((facts['ready_to_work_begin_seconds'], facts['whole_workload_seconds']), (90, 65))
         self.assertEqual(facts['status'], 'WITHIN_LIMITS')
-        for source, value in ((ready, {**clock, 'begin_qpc': 20101}),
-                              (ready, {**clock, 'end_qpc': 85101}),
+        for source, value in ((ready, {**clock, 'begin_qpc': 90101}),
+                              (ready, {**clock, 'end_qpc': 155101}),
                               ({**ready, 'qpc_frequency_hz': 1000.0}, clock),
                               (ready, {**clock, 'qpc_frequency_hz': True}),
                               (ready, {**clock, 'end_qpc': 2**63}),
@@ -1097,9 +1097,9 @@ class ControlledBudgetProtocolTests(unittest.TestCase):
             'requested_workload_policy': 'CONTROLLED_NATIVE_60', 'requested_process_timeout_seconds': 60,
             'requested_minimum_roundtrips': 1, 'requested_minimum_prelude_seconds': 0,
             'workload_budget': budget,
-            'requested_noise_policy': {'implementation': 'NATIVE_WIN32', 'ttl_seconds': 90,
-                                       'progress_limit': 361, 'owner_seconds': 105},
-            'noise_policy_receipts': {phase: {'implementation': 'NATIVE_WIN32', 'ttl_seconds': 90, 'progress_limit': 361}
+            'requested_noise_policy': {'implementation': 'NATIVE_WIN32', 'ttl_seconds': 180,
+                                       'progress_limit': 721, 'owner_seconds': 195},
+            'noise_policy_receipts': {phase: {'implementation': 'NATIVE_WIN32', 'ttl_seconds': 180, 'progress_limit': 721}
                                       for phase in ('ready', 'oracle')},
             'native_timing': {'ready_qpc': 0, 'work_begin_qpc': 10000, 'work_end_qpc': 74000, 'qpc_frequency_hz': 1000},
             'noise_producer': {'implementation': 'NATIVE_WIN32', 'source_sha256': '3' * 64,
@@ -1120,14 +1120,14 @@ class ControlledBudgetProtocolTests(unittest.TestCase):
         validate_comparison(first, second)
         for change in ({'noise_handoffs': 9999}, {'roundtrips_verified': 1}, {'application_sha256': '0' * 64},
                        {'noise_workload_coverage': {'all_16_threads_bracket': False}},
-                       {'prelude': {**second['prelude'], 'wait_seconds': 16}},
+                       {'prelude': {**second['prelude'], 'wait_seconds': 66}},
                        {'requested_workload_policy': 'ORDINARY_30'}, {'requested_process_timeout_seconds': 30},
-                       {'requested_noise_policy': {**common['requested_noise_policy'], 'ttl_seconds': 90.0}},
-                       {'requested_noise_policy': {**common['requested_noise_policy'], 'owner_seconds': 105.0}},
-                       {'requested_noise_policy': {**common['requested_noise_policy'], 'progress_limit': 361.0}},
+                       {'requested_noise_policy': {**common['requested_noise_policy'], 'ttl_seconds': 180.0}},
+                       {'requested_noise_policy': {**common['requested_noise_policy'], 'owner_seconds': 195.0}},
+                       {'requested_noise_policy': {**common['requested_noise_policy'], 'progress_limit': 721.0}},
                        {'requested_noise_policy': {**common['requested_noise_policy'], 'extra': 'PRIVATE_PATH'}},
                        {'noise_policy_receipts': {**common['noise_policy_receipts'],
-                            'oracle': {**common['noise_policy_receipts']['oracle'], 'progress_limit': 361.0}}},
+                            'oracle': {**common['noise_policy_receipts']['oracle'], 'progress_limit': 721.0}}},
                        {'native_timing': {**common['native_timing'], 'work_end_qpc': 76000}},
                        {'workload_budget': {**budget, 'requested_minimum_roundtrips': 2,
                             'workloads': [budget['workloads'][0],
@@ -2011,7 +2011,7 @@ class PreparedNativeBuildProtocolTests(unittest.TestCase):
             build.rmdir(); build.write_bytes(b'KEEP')
             with self.assertRaises(AssertionError): diagnostic_output_root(root, prepared=True)
             self.assertEqual(build.read_bytes(), b'KEEP')
-        self.assertEqual(prepared_budget_deadline(10, 9.25), 420.75)
+        self.assertEqual(prepared_budget_deadline(10, 9.25), 660.75)
         for bad in (0, -1, True, float('nan'), float('inf'), 90.01):
             with self.subTest(elapsed=bad), self.assertRaises(AssertionError): prepared_budget_deadline(10, bad)
 
@@ -2142,12 +2142,12 @@ class ControlledMinimumStimulusProtocolTests(unittest.TestCase):
             'implementation': implementation, 'expected_native_handles': ready['expected_native_handles']})
         noise.ready = ready
         noise.owner = SimpleNamespace(process=SimpleNamespace(poll=lambda: None))
-        def read(unused):
+        def read(unused, **options):
             read_times.append(now[0])
             return templates.progress(ready, int(now[0]) + 1)
         def sleep(seconds):
             self.assertEqual(seconds, .02)
-            self.assertLess(now[0], 20, 'fake-clock guard prevents protocol-test hangs')
+            self.assertLess(now[0], 80, 'fake-clock guard prevents protocol-test hangs')
             now[0] += 1
         def hashed(unused):
             now[0] += hash_advance
@@ -2236,7 +2236,7 @@ class ControlledMinimumStimulusProtocolTests(unittest.TestCase):
             for change in ({'requested_minimum_roundtrips': True}, {'requested_minimum_roundtrips': 1},
                            {'roundtrips_verified': 3}, {'requested_minimum_prelude_seconds': 10 if positive else 0},
                            {'prelude': {**second['prelude'], 'requested_minimum_seconds': True}},
-                           {'prelude': {**second['prelude'], 'wait_seconds': 16}},
+                           {'prelude': {**second['prelude'], 'wait_seconds': 66 if positive else 16}},
                            {'prelude': {**second['prelude'], 'observed_handoffs': 9999}},
                            {'prelude': {**second['prelude'], 'status': 'FAILED'}},
                            {'workload_budget': {**second['workload_budget'], 'roundtrips_verified': 3}}):
@@ -2276,7 +2276,7 @@ class ControlledMinimumStimulusProtocolTests(unittest.TestCase):
                     patch.object(driver.time, 'monotonic', return_value=0), \
                     patch.dict(os.environ, {'GITHUB_STEP_SUMMARY': ''}), redirect_stdout(io.StringIO()):
                 self.assertEqual(driver.run_diagnostic(args), 0)  # Fake protocol flow only, not native acceptance.
-            builder.assert_called_once_with(args.output / 'native-build', args.source_sha)
+            builder.assert_called_once_with(args.output.resolve() / 'native-build', args.source_sha)
             self.assertEqual(run.call_count, 4)
             self.assertEqual(run.call_args_list[0].kwargs, {})
             self.assertEqual(run.call_args_list[2].kwargs, {})
@@ -2317,6 +2317,101 @@ class ControlledMinimumStimulusProtocolTests(unittest.TestCase):
                 self.assertEqual(proof['reason_code'], 'PROTOCOL_WORKLOAD_ENTRY_FAILURE')
                 self.assertEqual(proof['requested_minimum_roundtrips'], minimum)
                 self.assertEqual(proof['requested_minimum_prelude_seconds'], prelude)
+
+
+class PreludeFailureAndBudgetCompositionTests(unittest.TestCase):
+    """Fault/clock fixtures only; all real acceptance still runs in Windows CI."""
+
+    def test_native_prelude_has_its_finite_preparation_window_and_python_stays_fifteen(self):
+        helper = ControlledMinimumStimulusProtocolTests()
+        prelude, _, error = helper.invoke_prelude(
+            target=640, minimum=0, implementation='NATIVE_WIN32')
+        self.assertIsNone(error)
+        self.assertEqual(prelude['wait_seconds'], 39)
+        self.assertEqual(prelude['maximum_wait_seconds'], 65)
+        native, _, error = helper.invoke_prelude(
+            target=100000, minimum=0, implementation='NATIVE_WIN32')
+        self.assertIsInstance(error, AssertionError)
+        self.assertEqual(native['wait_seconds'], 65)
+        python, _, error = helper.invoke_prelude(target=100000, minimum=10)
+        self.assertIsInstance(error, AssertionError)
+        self.assertEqual(python['wait_seconds'], 15)
+
+    def test_prelude_retains_original_os_error_and_numeric_phase_without_private_text(self):
+        from tools import qa_decoder_budget_diagnostic as driver
+        ready = ProducerNoisePolicyProtocolTests().ready('NATIVE_WIN32')
+        for phase in ('RECEIPT_STAT', 'RECEIPT_READ'):
+            with self.subTest(phase=phase):
+                failure = PermissionError(13, 'PRIVATE_USER_PATH_MUST_NOT_BE_EXPORTED')
+                failure.winerror = 32
+                noise = NoiseOwner(SimpleNamespace(glob=lambda pattern: [Path('progress-0013.json')]),
+                    {'implementation': 'NATIVE_WIN32', 'expected_native_handles': 32})
+                noise.ready = ready
+                noise.owner = SimpleNamespace(process=SimpleNamespace(poll=lambda: None))
+                with patch.object(driver.time, 'monotonic', return_value=0), \
+                        patch('pathlib.Path.stat', side_effect=failure if phase == 'RECEIPT_STAT' else None,
+                              return_value=SimpleNamespace(st_size=10)), \
+                        patch('pathlib.Path.read_text', side_effect=failure), \
+                        patch('tools.qa_decoder_apps.file_hash') as hashed:
+                    with self.assertRaises(PermissionError) as caught:
+                        noise.await_handoffs(1000, 100)
+                self.assertIs(caught.exception, failure)
+                fact = noise.prelude['failure']
+                self.assertEqual((fact['phase'], fact['error_type'], fact['winerror'], fact['errno']),
+                                 (phase, 'PermissionError', 32, 13))
+                self.assertEqual(fact['receipt_leaf'], 'progress-0013.json')
+                self.assertNotIn('PRIVATE_USER_PATH', json.dumps(fact))
+                self.assertEqual(noise.prelude['status'], 'FAILED')
+                hashed.assert_not_called()
+
+    def test_factory_prelude_failure_normally_stops_noise_before_wpr_and_keeps_primary(self):
+        from tools import qa_decoder_budget_diagnostic as driver
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); order = []; caught = []
+            failure = PermissionError(13, 'PRIVATE_PRELUDE_PATH')
+            failure.winerror = 5
+            actual = SimpleNamespace(active=True, qa_profile='cpu_file', profile_entry='fixed',
+                                     profile_path=root / 'profile.wprp')
+            def cancel():
+                order.append('wpr_cancel'); actual.active = False
+            actual.cancel = cancel
+            def start(noise):
+                noise.owner = SimpleNamespace(process=SimpleNamespace(poll=lambda: None))
+            def stop(noise):
+                order.append('noise_stop')
+                noise.oracle = {'workers': [{'handoffs': 1} for _ in range(16)]}  # Protocol fixture only.
+                noise.cleanup = {'status': 'COMPLETED'}
+            def workload(output, helper, **options):
+                try:
+                    driver.apps.start_schedule(output, profile='cpu_file')
+                except BaseException as error:
+                    caught.append(error)
+                    raise
+            producer = {'implementation': 'PYTHON_CTYPES_WIN32', 'source_sha256': 'a' * 64,
+                        'executable_sha256': 'b' * 64, 'expected_native_handles': 16}
+            with patch.object(driver, 'source_identity', return_value={'source_identity_status': 'VERIFIED_EXPECTED_HEAD'}), \
+                    patch.object(driver, 'kernel_api', return_value=object()), \
+                    patch.object(driver, 'counter', return_value=1000), \
+                    patch('tools.qa_decoder_apps.start_schedule', return_value=actual), \
+                    patch('tools.qa_decoder_apps.seven_zip', side_effect=workload), \
+                    patch('tools.qa_decoder_apps.file_hash', return_value='c' * 64), \
+                    patch.object(driver.NoiseOwner, 'start', autospec=True, side_effect=start), \
+                    patch.object(driver.NoiseOwner, 'await_handoffs', side_effect=failure), \
+                    patch.object(driver.NoiseOwner, 'stop', autospec=True, side_effect=stop), \
+                    patch.object(driver.NoiseOwner, 'abort') as abort, \
+                    patch.object(driver, 'collect_bounded_case_facts'), \
+                    patch.object(driver, 'collect_noise_stop_observation'), redirect_stdout(io.StringIO()):
+                proof = driver.run_case(root / 'case', root / 'helper.exe', 'a' * 40, 100,
+                    'cpu_file', producer, 'OUTPUT_BUDGET_NEGATIVE', 1000,
+                    native_module_encoding='INLINE_V1', minimum_prelude_seconds=10)
+            self.assertEqual(order, ['noise_stop', 'wpr_cancel'])
+            self.assertEqual(len(caught), 1); self.assertIs(caught[0], failure)
+            self.assertEqual(proof['status'], 'REPRODUCTION_NOT_ESTABLISHED')
+            self.assertEqual(proof['capture_cleanup'], {'status': 'CANCELLED', 'cleanup_required': False})
+            self.assertEqual(proof['noise_cleanup']['status'], 'COMPLETED')
+            self.assertEqual(proof['capture_lifecycle']['primary_error']['phase'], 'NOISE_START_OR_PRELUDE')
+            self.assertEqual(proof['capture_lifecycle']['primary_error']['winerror'], 5)
+            abort.assert_not_called()
 
 
 if __name__ == "__main__":

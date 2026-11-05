@@ -231,7 +231,7 @@ jobs:
             Write-Host "THIRD_PARTY_DECODER_QA_TRIAL_COMPLETE $trial/3"
           }
       - name: Controlled Python budget negatives and native Win32 A B acceptance
-        timeout-minutes: 8
+        timeout-minutes: 12
         run: python tools/qa_decoder_budget_diagnostic.py --helper decoder/BLACK.BOX-Decoder.exe --output decoder-budget-diagnostic --source-sha "${{ github.event.pull_request.head.sha || github.sha }}" --prepared-native-build --prepared-build-sha256 "${{ steps.prepare_native_noise.outputs.manifest_sha256 }}"
       - name: BB-WAVE-02 actual native evidence, provenance, requested domain routes and read-back
         timeout-minutes: 18

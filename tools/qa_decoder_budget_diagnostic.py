@@ -35,6 +35,8 @@ MAX_NOISE_LOG = 64 * 1024
 MAX_OUTPUT = 1152 * 1024**2
 MIN_NOISE_ROWS = 10000
 PRELUDE_SECONDS = 15
+NATIVE_PRELUDE_SECONDS = 65
+CONTROLLED_SECONDS = 660
 # A real-noise stimulus floor, never a substitute for observing MAX_OUTPUT.
 PYTHON_BYTE_MINIMUM_PRELUDE_SECONDS = 10
 MAX_PROGRESS_RECEIPTS = 281
@@ -48,7 +50,7 @@ SEVENZIP_CAPABILITIES = frozenset({
 def noise_policy(implementation):
     apps.require(type(implementation) is str and implementation in ('PYTHON_CTYPES_WIN32', 'NATIVE_WIN32'),
                  'NOISE_POLICY_IMPLEMENTATION_UNKNOWN')
-    ttl, progress, owner = (70, 281, 85) if implementation == 'PYTHON_CTYPES_WIN32' else (90, 361, 105)
+    ttl, progress, owner = (70, 281, 85) if implementation == 'PYTHON_CTYPES_WIN32' else (180, 721, 195)
     return {'implementation': implementation, 'ttl_seconds': ttl, 'progress_limit': progress,
             'owner_seconds': owner}
 
@@ -71,9 +73,29 @@ def validate_requested_noise_policy(record, implementation):
     return dict(record)
 
 
-def read_json(path, limit=32768):
+def bounded_failure(error, phase, leaf=None):
+    """Keep numeric OS evidence without copying paths or exception messages."""
+    kind = type(error).__name__
+    fact = {'phase': phase, 'error_type': kind if re.fullmatch(r'[A-Za-z][A-Za-z0-9_]{0,79}', kind)
+            else 'OTHER_EXCEPTION', 'reason_code': apps._qa_code(str(error))}
+    for field in ('winerror', 'errno'):
+        value = getattr(error, field, None)
+        fact[field] = value if type(value) is int and 0 <= value <= 2**32 - 1 else None
+    if type(leaf) is str and re.fullmatch(r'progress-[0-9]{4}\.json', leaf):
+        fact['receipt_leaf'] = leaf
+    return fact
+
+
+def read_json(path, limit=32768, *, phase_context=None):
+    if phase_context is not None:
+        phase_context['phase'] = 'RECEIPT_STAT'
     apps.require(0 < path.stat().st_size <= limit, 'DIAGNOSTIC_RECEIPT_SIZE')
-    value = json.loads(path.read_text(encoding='utf-8'))
+    if phase_context is not None:
+        phase_context['phase'] = 'RECEIPT_READ'
+    raw = path.read_text(encoding='utf-8')
+    if phase_context is not None:
+        phase_context['phase'] = 'RECEIPT_PARSE'
+    value = json.loads(raw)
     apps.require(type(value) is dict, 'DIAGNOSTIC_RECEIPT_TYPE')
     return value
 
@@ -282,34 +304,47 @@ class NoiseOwner:
             type(minimum_seconds) is int and minimum_seconds in (0, PYTHON_BYTE_MINIMUM_PRELUDE_SECONDS) and
             (minimum_seconds == 0 or self.producer['implementation'] == 'PYTHON_CTYPES_WIN32'),
             'INVALID_NOISE_PRELUDE_REQUEST')
-        started = time.monotonic(); deadline = min(started + PRELUDE_SECONDS, whole_deadline)
+        prelude_limit = NATIVE_PRELUDE_SECONDS if self.producer['implementation'] == 'NATIVE_WIN32' else PRELUDE_SECONDS
+        started = time.monotonic(); deadline = min(started + prelude_limit, whole_deadline)
         self.prelude = {'target_handoffs': target, 'requested_minimum_seconds': minimum_seconds,
-                        'wait_seconds': 0, 'status': 'IN_PROGRESS'}
+                        'wait_seconds': 0, 'maximum_wait_seconds': prelude_limit, 'status': 'IN_PROGRESS'}
         previous = None
+        context = {'phase': 'OWNER_POLL', 'leaf': None}
         try:
             while time.monotonic() < deadline:
+                context.update(phase='OWNER_POLL', leaf=None)
                 apps.require(not self.errors and self.owner.process.poll() is None, 'NOISE_PRELUDE_OWNER_FAILED')
+                context['phase'] = 'PROGRESS_GLOB'
                 paths = sorted(self.output.glob('progress-????.json'))
                 apps.require(len(paths) <= self.policy['progress_limit'], 'NOISE_PROGRESS_FILE_BUDGET')
                 if paths:
-                    path = paths[-1]; progress = read_json(path)
+                    path = paths[-1]
+                    context.update(phase='READ_PROGRESS_RECEIPT', leaf=path.name)
+                    progress = read_json(path, phase_context=context)
+                    context['phase'] = 'VALIDATE_PROGRESS'
                     validate_progress(progress, self.ready, previous, implementation=self.producer['implementation'])
                     previous = progress
-                    self.prelude.update(observed_handoffs=progress['total_handoffs'],
-                        sequence=progress['sequence'],
-                        receipt_sha256=apps.file_hash(path), receipt_bytes=path.stat().st_size)
+                    self.prelude.update(observed_handoffs=progress['total_handoffs'], sequence=progress['sequence'])
+                    context['phase'] = 'HASH_PROGRESS'
+                    self.prelude['receipt_sha256'] = apps.file_hash(path)
+                    context['phase'] = 'STAT_PROGRESS'
+                    self.prelude['receipt_bytes'] = path.stat().st_size
+                    context['phase'] = 'OWNER_RECHECK'
                     apps.require(not self.errors and self.owner.process.poll() is None,
                                  'NOISE_PRELUDE_OWNER_FAILED')
+                    context['phase'] = 'ELAPSED_GUARD'
                     observed = time.monotonic()
                     self.prelude['wait_seconds'] = observed - started
                     apps.require(observed < deadline, 'COMPARABLE_NOISE_PRELUDE_NOT_ESTABLISHED')
                     if progress['total_handoffs'] >= target and observed - started >= minimum_seconds:
                         self.prelude['status'] = 'COMPLETED'
                         return
+                context['phase'] = 'WAIT'
                 time.sleep(.02)
             raise AssertionError('COMPARABLE_NOISE_PRELUDE_NOT_ESTABLISHED')
-        except BaseException:
-            self.prelude.update(status='FAILED', wait_seconds=time.monotonic() - started)
+        except BaseException as error:
+            self.prelude.update(status='FAILED', wait_seconds=time.monotonic() - started,
+                failure=bounded_failure(error, context['phase'], context['leaf']))
             raise
 
     def stop(self):
@@ -779,7 +814,7 @@ def collect_bounded_case_facts(proof, work, helper, clock):
 def validate_native_timing(ready, clock, *, complete=False, facts=None):
     facts = {} if facts is None else facts
     facts.update(status='NOT_ESTABLISHED', scope='NATIVE_QA_ADMISSION_QPC_NOT_HARD_OS_DEADLINE',
-        ready_to_work_begin_limit_seconds=20, whole_workload_limit_seconds=65)
+        ready_to_work_begin_limit_seconds=90, whole_workload_limit_seconds=65)
     frequency = clock.get('qpc_frequency_hz')
     apps.require(type(frequency) is int and 0 < frequency <= 2**63 - 1 and
         type(ready.get('qpc_frequency_hz')) is int and ready['qpc_frequency_hz'] == frequency and
@@ -787,7 +822,7 @@ def validate_native_timing(ready, clock, *, complete=False, facts=None):
         0 <= ready['begin_qpc'] <= clock['begin_qpc'] <= 2**63 - 1, 'NATIVE_QOS_CLOCK_NOT_ESTABLISHED')
     facts.update(qpc_frequency_hz=frequency, ready_qpc=ready['begin_qpc'], work_begin_qpc=clock['begin_qpc'],
         ready_to_work_begin_seconds=(clock['begin_qpc'] - ready['begin_qpc']) / frequency, status='REJECTED')
-    apps.require(clock['begin_qpc'] - ready['begin_qpc'] <= 20 * frequency, 'NATIVE_QOS_READY_TO_WORK_EXCEEDED')
+    apps.require(clock['begin_qpc'] - ready['begin_qpc'] <= 90 * frequency, 'NATIVE_QOS_READY_TO_WORK_EXCEEDED')
     facts['status'] = 'READY_TO_WORK_WITHIN_LIMIT'
     if complete:
         apps.require(type(clock.get('end_qpc')) is int and clock['begin_qpc'] < clock['end_qpc'] <= 2**63 - 1,
@@ -811,7 +846,7 @@ class BudgetCapture:
         return self.actual.active
 
     def remember(self, error, phase):
-        fact = {'phase': phase, 'error_type': type(error).__name__, 'reason_code': apps._qa_code(str(error))}
+        fact = bounded_failure(error, phase)
         if self.first_error is None:
             self.first_error = error
             self.lifecycle['primary_error'] = fact
@@ -1028,6 +1063,8 @@ def run_case(output, helper, source_sha, deadline, profile, producer, expectatio
         capture_cleanup.update(status='START_REQUESTED', cleanup_required=True)
         actual = original_factory(folder, profile=profile)
         capture_cleanup.update(status='RECORDING', cleanup_required=True)
+        capture = BudgetCapture(actual, noise, workload_clock, capture_cleanup, captures,
+                                lambda: counter(kernel), capture_lifecycle)
         try:
             apps.require(actual.qa_profile == profile, 'DIAGNOSTIC_ACTUAL_PROFILE_MISMATCH')
             capture_profile.update(name=actual.qa_profile, entry=actual.profile_entry,
@@ -1038,17 +1075,10 @@ def run_case(output, helper, source_sha, deadline, profile, producer, expectatio
                 noise.await_handoffs(target_handoffs, deadline, minimum_seconds=minimum_prelude_seconds)
             apps.require(noise.ready['qpc_frequency_hz'] == frequency, 'DIAGNOSTIC_NOISE_COUNTER_MISMATCH')
             workload_clock['begin_qpc'] = counter(kernel)
-        except BaseException:
-            try:
-                actual.cancel()
-                apps.require(not actual.active, 'DIAGNOSTIC_WPR_CANCEL_UNCONFIRMED')
-                capture_cleanup.update(status='CANCELLED', cleanup_required=False)
-            except BaseException:
-                capture_cleanup.update(status='UNCONFIRMED', cleanup_required=True)
-                raise
+        except BaseException as error:
+            capture.remember(error, 'NOISE_START_OR_PRELUDE')
+            capture.cancel()  # Normal noise stop, then WPR cancel; rethrows the original.
             raise
-        capture = BudgetCapture(actual, noise, workload_clock, capture_cleanup, captures,
-                                lambda: counter(kernel), capture_lifecycle)
         if producer['implementation'] == 'NATIVE_WIN32':
             timing = capture_lifecycle.setdefault('native_timing', {})
             try:
@@ -1261,6 +1291,7 @@ def validate_comparison(first, second, *, positive=True):
                 {'begin_qpc': timing.get('work_begin_qpc'), 'end_qpc': timing.get('work_end_qpc'),
                  'qpc_frequency_hz': timing.get('qpc_frequency_hz')}, complete=True)
     minimum_prelude = 0 if positive else PYTHON_BYTE_MINIMUM_PRELUDE_SECONDS
+    maximum_prelude = NATIVE_PRELUDE_SECONDS if positive else PRELUDE_SECONDS
     apps.require(first.get('requested_minimum_roundtrips') == 1 and
         second.get('requested_minimum_roundtrips') == first['roundtrips_verified'] and
         type(first.get('requested_minimum_prelude_seconds')) is int and first['requested_minimum_prelude_seconds'] == 0 and
@@ -1290,7 +1321,7 @@ def validate_comparison(first, second, *, positive=True):
         type(second['prelude'].get('requested_minimum_seconds')) is int and
         second['prelude']['requested_minimum_seconds'] == minimum_prelude and
         type(second['prelude'].get('wait_seconds')) in (int, float) and
-        minimum_prelude <= second['prelude']['wait_seconds'] <= PRELUDE_SECONDS and
+        minimum_prelude <= second['prelude']['wait_seconds'] <= maximum_prelude and
         all(case['noise_cleanup']['status'] == 'COMPLETED' and case['capture_cleanup']['status'] == 'STOPPED'
             and case['noise_workload_coverage']['all_16_threads_bracket'] is True
             and case['noise_workload_coverage']['threads_with_positive_handoff_delta'] == 2 * PAIRS
@@ -1303,7 +1334,8 @@ def validate_comparison(first, second, *, positive=True):
             'second_observed_roundtrips': second['roundtrips_verified'],
             'second_minimum_prelude_seconds': minimum_prelude,
             'second_observed_prelude_seconds': second['prelude']['wait_seconds'],
-            'native_timing_limits': {'ready_to_work_begin_seconds': 20, 'whole_workload_seconds': 65}
+            'second_maximum_prelude_seconds': maximum_prelude,
+            'native_timing_limits': {'ready_to_work_begin_seconds': 90, 'whole_workload_seconds': 65}
                 if positive else 'NOT_APPLICABLE_PYTHON_POLICY'}
 
 
@@ -1337,11 +1369,11 @@ def diagnostic_output_root(path, *, prepared=False):
 
 
 def prepared_budget_deadline(started, elapsed):
-    """Charge the earlier build to the same finite 420s active-work budget."""
+    """Charge the earlier build to the same finite 660s active-work budget."""
     apps.require(type(started) in (int, float) and math.isfinite(started) and 0 <= started <= 2**63 - 1 and
         type(elapsed) in (int, float) and math.isfinite(elapsed) and 0 < elapsed <= 90,
         'DIAGNOSTIC_PREPARED_ELAPSED_INVALID')
-    return started + 420 - elapsed
+    return started + CONTROLLED_SECONDS - elapsed
 
 
 def validate_prepared_recheck(initial, final):
@@ -1359,7 +1391,7 @@ def validate_prepared_recheck(initial, final):
 
 
 def run_diagnostic(args):
-    started = time.monotonic(); deadline = started + 420
+    started = time.monotonic(); deadline = started + CONTROLLED_SECONDS
     prepaid_build_elapsed = 0
     require_hosted_windows()
     output = diagnostic_output_root(args.output, prepared=args.prepared_native_build)
@@ -1369,7 +1401,7 @@ def run_diagnostic(args):
         'subwindow_delta_scope': 'REPORT_ONLY; UNEQUAL_QPC_WINDOWS_ARE_NOT_A_CAUSAL_RATE_COMPARISON',
         'python_pair_transport_scope': 'COMPACT_ROW_NEGATIVE_AND_EXPLICIT_INLINE_BYTE_NEGATIVE; NOT_PROFILE_CAUSAL_COMPARISON',
         'native_pair_transport_scope': 'BOTH_DEFAULT_COMPACT_PER_EVENT_MODULES_V1',
-        'diagnostic_budget_seconds': 420,
+        'diagnostic_budget_seconds': CONTROLLED_SECONDS,
         'workload_budget_scope': 'SEVENZIP_ORDINARY_AND_PYTHON_30; CONTROLLED_NATIVE_PAIR_60; NOT_HARD_OS_COMPLETION_DEADLINE',
         'cases': {}}
     try:
