@@ -34,7 +34,7 @@ _COMPILER_OPT_OUT = {'VSCMD_SKIP_SENDTELEMETRY': '1', 'VCToolsTelemetryOptOut': 
 
 
 def _compiler_worker_environment(inherited):
-    """Configure only these fixed opt-outs, before any compiler setup child."""
+    """Configure only these fixed opt-outs, preserving all other entries."""
     policy_names = {name.casefold() for name in _COMPILER_OPT_OUT}
     environment = {name: value for name, value in inherited.items() if name.casefold() not in policy_names}
     environment.update(_COMPILER_OPT_OUT)
@@ -47,6 +47,16 @@ def _require_compiler_policy(environment):
     for name, expected in _COMPILER_OPT_OUT.items():
         values = [value for key, value in environment.items() if key.casefold() == name.casefold()]
         require(values == [expected], 'NATIVE_NOISE_COMPILER_OPT_OUT_POLICY_UNCONFIRMED')
+
+
+def _configured_compiler_environment(output):
+    # SDK setup may consume/change initialization variables. Preserve its real
+    # PATH/LIB/INCLUDE updates, then configure and validate the compiler child's
+    # own fixed policy rather than assuming setup retained either variable.
+    compiler, environment = compiler_environment(output)
+    environment = _compiler_worker_environment(environment)
+    _require_compiler_policy(environment)
+    return compiler, environment
 
 
 def _compile_command(compiler, output, source):
@@ -110,8 +120,7 @@ def _compile_worker(request_path):
             '#define NOISE_SOURCE_SHA256 "' + request['source_sha256'] + '"\n' and
             source_identity(request['source_sha']).get('source_identity_status') == 'VERIFIED_EXPECTED_HEAD',
             'NATIVE_NOISE_COMPILER_SOURCE_MISMATCH')
-    compiler, environment = compiler_environment(output)
-    _require_compiler_policy(environment)
+    compiler, environment = _configured_compiler_environment(output)
     command = _compile_command(compiler, output, source)
     compiled = subprocess.run(command, env=environment, stdin=subprocess.DEVNULL,
                               stdout=sys.stdout.buffer, stderr=sys.stderr.buffer,

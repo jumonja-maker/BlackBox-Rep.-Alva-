@@ -25,7 +25,7 @@ from tools.qa_decoder_budget_diagnostic import (PAIRS, parse_args, validate_nois
 from tools.qa_decoder_budget_diagnostic import native_attribution
 from tools.qa_schedule_capture import profile_definition
 from tools.qa_decoder_noise_fixture import (_close_owner_with_checked_handles,
-    _compiler_worker_environment, _require_compiler_policy)
+    _compiler_worker_environment, _require_compiler_policy, _configured_compiler_environment)
 
 
 class CheckedOwnerCloseProtocolTests(unittest.TestCase):
@@ -152,6 +152,46 @@ class CompilerEnvironmentPolicyProtocolTests(unittest.TestCase):
                 with self.assertRaisesRegex(AssertionError, 'NATIVE_NOISE_COMPILER_OPT_OUT_POLICY_UNCONFIRMED'):
                     _require_compiler_policy(environment)
                 self.assertEqual(environment, before)
+
+    def test_sdk_setup_updates_survive_reapplying_and_strictly_checking_fixed_policy(self):
+        # Entirely literal SDK-return fixtures, never actual vcvars/compiler
+        # execution or inspection of the host's environment.
+        parent = {'Path': 'C:/fixtures/original-bin', 'VSCMD_SKIP_SENDTELEMETRY': '1',
+            'VCToolsTelemetryOptOut': '1', 'HTTP_PROXY': 'http://proxy.invalid:8080',
+            'BB_FAKE_CREDENTIAL': 'LITERAL_TEST_VALUE_NOT_A_SECRET',
+            'SSL_CERT_FILE': 'C:/fixtures/ca.pem', 'BB_FAKE_CA_GUARD': 'KEEP_LITERAL_GUARD'}
+        original_parent = dict(parent)
+        sdk = {**parent, 'Path': 'C:/fixtures/SDK/bin;C:/fixtures/original-bin',
+            'INCLUDE': 'C:/fixtures/SDK/include', 'LIB': 'C:/fixtures/SDK/lib',
+            'VCToolsTelemetryOptOut': '0', 'vctoolstelemetryoptout': 'sdk-changed'}
+        del sdk['VSCMD_SKIP_SENDTELEMETRY']  # Model a consumed setup-only flag.
+        original_sdk = dict(sdk)
+        with self.assertRaisesRegex(AssertionError, 'NATIVE_NOISE_COMPILER_OPT_OUT_POLICY_UNCONFIRMED'):
+            _require_compiler_policy(sdk)
+        compiler = 'C:/fixtures/SDK/bin/cl.exe'
+        output = Path('SDK_SETUP_PROTOCOL_FIXTURE')
+        with patch('tools.qa_decoder_noise_fixture.compiler_environment',
+                   return_value=(compiler, MappingProxyType(sdk))) as setup, \
+                patch('tools.qa_decoder_noise_fixture._require_compiler_policy',
+                      wraps=_require_compiler_policy) as validator:
+            actual_compiler, configured = _configured_compiler_environment(output)
+        setup.assert_called_once_with(output)
+        validator.assert_called_once_with(configured)
+        self.assertIs(validator.call_args[0][0], configured)
+        self.assertIs(actual_compiler, compiler)
+        expected = {key: value for key, value in sdk.items()
+                    if key.casefold() not in ('vscmd_skip_sendtelemetry', 'vctoolstelemetryoptout')}
+        expected.update(VSCMD_SKIP_SENDTELEMETRY='1', VCToolsTelemetryOptOut='1')
+        self.assertEqual(configured, expected)
+        self.assertEqual(sdk, original_sdk)
+        self.assertEqual(parent, original_parent)
+        failure = AssertionError('NATIVE_NOISE_COMPILER_OPT_OUT_POLICY_UNCONFIRMED')
+        with patch('tools.qa_decoder_noise_fixture.compiler_environment', return_value=(compiler, sdk)), \
+                patch('tools.qa_decoder_noise_fixture._require_compiler_policy', side_effect=failure) as validator:
+            with self.assertRaises(AssertionError) as caught:
+                _configured_compiler_environment(output)
+        self.assertIs(caught.exception, failure)
+        validator.assert_called_once()
 
 
 class ControlledBudgetProtocolTests(unittest.TestCase):
