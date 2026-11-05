@@ -192,6 +192,8 @@ class NoiseOwner:
         self.watcher_stop = threading.Event(); self.watcher = None
         self.started = None; self.max_rss = 0; self.cleanup = {'status': 'NOT_ESTABLISHED'}
         self.prelude = {'target_handoffs': 0, 'wait_seconds': 0}
+        self.stop_observation = {'child_exit_code': 'NOT_ESTABLISHED',
+                                 'parent_stop_requested': False}
 
     def start(self):
         import psutil
@@ -263,8 +265,34 @@ class NoiseOwner:
         if self.cleanup.get('status') == 'COMPLETED':
             return
         apps.require(self.owner is not None, 'NOISE_OWNER_MISSING')
+        ready = getattr(self, 'ready', {})
+        self.stop_observation['child_ready'] = {name: ready.get(name) if type(ready.get(name)) is int
+            and 0 <= ready[name] <= 2**63 - 1 else 'NOT_ESTABLISHED'
+            for name in ('begin_qpc', 'qpc_frequency_hz')}
+        try:
+            before = self.owner.process.poll()
+            self.stop_observation['child_exit_before_stop_request'] = before if type(before) is int else 'RUNNING'
+        except Exception as error:
+            self.stop_observation['pre_request_poll_error'] = apps._qa_code(str(error))
+        try:
+            kernel = kernel_api()
+            self.stop_observation['parent_qpc_frequency_hz'] = counter(kernel, 'QueryPerformanceFrequency')
+            self.stop_observation['parent_stop_request_begin_qpc'] = counter(kernel)
+        except Exception as error:
+            self.stop_observation['parent_clock_error'] = apps._qa_code(str(error))
         (self.output / 'stop.request').touch(exist_ok=False)
-        apps.require(self.owner.process.wait(timeout=8) == 0, 'NOISE_EXIT_NOT_CONFIRMED')
+        self.stop_observation['parent_stop_requested'] = True
+        try:
+            if 'parent_clock_error' not in self.stop_observation:
+                self.stop_observation['parent_stop_request_end_qpc'] = counter(kernel)
+        except Exception as error:
+            self.stop_observation['parent_clock_error'] = apps._qa_code(str(error))
+        try:
+            exit_code = self.owner.process.wait(timeout=8)
+            self.stop_observation['child_exit_code'] = exit_code
+        finally:
+            collect_noise_stop_observation(self.output, self.stop_observation)
+        apps.require(exit_code == 0, 'NOISE_EXIT_NOT_CONFIRMED')
         self.watcher_stop.set(); self.watcher.join(timeout=2)
         apps.require(not self.watcher.is_alive() and not self.errors, 'NOISE_WATCHDOG_NOT_CLOSED')
         self.oracle = read_json(self.output / 'oracle.json')
@@ -314,6 +342,58 @@ class NoiseOwner:
             self.log.close()
         self.cleanup = {'status': 'FORCED_OR_UNCONFIRMED_NOT_ACCEPTED',
                         'process_exit_observed': exited, 'cleanup_required': True}
+
+
+def collect_noise_stop_observation(output, observation):
+    """Read bounded child facts without certifying cleanup or hiding a failure."""
+    def integer(value):
+        return value if type(value) is int and 0 <= value <= 2**63 - 1 else 'NOT_ESTABLISHED'
+    def boolean(value):
+        return value if type(value) is bool else 'NOT_ESTABLISHED'
+    def code(value):
+        return value if isinstance(value, str) and re.fullmatch(r'(?:NATIVE_)?NOISE_[A-Z0-9_]{1,80}', value) else 'NOT_ESTABLISHED'
+    try:
+        path = output / 'oracle.json'
+        oracle = read_json(path)
+        projected = {'schema': oracle.get('schema') if oracle.get('schema') == 'blackbox.scheduler-noise/1'
+                     else 'NOT_ESTABLISHED',
+                     'status': oracle.get('status') if oracle.get('status') in ('COMPLETED', 'FAILED')
+                     else 'NOT_ESTABLISHED',
+                     'receipt_bytes': path.stat().st_size, 'receipt_sha256': apps.file_hash(path),
+                     'acceptance_scope': 'UNVALIDATED_CHILD_RECEIPT_NOT_JOB_OR_HANDLE_CLOSURE_PROOF'}
+        for name in ('stop_requested', 'all_threads_joined', 'cleanup_required'):
+            projected[name] = boolean(oracle.get(name))
+        for name in ('pid', 'pairs', 'qpc_frequency_hz', 'begin_qpc', 'end_qpc',
+                     'native_handles_created', 'native_handles_closed', 'event_handles_created',
+                     'event_handles_closed', 'thread_handles_created', 'thread_handles_closed'):
+            projected[name] = integer(oracle.get(name))
+        created = oracle.get('created_100ns')
+        projected['created_100ns'] = created if isinstance(created, str) and re.fullmatch(r'[0-9]{1,20}', created) else 'NOT_ESTABLISHED'
+        errors = oracle.get('errors')
+        projected['errors'] = [code(value) for value in errors[:32]] if type(errors) is list and len(errors) <= 32 else 'NOT_ESTABLISHED'
+        workers = oracle.get('workers')
+        if type(workers) is list and len(workers) == 2 * PAIRS:
+            projected['workers'] = []
+            for worker in workers:
+                worker = worker if type(worker) is dict else {}
+                item = {name: integer(worker.get(name)) for name in ('tid', 'handoffs', 'begin_qpc', 'end_qpc')}
+                created = worker.get('created_100ns')
+                item['created_100ns'] = created if isinstance(created, str) and re.fullmatch(r'[0-9]{1,20}', created) else 'NOT_ESTABLISHED'
+                projected['workers'].append(item)
+        else:
+            projected['workers'] = 'NOT_ESTABLISHED'
+        observation['child_oracle'] = projected
+    except Exception as error:
+        observation.setdefault('child_oracle', 'NOT_ESTABLISHED')
+        observation['oracle_read_error'] = apps._qa_code(str(error))
+    try:
+        path = output.parent / 'noise.log'
+        apps.require(path.stat().st_size <= MAX_NOISE_LOG, 'NOISE_LOG_BUDGET')
+        observation['child_log'] = {'bytes': path.stat().st_size, 'sha256': apps.file_hash(path),
+                                    'scope': 'HASH_ONLY_NO_RAW_CHILD_LOG'}
+    except Exception as error:
+        observation.setdefault('child_log', 'NOT_ESTABLISHED')
+        observation['log_read_error'] = apps._qa_code(str(error))
 
 
 def validate_noise_oracle(oracle, pid, created, *, expected_handles=2 * PAIRS):
@@ -802,6 +882,9 @@ def run_case(output, helper, source_sha, deadline, profile, producer, expectatio
             except BaseException:
                 noise.cleanup = {'status': 'UNCONFIRMED', 'cleanup_required': True}
         proof['noise_cleanup'] = noise.cleanup
+        collect_noise_stop_observation(noise.output, noise.stop_observation)
+        noise.stop_observation['watchdog_error_codes'] = [apps._qa_code(value) for value in noise.errors[:32]]
+        proof['noise_stop_observation'] = noise.stop_observation
         proof['capture_profile'] = dict(capture_profile) if capture_profile else {'status': 'NOT_ESTABLISHED'}
         proof.setdefault('noise_workload_qpc_bounds', {key: workload_clock.get(key, 'NOT_ESTABLISHED') for key in
                          ('begin_qpc', 'end_qpc', 'qpc_frequency_hz')})

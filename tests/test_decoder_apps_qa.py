@@ -20,6 +20,7 @@ from tools.qa_decoder_apps import (decode_trace, etw_observations, installed, na
                                    native_output_path, observed_module_encoding,
                                    observed_process_image, safe_extract)
 from tools.qa_decoder_budget_diagnostic import (PAIRS, parse_args, validate_noise_oracle,
+    NoiseOwner,
     SEVENZIP_CAPABILITIES, validate_comparison, validate_original_source, validate_positive,
     validate_progress, validate_rejection, validate_workload_activity, validate_case_contract,
     validate_output_observation, seal_and_remove_large_evidence, collect_bounded_case_facts)
@@ -28,6 +29,87 @@ from tools.qa_schedule_capture import profile_definition
 from tools.qa_decoder_noise_fixture import (_close_owner_with_checked_handles,
     _compiler_worker_environment, _require_compiler_policy, _configured_compiler_environment,
     _stop_completed_compiler_job)
+
+
+class NoiseStopObservationProtocolTests(unittest.TestCase):
+    """Literal receipts and fake processes are protocol tests, not native proof."""
+    def noise(self, root, code=17):
+        output = root / 'noise'; output.mkdir()
+        noise = NoiseOwner(output, {'implementation': 'NATIVE_WIN32', 'expected_native_handles': 32})
+        calls = []
+        def wait(*, timeout):
+            calls.append(('wait', timeout, (output / 'stop.request').is_file()))
+            return code
+        noise.owner = SimpleNamespace(process=SimpleNamespace(wait=wait, poll=lambda: code),
+                                      close=lambda **kwargs: calls.append(('close', kwargs)))
+        noise.ready = {'begin_qpc': 100, 'qpc_frequency_hz': 10000000}
+        noise.log = io.BytesIO()
+        return noise, calls
+
+    def test_nonzero_exit_preserves_actual_bounded_oracle_before_unchanged_failure_and_abort(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); noise, calls = self.noise(root)
+            oracle = {'schema': 'blackbox.scheduler-noise/1', 'status': 'FAILED',
+                'pid': 123, 'created_100ns': '134000000000000000', 'pairs': 8,
+                'qpc_frequency_hz': 10000000, 'begin_qpc': 100, 'end_qpc': 170,
+                'stop_requested': True, 'all_threads_joined': False, 'cleanup_required': True,
+                'native_handles_created': 32, 'native_handles_closed': 31,
+                'event_handles_created': 16, 'event_handles_closed': 16,
+                'thread_handles_created': 16, 'thread_handles_closed': 15,
+                'errors': ['NATIVE_NOISE_THREAD_JOIN_FAILED', 'PRIVATE_ERROR /private/path'],
+                'secret': 'PRIVATE_PAYLOAD', 'workers': [{'tid': 1000 + i, 'handoffs': i + 1,
+                    'created_100ns': str(134000000000000001 + i), 'begin_qpc': 90, 'end_qpc': 160,
+                    'private': 'PRIVATE_WORKER_PAYLOAD'} for i in range(16)]}
+            (noise.output / 'oracle.json').write_text(json.dumps(oracle), encoding='utf-8')
+            (root / 'noise.log').write_bytes(b'PRIVATE_LOG_PAYLOAD')
+            with patch('tools.qa_decoder_budget_diagnostic.kernel_api', return_value=object()), \
+                    patch('tools.qa_decoder_budget_diagnostic.counter', side_effect=[10000000, 150, 151]):
+                with self.assertRaisesRegex(AssertionError, '^NOISE_EXIT_NOT_CONFIRMED$'):
+                    noise.stop()
+            self.assertEqual(calls, [('wait', 8, True)])
+            observation = noise.stop_observation
+            self.assertEqual(observation['child_exit_code'], 17)
+            self.assertEqual(observation['child_exit_before_stop_request'], 17)
+            self.assertTrue(observation['parent_stop_requested'])
+            self.assertEqual(observation['parent_stop_request_begin_qpc'], 150)
+            self.assertEqual(observation['parent_stop_request_end_qpc'], 151)
+            self.assertEqual(observation['child_ready'], {'begin_qpc': 100, 'qpc_frequency_hz': 10000000})
+            projected = observation['child_oracle']
+            for name in ('status', 'stop_requested', 'all_threads_joined', 'cleanup_required',
+                         'native_handles_created', 'native_handles_closed', 'event_handles_closed',
+                         'thread_handles_closed', 'begin_qpc', 'end_qpc'):
+                self.assertEqual(projected[name], oracle[name])
+            self.assertEqual(projected['workers'][15]['handoffs'], 16)
+            self.assertEqual(projected['errors'], ['NATIVE_NOISE_THREAD_JOIN_FAILED', 'NOT_ESTABLISHED'])
+            self.assertIn('UNVALIDATED', projected['acceptance_scope'])
+            self.assertEqual(observation['child_log']['sha256'], hashlib.sha256(b'PRIVATE_LOG_PAYLOAD').hexdigest())
+            for private in ('PRIVATE_', str(root)):
+                self.assertNotIn(private, json.dumps(observation))
+            saved = json.dumps(observation, sort_keys=True)
+            self.assertEqual(noise.cleanup['status'], 'NOT_ESTABLISHED')
+            noise.abort()
+            self.assertEqual(noise.cleanup['status'], 'FORCED_OR_UNCONFIRMED_NOT_ACCEPTED')
+            self.assertTrue(noise.cleanup['cleanup_required'])
+            self.assertEqual(json.dumps(noise.stop_observation, sort_keys=True), saved)
+            self.assertEqual(calls[-1], ('close', {'kill': True}))
+
+    def test_missing_or_malformed_child_oracle_never_masks_nonzero_exit(self):
+        for content in (None, '{private malformed JSON', json.dumps(['PRIVATE_PAYLOAD'])):
+            with self.subTest(content=content), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp); noise, calls = self.noise(root, 23)
+                if content is not None:
+                    (noise.output / 'oracle.json').write_text(content, encoding='utf-8')
+                with patch('tools.qa_decoder_budget_diagnostic.kernel_api', side_effect=RuntimeError('/private/clock')):
+                    with self.assertRaisesRegex(AssertionError, '^NOISE_EXIT_NOT_CONFIRMED$'):
+                        noise.stop()
+                observation = noise.stop_observation
+                self.assertEqual(observation['child_exit_code'], 23)
+                self.assertEqual(observation['child_oracle'], 'NOT_ESTABLISHED')
+                self.assertIn('oracle_read_error', observation)
+                self.assertEqual(observation['parent_clock_error'], 'REDACTED_UNSTRUCTURED')
+                self.assertNotIn('/private', json.dumps(observation))
+                self.assertNotIn('PRIVATE_PAYLOAD', json.dumps(observation))
+                self.assertEqual(calls, [('wait', 8, True)])
 
 
 class CheckedOwnerCloseProtocolTests(unittest.TestCase):
