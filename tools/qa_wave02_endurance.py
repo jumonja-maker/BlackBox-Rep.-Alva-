@@ -99,6 +99,108 @@ def actual_progress(folder):
             'span_seconds': (last - first) / 1000 if count else 0.}
 
 
+def artifactless_profile_facts(result):
+    """Project finite observed facts, never child paths or arbitrary payloads.
+
+    This is evidence transport, not another acceptance oracle. The parent's
+    original source/hash/span/Job checks and the child's SQL/native assertions
+    remain mandatory. Missing or ill-typed facts stay explicitly unavailable.
+    """
+    unavailable = []
+
+    def mapping(value):
+        return value if type(value) is dict else {}
+
+    def integer(value, field, maximum=2**63 - 1):
+        if type(value) is int and 0 <= value <= maximum:
+            return value
+        unavailable.append(field)
+        return None
+
+    def number(value, field):
+        if type(value) in (int, float) and 0 <= value <= 2**63 - 1 and math.isfinite(value):
+            return value
+        unavailable.append(field)
+        return None
+
+    def boolean(value, field):
+        if type(value) is bool:
+            return value
+        unavailable.append(field)
+        return None
+
+    def enum(value, choices, field):
+        if type(value) is str and value in choices:
+            return value
+        unavailable.append(field)
+        return 'NOT_ESTABLISHED'
+
+    result = mapping(result)
+    saved = mapping(result.get('saved'))
+    finalization = mapping(saved.get('database_finalization'))
+    detail = mapping(saved.get('detail_threads'))
+    recorder = mapping(result.get('recorder_cleanup'))
+    stop = mapping(result.get('stop'))
+    target = mapping(result.get('target_cleanup'))
+    oracle = mapping(target.get('oracle'))
+    facts = {'schema': 'blackbox.wave02.endurance-artifactless-facts/1',
+        'scope': 'OBSERVED_READONLY_SQL_AND_HELD_RESOURCE_FACTS; NOT_NEW_ACCEPTANCE_OR_CAUSAL_PROOF',
+        'database_finalization': {
+            **{key: integer(finalization.get(key), 'database_finalization.' + key, 4)
+               for key in ('database_count', 'integrity_ok_databases', 'nonempty_wal_files')},
+            'schema1_exit_code': enum(finalization.get('schema1_exit_code'), ('COMPLETED',), 'schema1_exit_code'),
+            'schema2_status': enum(finalization.get('schema2_status'), ('CLOSED',), 'schema2_status'),
+            'schema2_exit_code': enum(finalization.get('schema2_exit_code'), ('COMPLETED',), 'schema2_exit_code'),
+            'schema2_writer_dropped_commands': integer(finalization.get('schema2_writer_dropped_commands'),
+                                                       'schema2_writer_dropped_commands'),
+            'research_state': enum(finalization.get('research_state'), ('COMPLETED',), 'research_state'),
+            'recording_resources_closed': boolean(finalization.get('recording_resources_closed'),
+                                                  'recording_resources_closed'),
+            'finalization_error_count': integer(finalization.get('finalization_error_count'),
+                                                 'finalization_error_count', 256)},
+        'saved_measurements': {
+            **{key: integer(saved.get(key), key, 10_000_000) for key in
+               ('schema2_standard_samples', 'schema2_detail_samples', 'incident_count',
+                'burst_starts', 'burst_ttl_stops', 'manual_incident_refs')},
+            **{key: number(saved.get(key), key) for key in
+               ('recorded_peak_cpu_one_cpu_percent', 'recorded_rss_range_bytes', 'recorded_write_bytes_delta')}},
+        'detail_threads': {key: integer(detail.get(key), 'detail_threads.' + key, 256)
+                           for key in ('owner_count', 'live_thread_count', 'error_count')},
+        'recorder_cleanup': {
+            **{key: boolean(recorder.get(key), 'recorder_cleanup.' + key) for key in
+               ('recording_resources_closed', 'optional_jobs_cleanup_required',
+                'writer_thread_alive', 'journal_thread_alive')},
+            'pending_owned_process_owners': integer(recorder.get('pending_owned_process_owners'),
+                                                     'pending_owned_process_owners', 256)},
+        'stop': {'state': enum(stop.get('state'), ('COMPLETED',), 'stop.state'),
+                 'base_recording_state': enum(stop.get('base_recording_state'), ('COMPLETED',), 'stop.base_recording_state'),
+                 'cleanup_required': boolean(stop.get('cleanup_required'), 'stop.cleanup_required'),
+                 'error_count': integer(len(stop['errors']) if type(stop.get('errors')) is list else None,
+                                        'stop.error_count', 256)},
+        'target_cleanup': {'status': enum(target.get('status'), ('COMPLETED',), 'target_cleanup.status'),
+                           'exit_code': integer(target.get('exit_code'), 'target_cleanup.exit_code', 2**32 - 1),
+                           'native_oracle_cleanup_complete': boolean(oracle.get('cleanup_complete'),
+                                                                      'target_cleanup.native_oracle_cleanup_complete')}}
+    trigger = saved.get('trigger_coverage')
+    if result.get('profile') == 'STANDARD' and trigger is None:
+        facts['trigger_coverage'] = {'status': 'NOT_REQUESTED_FOR_STANDARD'}
+    else:
+        trigger = mapping(trigger)
+        codes = trigger.get('observed_codes')
+        allowed = {'MANUAL_PROBLEM', 'CPU_SUSTAINED', 'RSS_GROWTH', 'IO_BURST'}
+        if (type(codes) is not list or len(codes) > 4 or
+                any(type(value) is not str or value not in allowed for value in codes) or
+                len(set(codes)) != len(codes)):
+            unavailable.append('trigger_coverage.observed_codes')
+            codes = None
+        facts['trigger_coverage'] = {'observed_codes': codes,
+            'incomplete_prehistory_count': integer(trigger.get('incomplete_prehistory_count'),
+                                                   'trigger_coverage.incomplete_prehistory_count', 256)}
+    facts['status'] = 'OBSERVED_FIXED_FACTS' if not unavailable else 'NOT_ESTABLISHED'
+    facts['unavailable_fields'] = unavailable
+    return facts
+
+
 def policy(profile):
     return {'profile': profile, 'windows_enabled': False,
         'adaptive_throttle': True, 'incident_enabled': profile == 'INCIDENT_BURST',
@@ -227,14 +329,19 @@ def verify_saved(folder, profile, requested, expected_identity, executable_hash,
     require(all(not (p.with_name(p.name + '-wal')).exists() or
                 (p.with_name(p.name + '-wal')).stat().st_size == 0 for p in paths),
             'WAVE02_ENDURANCE_FINAL_WAL_NOT_CLOSED')
+    nonempty_wals = sum((p.with_name(p.name + '-wal')).exists() and
+                       (p.with_name(p.name + '-wal')).stat().st_size != 0 for p in paths)
     hashes = {p.name: file_hash(p) for p in paths}
+    integrity_ok_databases = 0
     for path in paths:
         with closing(open_readonly(path)) as db:
             require(db.execute('PRAGMA integrity_check').fetchone() == ('ok',),
                     'WAVE02_ENDURANCE_DATABASE_INTEGRITY_FAILED_' + path.name)
+            integrity_ok_databases += 1
     progress = actual_progress(folder)
     with closing(open_readonly(folder / 'session.sqlite3')) as db:
-        require(db.execute('SELECT exit_code FROM metadata').fetchall() == [('COMPLETED',)],
+        base_completion = db.execute('SELECT exit_code FROM metadata').fetchall()
+        require(base_completion == [('COMPLETED',)],
                 'WAVE02_ENDURANCE_BASE_NOT_COMPLETED')
         maximum_gap, nonpositive = db.execute('''SELECT max(gap),
             coalesce(sum(CASE WHEN gap<=0 THEN 1 ELSE 0 END),0) FROM
@@ -260,8 +367,8 @@ def verify_saved(folder, profile, requested, expected_identity, executable_hash,
     require(health['recording_resources_closed'] is True and not health['finalization_errors'] and
             metadata['state'] == 'COMPLETED', 'WAVE02_ENDURANCE_SAVED_CLEANUP_UNCONFIRMED')
     with closing(open_readonly(folder / 'session-v2.sqlite3')) as db:
-        require(db.execute('SELECT status,exit_code,writer_dropped_commands FROM sessions').fetchall()
-                == [('CLOSED', 'COMPLETED', 0)], 'WAVE02_ENDURANCE_SCHEMA2_FINALIZATION_FAILED')
+        normalized_completion = db.execute('SELECT status,exit_code,writer_dropped_commands FROM sessions').fetchall()
+        require(normalized_completion == [('CLOSED', 'COMPLETED', 0)], 'WAVE02_ENDURANCE_SCHEMA2_FINALIZATION_FAILED')
         base_count = db.execute("SELECT count(*) FROM samples WHERE series='STANDARD'").fetchone()[0]
         detail_count = db.execute("SELECT count(*) FROM samples WHERE series='DETAILED'").fetchone()[0]
         require(base_count == progress['count'], 'WAVE02_ENDURANCE_SCHEMA2_BASE_COUNT_MISMATCH')
@@ -278,7 +385,11 @@ def verify_saved(folder, profile, requested, expected_identity, executable_hash,
         manual_refs = db.execute("SELECT count(*) FROM evidence WHERE kind='user.problem_incident_request'").fetchone()[0]
     require(all(not q.thread.is_alive() and q.error is None for q in captures),
             'WAVE02_ENDURANCE_DETAIL_THREAD_OR_ERROR_NOT_CLOSED')
+    detail_threads = {'owner_count': len(captures),
+                      'live_thread_count': sum(q.thread.is_alive() for q in captures),
+                      'error_count': sum(q.error is not None for q in captures)}
     coverage = health.get('incident_coverage')
+    trigger_coverage = None
     if profile == 'STANDARD':
         require(not rows and not detail_count and not captures and burst_starts == burst_stops == 0 and
                 coverage is None, 'WAVE02_ENDURANCE_STANDARD_RECORDED_OPTIN_CAPTURE')
@@ -295,11 +406,12 @@ def verify_saved(folder, profile, requested, expected_identity, executable_hash,
         incomplete_count = sum(value.get('capture_coverage', {}).get('prehistory_complete') is False
             and value['capture_coverage'].get('coverage_state') == 'INCOMPLETE'
             for _, value in incidents)
-        print('WAVE02_ENDURANCE_TRIGGER_COVERAGE ' + json.dumps({
+        trigger_coverage = {
             'observed_codes': sorted(required_codes & codes),
             'missing_codes': sorted(required_codes - codes),
             'incomplete_prehistory_count': incomplete_count,
-            'incomplete_prehistory_observed': bool(incomplete_count)}, sort_keys=True), flush=True)
+            'incomplete_prehistory_observed': bool(incomplete_count)}
+        print('WAVE02_ENDURANCE_TRIGGER_COVERAGE ' + json.dumps(trigger_coverage, sort_keys=True), flush=True)
         require({'MANUAL_PROBLEM', 'CPU_SUSTAINED', 'RSS_GROWTH', 'IO_BURST'} <= codes and
                 any(value.get('capture_coverage', {}).get('prehistory_complete') is False
                     and value['capture_coverage'].get('coverage_state') == 'INCOMPLETE'
@@ -307,6 +419,13 @@ def verify_saved(folder, profile, requested, expected_identity, executable_hash,
     require(all(file_hash(p) == hashes[p.name] for p in paths),
             'WAVE02_ENDURANCE_READONLY_VERIFICATION_CHANGED_SOURCE')
     return {'sampling_coverage': measured, 'database_sha256': hashes,
+        'database_finalization': {'database_count': len(paths), 'integrity_ok_databases': integrity_ok_databases,
+            'nonempty_wal_files': nonempty_wals, 'schema1_exit_code': base_completion[0][0],
+            'schema2_status': normalized_completion[0][0], 'schema2_exit_code': normalized_completion[0][1],
+            'schema2_writer_dropped_commands': normalized_completion[0][2], 'research_state': metadata['state'],
+            'recording_resources_closed': health['recording_resources_closed'],
+            'finalization_error_count': len(health['finalization_errors'])},
+        'detail_threads': detail_threads, 'trigger_coverage': trigger_coverage,
         'schema2_standard_samples': base_count, 'schema2_detail_samples': detail_count,
         'incident_count': len(incidents), 'burst_starts': burst_starts, 'burst_ttl_stops': burst_stops,
         'manual_incident_refs': manual_refs, 'coverage': coverage,
@@ -465,6 +584,11 @@ def run_child(args):
                 not OwnedProcess.pending_cleanup() and not writer.thread.is_alive() and
                 (journal is None or not journal._worker.is_alive()),
                 'WAVE02_ENDURANCE_RECORDER_CLEANUP_UNCONFIRMED')
+        proof['recorder_cleanup'] = {'recording_resources_closed': session._recording_resources_closed(),
+            'optional_jobs_cleanup_required': bool(session.jobs.health().get('cleanup_required')),
+            'pending_owned_process_owners': len(OwnedProcess.pending_cleanup()),
+            'writer_thread_alive': writer.thread.is_alive(),
+            'journal_thread_alive': bool(journal is not None and journal._worker.is_alive())}
         proof['saved'] = verify_saved(folder, args.profile, args.duration_seconds,
             expected_identity, proof['executable_sha256'], captures)
         cpu_end = me.cpu_times()
@@ -581,7 +705,8 @@ def run_parent(args):
                         'periodic_native_bursts': result['periodic_native_bursts'],
                         'manual_markers': result['manual_markers'],
                         'burst_ttl_stops': result['saved']['burst_ttl_stops'],
-                        'coverage': result['saved']['coverage'], 'owned_job_cleanup': owner.cleanup_evidence}
+                        'coverage': result['saved']['coverage'], 'owned_job_cleanup': owner.cleanup_evidence,
+                        'artifactless_facts': artifactless_profile_facts(result)}
                     watch['complete'] = True
                     continue
                 if now >= next_check:
