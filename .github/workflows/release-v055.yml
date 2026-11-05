@@ -99,7 +99,7 @@ jobs:
             Write-Host "THIRD_PARTY_DECODER_QA_TRIAL_COMPLETE $trial/3"
           }
       - name: Controlled Python budget negatives and native Win32 A B acceptance
-        timeout-minutes: 6
+        timeout-minutes: 8
         run: python tools/qa_decoder_budget_diagnostic.py --helper decoder/BLACK.BOX-Decoder.exe --output decoder-budget-diagnostic --source-sha "${{ github.event.workflow_run.head_sha }}"
       - name: Build real owned R10 native fixtures for one-UAC release acceptance
         run: python tools/qa_r10_fixture.py --output r10-probe-build --source-sha "${{ github.event.workflow_run.head_sha }}"

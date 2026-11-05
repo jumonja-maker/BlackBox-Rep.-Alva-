@@ -221,7 +221,7 @@ jobs:
             Write-Host "THIRD_PARTY_DECODER_QA_TRIAL_COMPLETE $trial/3"
           }
       - name: Controlled Python budget negatives and native Win32 A B acceptance
-        timeout-minutes: 6
+        timeout-minutes: 8
         run: python tools/qa_decoder_budget_diagnostic.py --helper decoder/BLACK.BOX-Decoder.exe --output decoder-budget-diagnostic --source-sha "${{ github.event.pull_request.head.sha || github.sha }}"
       - name: Generate original retro Windows icon
         run: python tools/generate_icon.py

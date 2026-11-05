@@ -20,9 +20,10 @@
 
 #define PAIRS 8
 #define WORKERS (2 * PAIRS)
+#define TTL_SECONDS 90
 #define PATH_CAP 32768
 #define JSON_CAP 32768
-#define MAX_PROGRESS 281
+#define MAX_PROGRESS 361
 
 typedef struct Worker {
     HANDLE mine, other, thread;
@@ -148,9 +149,11 @@ static void append(const char *format, ...) {
 static void common(const char *schema) {
     json_used = 0;
     append("{\"schema\":\"%s\",\"implementation\":\"NATIVE_WIN32\","
-           "\"expected_native_handles\":32,\"pid\":%lu,\"created_100ns\":\"%llu\","
+           "\"expected_native_handles\":32,\"ttl_seconds\":%u,\"progress_limit\":%u,"
+           "\"pid\":%lu,\"created_100ns\":\"%llu\","
            "\"source_sha256\":\"%s\",\"executable_sha256\":\"%s\","
-           "\"qpc_frequency_hz\":%lld", schema, (unsigned long)process_id, process_created,
+           "\"qpc_frequency_hz\":%lld", schema, (unsigned)TTL_SECONDS, (unsigned)MAX_PROGRESS,
+           (unsigned long)process_id, process_created,
            NOISE_SOURCE_SHA256, executable_sha256, frequency);
 }
 
@@ -275,8 +278,8 @@ static int run(void) {
     append(",\"status\":\"READY\",\"pairs\":8,\"begin_qpc\":%lld", begin_qpc);
     worker_json(0); append("}\n");
     if (!receipt(L"ready.json")) { fail("NATIVE_NOISE_READY_WRITE_FAILED"); goto cleanup; }
-    /* Exactly the fixed 70-second workload TTL starts after READY publication. */
-    deadline = GetTickCount64() + 70000;
+    /* Exactly the fixed 90-second workload TTL starts after READY publication. */
+    deadline = GetTickCount64() + TTL_SECONDS * 1000ULL;
     next_progress = GetTickCount64();
     InterlockedExchange(&released, 1);
     while (!error_count && GetTickCount64() < deadline) {

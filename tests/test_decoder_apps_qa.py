@@ -24,7 +24,7 @@ from tools.qa_decoder_budget_diagnostic import (PAIRS, parse_args, validate_nois
     SEVENZIP_CAPABILITIES, validate_comparison, validate_original_source, validate_positive,
     validate_progress, validate_rejection, validate_workload_activity, validate_case_contract,
     validate_output_observation, seal_and_remove_large_evidence, collect_bounded_case_facts,
-    validate_workload_budget)
+    validate_workload_budget, noise_policy, validate_noise_policy, validate_native_timing, workload_activity)
 from tools.qa_decoder_budget_diagnostic import native_attribution
 from tools.qa_schedule_capture import profile_definition
 from tools.qa_decoder_noise_fixture import (_close_owner_with_checked_handles,
@@ -266,12 +266,119 @@ class WorkloadFailureObservationProtocolTests(unittest.TestCase):
             self.assertFalse(output.exists())
 
 
+class ProducerNoisePolicyProtocolTests(unittest.TestCase):
+    """Portable receipt/clock faults only; native execution remains a CI gate."""
+    def ready(self, implementation):
+        native = implementation == 'NATIVE_WIN32'
+        return {'schema': 'blackbox.scheduler-noise/1', 'status': 'READY', 'pid': 123,
+            'created_100ns': '1000', 'source_sha256': 'a' * 64, 'executable_sha256': 'b' * 64,
+            'implementation': implementation, 'expected_native_handles': 32 if native else 16,
+            'ttl_seconds': 90 if native else 70, 'progress_limit': 361 if native else 281,
+            'begin_qpc': 0, 'qpc_frequency_hz': 1000,
+            'workers': [{'tid': 100 + i, 'created_100ns': str(2000 + i)} for i in range(16)]}
+
+    def progress(self, ready, sequence):
+        return {**{key: ready[key] for key in ('pid', 'created_100ns', 'source_sha256', 'executable_sha256',
+            'implementation', 'expected_native_handles', 'ttl_seconds', 'progress_limit', 'qpc_frequency_hz')},
+            'schema': 'blackbox.scheduler-noise-progress/1', 'sequence': sequence,
+            'sample_begin_qpc': sequence * 10, 'sample_end_qpc': sequence * 10 + 1, 'qpc': sequence * 10 + 1,
+            'workers': [{'tid': 100 + i, 'handoffs': sequence} for i in range(16)], 'total_handoffs': 16 * sequence}
+
+    def test_native_extended_receipts_work_but_python_and_legacy_limits_stay_strict(self):
+        ready = self.ready('NATIVE_WIN32'); progress = self.progress(ready, 300)
+        validate_progress(progress, ready, implementation='NATIVE_WIN32')
+        with self.assertRaisesRegex(AssertionError, 'PROGRESS_IDENTITY_OR_COUNTS'):
+            validate_progress(progress, ready)  # Legacy utility calls retain the 281 ceiling.
+        for implementation, sequence in (('NATIVE_WIN32', 362), ('PYTHON_CTYPES_WIN32', 282)):
+            source = self.ready(implementation)
+            with self.subTest(implementation=implementation), self.assertRaisesRegex(AssertionError, 'PROGRESS_IDENTITY_OR_COUNTS'):
+                validate_progress(self.progress(source, sequence), source, implementation=implementation)
+        for change in ({'ttl_seconds': 70}, {'ttl_seconds': 90.0}, {'ttl_seconds': True},
+                       {'progress_limit': 281}, {'progress_limit': 361.0}, {'implementation': 'PYTHON_CTYPES_WIN32'}):
+            with self.subTest(change=change), self.assertRaisesRegex(AssertionError, 'ACTUAL_POLICY_MISMATCH'):
+                validate_progress({**progress, **change}, ready, implementation='NATIVE_WIN32')
+        oracle = {**ControlledBudgetProtocolTests().oracle(), 'implementation': 'NATIVE_WIN32',
+                  'ttl_seconds': 90, 'progress_limit': 361, 'native_handles_created': 32, 'native_handles_closed': 32}
+        validate_noise_oracle(oracle, 123, '1000', expected_handles=32, implementation='NATIVE_WIN32')
+        for change in ({'ttl_seconds': 70}, {'progress_limit': 361.0}):
+            with self.subTest(oracle=change), self.assertRaisesRegex(AssertionError, 'ACTUAL_POLICY_MISMATCH'):
+                validate_noise_oracle({**oracle, **change}, 123, '1000', expected_handles=32, implementation='NATIVE_WIN32')
+
+    def test_workload_activity_consumes_native_over_281_files_without_relaxing_python(self):
+        paths = [Path(f'progress-{i:04d}.json') for i in range(1, 301)]
+        for implementation in ('NATIVE_WIN32', 'PYTHON_CTYPES_WIN32'):
+            with self.subTest(implementation=implementation):
+                ready = self.ready(implementation)
+                noise = NoiseOwner(SimpleNamespace(glob=lambda pattern: paths), {
+                    'implementation': implementation, 'expected_native_handles': ready['expected_native_handles']})
+                noise.ready = ready
+                def read(path):
+                    return self.progress(ready, int(path.stem.split('-')[1]))
+                with patch('tools.qa_decoder_budget_diagnostic.read_json', side_effect=read) as reader, \
+                        patch('tools.qa_decoder_apps.file_hash', return_value='c' * 64):
+                    if implementation == 'NATIVE_WIN32':
+                        result = workload_activity(noise, {'begin_qpc': 5, 'end_qpc': 3010, 'qpc_frequency_hz': 1000})
+                        self.assertEqual(result['threads_with_positive_handoff_delta'], 16)
+                        self.assertEqual(result['handoffs_between_receipts'], 16 * 299)
+                        self.assertEqual(reader.call_count, 300)
+                    else:
+                        with self.assertRaisesRegex(AssertionError, 'PROGRESS_FILE_BUDGET'):
+                            workload_activity(noise, {'begin_qpc': 5, 'end_qpc': 3010, 'qpc_frequency_hz': 1000})
+                        reader.assert_not_called()
+
+    def test_native_prelude_accepts_extended_progress_and_failure_facts_survive_abort(self):
+        paths = [Path(f'progress-{i:04d}.json') for i in range(1, 301)]
+        for implementation in ('NATIVE_WIN32', 'PYTHON_CTYPES_WIN32'):
+            with self.subTest(implementation=implementation):
+                ready = self.ready(implementation)
+                noise = NoiseOwner(SimpleNamespace(glob=lambda pattern: paths), {
+                    'implementation': implementation, 'expected_native_handles': ready['expected_native_handles']})
+                noise.ready = ready
+                noise.owner = SimpleNamespace(process=SimpleNamespace(poll=lambda: None), close=lambda **kwargs: None)
+                with patch('tools.qa_decoder_budget_diagnostic.time.monotonic', return_value=0.), \
+                        patch('tools.qa_decoder_budget_diagnostic.read_json', return_value=self.progress(ready, 300)), \
+                        patch('tools.qa_decoder_apps.file_hash', return_value='c' * 64), \
+                        patch('pathlib.Path.stat', return_value=SimpleNamespace(st_size=123)):
+                    if implementation == 'NATIVE_WIN32':
+                        noise.await_handoffs(4800, 100)
+                        self.assertEqual(noise.prelude['status'], 'COMPLETED')
+                        self.assertEqual(noise.prelude['sequence'], 300)
+                        self.assertEqual(noise.prelude['observed_handoffs'], 4800)
+                    else:
+                        with self.assertRaisesRegex(AssertionError, 'PROGRESS_FILE_BUDGET'):
+                            noise.await_handoffs(4800, 100)
+                        self.assertEqual(noise.prelude['status'], 'FAILED')
+                saved = dict(noise.prelude)
+                noise.owner.process.poll = lambda: 1
+                noise.abort()
+                self.assertEqual(noise.prelude, saved)
+                self.assertEqual(noise.cleanup['status'], 'FORCED_OR_UNCONFIRMED_NOT_ACCEPTED')
+
+    def test_native_qos_accepts_exact_boundaries_and_rejects_one_tick_or_malformed_clock(self):
+        ready = {'begin_qpc': 100, 'qpc_frequency_hz': 1000}
+        clock = {'begin_qpc': 20100, 'end_qpc': 85100, 'qpc_frequency_hz': 1000}
+        facts = validate_native_timing(ready, clock, complete=True)
+        self.assertEqual((facts['ready_to_work_begin_seconds'], facts['whole_workload_seconds']), (20, 65))
+        self.assertEqual(facts['status'], 'WITHIN_LIMITS')
+        for source, value in ((ready, {**clock, 'begin_qpc': 20101}),
+                              (ready, {**clock, 'end_qpc': 85101}),
+                              ({**ready, 'qpc_frequency_hz': 1000.0}, clock),
+                              (ready, {**clock, 'qpc_frequency_hz': True}),
+                              (ready, {**clock, 'end_qpc': 2**63}),
+                              (ready, {**clock, 'qpc_frequency_hz': 2**64})):
+            rejected = {}
+            with self.subTest(ready=source, clock=value), self.assertRaisesRegex(AssertionError, 'NATIVE_QOS_'):
+                validate_native_timing(source, value, complete=True, facts=rejected)
+            self.assertNotEqual(rejected['status'], 'WITHIN_LIMITS')
+
+
 class BudgetCaptureOrderProtocolTests(unittest.TestCase):
     """Fault-injected protocol ordering only, not WPR or native evidence."""
     def capture(self, *, noise_error=None, stop_error=None, cancel_error=None):
         events = []; clock = {'begin_qpc': 100}; captures = []; lifecycle = {'secondary_errors': []}
         cleanup = {'status': 'RECORDING', 'cleanup_required': True}
-        noise = SimpleNamespace(owner=object(), cleanup={'status': 'NOT_ESTABLISHED'})
+        noise = SimpleNamespace(owner=object(), cleanup={'status': 'NOT_ESTABLISHED'},
+            producer={'implementation': 'PYTHON_CTYPES_WIN32'}, policy=noise_policy('PYTHON_CTYPES_WIN32'))
         def stop_noise():
             events.append(('noise_stop', clock.get('end_qpc')))
             if noise_error is not None:
@@ -387,6 +494,31 @@ class BudgetCaptureOrderProtocolTests(unittest.TestCase):
             capture.cancel()
         self.assertIs(repeated.exception, failure)
         self.assertEqual(events, [('noise_stop', None), ('wpr_cancel',)])
+
+    def test_native_qos_rejection_preserves_first_error_and_still_stops_noise_and_capture(self):
+        for begin, end, reason, wpr_error in ((20100, 85101, 'NATIVE_QOS_WORKLOAD_EXCEEDED', None),
+                (20101, 85101, 'NATIVE_QOS_READY_TO_WORK_EXCEEDED', RuntimeError('WPR_STOP_FAILED'))):
+            with self.subTest(reason=reason):
+                capture, events, _, _ = self.capture(stop_error=wpr_error)
+                capture.noise.producer = {'implementation': 'NATIVE_WIN32'}
+                capture.noise.policy = noise_policy('NATIVE_WIN32')
+                capture.noise.ready = {'begin_qpc': 100, 'qpc_frequency_hz': 1000}
+                capture.clock.update(begin_qpc=begin, qpc_frequency_hz=1000)
+                capture.end_counter = lambda: end
+                with self.assertRaisesRegex(AssertionError, '^' + reason + '$') as caught:
+                    try:
+                        capture.stop()
+                    finally:
+                        if capture.active:
+                            capture.cancel()
+                self.assertIs(capture.first_error, caught.exception)
+                self.assertEqual(capture.lifecycle['primary_error']['phase'], 'NATIVE_TIMING')
+                self.assertEqual(capture.lifecycle['native_timing']['status'], 'REJECTED')
+                self.assertEqual(events[:2], [('noise_stop', end), ('wpr_stop', end)])
+                self.assertEqual(sum(item[0] == 'noise_stop' for item in events), 1)
+                self.assertEqual(capture.noise.cleanup['status'], 'COMPLETED')
+                self.assertFalse(capture.cleanup['cleanup_required'])
+                self.assertEqual(capture.cleanup['status'], 'CANCELLED' if wpr_error else 'STOPPED')
 
     def scheduler_capture(self, *, noise_error=None, final_code=None):
         capture, events, _, _ = self.capture(noise_error=noise_error)
@@ -963,6 +1095,11 @@ class ControlledBudgetProtocolTests(unittest.TestCase):
             'actual_native_module_encoding': 'PER_EVENT_MODULES_V1',
             'requested_workload_policy': 'CONTROLLED_NATIVE_60', 'requested_process_timeout_seconds': 60,
             'workload_budget': budget,
+            'requested_noise_policy': {'implementation': 'NATIVE_WIN32', 'ttl_seconds': 90,
+                                       'progress_limit': 361, 'owner_seconds': 105},
+            'noise_policy_receipts': {phase: {'implementation': 'NATIVE_WIN32', 'ttl_seconds': 90, 'progress_limit': 361}
+                                      for phase in ('ready', 'oracle')},
+            'native_timing': {'ready_qpc': 0, 'work_begin_qpc': 10000, 'work_end_qpc': 74000, 'qpc_frequency_hz': 1000},
             'noise_producer': {'implementation': 'NATIVE_WIN32', 'source_sha256': '3' * 64,
                                'executable_sha256': '4' * 64, 'expected_native_handles': 32},
             'source_identity': {'actual_source_sha': 'e' * 40, 'source_tree_sha': 'f' * 40},
@@ -979,6 +1116,13 @@ class ControlledBudgetProtocolTests(unittest.TestCase):
                        {'noise_workload_coverage': {'all_16_threads_bracket': False}},
                        {'prelude': {**second['prelude'], 'wait_seconds': 16}},
                        {'requested_workload_policy': 'ORDINARY_30'}, {'requested_process_timeout_seconds': 30},
+                       {'requested_noise_policy': {**common['requested_noise_policy'], 'ttl_seconds': 90.0}},
+                       {'requested_noise_policy': {**common['requested_noise_policy'], 'owner_seconds': 105.0}},
+                       {'requested_noise_policy': {**common['requested_noise_policy'], 'progress_limit': 361.0}},
+                       {'requested_noise_policy': {**common['requested_noise_policy'], 'extra': 'PRIVATE_PATH'}},
+                       {'noise_policy_receipts': {**common['noise_policy_receipts'],
+                            'oracle': {**common['noise_policy_receipts']['oracle'], 'progress_limit': 361.0}}},
+                       {'native_timing': {**common['native_timing'], 'work_end_qpc': 76000}},
                        {'workload_budget': {**budget, 'workloads': [budget['workloads'][0],
                             {**budget['workloads'][1], 'configured_timeout_seconds': 30}, *budget['workloads'][2:]]}}):
             with self.subTest(change=change), self.assertRaises(AssertionError):

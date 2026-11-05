@@ -42,6 +42,32 @@ SEVENZIP_CAPABILITIES = frozenset({
 })
 
 
+def noise_policy(implementation):
+    apps.require(type(implementation) is str and implementation in ('PYTHON_CTYPES_WIN32', 'NATIVE_WIN32'),
+                 'NOISE_POLICY_IMPLEMENTATION_UNKNOWN')
+    ttl, progress, owner = (70, 281, 85) if implementation == 'PYTHON_CTYPES_WIN32' else (90, 361, 105)
+    return {'implementation': implementation, 'ttl_seconds': ttl, 'progress_limit': progress,
+            'owner_seconds': owner}
+
+
+def validate_noise_policy(receipt, implementation):
+    policy = noise_policy(implementation)
+    apps.require(type(receipt) is dict and receipt.get('implementation') == implementation and
+        all(type(receipt.get(key)) is int and receipt[key] == policy[key]
+            for key in ('ttl_seconds', 'progress_limit')), 'NOISE_ACTUAL_POLICY_MISMATCH')
+    return {key: receipt[key] for key in ('implementation', 'ttl_seconds', 'progress_limit')}
+
+
+def validate_requested_noise_policy(record, implementation):
+    expected = noise_policy(implementation)
+    apps.require(type(record) is dict and set(record) == set(expected) and
+        type(record.get('implementation')) is str and record['implementation'] == implementation and
+        all(type(record.get(key)) is int and record[key] == expected[key]
+            for key in ('ttl_seconds', 'progress_limit', 'owner_seconds')),
+        'CONTROLLED_PAIR_NOISE_POLICY_MISMATCH')
+    return dict(record)
+
+
 def read_json(path, limit=32768):
     apps.require(0 < path.stat().st_size <= limit, 'DIAGNOSTIC_RECEIPT_SIZE')
     value = json.loads(path.read_text(encoding='utf-8'))
@@ -100,6 +126,7 @@ def noise_child(output):
              'qpc_frequency_hz': counter(kernel, 'QueryPerformanceFrequency'),
              'source_sha256': apps.file_hash(Path(__file__)), 'pairs': PAIRS,
              'implementation': 'PYTHON_CTYPES_WIN32', 'expected_native_handles': 2 * PAIRS,
+             'ttl_seconds': NOISE_SECONDS, 'progress_limit': MAX_PROGRESS_RECEIPTS,
              'executable_sha256': apps.file_hash(Path(sys.executable))}
 
     def worker(index, mine, other):
@@ -150,6 +177,7 @@ def noise_child(output):
                     'source_sha256': proof['source_sha256'], 'qpc_frequency_hz': proof['qpc_frequency_hz'],
                     'implementation': proof['implementation'], 'executable_sha256': proof['executable_sha256'],
                     'expected_native_handles': proof['expected_native_handles'],
+                    'ttl_seconds': proof['ttl_seconds'], 'progress_limit': proof['progress_limit'],
                     'qpc': sample_end, 'sample_begin_qpc': sample_begin, 'sample_end_qpc': sample_end,
                     'workers': counts,
                     'total_handoffs': sum(record['handoffs'] for record in counts)})
@@ -189,6 +217,8 @@ class NoiseOwner:
         apps.require(producer['implementation'] in ('PYTHON_CTYPES_WIN32', 'NATIVE_WIN32') and
             producer['expected_native_handles'] == (16 if producer['implementation'] == 'PYTHON_CTYPES_WIN32' else 32),
             'NOISE_PRODUCER_CONTRACT')
+        self.policy = noise_policy(producer['implementation'])
+        self.policy_receipts = {'ready': 'NOT_ESTABLISHED', 'oracle': 'NOT_ESTABLISHED'}
         self.watcher_stop = threading.Event(); self.watcher = None
         self.started = None; self.max_rss = 0; self.cleanup = {'status': 'NOT_ESTABLISHED'}
         self.prelude = {'target_handoffs': 0, 'wait_seconds': 0}
@@ -219,7 +249,7 @@ class NoiseOwner:
                     apps.require(self.max_rss <= MAX_NOISE_RSS, 'NOISE_RSS_BUDGET')
                     apps.require(self.output.parent.joinpath('noise.log').stat().st_size <= MAX_NOISE_LOG,
                                  'NOISE_LOG_BUDGET')
-                    apps.require(time.monotonic() - self.started <= NOISE_SECONDS + 15, 'NOISE_OWNER_DEADLINE')
+                    apps.require(time.monotonic() - self.started <= self.policy['owner_seconds'], 'NOISE_OWNER_DEADLINE')
             except BaseException:
                 self.errors.append('NOISE_WATCHDOG_FAILED')
                 # Kill only this owned Job Object; this is never successful cleanup.
@@ -236,6 +266,7 @@ class NoiseOwner:
                          'NOISE_READY_NOT_ESTABLISHED')
             time.sleep(.02)
         ready = read_json(self.output / 'ready.json'); self.ready = ready
+        self.policy_receipts['ready'] = validate_noise_policy(ready, self.producer['implementation'])
         apps.require(ready.get('status') == 'READY' and ready.get('pid') == self.owner.process.pid and
                      ready.get('created_100ns') == self.identity['creation_time_filetime_ticks'] and
                      all(ready.get(key) == self.producer[key] for key in
@@ -244,22 +275,28 @@ class NoiseOwner:
 
     def await_handoffs(self, target, whole_deadline):
         started = time.monotonic(); deadline = min(started + PRELUDE_SECONDS, whole_deadline)
+        self.prelude = {'target_handoffs': target, 'wait_seconds': 0, 'status': 'IN_PROGRESS'}
         previous = None
-        while time.monotonic() < deadline:
-            apps.require(not self.errors and self.owner.process.poll() is None, 'NOISE_PRELUDE_OWNER_FAILED')
-            paths = sorted(self.output.glob('progress-????.json'))
-            apps.require(len(paths) <= MAX_PROGRESS_RECEIPTS, 'NOISE_PROGRESS_FILE_BUDGET')
-            if paths:
-                path = paths[-1]; progress = read_json(path)
-                validate_progress(progress, self.ready, previous)
-                previous = progress
-                if progress['total_handoffs'] >= target:
-                    self.prelude = {'target_handoffs': target, 'observed_handoffs': progress['total_handoffs'],
-                        'wait_seconds': time.monotonic() - started, 'sequence': progress['sequence'],
-                        'receipt_sha256': apps.file_hash(path), 'receipt_bytes': path.stat().st_size}
-                    return
-            time.sleep(.02)
-        raise AssertionError('COMPARABLE_NOISE_PRELUDE_NOT_ESTABLISHED')
+        try:
+            while time.monotonic() < deadline:
+                apps.require(not self.errors and self.owner.process.poll() is None, 'NOISE_PRELUDE_OWNER_FAILED')
+                paths = sorted(self.output.glob('progress-????.json'))
+                apps.require(len(paths) <= self.policy['progress_limit'], 'NOISE_PROGRESS_FILE_BUDGET')
+                if paths:
+                    path = paths[-1]; progress = read_json(path)
+                    validate_progress(progress, self.ready, previous, implementation=self.producer['implementation'])
+                    previous = progress
+                    self.prelude.update(observed_handoffs=progress['total_handoffs'],
+                        wait_seconds=time.monotonic() - started, sequence=progress['sequence'],
+                        receipt_sha256=apps.file_hash(path), receipt_bytes=path.stat().st_size)
+                    if progress['total_handoffs'] >= target:
+                        self.prelude['status'] = 'COMPLETED'
+                        return
+                time.sleep(.02)
+            raise AssertionError('COMPARABLE_NOISE_PRELUDE_NOT_ESTABLISHED')
+        except BaseException:
+            self.prelude.update(status='FAILED', wait_seconds=time.monotonic() - started)
+            raise
 
     def stop(self):
         if self.cleanup.get('status') == 'COMPLETED':
@@ -296,9 +333,11 @@ class NoiseOwner:
         self.watcher_stop.set(); self.watcher.join(timeout=2)
         apps.require(not self.watcher.is_alive() and not self.errors, 'NOISE_WATCHDOG_NOT_CLOSED')
         self.oracle = read_json(self.output / 'oracle.json')
+        self.policy_receipts['oracle'] = validate_noise_policy(self.oracle, self.producer['implementation'])
         validate_noise_oracle(self.oracle, self.owner.process.pid,
                               self.identity['creation_time_filetime_ticks'],
-                              expected_handles=self.producer['expected_native_handles'])
+                              expected_handles=self.producer['expected_native_handles'],
+                              implementation=self.producer['implementation'])
         apps.require(all(self.oracle.get(key) == self.producer[key] for key in
             ('source_sha256', 'executable_sha256', 'implementation', 'expected_native_handles')) and
             {w['tid']: w['created_100ns'] for w in self.oracle['workers']} ==
@@ -361,9 +400,12 @@ def collect_noise_stop_observation(output, observation):
                      else 'NOT_ESTABLISHED',
                      'receipt_bytes': path.stat().st_size, 'receipt_sha256': apps.file_hash(path),
                      'acceptance_scope': 'UNVALIDATED_CHILD_RECEIPT_NOT_JOB_OR_HANDLE_CLOSURE_PROOF'}
+        projected['implementation'] = oracle.get('implementation') if oracle.get('implementation') in (
+            'NATIVE_WIN32', 'PYTHON_CTYPES_WIN32') else 'NOT_ESTABLISHED'
         for name in ('stop_requested', 'all_threads_joined', 'cleanup_required'):
             projected[name] = boolean(oracle.get(name))
         for name in ('pid', 'pairs', 'qpc_frequency_hz', 'begin_qpc', 'end_qpc',
+                     'ttl_seconds', 'progress_limit',
                      'native_handles_created', 'native_handles_closed', 'event_handles_created',
                      'event_handles_closed', 'thread_handles_created', 'thread_handles_closed'):
             projected[name] = integer(oracle.get(name))
@@ -396,7 +438,9 @@ def collect_noise_stop_observation(output, observation):
         observation['log_read_error'] = apps._qa_code(str(error))
 
 
-def validate_noise_oracle(oracle, pid, created, *, expected_handles=2 * PAIRS):
+def validate_noise_oracle(oracle, pid, created, *, expected_handles=2 * PAIRS, implementation=None):
+    if implementation is not None:
+        validate_noise_policy(oracle, implementation)
     workers = oracle.get('workers')
     apps.require(oracle.get('schema') == 'blackbox.scheduler-noise/1' and oracle.get('status') == 'COMPLETED'
         and oracle.get('pid') == pid and oracle.get('created_100ns') == created
@@ -423,7 +467,12 @@ def validate_rejection(meta, actual_hash, native):
         'NATIVE_NOISE_ATTRIBUTION_NOT_ESTABLISHED')
 
 
-def validate_progress(progress, ready, previous=None):
+def validate_progress(progress, ready, previous=None, *, implementation=None):
+    limit = MAX_PROGRESS_RECEIPTS
+    if implementation is not None:
+        limit = noise_policy(implementation)['progress_limit']
+        validate_noise_policy(ready, implementation)
+        validate_noise_policy(progress, implementation)
     workers = progress.get('workers')
     apps.require(progress.get('schema') == 'blackbox.scheduler-noise-progress/1' and
         progress.get('pid') == ready['pid'] and progress.get('created_100ns') == ready['created_100ns'] and
@@ -432,7 +481,7 @@ def validate_progress(progress, ready, previous=None):
             ('implementation', 'executable_sha256', 'expected_native_handles')) and
         type(progress.get('qpc_frequency_hz')) is int and progress['qpc_frequency_hz'] > 0 and
         progress['qpc_frequency_hz'] == ready['qpc_frequency_hz'] and
-        type(progress.get('sequence')) is int and 1 <= progress['sequence'] <= MAX_PROGRESS_RECEIPTS and
+        type(progress.get('sequence')) is int and 1 <= progress['sequence'] <= limit and
         type(progress.get('qpc')) is int and type(progress.get('sample_begin_qpc')) is int and
         type(progress.get('sample_end_qpc')) is int and
         0 <= ready['begin_qpc'] <= progress['sample_begin_qpc'] <= progress['sample_end_qpc'] == progress['qpc'] and
@@ -478,11 +527,11 @@ def validate_workload_activity(first, last, clock):
 
 def workload_activity(noise, clock):
     paths = sorted(noise.output.glob('progress-????.json'))
-    apps.require(len(paths) <= MAX_PROGRESS_RECEIPTS, 'NOISE_PROGRESS_FILE_BUDGET')
+    apps.require(len(paths) <= noise.policy['progress_limit'], 'NOISE_PROGRESS_FILE_BUDGET')
     selected = []; previous = None
     for path in paths:
         progress = read_json(path)
-        validate_progress(progress, noise.ready, previous); previous = progress
+        validate_progress(progress, noise.ready, previous, implementation=noise.producer['implementation']); previous = progress
         if clock['begin_qpc'] < progress['sample_begin_qpc'] <= progress['sample_end_qpc'] < clock['end_qpc']:
             selected.append((path, progress))
     apps.require(len(selected) >= 2, 'NOISE_WORKLOAD_PROGRESS_INTERVAL_MISSING')
@@ -713,6 +762,29 @@ def collect_bounded_case_facts(proof, work, helper, clock):
                 facts[name] = 'NOT_ESTABLISHED'; errors[name] = apps._qa_code(str(error))
 
 
+def validate_native_timing(ready, clock, *, complete=False, facts=None):
+    facts = {} if facts is None else facts
+    facts.update(status='NOT_ESTABLISHED', scope='NATIVE_QA_ADMISSION_QPC_NOT_HARD_OS_DEADLINE',
+        ready_to_work_begin_limit_seconds=20, whole_workload_limit_seconds=65)
+    frequency = clock.get('qpc_frequency_hz')
+    apps.require(type(frequency) is int and 0 < frequency <= 2**63 - 1 and
+        type(ready.get('qpc_frequency_hz')) is int and ready['qpc_frequency_hz'] == frequency and
+        type(ready.get('begin_qpc')) is int and type(clock.get('begin_qpc')) is int and
+        0 <= ready['begin_qpc'] <= clock['begin_qpc'] <= 2**63 - 1, 'NATIVE_QOS_CLOCK_NOT_ESTABLISHED')
+    facts.update(qpc_frequency_hz=frequency, ready_qpc=ready['begin_qpc'], work_begin_qpc=clock['begin_qpc'],
+        ready_to_work_begin_seconds=(clock['begin_qpc'] - ready['begin_qpc']) / frequency, status='REJECTED')
+    apps.require(clock['begin_qpc'] - ready['begin_qpc'] <= 20 * frequency, 'NATIVE_QOS_READY_TO_WORK_EXCEEDED')
+    facts['status'] = 'READY_TO_WORK_WITHIN_LIMIT'
+    if complete:
+        apps.require(type(clock.get('end_qpc')) is int and clock['begin_qpc'] < clock['end_qpc'] <= 2**63 - 1,
+                     'NATIVE_QOS_CLOCK_NOT_ESTABLISHED')
+        facts.update(work_end_qpc=clock['end_qpc'], whole_workload_seconds=(clock['end_qpc'] - clock['begin_qpc']) / frequency,
+                     status='REJECTED')
+        apps.require(clock['end_qpc'] - clock['begin_qpc'] <= 65 * frequency, 'NATIVE_QOS_WORKLOAD_EXCEEDED')
+        facts['status'] = 'WITHIN_LIMITS'
+    return facts
+
+
 class BudgetCapture:
     """Stop noise at the workload boundary; always flush the owned WPR session."""
     def __init__(self, actual, noise, clock, cleanup, captures, end_counter, lifecycle):
@@ -832,6 +904,12 @@ class BudgetCapture:
             self.clock['end_qpc'] = self.end_counter()
         except BaseException as error:
             self.remember(error, 'WORKLOAD_END_CLOCK')
+        if self.noise.producer['implementation'] == 'NATIVE_WIN32':
+            timing = self.lifecycle.setdefault('native_timing', {})
+            try:
+                validate_native_timing(self.noise.ready, self.clock, complete=True, facts=timing)
+            except BaseException as error:
+                self.remember(error, 'NATIVE_TIMING')
         self.stop_noise()
         result = None
         try:
@@ -904,6 +982,7 @@ def run_case(output, helper, source_sha, deadline, profile, producer, expectatio
         'requested_profile': profile, 'expectation': expectation,
         'requested_workload_policy': workload_policy,
         'requested_process_timeout_seconds': apps.workload_policy_seconds(workload_policy),
+        'requested_noise_policy': dict(noise.policy),
         'requested_native_module_encoding': native_module_encoding or 'DEFAULT',
         'noise_producer': {key: producer[key] for key in
             ('implementation', 'source_sha256', 'executable_sha256', 'expected_native_handles')},
@@ -941,8 +1020,17 @@ def run_case(output, helper, source_sha, deadline, profile, producer, expectatio
                 capture_cleanup.update(status='UNCONFIRMED', cleanup_required=True)
                 raise
             raise
-        return BudgetCapture(actual, noise, workload_clock, capture_cleanup, captures,
-                             lambda: counter(kernel), capture_lifecycle)
+        capture = BudgetCapture(actual, noise, workload_clock, capture_cleanup, captures,
+                                lambda: counter(kernel), capture_lifecycle)
+        if producer['implementation'] == 'NATIVE_WIN32':
+            timing = capture_lifecycle.setdefault('native_timing', {})
+            try:
+                validate_native_timing(noise.ready, workload_clock, facts=timing)
+            except BaseException as error:
+                capture.remember(error, 'NATIVE_TIMING')
+                capture.cancel()
+                raise
+        return capture
 
     try:
         apps.start_schedule = factory
@@ -1032,6 +1120,9 @@ def run_case(output, helper, source_sha, deadline, profile, producer, expectatio
                      'DIAGNOSTIC_CAPTURE_OR_OWNER_UNCONFIRMED')
         proof['original_source_receipt'] = validate_original_source(diagnostic, source_hash, source.stat().st_size)
         proof['workload_budget'] = validate_workload_budget(workload, workload_policy)
+        proof['noise_policy_receipts'] = dict(noise.policy_receipts)
+        if producer['implementation'] == 'NATIVE_WIN32':
+            proof['native_timing'] = dict(capture_lifecycle['native_timing'])
         proof['native_output'] = validate_output_observation(observation, meta)
         apps.require(proof['actual_native_module_encoding'] ==
             ('INLINE_V1' if native_module_encoding == 'INLINE_V1' else 'PER_EVENT_MODULES_V1'),
@@ -1050,6 +1141,10 @@ def run_case(output, helper, source_sha, deadline, profile, producer, expectatio
         apps.start_schedule = original_factory
         proof['capture_cleanup'] = capture_cleanup
         proof['capture_lifecycle'] = capture_lifecycle
+        proof['prelude'] = dict(noise.prelude)
+        proof['noise_policy_receipts'] = dict(noise.policy_receipts)
+        if 'native_timing' in capture_lifecycle:
+            proof['native_timing'] = dict(capture_lifecycle['native_timing'])
         if capture_cleanup['cleanup_required']:
             proof.update(status='REPRODUCTION_NOT_ESTABLISHED', cleanup_required=True)
         if noise.cleanup.get('status') != 'COMPLETED':
@@ -1111,10 +1206,23 @@ def validate_comparison(first, second, *, positive=True):
         'CONTROLLED_PROFILE_A_B_NOT_ESTABLISHED')
     policy = 'CONTROLLED_NATIVE_60' if positive else 'ORDINARY_30'
     seconds = apps.workload_policy_seconds(policy)
+    implementation = 'NATIVE_WIN32' if positive else 'PYTHON_CTYPES_WIN32'
+    expected_noise_policy = noise_policy(implementation)
     for case in (first, second):
         apps.require(case.get('requested_workload_policy') == policy and
             case.get('requested_process_timeout_seconds') == seconds, 'CONTROLLED_PAIR_WORKLOAD_POLICY_MISMATCH')
         validate_workload_budget(case.get('workload_budget', {}), policy)
+        validate_requested_noise_policy(case.get('requested_noise_policy'), implementation)
+        receipts = case.get('noise_policy_receipts', {})
+        for phase in ('ready', 'oracle'):
+            validate_noise_policy(receipts.get(phase), implementation)
+        if positive:
+            timing = case.get('native_timing', {})
+            apps.require(type(timing) is dict, 'NATIVE_QOS_CLOCK_NOT_ESTABLISHED')
+            validate_native_timing({'begin_qpc': timing.get('ready_qpc'),
+                'qpc_frequency_hz': timing.get('qpc_frequency_hz')},
+                {'begin_qpc': timing.get('work_begin_qpc'), 'end_qpc': timing.get('work_end_qpc'),
+                 'qpc_frequency_hz': timing.get('qpc_frequency_hz')}, complete=True)
     for key in ('input_sha256', 'input_bytes', 'application_sha256', 'native_image', 'helper_sha256',
                 'script_hashes', 'noise_producer'):
         apps.require(first.get(key) == second.get(key) and first.get(key) is not None, 'CONTROLLED_A_B_SOURCE_CHANGED')
@@ -1135,10 +1243,13 @@ def validate_comparison(first, second, *, positive=True):
     apps.require(first['actual_native_module_encoding'] == 'PER_EVENT_MODULES_V1' and
         second['actual_native_module_encoding'] == ('PER_EVENT_MODULES_V1' if positive else 'INLINE_V1'),
         'CONTROLLED_PAIR_TRANSPORT_NOT_ESTABLISHED')
+    return {'workload_policy': policy, 'noise_policy_equal': True, 'noise_policy': expected_noise_policy,
+            'native_timing_limits': {'ready_to_work_begin_seconds': 20, 'whole_workload_seconds': 65}
+                if positive else 'NOT_APPLICABLE_PYTHON_POLICY'}
 
 
 def run_diagnostic(args):
-    deadline = time.monotonic() + 300
+    started = time.monotonic(); deadline = started + 420
     require_hosted_windows()
     output = args.output.resolve(); output.mkdir(parents=True, exist_ok=False)
     proof = {'schema': 'blackbox.native-budget-acceptance/2', 'status': 'REPRODUCTION_NOT_ESTABLISHED',
@@ -1147,6 +1258,7 @@ def run_diagnostic(args):
         'subwindow_delta_scope': 'REPORT_ONLY; UNEQUAL_QPC_WINDOWS_ARE_NOT_A_CAUSAL_RATE_COMPARISON',
         'python_pair_transport_scope': 'COMPACT_ROW_NEGATIVE_AND_EXPLICIT_INLINE_BYTE_NEGATIVE; NOT_PROFILE_CAUSAL_COMPARISON',
         'native_pair_transport_scope': 'BOTH_DEFAULT_COMPACT_PER_EVENT_MODULES_V1',
+        'diagnostic_budget_seconds': 420,
         'workload_budget_scope': 'SEVENZIP_ORDINARY_AND_PYTHON_30; CONTROLLED_NATIVE_PAIR_60; NOT_HARD_OS_COMPLETION_DEADLINE',
         'cases': {}}
     try:
@@ -1173,7 +1285,7 @@ def run_diagnostic(args):
                 first['noise_handoffs'], native_module_encoding=None if positive else 'INLINE_V1')
             proof['cases'][label + '_cpu_file'] = second
             max_live = max(max_live, second.get('measured_live_qa_bytes_before_removal', 0))
-            validate_comparison(first, second, positive=positive)
+            proof.setdefault('pair_policy_comparisons', {})[label] = validate_comparison(first, second, positive=positive)
             live = sum(p.stat().st_size for p in output.rglob('*') if p.is_file())
             max_live = max(max_live, live)
             apps.require(live <= MAX_OUTPUT and time.monotonic() < deadline, 'CONTROLLED_LIVE_OUTPUT_OR_DEADLINE')
@@ -1183,6 +1295,9 @@ def run_diagnostic(args):
         proof.update(status='REPRODUCTION_NOT_ESTABLISHED', error_type=type(error).__name__,
                      reason_code=apps._qa_code(str(error)))
     finally:
+        elapsed = time.monotonic() - started
+        proof['observed_elapsed_until_final_report_seconds'] = elapsed if 0 <= elapsed <= 2**63 - 1 else 'NOT_ESTABLISHED'
+        proof['observed_elapsed_scope'] = 'BEFORE_JSON_WRITE_AND_STDOUT_NOT_HARD_OS'
         apps.write_json(output / 'budget-diagnostic.json', proof)
         print('CONTROLLED_NATIVE_BUDGET_DIAGNOSTIC ' + json.dumps(proof, sort_keys=True), flush=True)
         if os.environ.get('GITHUB_STEP_SUMMARY'):
