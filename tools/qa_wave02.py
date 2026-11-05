@@ -105,7 +105,9 @@ def verify_case(case):
 def export_case(case, output):
     from blackbox_core.investigation_v3 import export_investigation, load_investigation
     from blackbox_core.evidence_graph import validate_case
+    from blackbox_universal.wave02_export_oracles import read_graph_export
     result = {}
+    json_reference = None
     for kind in ('json', 'html'):
         path = output / ('investigation.' + kind)
         receipt = export_investigation(case, path, format=kind)
@@ -125,6 +127,10 @@ def export_case(case, output):
             validate_case(independently_parsed)
             loaded = load_investigation(output / 'case.sqlite3')
             require(loaded['case_id'] == case['case_id'], 'WAVE02_PUBLIC_READBACK_FAILED')
+        parsed, semantic = read_graph_export(path, format=kind, expected_case=case,
+            json_reference=json_reference)
+        if kind == 'json':
+            json_reference = parsed
         before = file_hash(path)
         try:
             export_investigation(case, path, format=kind)
@@ -134,7 +140,8 @@ def export_case(case, output):
             raise AssertionError('WAVE02_EXPORT_OVERWROTE_EXISTING_DESTINATION')
         require(file_hash(path) == before, 'WAVE02_EXISTING_EXPORT_CHANGED')
         result[kind] = {'sha256': before, 'bytes': path.stat().st_size,
-                        'readback_verified': True, 'no_clobber_verified': True}
+                        'readback_verified': True, 'no_clobber_verified': True,
+                        'independent_semantic_readback': semantic}
     return result
 
 
