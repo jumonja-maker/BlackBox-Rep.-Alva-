@@ -90,7 +90,14 @@ jobs:
       - name: Real owned Windows Sleep, Event and Mutex waits
         run: python tools/qa_decoder_waits.py --helper decoder/BLACK.BOX-Decoder.exe --output decoder-waits-qa
       - name: Actual third-party 7-Zip, PowerShell 7 and Notepad++ acceptance
-        run: python tools/qa_decoder_apps.py --helper decoder/BLACK.BOX-Decoder.exe --output decoder-apps-qa
+        shell: pwsh
+        run: |
+          foreach ($trial in @(1, 2, 3)) {
+            Write-Host "THIRD_PARTY_DECODER_QA_TRIAL_BEGIN $trial/3"
+            python tools/qa_decoder_apps.py --helper decoder/BLACK.BOX-Decoder.exe --output "decoder-apps-qa-trial-$trial"
+            if ($LASTEXITCODE -ne 0) { throw "Third-party decoder acceptance failed in trial $trial/3; all three trials must pass" }
+            Write-Host "THIRD_PARTY_DECODER_QA_TRIAL_COMPLETE $trial/3"
+          }
       - name: Build real owned R10 native fixtures for one-UAC release acceptance
         run: python tools/qa_r10_fixture.py --output r10-probe-build --source-sha "${{ github.event.workflow_run.head_sha }}"
       - name: R10 real one-helper two-target Windows operations, rollback and cleanup
