@@ -1,5 +1,5 @@
 """Portable QA protocol/profile/download boundaries, not native Windows evidence."""
-from contextlib import closing, redirect_stdout
+from contextlib import closing, nullcontext, redirect_stdout
 from pathlib import Path
 import hashlib
 import io
@@ -18,7 +18,7 @@ import zipfile
 
 from tools.qa_decoder_apps import (decode_trace, etw_observations, installed, native_pe_identity, observe_native_output,
                                    native_output_path, observed_module_encoding,
-                                   observed_process_image, safe_extract)
+                                   observed_process_image, safe_extract, monitored_run, seven_zip, workload_log_snapshot)
 from tools.qa_decoder_budget_diagnostic import (PAIRS, parse_args, validate_noise_oracle,
     NoiseOwner, BudgetCapture,
     SEVENZIP_CAPABILITIES, validate_comparison, validate_original_source, validate_positive,
@@ -29,6 +29,167 @@ from tools.qa_schedule_capture import profile_definition
 from tools.qa_decoder_noise_fixture import (_close_owner_with_checked_handles,
     _compiler_worker_environment, _require_compiler_policy, _configured_compiler_environment,
     _stop_completed_compiler_job)
+
+
+class WorkloadFailureObservationProtocolTests(unittest.TestCase):
+    """Fake owners/sensors/clocks exercise receipts, never real Windows load."""
+    def invoke_deadline(self, root, *, fresh_code=None, diagnostics_fail=False, cleanup_fail=False, rss_budget_fail=False):
+        log = root / 'private-child.log'; now = [0.0]; polls = [None, None, fresh_code]
+        events = []; before_cleanup = []
+        process = SimpleNamespace(pid=123, poll=lambda: polls.pop(0))
+        def wait(**kwargs):
+            raise AssertionError('UNEXPECTED_WAIT_AFTER_DEADLINE')
+        process.wait = wait
+        def close(**kwargs):
+            events.append(('close', kwargs))
+            receipt = root / 'workload-failure.json'
+            before_cleanup.append(json.loads(receipt.read_text()) if receipt.exists() else None)
+            if cleanup_fail:
+                raise OSError('/private/cleanup')
+        def owned(*args, **kwargs):
+            kwargs['stdout'].write(b'PRIVATE_CHILD_LOG_PAYLOAD')
+            return SimpleNamespace(process=process, close=close)
+        identity = {'observed_image': '/private/executable', 'owned_image_matches_requested': True,
+            'image_identity_source': 'OWNED_WINDOWS_PROCESS_HANDLE', 'creation_time_filetime_ticks': '134000000000000000',
+            'cpu_user_seconds_held_handle': 2.75, 'cpu_kernel_seconds_held_handle': .65,
+            'exit_time_filetime_ticks': '0'}
+        identities = [identity, OSError('/private/held-handle')] if diagnostics_fail else [identity, identity]
+        sensor = SimpleNamespace(oneshot=nullcontext, cpu_times=lambda: SimpleNamespace(user=2.5, system=.5),
+            memory_info=lambda: SimpleNamespace(rss=2 * 1024**3 if rss_budget_fail else 4 * 1024**2), num_threads=lambda: 3,
+            io_counters=lambda: SimpleNamespace(write_bytes=1024, read_bytes=2048))
+        fake_psutil = SimpleNamespace(Process=lambda pid: sensor, NoSuchProcess=type('FakeNoSuchProcess', (Exception,), {}))
+        def sleep(seconds):
+            self.assertEqual(seconds, .025)
+            now[0] += 31
+        buffer = io.StringIO()
+        expected_reason = 'APP_WORKLOAD_RSS_BUDGET' if rss_budget_fail else 'APP_WORKLOAD_DEADLINE'
+        with patch.dict('sys.modules', {'psutil': fake_psutil}), \
+                patch('tools.qa_decoder_apps.OwnedProcess', side_effect=owned), \
+                patch('tools.qa_decoder_apps.owned_process_identity', side_effect=identities), \
+                patch('tools.qa_decoder_apps.time.monotonic', side_effect=lambda: now[0]), \
+                patch('tools.qa_decoder_apps.time.sleep', side_effect=sleep), redirect_stdout(buffer):
+            if diagnostics_fail:
+                with patch('tools.qa_decoder_apps.write_json', side_effect=OSError('/private/write')), \
+                        patch('tools.qa_decoder_apps.workload_log_snapshot', side_effect=OSError('/private/hash')):
+                    with self.assertRaisesRegex(AssertionError, '^' + expected_reason + '$') as caught:
+                        monitored_run(['/private/executable', 'PRIVATE_ARG'], log, role='COMPRESS', cycle=1)
+            else:
+                with self.assertRaisesRegex(AssertionError, '^' + expected_reason + '$') as caught:
+                    monitored_run(['/private/executable', 'PRIVATE_ARG'], log, role='COMPRESS', cycle=1)
+        self.assertEqual(events, [('close', {'kill': True})])
+        return caught.exception.workload_failure, before_cleanup[0], buffer.getvalue()
+
+    def test_actual_failure_state_and_partial_counters_are_saved_before_forced_cleanup(self):
+        for code in (None, 0):
+            with self.subTest(fresh_code=code), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp); facts, saved, stdout = self.invoke_deadline(root, fresh_code=code)
+                self.assertEqual(saved, facts)
+                self.assertEqual(facts['reason_code'], 'APP_WORKLOAD_DEADLINE')
+                self.assertEqual(facts['configured_timeout_seconds'], 30)
+                self.assertEqual(facts['elapsed_monitor_seconds'], 31)
+                self.assertEqual(facts['deadline_check_elapsed_monitor_seconds'], 31)
+                self.assertEqual(facts['last_resource_sample_begin_elapsed_monitor_seconds'], 0)
+                self.assertEqual(facts['resource_samples_observed'], 1)
+                self.assertEqual(facts['last_loop_poll_state'], 'RUNNING')
+                self.assertEqual(facts['process_state_before_cleanup'], 'RUNNING' if code is None else 'EXITED')
+                self.assertEqual(facts['poll_exit_code_before_cleanup'], 'NOT_ESTABLISHED' if code is None else 0)
+                self.assertEqual((facts['role'], facts['cycle'], facts['phase']), ('COMPRESS', 1, 'DEADLINE_CHECK'))
+                self.assertEqual((facts['cpu_user_seconds_observed'], facts['cpu_kernel_seconds_observed']), (2.5, .5))
+                self.assertEqual((facts['cpu_user_seconds_held_handle'], facts['cpu_kernel_seconds_held_handle']), (2.75, .65))
+                self.assertEqual(facts['peak_rss_observed'], 4 * 1024**2)
+                self.assertEqual((facts['max_threads_observed'], facts['write_bytes_observed'], facts['read_bytes_observed']), (3, 1024, 2048))
+                self.assertTrue(facts['owned_image_matches_requested'])
+                self.assertEqual(facts['creation_time_filetime_ticks'], '134000000000000000')
+                self.assertEqual(facts['log']['sha256'], hashlib.sha256(b'PRIVATE_CHILD_LOG_PAYLOAD').hexdigest())
+                self.assertEqual(facts['log']['observation'], 'BOUNDED_STABLE_SNAPSHOT_NOT_FINAL_LOG')
+                for private in ('PRIVATE_', '/private/', str(root)):
+                    self.assertNotIn(private, json.dumps(facts) + stdout)
+                proof = {'reason_code': 'APP_WORKLOAD_DEADLINE'}
+                collect_bounded_case_facts(proof, root, root / 'absent-helper', {})
+                self.assertEqual(proof['small_facts']['workload_failure'], facts)
+                self.assertEqual(proof['reason_code'], 'APP_WORKLOAD_DEADLINE')
+
+    def test_diagnostic_and_cleanup_failures_do_not_replace_primary_deadline(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            facts, saved, stdout = self.invoke_deadline(Path(tmp), diagnostics_fail=True, cleanup_fail=True)
+            self.assertIsNone(saved)
+            self.assertEqual(facts['reason_code'], 'APP_WORKLOAD_DEADLINE')
+            self.assertEqual(facts['held_counters_observation'], 'NOT_ESTABLISHED')
+            self.assertEqual(facts['cpu_user_seconds_held_handle'], 'NOT_ESTABLISHED')
+            for name in ('held_identity_observation_error', 'log_observation_error', 'cleanup_error'):
+                self.assertEqual(facts[name], 'REDACTED_UNSTRUCTURED')
+            self.assertIn('APP_WORKLOAD_FAILURE_WRITE_FAILED', stdout)
+            self.assertNotIn('/private/', json.dumps(facts) + stdout)
+
+    def test_mid_sample_rss_failure_preserves_queried_metrics_and_marks_unqueried_unknown(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            facts, saved, _ = self.invoke_deadline(Path(tmp), rss_budget_fail=True)
+            self.assertEqual(saved, facts)
+            self.assertEqual(facts['reason_code'], 'APP_WORKLOAD_RSS_BUDGET')
+            self.assertEqual(facts['phase'], 'RESOURCE_SAMPLE')
+            self.assertEqual(facts['resource_samples_observed'], 0)
+            self.assertEqual(facts['peak_rss_observed'], 2 * 1024**3)
+            self.assertEqual(facts['cpu_seconds_observed'], 3.)
+            for name in ('max_threads_observed', 'write_bytes_observed', 'read_bytes_observed'):
+                self.assertEqual(facts[name], 'NOT_ESTABLISHED')
+
+    def test_log_snapshot_never_reads_more_than_limit_and_rejects_growth_or_replacement(self):
+        def info(*, size=3, inode=22, modified=10):
+            return SimpleNamespace(st_dev=1, st_ino=inode, st_size=size, st_mtime_ns=modified,
+                                   st_ctime_ns=10, st_mode=stat.S_IFREG)
+        cases = [('stable', info(), info(), info(), info()),
+                 ('growth', info(), info(), info(size=4), info(size=4)),
+                 ('same_size_write', info(), info(), info(modified=11), info(modified=11)),
+                 ('replacement', info(), info(inode=23), info(inode=23), info(inode=23)),
+                 ('oversize', info(size=4 * 1024**2 + 1), info(), info(), info())]
+        for name, expected, before, after, current in cases:
+            with self.subTest(case=name):
+                reads = []
+                def read(limit):
+                    reads.append(limit)
+                    return b'abc'
+                source = SimpleNamespace(fileno=lambda: 20, read=read)
+                with patch('tools.qa_decoder_apps.os.fstat', side_effect=[expected, before, after]), \
+                        patch('pathlib.Path.open', return_value=nullcontext(source)), \
+                        patch('pathlib.Path.stat', return_value=current):
+                    if name == 'stable':
+                        facts = workload_log_snapshot(Path('private.log'), SimpleNamespace(fileno=lambda: 10))
+                        self.assertEqual(facts['sha256'], hashlib.sha256(b'abc').hexdigest())
+                        self.assertEqual(facts['observation'], 'BOUNDED_STABLE_SNAPSHOT_NOT_FINAL_LOG')
+                    else:
+                        with self.assertRaisesRegex(AssertionError, 'APP_WORKLOAD_LOG_SNAPSHOT_'):
+                            workload_log_snapshot(Path('private.log'), SimpleNamespace(fileno=lambda: 10))
+                self.assertEqual(reads, [4 * 1024**2 + 1] if name not in ('replacement', 'oversize') else [])
+
+    def test_seven_zip_persists_partial_work_before_failed_extraction_and_cancel(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); binary = root / 'private-7z.exe'; binary.write_bytes(b'fixture')
+            failure = AssertionError('APP_WORKLOAD_DEADLINE'); calls = []; saved_before_cancel = []
+            capture = SimpleNamespace(active=True)
+            def cancel():
+                saved_before_cancel.append(json.loads((root / 'workload-oracle.json').read_text()))
+                capture.active = False
+            capture.cancel = cancel
+            def run(args, log, **kwargs):
+                calls.append(kwargs)
+                if kwargs['role'] == 'EXTRACT':
+                    raise failure
+                return {'pid': 123, 'exit_code': 0, 'owned_image_matches_requested': True}
+            with patch('tools.qa_decoder_apps.installed', return_value=binary), \
+                    patch('tools.qa_decoder_apps.native_pe_identity', return_value={'code_kind': 'NATIVE_PE_NO_CLR_COM_DESCRIPTOR'}), \
+                    patch('tools.qa_decoder_apps.binary_identity', return_value={'sha256': 'a' * 64}), \
+                    patch('tools.qa_decoder_apps.start_schedule', return_value=capture), \
+                    patch('tools.qa_decoder_apps.monitored_run', side_effect=run):
+                with self.assertRaises(AssertionError) as caught:
+                    seven_zip(root, root / 'unused-helper')
+            self.assertIs(caught.exception, failure)
+            self.assertEqual(calls, [{'role': 'COMPRESS', 'cycle': 0}, {'role': 'EXTRACT', 'cycle': 0}])
+            oracle = saved_before_cancel[0]
+            self.assertEqual(oracle['status'], 'INCOMPLETE_WORKLOAD_FAILURE')
+            self.assertEqual(oracle['roundtrips_verified'], 0)
+            self.assertEqual(oracle['input_bytes'], 8 * 1024**2)
+            self.assertEqual(oracle['input_sha256'], hashlib.sha256((root / 'input.bin').read_bytes()).hexdigest())
+            self.assertEqual(oracle['workloads'][0]['pid'], 123)
 
 
 class BudgetCaptureOrderProtocolTests(unittest.TestCase):

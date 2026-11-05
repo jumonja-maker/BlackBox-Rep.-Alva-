@@ -650,6 +650,16 @@ def collect_bounded_case_facts(proof, work, helper, clock):
     """Secondary diagnostics never replace the primary failure or certify cleanup."""
     facts = proof.setdefault('small_facts', {})
     errors = proof.setdefault('fact_errors', {})
+    failure_path = work / 'workload-failure.json'
+    try:
+        if failure_path.is_file():
+            failure = read_json(failure_path)
+            apps.require(failure.get('schema') == 'blackbox.app-workload-failure/1',
+                         'WORKLOAD_FAILURE_SCHEMA_UNRECOGNIZED')
+            facts['workload_failure'] = apps.project_workload_failure(failure)
+    except Exception as error:
+        facts.setdefault('workload_failure', 'NOT_ESTABLISHED')
+        errors['workload_failure'] = apps._qa_code(str(error))
     def scalar(value):
         if type(value) is bool or type(value) is int and abs(value) <= 2**63 - 1:
             return value

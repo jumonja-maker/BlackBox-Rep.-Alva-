@@ -12,6 +12,7 @@ import ctypes as C
 from ctypes import wintypes as W
 import hashlib
 import json
+import math
 import os
 from pathlib import Path, PurePosixPath
 import random
@@ -189,7 +190,10 @@ def owned_process_identity(process, binary):
     return {"observed_image": str(observed), "owned_image_matches_requested": True,
             "image_identity_source": "OWNED_WINDOWS_PROCESS_HANDLE",
             "created": (ticks - 116444736000000000) / 10000000,
-            "creation_time_filetime_ticks": str(ticks)}
+            "creation_time_filetime_ticks": str(ticks),
+            "cpu_user_seconds_held_handle": ((user_time.dwHighDateTime << 32) | user_time.dwLowDateTime) / 10000000,
+            "cpu_kernel_seconds_held_handle": ((kernel_time.dwHighDateTime << 32) | kernel_time.dwLowDateTime) / 10000000,
+            "exit_time_filetime_ticks": str((exited.dwHighDateTime << 32) | exited.dwLowDateTime)}
 
 
 def binary_identity(binary, *, version_args=None):
@@ -203,44 +207,192 @@ def binary_identity(binary, *, version_args=None):
     return data
 
 
-def monitored_run(args, log, *, env=None, timeout=30):
+def workload_log_snapshot(log, owned_stream):
+    """Hash at most a bounded, stable snapshot of this owned regular log."""
+    def fingerprint(info):
+        return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+    expected = os.fstat(owned_stream.fileno())
+    require(stat.S_ISREG(expected.st_mode) and expected.st_size <= 4 * 1024**2, "APP_WORKLOAD_LOG_SNAPSHOT_BUDGET")
+    with Path(log).open('rb') as source:
+        before = os.fstat(source.fileno())
+        require(fingerprint(before) == fingerprint(expected), "APP_WORKLOAD_LOG_SNAPSHOT_CHANGED")
+        payload = source.read(4 * 1024**2 + 1)
+        after = os.fstat(source.fileno())
+    current = Path(log).stat()
+    require(len(payload) == before.st_size <= 4 * 1024**2 and
+            fingerprint(before) == fingerprint(after) == fingerprint(current), "APP_WORKLOAD_LOG_SNAPSHOT_CHANGED")
+    return {'bytes': len(payload), 'sha256': hashlib.sha256(payload).hexdigest(),
+            'observation': 'BOUNDED_STABLE_SNAPSHOT_NOT_FINAL_LOG'}
+
+
+def project_workload_failure(value):
+    """Finite public projection; never export argv, image paths or child text."""
+    def number(value):
+        return value if type(value) in (int, float) and 0 <= value <= 2**63 - 1 and math.isfinite(value) else "NOT_ESTABLISHED"
+    result = {"schema": "blackbox.app-workload-failure/1", "status": "FAILED",
+              "scope": "PARTIAL_OBSERVATIONS_BEFORE_FORCED_CLEANUP_NOT_CAUSE_OR_CLEANUP_PROOF"}
+    for key in ("reason_code", "error_type"):
+        result[key] = _qa_code(value.get(key))
+    result["role"] = value.get("role") if value.get("role") in ("COMPRESS", "EXTRACT", "OTHER") else "OTHER"
+    result["phase"] = value.get("phase") if value.get("phase") in ("IDENTITY", "SENSOR_ATTACH", "DEADLINE_CHECK",
+        "RESOURCE_SAMPLE", "LOG_BUDGET_CHECK", "MONITOR_SLEEP", "WAIT") else "NOT_ESTABLISHED"
+    result["cycle"] = value.get("cycle") if type(value.get("cycle")) is int and 0 <= value["cycle"] <= 2 else "NOT_ESTABLISHED"
+    for key in ("pid", "configured_timeout_seconds", "elapsed_since_launch_seconds", "elapsed_monitor_seconds",
+                "launch_duration_seconds", "identity_observation_seconds_after_launch", "resource_samples_observed",
+                "deadline_check_elapsed_monitor_seconds", "last_resource_sample_begin_elapsed_monitor_seconds",
+                "cpu_seconds_observed", "cpu_user_seconds_observed", "cpu_kernel_seconds_observed",
+                "peak_rss_observed", "max_threads_observed", "write_bytes_observed", "read_bytes_observed",
+                "cpu_user_seconds_held_handle", "cpu_kernel_seconds_held_handle"):
+        result[key] = number(value.get(key))
+    for key in ("poll_exit_code_before_cleanup", "wait_return_code", "last_loop_poll_exit_code"):
+        item = value.get(key)
+        result[key] = item if type(item) is int and -(2**31) <= item <= 2**32 - 1 else "NOT_ESTABLISHED"
+    result["process_state_before_cleanup"] = value.get("process_state_before_cleanup") if value.get("process_state_before_cleanup") in ("RUNNING", "EXITED") else "NOT_ESTABLISHED"
+    result["last_loop_poll_state"] = value.get("last_loop_poll_state") if value.get("last_loop_poll_state") in ("RUNNING", "EXITED") else "NOT_ESTABLISHED"
+    result["held_counters_observation"] = "FAILURE_BEFORE_CLEANUP" if value.get("held_counters_observation") == "FAILURE_BEFORE_CLEANUP" else "NOT_ESTABLISHED"
+    result["owned_image_matches_requested"] = value.get("owned_image_matches_requested") if type(value.get("owned_image_matches_requested")) is bool else "NOT_ESTABLISHED"
+    result["image_identity_source"] = "OWNED_WINDOWS_PROCESS_HANDLE" if value.get("image_identity_source") == "OWNED_WINDOWS_PROCESS_HANDLE" else "NOT_ESTABLISHED"
+    for key in ("creation_time_filetime_ticks", "exit_time_filetime_ticks"):
+        item = value.get(key)
+        result[key] = item if isinstance(item, str) and re.fullmatch(r"[0-9]{1,20}", item) else "NOT_ESTABLISHED"
+    for key in ("poll_observation_error", "held_identity_observation_error", "log_observation_error", "cleanup_error"):
+        if key in value:
+            result[key] = _qa_code(value[key])
+    log = value.get("log") if type(value.get("log")) is dict else {}
+    digest = log.get("sha256")
+    result["log"] = {"bytes": number(log.get("bytes")), "sha256": digest if isinstance(digest, str)
+        and re.fullmatch(r"[a-f0-9]{64}", digest) else "NOT_ESTABLISHED", "scope": "HASH_ONLY_NO_RAW_CHILD_LOG",
+        "observation": "BOUNDED_STABLE_SNAPSHOT_NOT_FINAL_LOG" if log.get('observation') ==
+            'BOUNDED_STABLE_SNAPSHOT_NOT_FINAL_LOG' else 'NOT_ESTABLISHED'}
+    return result
+
+
+def emit_workload_failure(log, observation):
+    observation = project_workload_failure(observation)
+    try:
+        write_json(Path(log).parent / "workload-failure.json", observation)
+    except Exception as error:
+        try:
+            print("APP_WORKLOAD_FAILURE_WRITE_FAILED " + _qa_code(str(error)), flush=True)
+        except Exception:
+            pass
+    try:
+        print("APP_WORKLOAD_FAILURE_FACTS " + json.dumps(observation, sort_keys=True), flush=True)
+    except Exception:
+        pass
+    return observation
+
+
+def monitored_run(args, log, *, env=None, timeout=30, role="OTHER", cycle=None):
     """Sample only a process launched here; terminate only its owned job."""
     import psutil
     with Path(log).open("xb") as stream:
+        launch_started = time.monotonic()
         owner = OwnedProcess(args, stdout=stream, stderr=stream, env=env)
+        launch_completed = time.monotonic()
         p = owner.process
         proof = {"pid": p.pid, "cpu_seconds_observed": 0., "peak_rss_observed": 0,
                  "max_threads_observed": 0, "write_bytes_observed": 0,
-                 "read_bytes_observed": 0}
+                 "read_bytes_observed": 0, "resource_samples_observed": 0}
+        monitor_started = None; identity_elapsed = None; primary_error = None; failure = None
+        last_loop_code = 'NOT_ESTABLISHED'; deadline_observed = None; last_sample_begin = None
+        observed_metrics = set()
+        phase = 'IDENTITY'
         try:
             proof.update(owned_process_identity(p, args[0]))
+            identity_elapsed = time.monotonic() - launch_started
+            phase = 'SENSOR_ATTACH'
             try:
                 sensor = psutil.Process(p.pid)
             except psutil.NoSuchProcess:
                 sensor = None
-            deadline = time.monotonic() + timeout
-            while p.poll() is None:
-                require(time.monotonic() < deadline, "APP_WORKLOAD_DEADLINE")
+            monitor_started = time.monotonic()
+            deadline = monitor_started + timeout
+            while (last_loop_code := p.poll()) is None:
+                phase = 'DEADLINE_CHECK'
+                deadline_observed = time.monotonic()
+                require(deadline_observed < deadline, "APP_WORKLOAD_DEADLINE")
                 try:
+                    phase = 'RESOURCE_SAMPLE'
                     if sensor is None:
                         sensor = psutil.Process(p.pid)
                     with sensor.oneshot():
                         cpu = sensor.cpu_times()
+                        proof["cpu_user_seconds_observed"] = cpu.user
+                        proof["cpu_kernel_seconds_observed"] = cpu.system
                         proof["cpu_seconds_observed"] = max(proof["cpu_seconds_observed"], cpu.user + cpu.system)
+                        observed_metrics.update(('cpu_seconds_observed', 'cpu_user_seconds_observed', 'cpu_kernel_seconds_observed'))
                         proof["peak_rss_observed"] = max(proof["peak_rss_observed"], sensor.memory_info().rss)
+                        observed_metrics.add('peak_rss_observed')
                         require(proof["peak_rss_observed"] <= 1024**3, "APP_WORKLOAD_RSS_BUDGET")
                         proof["max_threads_observed"] = max(proof["max_threads_observed"], sensor.num_threads())
+                        observed_metrics.add('max_threads_observed')
                         io = sensor.io_counters()
                         for key in ("write_bytes", "read_bytes"):
                             proof[key + "_observed"] = max(proof[key + "_observed"], getattr(io, key))
+                            observed_metrics.add(key + '_observed')
+                        proof["resource_samples_observed"] += 1
+                        last_sample_begin = deadline_observed - monitor_started
                 except psutil.NoSuchProcess:
                     break
+                phase = 'LOG_BUDGET_CHECK'
                 require(Path(log).stat().st_size <= 4 * 1024**2, "APP_WORKLOAD_LOG_BUDGET")
+                phase = 'MONITOR_SLEEP'
                 time.sleep(.025)
+            phase = 'WAIT'
             proof["exit_code"] = p.wait(timeout=5)
             require(proof["exit_code"] == 0, "APP_WORKLOAD_EXIT_NONZERO")
+        except BaseException as error:
+            primary_error = error
+            observed = time.monotonic()
+            failure = {**proof, "role": role, "cycle": cycle, "phase": phase,
+                "error_type": type(error).__name__, "reason_code": _qa_code(str(error)),
+                "configured_timeout_seconds": timeout, "launch_duration_seconds": launch_completed - launch_started,
+                "identity_observation_seconds_after_launch": identity_elapsed,
+                "elapsed_since_launch_seconds": observed - launch_started,
+                "elapsed_monitor_seconds": observed - monitor_started if monitor_started is not None else None,
+                "deadline_check_elapsed_monitor_seconds": deadline_observed - monitor_started
+                    if deadline_observed is not None and monitor_started is not None else None,
+                "last_resource_sample_begin_elapsed_monitor_seconds": last_sample_begin,
+                "last_loop_poll_state": "RUNNING" if last_loop_code is None else
+                    "EXITED" if type(last_loop_code) is int else "NOT_ESTABLISHED",
+                "last_loop_poll_exit_code": last_loop_code, "wait_return_code": proof.get("exit_code")}
+            for key in ('cpu_user_seconds_held_handle', 'cpu_kernel_seconds_held_handle', 'exit_time_filetime_ticks'):
+                failure.pop(key, None)
+            for key in ("cpu_seconds_observed", "cpu_user_seconds_observed", "cpu_kernel_seconds_observed",
+                        "peak_rss_observed", "max_threads_observed", "write_bytes_observed", "read_bytes_observed"):
+                if key not in observed_metrics:
+                    failure[key] = "NOT_ESTABLISHED"
+            try:
+                code = p.poll()
+                failure.update(process_state_before_cleanup="RUNNING" if code is None else "EXITED",
+                               poll_exit_code_before_cleanup=code)
+            except Exception as secondary:
+                failure["poll_observation_error"] = _qa_code(str(secondary))
+            try:
+                failure.update(owned_process_identity(p, args[0]))
+                failure['held_counters_observation'] = 'FAILURE_BEFORE_CLEANUP'
+            except Exception as secondary:
+                failure["held_identity_observation_error"] = _qa_code(str(secondary))
+            try:
+                stream.flush()
+                failure["log"] = workload_log_snapshot(log, stream)
+            except Exception as secondary:
+                failure["log_observation_error"] = _qa_code(str(secondary))
+            failure = emit_workload_failure(log, failure)
+            try:
+                error.workload_failure = failure
+            except Exception:
+                pass
+            raise
         finally:
-            owner.close(kill=True)
+            try:
+                owner.close(kill=True)
+            except BaseException as error:
+                if primary_error is None:
+                    raise
+                failure["cleanup_error"] = _qa_code(str(error))
+                emit_workload_failure(log, failure)
     return proof
 
 
@@ -462,17 +614,19 @@ def seven_zip(output, helper, *, profile="cpu_file", native_module_encoding=None
     digest = file_hash(source)
     capture = start_schedule(output, profile=profile)
     proofs = []
+    verified_roundtrips = 0
     try:
         started = time.monotonic()
         for cycle in range(3):
             archive = output / f"roundtrip-{cycle}.7z"
             destination = output / f"roundtrip-{cycle}"
             proofs.append(monitored_run([str(binary), "a", "-t7z", "-mx=7", "-mmt=2", "-bd", "-y",
-                                         str(archive), str(source)], output / f"compress-{cycle}.log"))
+                                         str(archive), str(source)], output / f"compress-{cycle}.log", role="COMPRESS", cycle=cycle))
             proofs.append(monitored_run([str(binary), "x", "-bd", "-y", "-o" + str(destination),
-                                         str(archive)], output / f"extract-{cycle}.log"))
+                                         str(archive)], output / f"extract-{cycle}.log", role="EXTRACT", cycle=cycle))
             require(file_hash(destination / source.name) == digest,
                     "SEVENZIP_ROUNDTRIP_HASH_MISMATCH")
+            verified_roundtrips += 1
             if time.monotonic() - started >= 4:
                 break
         write_json(output / "workload-oracle.json", {
@@ -481,6 +635,22 @@ def seven_zip(output, helper, *, profile="cpu_file", native_module_encoding=None
             "roundtrips_verified": len(proofs) // 2, "workloads": proofs})
         options = {'native_module_encoding': native_module_encoding} if native_module_encoding is not None else {}
         trace = finish_schedule(capture, output, helper, [x["pid"] for x in proofs], **options)
+    except BaseException as error:
+        # Keep completed work and its input identity even when monitored_run
+        # failed before returning a proof. This is never a completed oracle.
+        try:
+            if not (output / "workload-oracle.json").exists():
+                write_json(output / "workload-oracle.json", {
+                    "schema": "blackbox.sevenzip-workload-oracle/1", "status": "INCOMPLETE_WORKLOAD_FAILURE",
+                    "application": identity, "input_bytes": source.stat().st_size, "input_sha256": digest,
+                    "roundtrips_verified": verified_roundtrips, "workloads": proofs,
+                    "failure_reason_code": _qa_code(str(error))})
+        except Exception as secondary:
+            try:
+                print("APP_PARTIAL_WORKLOAD_ORACLE_WRITE_FAILED " + _qa_code(str(secondary)), flush=True)
+            except Exception:
+                pass
+        raise
     finally:
         if capture.active:
             capture.cancel()
