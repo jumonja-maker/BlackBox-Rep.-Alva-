@@ -1,5 +1,6 @@
 """Fixtures for the independent combined SQLite oracle, not native evidence."""
 from copy import deepcopy
+from contextlib import closing
 import hashlib
 import json
 from pathlib import Path
@@ -27,7 +28,7 @@ class CombinedSavedEvidenceOracleTests(unittest.TestCase):
 
     def write_index(self):
         raw = json.dumps(self.case, ensure_ascii=True, sort_keys=True, separators=(',', ':'))
-        with sqlite3.connect(self.path) as db:
+        with closing(sqlite3.connect(self.path)) as db, db:
             db.execute('PRAGMA application_id=0x42424933')
             db.execute('PRAGMA user_version=1')
             db.executescript('''
@@ -47,7 +48,7 @@ class CombinedSavedEvidenceOracleTests(unittest.TestCase):
                            (ordinal, edge['edge_id'], edge['from_node'], edge['to_node'], json.dumps(edge)))
 
     def mutate(self, command, values=()):
-        with sqlite3.connect(self.path) as db:
+        with closing(sqlite3.connect(self.path)) as db, db:
             db.execute(command, values)
 
     def test_reads_content_manifests_and_individual_rows_without_changing_source(self):
