@@ -30,6 +30,23 @@ MAX_JOB_DIAGNOSTIC_PIDS = 16
 MAX_JOB_SNAPSHOTS = 4
 _retained_build_resources = []
 _COMPILE_GO = b'BLACKBOX_NATIVE_NOISE_BUILD_GO\n'
+_COMPILER_OPT_OUT = {'VSCMD_SKIP_SENDTELEMETRY': '1', 'VCToolsTelemetryOptOut': '1'}
+
+
+def _compiler_worker_environment(inherited):
+    """Configure only these fixed opt-outs, before any compiler setup child."""
+    policy_names = {name.casefold() for name in _COMPILER_OPT_OUT}
+    environment = {name: value for name, value in inherited.items() if name.casefold() not in policy_names}
+    environment.update(_COMPILER_OPT_OUT)
+    return environment
+
+
+def _require_compiler_policy(environment):
+    # Windows environment keys are case insensitive. Reject ambiguous duplicate
+    # spellings instead of relying on subprocess or vcvars ordering to pick one.
+    for name, expected in _COMPILER_OPT_OUT.items():
+        values = [value for key, value in environment.items() if key.casefold() == name.casefold()]
+        require(values == [expected], 'NATIVE_NOISE_COMPILER_OPT_OUT_POLICY_UNCONFIRMED')
 
 
 def _compile_command(compiler, output, source):
@@ -71,6 +88,7 @@ def _await_compile_go():
 
 def _compile_worker(request_path):
     require_hosted_windows()
+    _require_compiler_policy(os.environ)  # Read-only: still no child before GO.
     _await_compile_go()
     # All subprocesses below now inherit the parent's already assigned Job.
     require(request_path.name == 'compiler-request.json' and not request_path.is_symlink(),
@@ -93,6 +111,7 @@ def _compile_worker(request_path):
             source_identity(request['source_sha']).get('source_identity_status') == 'VERIFIED_EXPECTED_HEAD',
             'NATIVE_NOISE_COMPILER_SOURCE_MISMATCH')
     compiler, environment = compiler_environment(output)
+    _require_compiler_policy(environment)
     command = _compile_command(compiler, output, source)
     compiled = subprocess.run(command, env=environment, stdin=subprocess.DEVNULL,
                               stdout=sys.stdout.buffer, stderr=sys.stderr.buffer,
@@ -326,10 +345,14 @@ def build_native_noise(output: Path, source_sha: str) -> dict:
     closed = False
     cleanup = {'status': 'NOT_ESTABLISHED', 'cleanup_required': True}
     observations = []
+    opt_out_policy = {'request_status': 'NOT_REQUESTED', 'worker_verification_status': 'NOT_ESTABLISHED'}
     try:
         require(time.monotonic() < build_deadline, 'NATIVE_NOISE_COMPILER_DEADLINE')
+        environment = _compiler_worker_environment(os.environ)
+        _require_compiler_policy(environment)
+        opt_out_policy['request_status'] = 'FIXED_ENVIRONMENT_REQUESTED'
         owner = OwnedProcess(command, stdin=subprocess.PIPE, stdout=stream, stderr=stream,
-                             detach_console=True)
+                             detach_console=True, env=environment)
         owned_process_identity(owner.process, Path(sys.executable).resolve())
         owner.kernel.IsProcessInJob.argtypes = [W.HANDLE, W.HANDLE, C.POINTER(W.BOOL)]
         owner.kernel.IsProcessInJob.restype = W.BOOL
@@ -359,6 +382,9 @@ def build_native_noise(output: Path, source_sha: str) -> dict:
         require(file_hash(source) == digest and
                 source_identity(source_sha).get('source_identity_status') == 'VERIFIED_EXPECTED_HEAD',
                 'NATIVE_NOISE_BUILD_SOURCE_CHANGED')
+        # A zero worker exit follows both policy checks and its final source
+        # guards. This verifies propagation, not that MSVC honours every knob.
+        opt_out_policy['worker_verification_status'] = 'WORKER_AND_COMPILER_ENVIRONMENT_VERIFIED'
         pdb = _built_pdb(output / 'scheduler-noise.pdb')
         require(time.monotonic() < build_deadline, 'NATIVE_NOISE_COMPILER_DEADLINE')
         result = {'schema': 'blackbox.native-noise-build/1', 'status': 'PASS',
@@ -367,12 +393,13 @@ def build_native_noise(output: Path, source_sha: str) -> dict:
                   'expected_native_handles': 32, 'event_handles': 16, 'thread_handles': 16,
                   'source_identity': identity, 'native_image': native, 'native_pdb': pdb, 'cleanup': cleanup,
                   'compiler_job_observations': observations,
+                  'compiler_opt_out_policy': opt_out_policy,
                   'compiler_job_assignment_verified_before_go': True}
         save(output / 'build.json', result)
         print('NATIVE_NOISE_FIXTURE_BUILD ' + json.dumps({key: result[key] for key in (
             'schema', 'status', 'source_sha256', 'executable_sha256', 'implementation',
             'expected_native_handles', 'source_identity', 'native_image', 'native_pdb', 'cleanup',
-            'compiler_job_observations')}, sort_keys=True), flush=True)
+            'compiler_job_observations', 'compiler_opt_out_policy')}, sort_keys=True), flush=True)
         return result
     except BaseException as error:
         # Newer owners preserve a failed constructor's cleanup capability on
@@ -414,6 +441,7 @@ def build_native_noise(output: Path, source_sha: str) -> dict:
                    'error_type': type(error).__name__, 'reason': reason, 'cleanup': cleanup,
                    'source_sha256': digest, 'source_identity': identity,
                    'compiler_job_observations': observations,
+                   'compiler_opt_out_policy': opt_out_policy,
                    'compiler_exit_code': getattr(getattr(owner, 'process', None), 'returncode', None),
                    'compiler_diagnostics_tail': _compiler_tail(log_path, output)}
         # Print the final cleanup receipt even if persisting it subsequently

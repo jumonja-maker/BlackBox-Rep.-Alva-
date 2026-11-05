@@ -10,6 +10,7 @@ import stat
 import struct
 import tempfile
 import time
+from types import MappingProxyType
 import unittest
 from unittest.mock import patch
 import xml.etree.ElementTree as ET
@@ -23,7 +24,8 @@ from tools.qa_decoder_budget_diagnostic import (PAIRS, parse_args, validate_nois
     validate_output_observation, seal_and_remove_large_evidence, collect_bounded_case_facts)
 from tools.qa_decoder_budget_diagnostic import native_attribution
 from tools.qa_schedule_capture import profile_definition
-from tools.qa_decoder_noise_fixture import _close_owner_with_checked_handles
+from tools.qa_decoder_noise_fixture import (_close_owner_with_checked_handles,
+    _compiler_worker_environment, _require_compiler_policy)
 
 
 class CheckedOwnerCloseProtocolTests(unittest.TestCase):
@@ -98,6 +100,58 @@ class CheckedOwnerCloseProtocolTests(unittest.TestCase):
         self.assertEqual(owner.close_calls, [False])
         self.assertEqual(owner.unregister_calls, 1)
         self.assertIs(owner.kernel.CloseHandle, original_close)
+
+
+class CompilerEnvironmentPolicyProtocolTests(unittest.TestCase):
+    """Literal fake mappings only: no ambient environment or Windows evidence."""
+    def test_normalizes_only_two_casefold_keys_without_mutating_or_filtering_parent_mapping(self):
+        inherited = {
+            'VSCMD_SKIP_SENDTELEMETRY': '0', 'vscmd_skip_sendtelemetry': 'false',
+            'VCToolsTelemetryOptOut': '0', 'VCTOOLSTELEMETRYOPTOUT': 'false',
+            'HTTP_PROXY': 'http://proxy.invalid:8080', 'NO_PROXY': 'example.invalid,localhost',
+            'BB_FAKE_CREDENTIAL': 'LITERAL_TEST_VALUE_NOT_A_SECRET',
+            'SSL_CERT_FILE': 'C:/fixtures/ca.pem', 'REQUESTS_CA_BUNDLE': 'C:/fixtures/ca-bundle.pem',
+            'BB_FAKE_CA_GUARD': 'KEEP_LITERAL_CA_GUARD', 'EMPTY_UNRELATED': '',
+            'Unrelated_miXeD': 'MiXeD-Value', 'VSCMD_SKIP_SENDTELEMETRY_extra': 'keep-suffix',
+            'PrefixVCToolsTelemetryOptOut': 'keep-prefix', 'VCToolsTelemetryOptOut.Suffix': 'keep-dot-suffix',
+        }
+        before = dict(inherited)
+        normalized = _compiler_worker_environment(inherited)
+        policy = {'vscmd_skip_sendtelemetry', 'vctoolstelemetryoptout'}
+        expected = {key: value for key, value in inherited.items() if key.casefold() not in policy}
+        expected.update(VSCMD_SKIP_SENDTELEMETRY='1', VCToolsTelemetryOptOut='1')
+        self.assertEqual(normalized, expected)
+        self.assertEqual(_compiler_worker_environment(MappingProxyType(inherited)), expected)
+        self.assertEqual(inherited, before)
+        self.assertIsNot(normalized, inherited)
+        for canonical in ('VSCMD_SKIP_SENDTELEMETRY', 'VCToolsTelemetryOptOut'):
+            self.assertEqual([key for key in normalized if key.casefold() == canonical.casefold()], [canonical])
+        _require_compiler_policy(normalized)
+
+    def test_validator_accepts_one_exact_value_for_each_case_insensitive_key_without_mutation(self):
+        for policy in ({'VSCMD_SKIP_SENDTELEMETRY': '1', 'VCToolsTelemetryOptOut': '1'},
+                       {'vscmd_skip_sendtelemetry': '1', 'vctoolstelemetryoptout': '1'},
+                       {'VsCmD_SkIp_SeNdTeLeMeTrY': '1', 'VcToOlStElEmEtRyOpToUt': '1'}):
+            with self.subTest(keys=tuple(policy)):
+                before = dict(policy)
+                _require_compiler_policy(policy)
+                self.assertEqual(policy, before)
+
+    def test_validator_rejects_missing_conflicting_duplicate_and_near_match_policy(self):
+        base = {'VSCMD_SKIP_SENDTELEMETRY': '1', 'VCToolsTelemetryOptOut': '1'}
+        invalid = [{}, {'VSCMD_SKIP_SENDTELEMETRY': '1'}, {'VCToolsTelemetryOptOut': '1'},
+            {**base, 'vscmd_skip_sendtelemetry': '1'},
+            {**base, 'VCTOOLSTELEMETRYOPTOUT': '0'},
+            {'VSCMD_SKIP_SENDTELEMETRY': '1', 'VCToolsTelemetryOptOut_typo': '1'}]
+        for key in base:
+            for value in ('0', 'true', '', ' 1', '1 '):
+                invalid.append({**base, key: value})
+        for number, environment in enumerate(invalid):
+            with self.subTest(fixture=number):
+                before = dict(environment)
+                with self.assertRaisesRegex(AssertionError, 'NATIVE_NOISE_COMPILER_OPT_OUT_POLICY_UNCONFIRMED'):
+                    _require_compiler_policy(environment)
+                self.assertEqual(environment, before)
 
 
 class ControlledBudgetProtocolTests(unittest.TestCase):
