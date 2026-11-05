@@ -341,6 +341,10 @@ class NoiseOwner:
     def __init__(self, output, producer):
         self.output = output; self.owner = None; self.log = None; self.errors = []
         self.producer = producer
+        from tools.qa_noise_boost_control import requested_policy
+        self.requested_boost_policy = requested_policy(producer)
+        self.boost_control = {'requested': self.requested_boost_policy,
+                              'ready': 'NOT_ESTABLISHED', 'oracle': 'NOT_ESTABLISHED', 'live_ready': 'NOT_ESTABLISHED'}
         apps.require(producer['implementation'] in ('PYTHON_CTYPES_WIN32', 'NATIVE_WIN32') and
             producer['expected_native_handles'] == (16 if producer['implementation'] == 'PYTHON_CTYPES_WIN32' else 32),
             'NOISE_PRODUCER_CONTRACT')
@@ -360,7 +364,10 @@ class NoiseOwner:
         apps.require(apps.file_hash(executable) == self.producer['executable_sha256'], 'NOISE_EXECUTABLE_CHANGED')
         command = ([str(executable), str(Path(__file__).resolve()), '--noise-child']
                    if self.producer['implementation'] == 'PYTHON_CTYPES_WIN32' else [str(executable)])
-        self.owner = apps.OwnedProcess([*command, '--output', str(self.output)], stdout=self.log, stderr=self.log,
+        command += ['--output', str(self.output)]
+        if self.requested_boost_policy is not None:
+            command += ['--thread-boost-policy', self.requested_boost_policy]
+        self.owner = apps.OwnedProcess(command, stdout=self.log, stderr=self.log,
             detach_console=True)
         self.started = time.monotonic()
         self.identity = apps.owned_process_identity(self.owner.process, executable)
@@ -400,6 +407,13 @@ class NoiseOwner:
                      all(ready.get(key) == self.producer[key] for key in
                          ('source_sha256', 'executable_sha256', 'implementation', 'expected_native_handles')),
                      'NOISE_IDENTITY_MISMATCH')
+        if self.requested_boost_policy is not None:
+            from tools.qa_noise_boost_control import validate_cached_control, validate_live_control
+            self.boost_control['ready'] = validate_cached_control(ready, self.requested_boost_policy)
+            observed = apps.observe_owned_thread_priorities(self.owner.process,
+                self.identity['creation_time_filetime_ticks'],
+                thread_births={w['tid']: w['created_100ns'] for w in ready['workers']})
+            self.boost_control['live_ready'] = validate_live_control(observed, ready, self.requested_boost_policy)
 
     def await_handoffs(self, target, whole_deadline, *, minimum_seconds=0):
         apps.require(type(target) is int and 0 <= target <= 2**63 - 1 and
@@ -494,6 +508,9 @@ class NoiseOwner:
                               self.identity['creation_time_filetime_ticks'],
                               expected_handles=self.producer['expected_native_handles'],
                               implementation=self.producer['implementation'])
+        if self.requested_boost_policy is not None:
+            from tools.qa_noise_boost_control import validate_cached_control
+            self.boost_control['oracle'] = validate_cached_control(self.oracle, self.requested_boost_policy)
         apps.require(all(self.oracle.get(key) == self.producer[key] for key in
             ('source_sha256', 'executable_sha256', 'implementation', 'expected_native_handles')) and
             {w['tid']: w['created_100ns'] for w in self.oracle['workers']} ==
@@ -1350,6 +1367,7 @@ def run_case(output, helper, source_sha, deadline, profile, producer, expectatio
             except BaseException:
                 noise.cleanup = {'status': 'UNCONFIRMED', 'cleanup_required': True}
         proof['noise_cleanup'] = noise.cleanup
+        proof['native_thread_boost_control'] = dict(noise.boost_control)
         collect_noise_stop_observation(noise.output, noise.stop_observation)
         noise.stop_observation['watchdog_error_codes'] = [apps._qa_code(value) for value in noise.errors[:32]]
         proof['noise_stop_observation'] = noise.stop_observation
