@@ -244,7 +244,32 @@ def monitored_run(args, log, *, env=None, timeout=30):
     return proof
 
 
-def _emit_trace_diagnostic(source, output, meta, digest, source_bytes):
+def observe_native_output(path):
+    """Measure the real private helper output before its normal temp cleanup."""
+    from blackbox_core.decoder_limits import MAX_WORK_BYTES
+    size = path.stat().st_size
+    require(0 < size <= MAX_WORK_BYTES, "NATIVE_OBSERVATION_SIZE_BUDGET")
+    with path.open("rb") as stream:
+        digest = hashlib.file_digest(stream, "sha256").hexdigest()
+        stream.seek(max(0, size - 4096))
+        tail = stream.read(4096).splitlines()
+    facts = {"status": "UNCONFIRMED", "output_bytes": size, "output_sha256": digest,
+             "byte_scope": "ACTUAL_NATIVE_JSONL_NOT_RESERIALIZED_INDEX_BYTES"}
+    try:
+        require(bool(tail), "NATIVE_OBSERVATION_FOOTER")
+        footer = json.loads(tail[-1])
+        require(type(footer) is dict and footer.get("type") == "footer" and
+                footer.get("protocol") == "blackbox.trace-event/1" and
+                footer.get("status") in ("DECODED", "TRUNCATED") and
+                type(footer.get("rows")) is int and 0 <= footer["rows"] <= 250000 and
+                size == path.stat().st_size, "NATIVE_OBSERVATION_FOOTER_OR_SIZE")
+        facts.update(status="OBSERVED", footer={key: footer[key] for key in ("status", "rows")})
+    except Exception as error:
+        facts["observation_error_code"] = _qa_code(str(error))
+    return facts
+
+
+def _emit_trace_diagnostic(source, output, meta, digest, source_bytes, native_observation=None):
     """Log only fixed enums, bounded counts and the original source digest."""
     def count(value):
         return value if type(value) is int and 0 <= value <= 2**63 - 1 else None
@@ -273,6 +298,10 @@ def _emit_trace_diagnostic(source, output, meta, digest, source_bytes):
         "bounded_events": count(meta.get("bounded_events")),
         "event_limit": count(reliability.get("event_limit")),
     }
+    if native_observation:
+        detail["native_output_bytes"] = count(native_observation.get("output_bytes"))
+        value = native_observation.get("output_sha256")
+        detail["native_output_sha256"] = value if isinstance(value, str) and re.fullmatch(r"[a-f0-9]{64}", value) else None
     write_json(output / "decoder-diagnostic.json", detail)
     record = json.dumps(detail, sort_keys=True, allow_nan=False)
     print("THIRD_PARTY_DECODER_TRACE_DETAIL " + record, flush=True)
@@ -287,10 +316,42 @@ def decode_trace(source, output, helper):
     source_bytes = source.stat().st_size
     digest = file_hash(source)
     index = output / "decoded.sqlite3"
-    with patch("blackbox_core.decoder_service.helper_path", return_value=helper):
-        meta = decode_file(source, index, timeout=90)
+    observations = []
+
+    class ObservedNativeDecoder(OwnedProcess):
+        def __init__(self, args, **kwargs):
+            self._native_output = Path(args[2]) if isinstance(args, (list, tuple)) and len(args) == 3 else None
+            super().__init__(args, **kwargs)
+            self._observation_done = False
+
+        def close(self, *args, **kwargs):
+            try:
+                return super().close(*args, **kwargs)
+            finally:
+                if not self._observation_done:
+                    self._observation_done = True
+                    item = {"status": "UNCONFIRMED", "helper_exit_code": self.process.poll()}
+                    try:
+                        if self.process.poll() is not None:
+                            require(self._native_output is not None, "NATIVE_OBSERVATION_LAUNCH_SHAPE")
+                            item["output_bytes"] = self._native_output.stat().st_size
+                            item.update(observe_native_output(self._native_output))
+                    except Exception as error:
+                        item["observation_error_code"] = _qa_code(str(error))
+                    observations.append(item)
+
+    try:
+        with patch("blackbox_core.decoder_service.helper_path", return_value=helper), \
+                patch("blackbox_core.optional_jobs.OwnedProcess", ObservedNativeDecoder):
+            meta = decode_file(source, index, timeout=90)
+    finally:
+        try:
+            write_json(output / "native-output-observation.json", {
+                "schema": "blackbox.native-output-observation/1", "processes": observations})
+        except Exception as error:
+            print("NATIVE_OUTPUT_OBSERVATION_WRITE_FAILED " + _qa_code(str(error)), flush=True)
     write_json(output / "decoder-summary.json", meta)
-    _emit_trace_diagnostic(source, output, meta, digest, source_bytes)
+    _emit_trace_diagnostic(source, output, meta, digest, source_bytes, observations[0] if observations else None)
     require(meta["status"] == "DECODED" and meta["rows"] > 0,
             "APP_TRACE_NOT_COMPLETELY_DECODED")
     require(file_hash(source) == digest and meta["input_sha256"] == digest,

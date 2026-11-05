@@ -9,16 +9,19 @@ import sqlite3
 import stat
 import struct
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 import xml.etree.ElementTree as ET
 import zipfile
 
-from tools.qa_decoder_apps import (decode_trace, etw_observations, installed, native_pe_identity,
+from tools.qa_decoder_apps import (decode_trace, etw_observations, installed, native_pe_identity, observe_native_output,
                                    observed_process_image, safe_extract)
 from tools.qa_decoder_budget_diagnostic import (PAIRS, parse_args, validate_noise_oracle,
     SEVENZIP_CAPABILITIES, validate_comparison, validate_original_source, validate_positive,
-    validate_progress, validate_rejection, validate_workload_activity)
+    validate_progress, validate_rejection, validate_workload_activity, validate_case_contract,
+    validate_output_observation, seal_and_remove_large_evidence, collect_bounded_case_facts)
+from tools.qa_decoder_budget_diagnostic import native_attribution
 from tools.qa_schedule_capture import profile_definition
 
 
@@ -122,11 +125,13 @@ class ControlledBudgetProtocolTests(unittest.TestCase):
         common = {'input_sha256': 'a' * 64, 'input_bytes': 8 * 1024**2, 'application_sha256': 'b' * 64,
             'native_image': {'code_kind': 'NATIVE_PE_NO_CLR_COM_DESCRIPTOR'}, 'helper_sha256': 'c' * 64,
             'script_hashes': {'driver': 'd' * 64},
+            'noise_producer': {'implementation': 'NATIVE_WIN32', 'source_sha256': '3' * 64,
+                               'executable_sha256': '4' * 64, 'expected_native_handles': 32},
             'source_identity': {'actual_source_sha': 'e' * 40, 'source_tree_sha': 'f' * 40},
             'noise_cleanup': {'status': 'COMPLETED'}, 'capture_cleanup': {'status': 'STOPPED'},
             'noise_workload_coverage': {'all_16_threads_bracket': True, 'threads_with_positive_handoff_delta': 16},
             'roundtrips_verified': 2}
-        first = {**common, 'status': 'EXPECTED_NATIVE_BUDGET_REJECTION', 'noise_handoffs': 10000,
+        first = {**common, 'status': 'EXPECTED_NATIVE_BUDGET_NEGATIVE', 'noise_handoffs': 10000,
             'capture_profile': {'name': 'schedule', 'xml_sha256': '1' * 64}}
         second = {**common, 'status': 'COMPLETE_7ZIP_ACCEPTANCE', 'noise_handoffs': 20000,
             'capture_profile': {'name': 'cpu_file', 'xml_sha256': '2' * 64},
@@ -161,6 +166,157 @@ class ControlledBudgetProtocolTests(unittest.TestCase):
         last['workers'][0]['handoffs'] = 100
         with self.assertRaisesRegex(AssertionError, 'ALL_THREADS_ACTIVE'):
             validate_workload_activity(first, last, clock)
+
+    def test_negative_contracts_require_real_observer_footer_and_distinct_limits(self):
+        meta = {'status': 'TRUNCATED', 'rows': 250000, 'input_sha256': 'a' * 64,
+                'import_completeness': 'BOUNDED_PREFIX'}
+        native = {'switch_rows': 12000, 'ready_rows': 12000, 'noise_tids_observed': 16,
+                  'qpc_frequency_matches': True}
+        output = {'status': 'OBSERVED', 'helper_exit_code': 0, 'output_bytes': 100,
+                  'output_sha256': 'b' * 64, 'footer': {'status': 'TRUNCATED', 'rows': 250000}}
+        value = {'schema': 'blackbox.native-output-observation/1', 'processes': [output]}
+        self.assertEqual(validate_output_observation(value, meta), output)
+        self.assertEqual(validate_case_contract('ROW_BUDGET_NEGATIVE', True, None, meta, 'a' * 64, native, output),
+                         'EXPECTED_ROW_BUDGET_NEGATIVE')
+        self.assertEqual(validate_case_contract('NATIVE_BUDGET_NEGATIVE', True, None, meta, 'a' * 64, native, output),
+                         'EXPECTED_NATIVE_BUDGET_NEGATIVE')
+        with self.assertRaisesRegex(AssertionError, 'OUTPUT_LIMIT_NOT_REACHED'):
+            validate_case_contract('OUTPUT_BUDGET_NEGATIVE', True, None, meta, 'a' * 64, native, output)
+        byte_meta = {**meta, 'rows': 139635}
+        byte_output = {**output, 'output_bytes': 384 * 1024**2 + 100,
+                       'footer': {'status': 'TRUNCATED', 'rows': 139635}}
+        self.assertEqual(validate_case_contract('OUTPUT_BUDGET_NEGATIVE', True, None, byte_meta,
+            'a' * 64, native, byte_output), 'EXPECTED_OUTPUT_BUDGET_NEGATIVE')
+        with self.assertRaisesRegex(AssertionError, 'NATIVE_ROW_LIMIT_NOT_REACHED'):
+            validate_case_contract('NATIVE_BUDGET_NEGATIVE', True, None, byte_meta, 'a' * 64, native, byte_output)
+        with self.assertRaisesRegex(AssertionError, 'REJECTION_NOT_OBSERVED'):
+            validate_case_contract('OUTPUT_BUDGET_NEGATIVE', False, None, byte_meta, 'a' * 64, native, byte_output)
+        with self.assertRaisesRegex(AssertionError, 'OBSERVATION_UNCONFIRMED'):
+            validate_output_observation({'schema': value['schema'], 'processes': [{**output, 'helper_exit_code': 1}]}, meta)
+        with self.assertRaisesRegex(AssertionError, 'OBSERVATION_UNCONFIRMED'):
+            validate_output_observation(value, byte_meta)
+
+
+class NativeOutputAndRetentionProtocolTests(unittest.TestCase):
+    """Only file/protocol fixtures; actual decoder/Windows evidence comes from CI."""
+    def test_partial_failure_facts_preserve_primary_error_and_exclude_paths_payload_and_args(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); work = root / '7zip'; work.mkdir()
+            helper = root / 'helper.exe'; helper.write_bytes(b'explicit non-executable hash fixture')
+            (work / 'input.bin').write_bytes(b'explicit input fixture')
+            (work / 'decoder-summary.json').write_text(json.dumps({'status': 'TRUNCATED', 'rows': 5,
+                'input_sha256': 'a' * 64, 'payload': 'PRIVATE_PAYLOAD', 'path': str(root)}), encoding='utf-8')
+            (work / 'workload-oracle.json').write_text(json.dumps({'input_sha256': 'b' * 64, 'input_bytes': 8,
+                'roundtrips_verified': 1, 'application': {'sha256': 'c' * 64, 'path': str(helper)},
+                'workloads': [{'pid': 123, 'creation_time_filetime_ticks': '1000', 'exit_code': 0,
+                    'owned_image_matches_requested': True, 'args': ['PRIVATE_ARG'], 'observed_image': str(helper)}]}),
+                encoding='utf-8')
+            proof = {'status': 'REPRODUCTION_NOT_ESTABLISHED', 'reason_code': 'ORIGINAL_OBSERVER_FAILURE'}
+            collect_bounded_case_facts(proof, work, helper, {'begin_qpc': 10, 'qpc_frequency_hz': 10000000})
+            self.assertEqual(proof['reason_code'], 'ORIGINAL_OBSERVER_FAILURE')
+            self.assertEqual(proof['small_facts']['summary']['rows'], 5)
+            self.assertEqual(proof['small_facts']['workload']['owned_processes'][0]['creation_time_filetime_ticks'], '1000')
+            self.assertEqual(proof['small_facts']['workload_qpc_bounds']['end_qpc'], 'NOT_ESTABLISHED')
+            self.assertEqual(proof['small_facts']['actual_input_file']['bytes'], len(b'explicit input fixture'))
+            for private in (str(root), str(helper), 'PRIVATE_PAYLOAD', 'PRIVATE_ARG'):
+                self.assertNotIn(private, json.dumps(proof))
+            missing = {'reason_code': 'ORIGINAL_CAPTURE_FAILURE'}
+            collect_bounded_case_facts(missing, root / 'absent', helper, {})
+            self.assertEqual(missing['reason_code'], 'ORIGINAL_CAPTURE_FAILURE')
+            self.assertEqual(missing['small_facts']['summary'], 'NOT_ESTABLISHED')
+            self.assertIn('workload', missing['fact_errors'])
+
+    def test_observer_measures_actual_file_bytes_hash_and_footer_without_payload_export(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'private-output.jsonl'
+            payload = (b'{"type":"header","secret":"PRIVATE_PAYLOAD"}\n' +
+                json.dumps({'type': 'footer', 'protocol': 'blackbox.trace-event/1',
+                            'status': 'TRUNCATED', 'rows': 5}).encode() + b'\n')
+            path.write_bytes(payload)
+            observed = observe_native_output(path)
+            self.assertEqual(observed['status'], 'OBSERVED')
+            self.assertEqual(observed['output_bytes'], len(payload))
+            self.assertEqual(observed['output_sha256'], hashlib.sha256(payload).hexdigest())
+            self.assertNotIn('PRIVATE_PAYLOAD', json.dumps(observed))
+            self.assertNotIn(str(path), json.dumps(observed))
+            path.write_bytes(b'no completion footer\n')
+            broken = observe_native_output(path)
+            self.assertEqual(broken['status'], 'UNCONFIRMED')
+            self.assertEqual(broken['output_bytes'], path.stat().st_size)
+            self.assertIn('observation_error_code', broken)
+
+    def test_only_hashed_owned_large_files_are_removed_after_verified_seal(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); work = root / '7zip'; work.mkdir()
+            source = work / 'trace-owned.etl'; index = work / 'decoded.sqlite3'
+            source.write_bytes(b'explicit ETL file fixture'); index.write_bytes(b'explicit index file fixture')
+            original = work / 'input.bin'; original.write_bytes(b'preserved QA input')
+            proof = {'status': 'REPRODUCTION_NOT_ESTABLISHED', 'noise_cleanup': {'status': 'COMPLETED'},
+                'capture_cleanup': {'status': 'STOPPED'}, 'native_output': {'helper_exit_code': 0},
+                'evidence': {name: {'sha256': hashlib.sha256(path.read_bytes()).hexdigest(),
+                                    'bytes': path.stat().st_size} for name, path in (('etl', source), ('index', index))}}
+            seal_and_remove_large_evidence(root, work, source, index, proof)
+            self.assertFalse(source.exists()); self.assertFalse(index.exists())
+            self.assertEqual(original.read_bytes(), b'preserved QA input')
+            self.assertTrue((root / 'case-sealed.json').is_file())
+            self.assertEqual(proof['evidence_retention']['status'], 'OWNED_QA_EVIDENCE_HASHED_THEN_REMOVED')
+            self.assertEqual(proof['evidence_retention']['removed'], ['etl', 'index'])
+
+    def test_unconfirmed_resources_cannot_delete_evidence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); source = root / 'trace.etl'; index = root / 'decoded.sqlite3'
+            source.write_bytes(b'keep'); index.write_bytes(b'keep')
+            with self.assertRaisesRegex(AssertionError, 'RESOURCE_CLEANUP_UNCONFIRMED'):
+                seal_and_remove_large_evidence(root, root, source, index, {
+                    'noise_cleanup': {'status': 'UNCONFIRMED'}, 'capture_cleanup': {'status': 'STOPPED'},
+                    'native_output': {'helper_exit_code': 0}})
+            self.assertTrue(source.is_file()); self.assertTrue(index.is_file())
+
+    def test_wrong_hash_cannot_delete_owned_or_other_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); work = root / '7zip'; work.mkdir()
+            source = work / 'trace.etl'; index = work / 'decoded.sqlite3'; outside = root / 'user-input.etl'
+            for path in (source, index, outside):
+                path.write_bytes(b'preserve on unconfirmed hash')
+            proof = {'noise_cleanup': {'status': 'COMPLETED'}, 'capture_cleanup': {'status': 'STOPPED'},
+                'native_output': {'helper_exit_code': 0}, 'evidence': {
+                    name: {'sha256': '0' * 64, 'bytes': path.stat().st_size}
+                    for name, path in (('etl', source), ('index', index))}}
+            with self.assertRaisesRegex(AssertionError, 'HASH_CHANGED'):
+                seal_and_remove_large_evidence(root, work, source, index, proof)
+            for path in (source, index, outside):
+                self.assertTrue(path.is_file())
+
+
+class IndexAttributionProtocolTests(unittest.TestCase):
+    """Stored-row fixtures exercise scopes and ambiguity, never native capture."""
+    def test_stack_counts_are_partitioned_and_bytes_explicitly_derived(self):
+        frame = {'name': 'PRIVATE_FRAME_Ж'}
+        rows = [{'pid': 11, 'process_instance': 1, 'frames': [frame]},
+                {'pid': 22, 'process_instance': 2, 'frames': [frame, frame]},
+                {'pid': -1, 'process_instance': None, 'frames': []}]
+        with tempfile.TemporaryDirectory() as tmp:
+            index = Path(tmp) / 'index.sqlite3'
+            with closing(sqlite3.connect(index)) as db:
+                db.execute('CREATE TABLE events(data TEXT)')
+                db.executemany('INSERT INTO events VALUES(?)', [(json.dumps(row),) for row in rows])
+                db.commit()
+            result = native_attribution(index, {'rows': 3, 'engine': {'trace_counter_frequency_hz': 10}},
+                {'pid': 22, 'qpc_frequency_hz': 10, 'workers': []}, time.monotonic() + 5, [11])
+            stats = result['stack_attribution']; groups = stats['groups']
+            self.assertEqual(groups['target_application']['frames'], 1)
+            self.assertEqual(groups['owned_noise']['frames'], 2)
+            self.assertEqual(groups['unattributed']['rows'], 1)
+            self.assertIn('NOT_ACTUAL_NATIVE_JSONL', stats['byte_scope'])
+            self.assertGreater(groups['target_application']['derived_index_frame_json_bytes'], 0)
+            self.assertNotIn('PRIVATE_FRAME', json.dumps(stats))
+            with closing(sqlite3.connect(index)) as db:
+                db.execute('INSERT INTO events VALUES(?)', (json.dumps({**rows[0], 'process_instance': 3}),))
+                db.commit()
+            reused = native_attribution(index, {'rows': 4, 'engine': {'trace_counter_frequency_hz': 10}},
+                {'pid': 22, 'qpc_frequency_hz': 10, 'workers': []}, time.monotonic() + 5, [11])
+            self.assertIn(11, reused['stack_attribution']['ambiguous_known_pids'])
+            self.assertEqual(reused['stack_attribution']['groups']['target_application']['rows'], 0)
 
 
 class FixedQaProfileTests(unittest.TestCase):

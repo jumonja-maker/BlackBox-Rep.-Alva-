@@ -40,7 +40,7 @@ APPROVED_RELEASE_QA_SCOPE = frozenset({
 })
 APPROVED_DECODER_QA_PR = 38
 APPROVED_DECODER_QA_BRANCH = "fix/r10-v055-trace-diagnostics-20261105"
-# This one repair retains two new QA files. It is not a directory allowlist:
+# This one repair retains four new QA files. It is not a directory allowlist:
 # added/modified/renamed/deleted statuses must match each exact reviewed path.
 APPROVED_DECODER_QA_FILES = {
     ".github/workflows/shell-qa.yml": "modified",
@@ -48,6 +48,8 @@ APPROVED_DECODER_QA_FILES = {
     "tools/qa_decoder_apps.py": "modified",
     "tests/test_decoder_apps_qa.py": "modified",
     "tools/qa_decoder_budget_diagnostic.py": "added",
+    "tools/qa_decoder_noise_fixture.py": "added",
+    "tools/fixtures/DecoderBudgetProbe/noise.c": "added",
     "tools/qa_schedule_capture.py": "modified",
     "tools/fixtures/DecoderApps/cpu_file.wprp": "added",
     "tools/publish_v055_after_ci.py": "modified",

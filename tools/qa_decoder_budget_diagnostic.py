@@ -1,4 +1,4 @@
-"""CI-only native A/B: a rejected scheduler prefix and complete focused 7-Zip.
+"""CI-only Python budget negatives and a complete native Win32 noise A/B.
 
 The historical a80 release trace is unavailable: its cause remains unknown.
 All capture/decode/workload operations delegate to the existing real 7-Zip QA.
@@ -12,7 +12,9 @@ from ctypes import wintypes as W
 import json
 import os
 from pathlib import Path
+import re
 import sqlite3
+import stat
 import subprocess
 import sys
 import threading
@@ -96,7 +98,9 @@ def noise_child(output):
     proof = {'schema': 'blackbox.scheduler-noise/1', 'status': 'FAILED',
              'pid': os.getpid(), 'created_100ns': creation_time(kernel, kernel.GetCurrentProcess(), 'GetProcessTimes'),
              'qpc_frequency_hz': counter(kernel, 'QueryPerformanceFrequency'),
-             'source_sha256': apps.file_hash(Path(__file__)), 'pairs': PAIRS}
+             'source_sha256': apps.file_hash(Path(__file__)), 'pairs': PAIRS,
+             'implementation': 'PYTHON_CTYPES_WIN32', 'expected_native_handles': 2 * PAIRS,
+             'executable_sha256': apps.file_hash(Path(sys.executable))}
 
     def worker(index, mine, other):
         record = {'tid': kernel.GetCurrentThreadId(), 'handoffs': 0,
@@ -144,6 +148,8 @@ def noise_child(output):
                     'schema': 'blackbox.scheduler-noise-progress/1', 'sequence': sequence,
                     'pid': proof['pid'], 'created_100ns': proof['created_100ns'],
                     'source_sha256': proof['source_sha256'], 'qpc_frequency_hz': proof['qpc_frequency_hz'],
+                    'implementation': proof['implementation'], 'executable_sha256': proof['executable_sha256'],
+                    'expected_native_handles': proof['expected_native_handles'],
                     'qpc': sample_end, 'sample_begin_qpc': sample_begin, 'sample_end_qpc': sample_end,
                     'workers': counts,
                     'total_handoffs': sum(record['handoffs'] for record in counts)})
@@ -177,8 +183,12 @@ def noise_child(output):
 
 
 class NoiseOwner:
-    def __init__(self, output):
+    def __init__(self, output, producer):
         self.output = output; self.owner = None; self.log = None; self.errors = []
+        self.producer = producer
+        apps.require(producer['implementation'] in ('PYTHON_CTYPES_WIN32', 'NATIVE_WIN32') and
+            producer['expected_native_handles'] == (16 if producer['implementation'] == 'PYTHON_CTYPES_WIN32' else 32),
+            'NOISE_PRODUCER_CONTRACT')
         self.watcher_stop = threading.Event(); self.watcher = None
         self.started = None; self.max_rss = 0; self.cleanup = {'status': 'NOT_ESTABLISHED'}
         self.prelude = {'target_handoffs': 0, 'wait_seconds': 0}
@@ -186,11 +196,14 @@ class NoiseOwner:
     def start(self):
         import psutil
         self.log = (self.output.parent / 'noise.log').open('xb')
-        self.owner = apps.OwnedProcess([sys.executable, str(Path(__file__).resolve()),
-            '--noise-child', '--output', str(self.output)], stdout=self.log, stderr=self.log,
+        executable = Path(self.producer['executable']).resolve(strict=True)
+        apps.require(apps.file_hash(executable) == self.producer['executable_sha256'], 'NOISE_EXECUTABLE_CHANGED')
+        command = ([str(executable), str(Path(__file__).resolve()), '--noise-child']
+                   if self.producer['implementation'] == 'PYTHON_CTYPES_WIN32' else [str(executable)])
+        self.owner = apps.OwnedProcess([*command, '--output', str(self.output)], stdout=self.log, stderr=self.log,
             detach_console=True)
         self.started = time.monotonic()
-        self.identity = apps.owned_process_identity(self.owner.process, Path(sys.executable).resolve())
+        self.identity = apps.owned_process_identity(self.owner.process, executable)
         process = psutil.Process(self.owner.process.pid)
 
         def watch():
@@ -223,7 +236,9 @@ class NoiseOwner:
         ready = read_json(self.output / 'ready.json'); self.ready = ready
         apps.require(ready.get('status') == 'READY' and ready.get('pid') == self.owner.process.pid and
                      ready.get('created_100ns') == self.identity['creation_time_filetime_ticks'] and
-                     ready.get('source_sha256') == apps.file_hash(Path(__file__)), 'NOISE_IDENTITY_MISMATCH')
+                     all(ready.get(key) == self.producer[key] for key in
+                         ('source_sha256', 'executable_sha256', 'implementation', 'expected_native_handles')),
+                     'NOISE_IDENTITY_MISMATCH')
 
     def await_handoffs(self, target, whole_deadline):
         started = time.monotonic(); deadline = min(started + PRELUDE_SECONDS, whole_deadline)
@@ -254,8 +269,10 @@ class NoiseOwner:
         apps.require(not self.watcher.is_alive() and not self.errors, 'NOISE_WATCHDOG_NOT_CLOSED')
         self.oracle = read_json(self.output / 'oracle.json')
         validate_noise_oracle(self.oracle, self.owner.process.pid,
-                              self.identity['creation_time_filetime_ticks'])
-        apps.require(self.oracle.get('source_sha256') == self.ready['source_sha256'] and
+                              self.identity['creation_time_filetime_ticks'],
+                              expected_handles=self.producer['expected_native_handles'])
+        apps.require(all(self.oracle.get(key) == self.producer[key] for key in
+            ('source_sha256', 'executable_sha256', 'implementation', 'expected_native_handles')) and
             {w['tid']: w['created_100ns'] for w in self.oracle['workers']} ==
             {w['tid']: w['created_100ns'] for w in self.ready['workers']} and
             sum(w['handoffs'] for w in self.oracle['workers']) >= self.prelude.get('observed_handoffs', 0),
@@ -280,7 +297,7 @@ class NoiseOwner:
         self.log.close()
         self.cleanup = {'status': 'COMPLETED', 'child_exit_code': 0,
                         'active_job_processes_before_close': 0, 'job_handle_closed_verified': True,
-                        'all_threads_joined': True, 'native_handles_closed': 2 * PAIRS,
+                        'all_threads_joined': True, 'native_handles_closed': self.producer['expected_native_handles'],
                         'max_rss_bytes': self.max_rss}
 
     def abort(self):
@@ -299,13 +316,13 @@ class NoiseOwner:
                         'process_exit_observed': exited, 'cleanup_required': True}
 
 
-def validate_noise_oracle(oracle, pid, created):
+def validate_noise_oracle(oracle, pid, created, *, expected_handles=2 * PAIRS):
     workers = oracle.get('workers')
     apps.require(oracle.get('schema') == 'blackbox.scheduler-noise/1' and oracle.get('status') == 'COMPLETED'
         and oracle.get('pid') == pid and oracle.get('created_100ns') == created
         and oracle.get('pairs') == PAIRS and oracle.get('stop_requested') is True
-        and oracle.get('all_threads_joined') is True and oracle.get('native_handles_created') == 2 * PAIRS
-        and oracle.get('native_handles_closed') == 2 * PAIRS and oracle.get('cleanup_required') is False
+        and oracle.get('all_threads_joined') is True and oracle.get('native_handles_created') == expected_handles
+        and oracle.get('native_handles_closed') == expected_handles and oracle.get('cleanup_required') is False
         and oracle.get('errors') == [] and type(workers) is list and len(workers) == 2 * PAIRS,
         'NOISE_ORACLE_OR_CLEANUP_UNCONFIRMED')
     apps.require(type(oracle.get('qpc_frequency_hz')) is int and oracle['qpc_frequency_hz'] > 0 and
@@ -331,6 +348,8 @@ def validate_progress(progress, ready, previous=None):
     apps.require(progress.get('schema') == 'blackbox.scheduler-noise-progress/1' and
         progress.get('pid') == ready['pid'] and progress.get('created_100ns') == ready['created_100ns'] and
         progress.get('source_sha256') == ready['source_sha256'] and
+        all(progress.get(key) == ready.get(key) for key in
+            ('implementation', 'executable_sha256', 'expected_native_handles')) and
         type(progress.get('qpc_frequency_hz')) is int and progress['qpc_frequency_hz'] > 0 and
         progress['qpc_frequency_hz'] == ready['qpc_frequency_hz'] and
         type(progress.get('sequence')) is int and 1 <= progress['sequence'] <= MAX_PROGRESS_RECEIPTS and
@@ -403,11 +422,19 @@ def validate_original_source(diagnostic, actual_hash, actual_bytes):
             'metadata_input_sha256_matches': True}
 
 
-def native_attribution(index, meta, oracle, deadline):
+def native_attribution(index, meta, oracle, deadline, target_pids=()):
+    from blackbox_core.decoder_cpu import classify_cpu_sample
     workers = {w['tid']: w for w in oracle['workers']}
     result = {'switch_rows': 0, 'ready_rows': 0, 'noise_tids_observed': 0,
               'qpc_frequency_matches': meta.get('engine', {}).get('trace_counter_frequency_hz') == oracle['qpc_frequency_hz']}
     observed = set()
+    def counts():
+        return {'rows': 0, 'stacked_rows': 0, 'frames': 0, 'cpu_samples': 0,
+                'cpu_samples_with_stacks': 0, 'derived_index_event_json_bytes': 0,
+                'derived_index_frame_json_bytes': 0}
+    known = {pid: {'counts': counts(), 'instances': set(), 'missing_instance': False}
+             for pid in set(target_pids) | {oracle['pid']}}
+    groups = {key: counts() for key in ('target_application', 'owned_noise', 'other', 'unattributed')}
     with closing(sqlite3.connect(index.resolve().as_uri() + '?mode=ro', uri=True)) as db:
         db.execute('PRAGMA query_only=ON'); db.execute('PRAGMA trusted_schema=OFF')
         apps.require(db.execute('PRAGMA integrity_check').fetchone() == ('ok',), 'DIAGNOSTIC_INDEX_INTEGRITY')
@@ -416,6 +443,22 @@ def native_attribution(index, meta, oracle, deadline):
             if number % 512 == 0:
                 apps.require(time.monotonic() < deadline, 'DIAGNOSTIC_NATIVE_SCAN_DEADLINE')
             row = json.loads(data); schedule = row.get('thread_schedule') or {}
+            pid = row.get('pid'); frames = row.get('frames') or []
+            if pid in known:
+                item = known[pid]; bucket = item['counts']; instance = row.get('process_instance')
+                if type(instance) is int and instance >= 0:
+                    if len(item['instances']) < 2:
+                        item['instances'].add(instance)
+                else:
+                    item['missing_instance'] = True
+            else:
+                bucket = groups['other' if type(pid) is int and pid > 0 else 'unattributed']
+            cpu = classify_cpu_sample(row, 'etw') == 'PROCESS_SAMPLE'
+            bucket['rows'] += 1; bucket['stacked_rows'] += bool(frames); bucket['frames'] += len(frames)
+            bucket['cpu_samples'] += cpu; bucket['cpu_samples_with_stacks'] += cpu and bool(frames)
+            bucket['derived_index_event_json_bytes'] += len(data.encode('utf-8'))
+            bucket['derived_index_frame_json_bytes'] += len(json.dumps(frames, ensure_ascii=True,
+                separators=(',', ':'), allow_nan=False).encode('utf-8'))
             if (schedule.get('schema') != 'blackbox.thread-schedule/1' or
                     schedule.get('source') != 'ETW_KERNEL_SCHEDULER' or
                     row.get('provider_guid', '').lower() != '9e814aad-3204-11d2-9a82-006008a86939'):
@@ -438,19 +481,156 @@ def native_attribution(index, meta, oracle, deadline):
             if matched:
                 result['switch_rows' if parser == 'TRACEEVENT_CSWITCH' else 'ready_rows'] += 1
     result['noise_tids_observed'] = len(observed)
+    ambiguous = []
+    for pid, item in known.items():
+        if len(item['instances']) != 1 or item['missing_instance']:
+            ambiguous.append(pid); name = 'unattributed'
+        else:
+            name = 'owned_noise' if pid == oracle['pid'] else 'target_application'
+        for key, value in item['counts'].items():
+            groups[name][key] += value
+    result['stack_attribution'] = {'groups': groups, 'ambiguous_known_pids': sorted(ambiguous),
+        'scope': 'OWNED_PID_LIST_AND_SINGLE_TRACE_PROCESS_INDEX_NOT_CAUSAL_OR_CREATION_TIME_ATTESTATION',
+        'byte_scope': 'DERIVED_INDEX_JSON_BYTES_NOT_ACTUAL_NATIVE_JSONL_BYTE_DISTRIBUTION'}
     return result
 
 
-def run_case(output, helper, source_sha, deadline, profile, target_handoffs=0):
+def validate_output_observation(value, meta):
+    processes = value.get('processes')
+    apps.require(value.get('schema') == 'blackbox.native-output-observation/1' and type(processes) is list and
+        len(processes) == 1, 'ACTUAL_NATIVE_OUTPUT_OBSERVATION_MISSING')
+    item = processes[0]
+    apps.require(item.get('status') == 'OBSERVED' and item.get('helper_exit_code') == 0 and
+        type(item.get('output_bytes')) is int and item['output_bytes'] > 0 and
+        re.fullmatch(r'[a-f0-9]{64}', item.get('output_sha256', '')) and
+        item.get('footer') == {'status': meta['status'], 'rows': meta['rows']},
+        'ACTUAL_NATIVE_OUTPUT_OBSERVATION_UNCONFIRMED')
+    return item
+
+
+def validate_case_contract(expectation, assertion_observed, result, meta, actual_hash, native, output):
+    apps.require(native.get('qpc_frequency_matches') is True, 'NATIVE_TRACE_COUNTER_FREQUENCY_MISMATCH')
+    if expectation in ('ROW_BUDGET_NEGATIVE', 'OUTPUT_BUDGET_NEGATIVE', 'NATIVE_BUDGET_NEGATIVE'):
+        apps.require(assertion_observed, 'EXPECTED_NATIVE_REJECTION_NOT_OBSERVED')
+        apps.require(meta.get('status') == 'TRUNCATED' and type(meta.get('rows')) is int and
+            0 < meta['rows'] <= 250000 and meta.get('import_completeness') == 'BOUNDED_PREFIX' and
+            meta.get('input_sha256') == actual_hash, 'EXPECTED_NATIVE_PREFIX_NOT_ESTABLISHED')
+        if expectation == 'ROW_BUDGET_NEGATIVE':
+            apps.require(meta['rows'] == 250000, 'EXPECTED_NATIVE_ROW_LIMIT_NOT_REACHED')
+        elif expectation == 'OUTPUT_BUDGET_NEGATIVE':
+            apps.require(meta['rows'] < 250000 and output['output_bytes'] > 384 * 1024**2,
+                         'EXPECTED_NATIVE_OUTPUT_LIMIT_NOT_REACHED')
+        else:
+            apps.require(meta['rows'] == 250000, 'EXPECTED_NATIVE_ROW_LIMIT_NOT_REACHED')
+        if expectation != 'OUTPUT_BUDGET_NEGATIVE':
+            validate_rejection(meta, actual_hash, native)
+        return 'EXPECTED_' + expectation
+    apps.require(expectation == 'COMPLETE_NATIVE_7ZIP' and not assertion_observed,
+                 'COMPLETE_NATIVE_CASE_STILL_REJECTED')
+    validate_positive(result, meta)
+    apps.require(native['qpc_frequency_matches'], 'FOCUSED_TRACE_COUNTER_FREQUENCY_MISMATCH')
+    return 'COMPLETE_7ZIP_ACCEPTANCE'
+
+
+def seal_and_remove_large_evidence(root, work, source, index, proof):
+    apps.require(proof['noise_cleanup']['status'] == 'COMPLETED' and
+        proof['capture_cleanup']['status'] == 'STOPPED' and
+        proof['native_output']['helper_exit_code'] == 0, 'EVIDENCE_REMOVAL_RESOURCE_CLEANUP_UNCONFIRMED')
+    candidates = {'etl': source, 'index': index}
+    expected = {}
+    for name, path in candidates.items():
+        info = path.lstat()
+        apps.require(path.resolve().parent == work.resolve() and not path.is_symlink() and
+            stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and
+            not (getattr(info, 'st_file_attributes', 0) & 0x400) and
+            (path.suffix.lower() == '.etl' if name == 'etl' else path.name == 'decoded.sqlite3'),
+            'EVIDENCE_REMOVAL_NOT_OWNED_REGULAR_FILE')
+        expected[name] = (info.st_dev, info.st_ino, info.st_size)
+        apps.require(proof['evidence'][name] == {'sha256': apps.file_hash(path), 'bytes': info.st_size},
+                     'EVIDENCE_REMOVAL_HASH_CHANGED')
+    sealed = root / 'case-sealed.json'
+    write_receipt(sealed, {'schema': 'blackbox.owned-evidence-seal/1', 'facts': proof})
+    seal_hash = apps.file_hash(sealed)
+    apps.require(read_json(sealed, 128 * 1024).get('facts') == proof and apps.file_hash(sealed) == seal_hash,
+                 'EVIDENCE_SEAL_READBACK_FAILED')
+    removed = []
+    proof['evidence_retention'] = {'status': 'REMOVAL_NOT_COMPLETED', 'seal_sha256': seal_hash,
+        'scope': 'ONLY_THIS_FRESH_OWNED_QA_CAPTURE_ETL_AND_CLOSED_INDEX', 'removed': removed}
+    for name, path in candidates.items():
+        info = path.lstat()
+        apps.require((info.st_dev, info.st_ino, info.st_size) == expected[name] and
+            not path.is_symlink() and apps.file_hash(path) == proof['evidence'][name]['sha256'] and
+            apps.file_hash(sealed) == seal_hash, 'EVIDENCE_REMOVAL_IDENTITY_CHANGED')
+        path.unlink(); apps.require(not path.exists() and not path.is_symlink(), 'EVIDENCE_REMOVAL_UNCONFIRMED')
+        removed.append(name)
+    proof['evidence_retention']['status'] = 'OWNED_QA_EVIDENCE_HASHED_THEN_REMOVED'
+
+
+def collect_bounded_case_facts(proof, work, helper, clock):
+    """Secondary diagnostics never replace the primary failure or certify cleanup."""
+    facts = proof.setdefault('small_facts', {})
+    errors = proof.setdefault('fact_errors', {})
+    def scalar(value):
+        if type(value) is bool or type(value) is int and abs(value) <= 2**63 - 1:
+            return value
+        if isinstance(value, str) and re.fullmatch(r'[A-Za-z0-9_+.-]{1,96}', value):
+            return value
+        return 'NOT_ESTABLISHED'
+    for key, filename, limit in (('summary', 'decoder-summary.json', 256 * 1024),
+                                  ('workload', 'workload-oracle.json', 32768)):
+        try:
+            value = read_json(work / filename, limit)
+            if key == 'summary':
+                facts[key] = {name: scalar(value.get(name)) for name in ('status', 'rows', 'input_sha256',
+                    'import_completeness', 'events_with_stacks', 'events_with_errors', 'bounded_events',
+                    'decoder_reported_lost_events')}
+            else:
+                application = value.get('application') if type(value.get('application')) is dict else {}
+                facts[key] = {name: scalar(value.get(name)) for name in
+                              ('input_sha256', 'input_bytes', 'roundtrips_verified')}
+                facts[key]['application_sha256'] = scalar(application.get('sha256'))
+                entries = value.get('workloads')
+                if type(entries) is list and len(entries) <= 6 and all(type(item) is dict for item in entries):
+                    facts[key]['owned_processes'] = [{name: scalar(item.get(name)) for name in
+                        ('pid', 'creation_time_filetime_ticks', 'owned_image_matches_requested', 'exit_code')}
+                        for item in entries]
+                else:
+                    facts[key]['owned_processes'] = 'NOT_ESTABLISHED'
+                    errors['workload_processes'] = 'NOT_ESTABLISHED'
+        except Exception as error:
+            facts.setdefault(key, 'NOT_ESTABLISHED')
+            errors[key] = apps._qa_code(str(error))
+    facts['workload_qpc_bounds'] = {key: scalar(clock.get(key)) for key in
+                                  ('begin_qpc', 'end_qpc', 'qpc_frequency_hz')}
+    try:
+        path = work / 'input.bin'
+        apps.require(path.stat().st_size <= 8 * 1024**2, 'DIAGNOSTIC_INPUT_FACT_SIZE')
+        facts['actual_input_file'] = {'bytes': path.stat().st_size, 'sha256': apps.file_hash(path)}
+    except Exception as error:
+        facts.setdefault('actual_input_file', 'NOT_ESTABLISHED')
+        errors['input_file'] = apps._qa_code(str(error))
+    for name, path in (('helper_sha256', helper), ('driver_sha256', Path(__file__)),
+                       ('apps_sha256', Path(apps.__file__)), ('capture_sha256', ROOT / 'tools' / 'qa_schedule_capture.py')):
+        if name not in facts:
+            try:
+                facts[name] = apps.file_hash(path)
+            except Exception as error:
+                facts[name] = 'NOT_ESTABLISHED'; errors[name] = apps._qa_code(str(error))
+
+
+def run_case(output, helper, source_sha, deadline, profile, producer, expectation, target_handoffs=0):
     identity = source_identity(source_sha)
     apps.require(identity['source_identity_status'] == 'VERIFIED_EXPECTED_HEAD', 'DIAGNOSTIC_SOURCE_IDENTITY')
     output.mkdir(parents=True, exist_ok=False)
     work = output / '7zip'; work.mkdir()
-    noise = NoiseOwner(output / 'noise')
+    noise = NoiseOwner(output / 'noise', producer)
     proof = {'schema': 'blackbox.native-budget-diagnostic/1', 'status': 'REPRODUCTION_NOT_ESTABLISHED',
         'source_identity': identity, 'historical_a80_cause': 'NOT_ESTABLISHED',
         'positive_application_acceptance': 'NOT_ESTABLISHED', 'synthetic_etw': False,
-        'requested_profile': profile}
+        'requested_profile': profile, 'expectation': expectation,
+        'noise_producer': {key: producer[key] for key in
+            ('implementation', 'source_sha256', 'executable_sha256', 'expected_native_handles')},
+        'evidence': {}}
     captures = []; original_factory = apps.start_schedule
     capture_cleanup = {'status': 'NOT_STARTED', 'cleanup_required': False}
     capture_profile = {}
@@ -493,6 +673,7 @@ def run_case(output, helper, source_sha, deadline, profile, target_handoffs=0):
             apps.require(actual.qa_profile == profile, 'DIAGNOSTIC_ACTUAL_PROFILE_MISMATCH')
             capture_profile.update(name=actual.qa_profile, entry=actual.profile_entry,
                                    xml_sha256=apps.file_hash(actual.profile_path))
+            proof['capture_profile'] = dict(capture_profile)
             noise.start()
             if target_handoffs:
                 noise.await_handoffs(target_handoffs, deadline)
@@ -516,32 +697,35 @@ def run_case(output, helper, source_sha, deadline, profile, target_handoffs=0):
         try:
             result = apps.seven_zip(work, helper, profile=profile)
         except AssertionError as error:
-            apps.require(str(error) == EXPECTED_REASON, 'DIAGNOSTIC_UNEXPECTED_ACCEPTANCE_ERROR')
+            if str(error) != EXPECTED_REASON:
+                raise
             expected_assertion_observed = True
         finally:
             apps.start_schedule = original_factory
-        apps.require(len(captures) == 1 and noise.cleanup.get('status') == 'COMPLETED',
-                     'DIAGNOSTIC_CAPTURE_OR_OWNER_UNCONFIRMED')
+        collect_bounded_case_facts(proof, work, helper, workload_clock)
+        apps.require(len(captures) == 1, 'DIAGNOSTIC_CAPTURE_METADATA_NOT_AVAILABLE')
         meta_path = work / 'decoder-summary.json'; index = work / 'decoded.sqlite3'
         source = work / captures[0]['path']; meta = read_json(meta_path, 256 * 1024)
         oracle_path = work / 'workload-oracle.json'; workload = read_json(oracle_path)
         index_hash = apps.file_hash(index); source_hash = apps.file_hash(source)
         diagnostic_path = work / 'decoder-diagnostic.json'
         diagnostic = read_json(diagnostic_path)
+        observation_path = work / 'native-output-observation.json'
+        observation = read_json(observation_path)
         proof.update(decoder_status=meta['status'], rows=meta['rows'], noise_cleanup=noise.cleanup,
                      decoder_reported_lost_events=meta.get('decoder_reported_lost_events'))
-        proof['original_source_receipt'] = validate_original_source(diagnostic, source_hash, source.stat().st_size)
-        native = native_attribution(index, meta, noise.oracle, deadline)
+        proof['native_output_observation'] = observation
+        proof['decoder_diagnostic'] = diagnostic
+        roundtrips = workload.get('roundtrips_verified'); workloads = workload.get('workloads')
+        proof['roundtrips_verified'] = roundtrips
+        native = native_attribution(index, meta, noise.oracle, deadline,
+                                    [p['pid'] for p in workloads])
         proof['native_attribution'] = native
         proof['expected_assertion_observed'] = expected_assertion_observed
-        if profile == 'schedule':
-            apps.require(expected_assertion_observed, 'REPRODUCTION_NOT_ESTABLISHED')
-            validate_rejection(meta, source_hash, native)
+        if result is not None:
+            proof['capabilities'] = result.get('capabilities')
         else:
-            apps.require(not expected_assertion_observed, 'FOCUSED_PROFILE_STILL_TRUNCATED')
-            validate_positive(result, meta)
-            apps.require(native['qpc_frequency_matches'], 'FOCUSED_TRACE_COUNTER_FREQUENCY_MISMATCH')
-        roundtrips = workload.get('roundtrips_verified'); workloads = workload.get('workloads')
+            proof['capabilities_assessment'] = 'NOT_EVALUATED_FULL_DECODE_REQUIRED; PREFIX_COUNTS_ARE_NOT_PASS'
         apps.require(type(roundtrips) is int and 1 <= roundtrips <= 3 and type(workloads) is list
             and len(workloads) == 2 * roundtrips and all(p.get('exit_code') == 0 and
             p.get('owned_image_matches_requested') is True for p in workloads) and
@@ -556,10 +740,13 @@ def run_case(output, helper, source_sha, deadline, profile, target_handoffs=0):
         activity = workload_activity(noise, workload_clock)
         files = {'etl': source, 'index': index, 'decoder_summary': meta_path,
             'decoder_diagnostic': diagnostic_path, 'workload_oracle': oracle_path,
+            'native_output_observation': observation_path,
             'noise_ready': noise.output / 'ready.json', 'noise_oracle': noise.output / 'oracle.json'}
         hashes = {name: {'sha256': apps.file_hash(path), 'bytes': path.stat().st_size} for name, path in files.items()}
+        live_bytes = sum(p.stat().st_size for p in output.parent.rglob('*') if p.is_file())
+        proof['measured_live_qa_bytes_before_removal'] = live_bytes
         apps.require(apps.file_hash(source) == source_hash and apps.file_hash(index) == index_hash and
-            sum(p.stat().st_size for p in output.rglob('*') if p.is_file()) <= MAX_OUTPUT,
+            live_bytes <= MAX_OUTPUT,
             'DIAGNOSTIC_SOURCE_CHANGED_OR_OUTPUT_BUDGET')
         from tools.qa_schedule_capture import profile_definition
         profile_relative = profile_definition(profile)[0]
@@ -568,8 +755,7 @@ def run_case(output, helper, source_sha, deadline, profile, target_handoffs=0):
         final_identity = source_identity(source_sha)
         apps.require(final_identity['source_identity_status'] == 'VERIFIED_EXPECTED_HEAD',
                      'DIAGNOSTIC_FINAL_SOURCE_IDENTITY')
-        proof.update(status='EXPECTED_NATIVE_BUDGET_REJECTION' if profile == 'schedule' else 'COMPLETE_7ZIP_ACCEPTANCE',
-            decoder_status=meta['status'],
+        proof.update(decoder_status=meta['status'],
             rows=meta['rows'], native_attribution=native, noise_cleanup=noise.cleanup,
             roundtrips_verified=roundtrips, decoder_reported_lost_events=meta.get('decoder_reported_lost_events'),
             evidence=hashes, final_source_identity=final_identity, capture_profile=capture_profile,
@@ -582,10 +768,22 @@ def run_case(output, helper, source_sha, deadline, profile, target_handoffs=0):
                            'capture': apps.file_hash(ROOT / 'tools' / 'qa_schedule_capture.py')},
             owned_processes=[{'pid': p['pid'], 'created_100ns': p['creation_time_filetime_ticks'],
                               'owned_image_matches_requested': p['owned_image_matches_requested']} for p in workloads])
-        if profile == 'cpu_file':
-            proof.update(positive_application_acceptance='ALL_EIGHT_ORACLES_PASS', capabilities=result['capabilities'])
+        proof.update(capture_cleanup=dict(capture_cleanup), noise_cleanup=noise.cleanup,
+                     noise_handoffs=sum(w['handoffs'] for w in noise.oracle['workers']), prelude=noise.prelude)
+        apps.require(noise.cleanup.get('status') == 'COMPLETED' and capture_cleanup['status'] == 'STOPPED',
+                     'DIAGNOSTIC_CAPTURE_OR_OWNER_UNCONFIRMED')
+        proof['original_source_receipt'] = validate_original_source(diagnostic, source_hash, source.stat().st_size)
+        proof['native_output'] = validate_output_observation(observation, meta)
+        decision = validate_case_contract(expectation, expected_assertion_observed, result, meta,
+                                         source_hash, native, proof['native_output'])
+        if expectation == 'COMPLETE_NATIVE_7ZIP':
+            proof['positive_application_acceptance'] = 'ALL_EIGHT_ORACLES_PASS'
+        proof['admission_decision'] = decision
+        seal_and_remove_large_evidence(output, work, source, index, proof)
+        proof['status'] = decision
     except BaseException as error:
-        proof.update(error_type=type(error).__name__, reason_code=apps._qa_code(str(error)))
+        proof.update(status='REPRODUCTION_NOT_ESTABLISHED', error_type=type(error).__name__,
+                     reason_code=apps._qa_code(str(error)))
     finally:
         apps.start_schedule = original_factory
         proof['capture_cleanup'] = capture_cleanup
@@ -597,17 +795,56 @@ def run_case(output, helper, source_sha, deadline, profile, target_handoffs=0):
             except BaseException:
                 noise.cleanup = {'status': 'UNCONFIRMED', 'cleanup_required': True}
         proof['noise_cleanup'] = noise.cleanup
+        proof['capture_profile'] = dict(capture_profile) if capture_profile else {'status': 'NOT_ESTABLISHED'}
+        proof.setdefault('noise_workload_qpc_bounds', {key: workload_clock.get(key, 'NOT_ESTABLISHED') for key in
+                         ('begin_qpc', 'end_qpc', 'qpc_frequency_hz')})
         if noise.cleanup.get('status') == 'COMPLETED':
             proof['noise_handoffs'] = sum(w['handoffs'] for w in noise.oracle['workers'])
             proof['prelude'] = noise.prelude
-        apps.write_json(output / 'budget-diagnostic.json', proof)
+        collect_bounded_case_facts(proof, work, helper, workload_clock)
+        for key, filename in (('native_output_observation', 'native-output-observation.json'),
+                              ('decoder_diagnostic', 'decoder-diagnostic.json')):
+            path = work / filename
+            try:
+                if key not in proof and path.is_file():
+                    proof[key] = read_json(path)
+            except Exception as error:
+                proof.setdefault('fact_errors', {})[key] = apps._qa_code(str(error))
+        # Preserve every already available owned fact even if admission or an
+        # earlier reader failed; never replace a sealed, removed-file hash.
+        available = {'index': work / 'decoded.sqlite3', 'decoder_summary': work / 'decoder-summary.json',
+            'decoder_diagnostic': work / 'decoder-diagnostic.json', 'native_output_observation': work / 'native-output-observation.json',
+            'workload_oracle': work / 'workload-oracle.json', 'noise_ready': noise.output / 'ready.json',
+            'noise_oracle': noise.output / 'oracle.json'}
+        if captures:
+            available['etl'] = work / captures[0]['path']
+        for name, path in available.items():
+            try:
+                if name not in proof['evidence'] and path.is_file():
+                    apps.require(path.stat().st_size <= 768 * 1024**2, 'FAILURE_FACT_SIZE_BUDGET')
+                    proof['evidence'][name] = {'sha256': apps.file_hash(path), 'bytes': path.stat().st_size}
+            except Exception as error:
+                proof.setdefault('fact_errors', {})[name] = apps._qa_code(str(error))
+        for key in ('native_attribution', 'native_output', 'original_source_receipt', 'noise_workload_coverage', 'owned_processes',
+                    'input_sha256', 'input_bytes', 'application_sha256', 'native_image', 'helper_sha256',
+                    'script_hashes', 'final_source_identity'):
+            if key not in proof:
+                proof[key] = 'NOT_ESTABLISHED'
+                proof.setdefault('fact_errors', {}).setdefault(key, 'NOT_ESTABLISHED_DEPENDENT_FACT_UNAVAILABLE')
+        try:
+            apps.write_json(output / 'budget-diagnostic.json', proof)
+        except Exception as error:
+            proof.update(status='REPRODUCTION_NOT_ESTABLISHED', evidence_write_error=apps._qa_code(str(error)))
+        print('CONTROLLED_NATIVE_CASE_FACTS ' + json.dumps(proof, sort_keys=True), flush=True)
     return proof
 
 
-def validate_comparison(first, second):
-    apps.require(first.get('status') == 'EXPECTED_NATIVE_BUDGET_REJECTION' and
-        second.get('status') == 'COMPLETE_7ZIP_ACCEPTANCE', 'CONTROLLED_PROFILE_A_B_NOT_ESTABLISHED')
-    for key in ('input_sha256', 'input_bytes', 'application_sha256', 'native_image', 'helper_sha256', 'script_hashes'):
+def validate_comparison(first, second, *, positive=True):
+    apps.require(first.get('status') in ('EXPECTED_ROW_BUDGET_NEGATIVE', 'EXPECTED_NATIVE_BUDGET_NEGATIVE') and
+        second.get('status') == ('COMPLETE_7ZIP_ACCEPTANCE' if positive else 'EXPECTED_OUTPUT_BUDGET_NEGATIVE'),
+        'CONTROLLED_PROFILE_A_B_NOT_ESTABLISHED')
+    for key in ('input_sha256', 'input_bytes', 'application_sha256', 'native_image', 'helper_sha256',
+                'script_hashes', 'noise_producer'):
         apps.require(first.get(key) == second.get(key) and first.get(key) is not None, 'CONTROLLED_A_B_SOURCE_CHANGED')
     apps.require(first['source_identity']['actual_source_sha'] == second['source_identity']['actual_source_sha'] and
         first['source_identity']['source_tree_sha'] == second['source_identity']['source_tree_sha'] and
@@ -629,30 +866,51 @@ def run_diagnostic(args):
     deadline = time.monotonic() + 300
     require_hosted_windows()
     output = args.output.resolve(); output.mkdir(parents=True, exist_ok=False)
-    proof = {'schema': 'blackbox.native-budget-profile-ab/1', 'status': 'REPRODUCTION_NOT_ESTABLISHED',
-             'historical_a80_cause': 'NOT_ESTABLISHED', 'cases': {}}
+    proof = {'schema': 'blackbox.native-budget-acceptance/2', 'status': 'REPRODUCTION_NOT_ESTABLISHED',
+        'historical_a80_cause': 'NOT_ESTABLISHED', 'previous_7f45_result': 'FAILED_FOCUSED_PROFILE_STILL_TRUNCATED',
+        'evidence_footprint_scope': 'LIVE_OWNED_QA_TREE; EXISTING_PRODUCTION_PRIVATE_IMPORT_BUDGET_IS_SEPARATE',
+        'subwindow_delta_scope': 'REPORT_ONLY; UNEQUAL_QPC_WINDOWS_ARE_NOT_A_CAUSAL_RATE_COMPARISON',
+        'cases': {}}
     try:
         helper = args.helper.resolve(strict=True)
-        first = run_case(output / 'a-schedule', helper, args.source_sha, deadline, 'schedule')
-        proof['cases']['A'] = first
-        apps.require(first['status'] == 'EXPECTED_NATIVE_BUDGET_REJECTION', 'CONTROLLED_A_REJECTION_NOT_ESTABLISHED')
-        apps.require(time.monotonic() < deadline, 'CONTROLLED_A_B_DEADLINE')
-        second = run_case(output / 'b-cpu-file', helper, args.source_sha, deadline, 'cpu_file', first['noise_handoffs'])
-        proof['cases']['B'] = second
-        validate_comparison(first, second)
-        apps.require(time.monotonic() < deadline, 'CONTROLLED_A_B_DEADLINE')
-        apps.require(sum(p.stat().st_size for p in output.rglob('*') if p.is_file()) <= MAX_OUTPUT,
-                     'CONTROLLED_A_B_COMBINED_OUTPUT_BUDGET')
-        proof['status'] = 'CONTROLLED_PROFILE_A_B_VERIFIED'
+        python = {'implementation': 'PYTHON_CTYPES_WIN32', 'executable': str(Path(sys.executable).resolve()),
+            'source_sha256': apps.file_hash(Path(__file__)), 'executable_sha256': apps.file_hash(Path(sys.executable)),
+            'expected_native_handles': 16}
+        from tools.qa_decoder_noise_fixture import build_native_noise
+        native = build_native_noise(output / 'native-build', args.source_sha)
+        max_live = 0
+        for label, producer, positive in (('python', python, False), ('native', native, True)):
+            live = sum(p.stat().st_size for p in output.rglob('*') if p.is_file())
+            max_live = max(max_live, live)
+            apps.require(live <= MAX_OUTPUT and time.monotonic() < deadline, 'CONTROLLED_LIVE_OUTPUT_OR_DEADLINE')
+            first = run_case(output / (label + '-schedule'), helper, args.source_sha, deadline,
+                'schedule', producer, 'NATIVE_BUDGET_NEGATIVE' if positive else 'ROW_BUDGET_NEGATIVE')
+            proof['cases'][label + '_schedule'] = first
+            max_live = max(max_live, first.get('measured_live_qa_bytes_before_removal', 0))
+            apps.require(first['status'] in ('EXPECTED_ROW_BUDGET_NEGATIVE', 'EXPECTED_NATIVE_BUDGET_NEGATIVE'),
+                         'CONTROLLED_SCHEDULE_REJECTION_NOT_ESTABLISHED')
+            apps.require(time.monotonic() < deadline, 'CONTROLLED_A_B_DEADLINE')
+            second = run_case(output / (label + '-cpu-file'), helper, args.source_sha, deadline,
+                'cpu_file', producer, 'COMPLETE_NATIVE_7ZIP' if positive else 'OUTPUT_BUDGET_NEGATIVE',
+                first['noise_handoffs'])
+            proof['cases'][label + '_cpu_file'] = second
+            max_live = max(max_live, second.get('measured_live_qa_bytes_before_removal', 0))
+            validate_comparison(first, second, positive=positive)
+            live = sum(p.stat().st_size for p in output.rglob('*') if p.is_file())
+            max_live = max(max_live, live)
+            apps.require(live <= MAX_OUTPUT and time.monotonic() < deadline, 'CONTROLLED_LIVE_OUTPUT_OR_DEADLINE')
+        proof.update(status='CONTROLLED_NEGATIVE_BUDGETS_AND_NATIVE_A_B_VERIFIED',
+                     max_measured_live_qa_bytes=max_live)
     except BaseException as error:
-        proof.update(error_type=type(error).__name__, reason_code=apps._qa_code(str(error)))
+        proof.update(status='REPRODUCTION_NOT_ESTABLISHED', error_type=type(error).__name__,
+                     reason_code=apps._qa_code(str(error)))
     finally:
         apps.write_json(output / 'budget-diagnostic.json', proof)
         print('CONTROLLED_NATIVE_BUDGET_DIAGNOSTIC ' + json.dumps(proof, sort_keys=True), flush=True)
         if os.environ.get('GITHUB_STEP_SUMMARY'):
             with Path(os.environ['GITHUB_STEP_SUMMARY']).open('a', encoding='utf-8') as stream:
-                stream.write('\n- Controlled native profile A/B ' + json.dumps(proof, sort_keys=True) + '\n')
-    return 0 if proof['status'] == 'CONTROLLED_PROFILE_A_B_VERIFIED' else 1
+                stream.write('\n- Controlled negative budgets and native A/B ' + json.dumps(proof, sort_keys=True) + '\n')
+    return 0 if proof['status'] == 'CONTROLLED_NEGATIVE_BUDGETS_AND_NATIVE_A_B_VERIFIED' else 1
 
 
 def parse_args(argv=None):
