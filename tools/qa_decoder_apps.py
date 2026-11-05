@@ -43,6 +43,14 @@ NPP_URL = ("https://github.com/notepad-plus-plus/notepad-plus-plus/releases/"
 NPP_SHA256 = "beddf5548e75c97930d1575ba1c7d113e6e2b33d0a200310e734ca08e225f414"
 MAX_DOWNLOAD = 32 * 1024**2
 MAX_TRACE = 256 * 1024**2
+# Only the controlled native-noise pair opts in. This does not change product
+# timeouts, ordinary acceptance, or the separate noise/whole-diagnostic limits.
+QA_WORKLOAD_POLICIES = {'ORDINARY_30': 30, 'CONTROLLED_NATIVE_60': 60}
+
+
+def workload_policy_seconds(policy):
+    require(type(policy) is str and policy in QA_WORKLOAD_POLICIES, 'UNKNOWN_FIXED_QA_WORKLOAD_POLICY')
+    return QA_WORKLOAD_POLICIES[policy]
 
 
 class NotExecuted(Exception):
@@ -293,7 +301,8 @@ def monitored_run(args, log, *, env=None, timeout=30, role="OTHER", cycle=None):
         p = owner.process
         proof = {"pid": p.pid, "cpu_seconds_observed": 0., "peak_rss_observed": 0,
                  "max_threads_observed": 0, "write_bytes_observed": 0,
-                 "read_bytes_observed": 0, "resource_samples_observed": 0}
+                 "read_bytes_observed": 0, "resource_samples_observed": 0,
+                 "configured_timeout_seconds": timeout, "role": role, "cycle": cycle}
         monitor_started = None; identity_elapsed = None; primary_error = None; failure = None
         last_loop_code = 'NOT_ESTABLISHED'; deadline_observed = None; last_sample_begin = None
         observed_metrics = set()
@@ -342,6 +351,8 @@ def monitored_run(args, log, *, env=None, timeout=30, role="OTHER", cycle=None):
             phase = 'WAIT'
             proof["exit_code"] = p.wait(timeout=5)
             require(proof["exit_code"] == 0, "APP_WORKLOAD_EXIT_NONZERO")
+            proof['elapsed_monitor_seconds'] = time.monotonic() - monitor_started
+            proof['monitor_duration_scope'] = 'OBSERVED_MONITOR_DURATION_NOT_HARD_OS_DEADLINE'
         except BaseException as error:
             primary_error = error
             observed = time.monotonic()
@@ -604,7 +615,9 @@ def finish_schedule(capture, output, helper, pids, *, waits=False, native_module
             "capture_complete": "UNKNOWN", "root_cause": "NOT_ESTABLISHED"}
 
 
-def seven_zip(output, helper, *, profile="cpu_file", native_module_encoding=None):
+def seven_zip(output, helper, *, profile="cpu_file", native_module_encoding=None, workload_policy='ORDINARY_30'):
+    process_timeout = workload_policy_seconds(workload_policy)
+    run_options = {'timeout': process_timeout} if workload_policy != 'ORDINARY_30' else {}
     binary = installed("7z", [Path(os.environ.get("ProgramFiles", "C:/Program Files")) / "7-Zip/7z.exe"])
     native = native_pe_identity(binary)
     identity = {**binary_identity(binary, version_args=["i"]), "native_image": native}
@@ -621,9 +634,11 @@ def seven_zip(output, helper, *, profile="cpu_file", native_module_encoding=None
             archive = output / f"roundtrip-{cycle}.7z"
             destination = output / f"roundtrip-{cycle}"
             proofs.append(monitored_run([str(binary), "a", "-t7z", "-mx=7", "-mmt=2", "-bd", "-y",
-                                         str(archive), str(source)], output / f"compress-{cycle}.log", role="COMPRESS", cycle=cycle))
+                                         str(archive), str(source)], output / f"compress-{cycle}.log",
+                                         role="COMPRESS", cycle=cycle, **run_options))
             proofs.append(monitored_run([str(binary), "x", "-bd", "-y", "-o" + str(destination),
-                                         str(archive)], output / f"extract-{cycle}.log", role="EXTRACT", cycle=cycle))
+                                         str(archive)], output / f"extract-{cycle}.log",
+                                         role="EXTRACT", cycle=cycle, **run_options))
             require(file_hash(destination / source.name) == digest,
                     "SEVENZIP_ROUNDTRIP_HASH_MISMATCH")
             verified_roundtrips += 1
@@ -631,6 +646,7 @@ def seven_zip(output, helper, *, profile="cpu_file", native_module_encoding=None
                 break
         write_json(output / "workload-oracle.json", {
             "schema": "blackbox.sevenzip-workload-oracle/1", "application": identity,
+            "workload_policy": workload_policy, "requested_process_timeout_seconds": process_timeout,
             "input_bytes": source.stat().st_size, "input_sha256": digest,
             "roundtrips_verified": len(proofs) // 2, "workloads": proofs})
         options = {'native_module_encoding': native_module_encoding} if native_module_encoding is not None else {}
@@ -642,6 +658,7 @@ def seven_zip(output, helper, *, profile="cpu_file", native_module_encoding=None
             if not (output / "workload-oracle.json").exists():
                 write_json(output / "workload-oracle.json", {
                     "schema": "blackbox.sevenzip-workload-oracle/1", "status": "INCOMPLETE_WORKLOAD_FAILURE",
+                    "workload_policy": workload_policy, "requested_process_timeout_seconds": process_timeout,
                     "application": identity, "input_bytes": source.stat().st_size, "input_sha256": digest,
                     "roundtrips_verified": verified_roundtrips, "workloads": proofs,
                     "failure_reason_code": _qa_code(str(error))})

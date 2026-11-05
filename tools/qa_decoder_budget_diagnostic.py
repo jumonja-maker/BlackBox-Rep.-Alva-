@@ -677,12 +677,17 @@ def collect_bounded_case_facts(proof, work, helper, clock):
             else:
                 application = value.get('application') if type(value.get('application')) is dict else {}
                 facts[key] = {name: scalar(value.get(name)) for name in
-                              ('input_sha256', 'input_bytes', 'roundtrips_verified')}
+                              ('input_sha256', 'input_bytes', 'roundtrips_verified', 'workload_policy',
+                               'requested_process_timeout_seconds')}
                 facts[key]['application_sha256'] = scalar(application.get('sha256'))
                 entries = value.get('workloads')
                 if type(entries) is list and len(entries) <= 6 and all(type(item) is dict for item in entries):
-                    facts[key]['owned_processes'] = [{name: scalar(item.get(name)) for name in
-                        ('pid', 'creation_time_filetime_ticks', 'owned_image_matches_requested', 'exit_code')}
+                    facts[key]['owned_processes'] = [{**{name: scalar(item.get(name)) for name in
+                        ('pid', 'creation_time_filetime_ticks', 'owned_image_matches_requested', 'exit_code',
+                         'role', 'cycle', 'configured_timeout_seconds')},
+                        'elapsed_monitor_seconds': item.get('elapsed_monitor_seconds') if
+                            type(item.get('elapsed_monitor_seconds')) in (int, float) and
+                            0 <= item['elapsed_monitor_seconds'] <= 2**63 - 1 else 'NOT_ESTABLISHED'}
                         for item in entries]
                 else:
                     facts[key]['owned_processes'] = 'NOT_ESTABLISHED'
@@ -782,6 +787,28 @@ class BudgetCapture:
         return result
 
 
+def validate_workload_budget(workload, policy):
+    seconds = apps.workload_policy_seconds(policy)
+    apps.require(type(workload) is dict, 'CONTROLLED_WORKLOAD_BUDGET_NOT_OBSERVED')
+    entries = workload.get('workloads')
+    apps.require(workload.get('workload_policy') == policy and
+        type(workload.get('requested_process_timeout_seconds')) is int and
+        workload['requested_process_timeout_seconds'] == seconds and type(entries) is list and
+        len(entries) in (2, 4, 6) and all(type(item) is dict and
+            type(item.get('pid')) is int and 1 <= item['pid'] <= 2**32 - 1 and
+            type(item.get('configured_timeout_seconds')) is int and item['configured_timeout_seconds'] == seconds and
+            type(item.get('elapsed_monitor_seconds')) in (int, float) and
+            0 <= item['elapsed_monitor_seconds'] <= 2**63 - 1 and
+            type(item.get('exit_code')) is int and item['exit_code'] == 0 and
+            item.get('role') == ('COMPRESS' if number % 2 == 0 else 'EXTRACT') and
+            type(item.get('cycle')) is int and item['cycle'] == number // 2
+            for number, item in enumerate(entries)), 'CONTROLLED_WORKLOAD_BUDGET_NOT_OBSERVED')
+    return {'workload_policy': policy, 'requested_process_timeout_seconds': seconds,
+        'monitor_duration_scope': 'OBSERVED_MONITOR_DURATION_NOT_HARD_OS_DEADLINE',
+        'workloads': [{key: item.get(key) for key in ('pid', 'role', 'cycle', 'exit_code',
+                      'configured_timeout_seconds', 'elapsed_monitor_seconds')} for item in entries]}
+
+
 def run_case(output, helper, source_sha, deadline, profile, producer, expectation, target_handoffs=0,
              *, native_module_encoding=None):
     identity = source_identity(source_sha)
@@ -789,10 +816,13 @@ def run_case(output, helper, source_sha, deadline, profile, producer, expectatio
     output.mkdir(parents=True, exist_ok=False)
     work = output / '7zip'; work.mkdir()
     noise = NoiseOwner(output / 'noise', producer)
+    workload_policy = 'CONTROLLED_NATIVE_60' if producer['implementation'] == 'NATIVE_WIN32' else 'ORDINARY_30'
     proof = {'schema': 'blackbox.native-budget-diagnostic/1', 'status': 'REPRODUCTION_NOT_ESTABLISHED',
         'source_identity': identity, 'historical_a80_cause': 'NOT_ESTABLISHED',
         'positive_application_acceptance': 'NOT_ESTABLISHED', 'synthetic_etw': False,
         'requested_profile': profile, 'expectation': expectation,
+        'requested_workload_policy': workload_policy,
+        'requested_process_timeout_seconds': apps.workload_policy_seconds(workload_policy),
         'requested_native_module_encoding': native_module_encoding or 'DEFAULT',
         'noise_producer': {key: producer[key] for key in
             ('implementation', 'source_sha256', 'executable_sha256', 'expected_native_handles')},
@@ -839,6 +869,8 @@ def run_case(output, helper, source_sha, deadline, profile, producer, expectatio
         result = None
         try:
             options = {'native_module_encoding': native_module_encoding} if native_module_encoding is not None else {}
+            if workload_policy != 'ORDINARY_30':
+                options['workload_policy'] = workload_policy
             result = apps.seven_zip(work, helper, profile=profile, **options)
         except AssertionError as error:
             if str(error) != EXPECTED_REASON:
@@ -918,6 +950,7 @@ def run_case(output, helper, source_sha, deadline, profile, producer, expectatio
         apps.require(noise.cleanup.get('status') == 'COMPLETED' and capture_cleanup['status'] == 'STOPPED',
                      'DIAGNOSTIC_CAPTURE_OR_OWNER_UNCONFIRMED')
         proof['original_source_receipt'] = validate_original_source(diagnostic, source_hash, source.stat().st_size)
+        proof['workload_budget'] = validate_workload_budget(workload, workload_policy)
         proof['native_output'] = validate_output_observation(observation, meta)
         apps.require(proof['actual_native_module_encoding'] ==
             ('INLINE_V1' if native_module_encoding == 'INLINE_V1' else 'PER_EVENT_MODULES_V1'),
@@ -995,6 +1028,12 @@ def validate_comparison(first, second, *, positive=True):
     apps.require(first.get('status') in ('EXPECTED_ROW_BUDGET_NEGATIVE', 'EXPECTED_NATIVE_BUDGET_NEGATIVE') and
         second.get('status') == ('COMPLETE_7ZIP_ACCEPTANCE' if positive else 'EXPECTED_OUTPUT_BUDGET_NEGATIVE'),
         'CONTROLLED_PROFILE_A_B_NOT_ESTABLISHED')
+    policy = 'CONTROLLED_NATIVE_60' if positive else 'ORDINARY_30'
+    seconds = apps.workload_policy_seconds(policy)
+    for case in (first, second):
+        apps.require(case.get('requested_workload_policy') == policy and
+            case.get('requested_process_timeout_seconds') == seconds, 'CONTROLLED_PAIR_WORKLOAD_POLICY_MISMATCH')
+        validate_workload_budget(case.get('workload_budget', {}), policy)
     for key in ('input_sha256', 'input_bytes', 'application_sha256', 'native_image', 'helper_sha256',
                 'script_hashes', 'noise_producer'):
         apps.require(first.get(key) == second.get(key) and first.get(key) is not None, 'CONTROLLED_A_B_SOURCE_CHANGED')
@@ -1027,6 +1066,7 @@ def run_diagnostic(args):
         'subwindow_delta_scope': 'REPORT_ONLY; UNEQUAL_QPC_WINDOWS_ARE_NOT_A_CAUSAL_RATE_COMPARISON',
         'python_pair_transport_scope': 'COMPACT_ROW_NEGATIVE_AND_EXPLICIT_INLINE_BYTE_NEGATIVE; NOT_PROFILE_CAUSAL_COMPARISON',
         'native_pair_transport_scope': 'BOTH_DEFAULT_COMPACT_PER_EVENT_MODULES_V1',
+        'workload_budget_scope': 'SEVENZIP_ORDINARY_AND_PYTHON_30; CONTROLLED_NATIVE_PAIR_60; NOT_HARD_OS_COMPLETION_DEADLINE',
         'cases': {}}
     try:
         helper = args.helper.resolve(strict=True)

@@ -23,7 +23,8 @@ from tools.qa_decoder_budget_diagnostic import (PAIRS, parse_args, validate_nois
     NoiseOwner, BudgetCapture,
     SEVENZIP_CAPABILITIES, validate_comparison, validate_original_source, validate_positive,
     validate_progress, validate_rejection, validate_workload_activity, validate_case_contract,
-    validate_output_observation, seal_and_remove_large_evidence, collect_bounded_case_facts)
+    validate_output_observation, seal_and_remove_large_evidence, collect_bounded_case_facts,
+    validate_workload_budget)
 from tools.qa_decoder_budget_diagnostic import native_attribution
 from tools.qa_schedule_capture import profile_definition
 from tools.qa_decoder_noise_fixture import (_close_owner_with_checked_handles,
@@ -33,7 +34,8 @@ from tools.qa_decoder_noise_fixture import (_close_owner_with_checked_handles,
 
 class WorkloadFailureObservationProtocolTests(unittest.TestCase):
     """Fake owners/sensors/clocks exercise receipts, never real Windows load."""
-    def invoke_deadline(self, root, *, fresh_code=None, diagnostics_fail=False, cleanup_fail=False, rss_budget_fail=False):
+    def invoke_deadline(self, root, *, fresh_code=None, diagnostics_fail=False, cleanup_fail=False, rss_budget_fail=False,
+                        timeout_override=None, sleep_advance=31):
         log = root / 'private-child.log'; now = [0.0]; polls = [None, None, fresh_code]
         events = []; before_cleanup = []
         process = SimpleNamespace(pid=123, poll=lambda: polls.pop(0))
@@ -60,9 +62,10 @@ class WorkloadFailureObservationProtocolTests(unittest.TestCase):
         fake_psutil = SimpleNamespace(Process=lambda pid: sensor, NoSuchProcess=type('FakeNoSuchProcess', (Exception,), {}))
         def sleep(seconds):
             self.assertEqual(seconds, .025)
-            now[0] += 31
+            now[0] += sleep_advance
         buffer = io.StringIO()
         expected_reason = 'APP_WORKLOAD_RSS_BUDGET' if rss_budget_fail else 'APP_WORKLOAD_DEADLINE'
+        run_options = {'timeout': timeout_override} if timeout_override is not None else {}
         with patch.dict('sys.modules', {'psutil': fake_psutil}), \
                 patch('tools.qa_decoder_apps.OwnedProcess', side_effect=owned), \
                 patch('tools.qa_decoder_apps.owned_process_identity', side_effect=identities), \
@@ -72,10 +75,10 @@ class WorkloadFailureObservationProtocolTests(unittest.TestCase):
                 with patch('tools.qa_decoder_apps.write_json', side_effect=OSError('/private/write')), \
                         patch('tools.qa_decoder_apps.workload_log_snapshot', side_effect=OSError('/private/hash')):
                     with self.assertRaisesRegex(AssertionError, '^' + expected_reason + '$') as caught:
-                        monitored_run(['/private/executable', 'PRIVATE_ARG'], log, role='COMPRESS', cycle=1)
+                        monitored_run(['/private/executable', 'PRIVATE_ARG'], log, role='COMPRESS', cycle=1, **run_options)
             else:
                 with self.assertRaisesRegex(AssertionError, '^' + expected_reason + '$') as caught:
-                    monitored_run(['/private/executable', 'PRIVATE_ARG'], log, role='COMPRESS', cycle=1)
+                    monitored_run(['/private/executable', 'PRIVATE_ARG'], log, role='COMPRESS', cycle=1, **run_options)
         self.assertEqual(events, [('close', {'kill': True})])
         return caught.exception.workload_failure, before_cleanup[0], buffer.getvalue()
 
@@ -120,6 +123,42 @@ class WorkloadFailureObservationProtocolTests(unittest.TestCase):
                 self.assertEqual(facts[name], 'REDACTED_UNSTRUCTURED')
             self.assertIn('APP_WORKLOAD_FAILURE_WRITE_FAILED', stdout)
             self.assertNotIn('/private/', json.dumps(facts) + stdout)
+
+    def test_native_budget_still_rejects_live_process_after_sixty_seconds(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            facts, saved, _ = self.invoke_deadline(Path(tmp), timeout_override=60, sleep_advance=61)
+            self.assertEqual(saved, facts)
+            self.assertEqual(facts['configured_timeout_seconds'], 60)
+            self.assertEqual(facts['elapsed_monitor_seconds'], 61)
+            self.assertEqual(facts['reason_code'], 'APP_WORKLOAD_DEADLINE')
+            self.assertEqual(facts['process_state_before_cleanup'], 'RUNNING')
+
+    def test_returned_process_proof_records_native_budget_and_observed_duration_after_thirty_one(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); now = [0.]; polls = [None, 0]; events = []
+            process = SimpleNamespace(pid=123, poll=lambda: polls.pop(0))
+            def wait(**kwargs):
+                events.append(('wait', kwargs)); return 0
+            process.wait = wait
+            owner = SimpleNamespace(process=process, close=lambda **kwargs: events.append(('close', kwargs)))
+            sensor = SimpleNamespace(oneshot=nullcontext, cpu_times=lambda: SimpleNamespace(user=1., system=.5),
+                memory_info=lambda: SimpleNamespace(rss=1024), num_threads=lambda: 2,
+                io_counters=lambda: SimpleNamespace(read_bytes=1024, write_bytes=512))
+            fake_psutil = SimpleNamespace(Process=lambda pid: sensor, NoSuchProcess=type('FakeNoSuchProcess', (Exception,), {}))
+            def sleep(seconds):
+                self.assertEqual(seconds, .025); now[0] += 31
+            with patch.dict('sys.modules', {'psutil': fake_psutil}), \
+                    patch('tools.qa_decoder_apps.OwnedProcess', return_value=owner), \
+                    patch('tools.qa_decoder_apps.owned_process_identity', return_value={'owned_image_matches_requested': True}), \
+                    patch('tools.qa_decoder_apps.time.monotonic', side_effect=lambda: now[0]), \
+                    patch('tools.qa_decoder_apps.time.sleep', side_effect=sleep):
+                proof = monitored_run(['fake.exe'], root / 'child.log', timeout=60, role='COMPRESS', cycle=0)
+            self.assertEqual(events, [('wait', {'timeout': 5}), ('close', {'kill': True})])
+            self.assertEqual(proof['exit_code'], 0)
+            self.assertEqual(proof['configured_timeout_seconds'], 60)
+            self.assertEqual(proof['elapsed_monitor_seconds'], 31)
+            self.assertEqual(proof['monitor_duration_scope'], 'OBSERVED_MONITOR_DURATION_NOT_HARD_OS_DEADLINE')
+            self.assertFalse((root / 'workload-failure.json').exists())
 
     def test_mid_sample_rss_failure_preserves_queried_metrics_and_marks_unqueried_unknown(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -190,6 +229,41 @@ class WorkloadFailureObservationProtocolTests(unittest.TestCase):
             self.assertEqual(oracle['input_bytes'], 8 * 1024**2)
             self.assertEqual(oracle['input_sha256'], hashlib.sha256((root / 'input.bin').read_bytes()).hexdigest())
             self.assertEqual(oracle['workloads'][0]['pid'], 123)
+            self.assertEqual(oracle['workload_policy'], 'ORDINARY_30')
+            self.assertEqual(oracle['requested_process_timeout_seconds'], 30)
+
+    def test_seven_zip_native_policy_forwards_sixty_to_both_roles_and_records_partial_policy(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); binary = root / 'fake.exe'; binary.write_bytes(b'fixture')
+            capture = SimpleNamespace(active=False); failure = AssertionError('APP_WORKLOAD_DEADLINE')
+            completed = {'pid': 123, 'configured_timeout_seconds': 60, 'elapsed_monitor_seconds': 31,
+                         'exit_code': 0, 'role': 'COMPRESS', 'cycle': 0}
+            with patch('tools.qa_decoder_apps.installed', return_value=binary), \
+                    patch('tools.qa_decoder_apps.native_pe_identity', return_value={}), \
+                    patch('tools.qa_decoder_apps.binary_identity', return_value={'sha256': 'a' * 64}), \
+                    patch('tools.qa_decoder_apps.start_schedule', return_value=capture), \
+                    patch('tools.qa_decoder_apps.monitored_run', side_effect=[completed, failure]) as run:
+                with self.assertRaises(AssertionError) as caught:
+                    seven_zip(root, root / 'unused', workload_policy='CONTROLLED_NATIVE_60')
+            self.assertIs(caught.exception, failure)
+            self.assertEqual([call.kwargs for call in run.call_args_list], [
+                {'role': 'COMPRESS', 'cycle': 0, 'timeout': 60}, {'role': 'EXTRACT', 'cycle': 0, 'timeout': 60}])
+            oracle = json.loads((root / 'workload-oracle.json').read_text())
+            self.assertEqual(oracle['workload_policy'], 'CONTROLLED_NATIVE_60')
+            self.assertEqual(oracle['requested_process_timeout_seconds'], 60)
+            self.assertEqual(oracle['workloads'][0]['elapsed_monitor_seconds'], 31)
+            self.assertEqual(oracle['status'], 'INCOMPLETE_WORKLOAD_FAILURE')
+
+    def test_unknown_and_boolean_workload_policies_are_rejected_before_source_or_capture_work(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / 'must-not-be-created'
+            with patch('tools.qa_decoder_apps.installed') as installed_app, \
+                    patch('tools.qa_decoder_apps.start_schedule') as capture:
+                for policy in ('UNKNOWN', 'CONTROLLED_NATIVE_61', True, False, 60, None):
+                    with self.subTest(policy=policy), self.assertRaisesRegex(AssertionError, 'UNKNOWN_FIXED_QA_WORKLOAD_POLICY'):
+                        seven_zip(output, output / 'unused', workload_policy=policy)
+                installed_app.assert_not_called(); capture.assert_not_called()
+            self.assertFalse(output.exists())
 
 
 class BudgetCaptureOrderProtocolTests(unittest.TestCase):
@@ -752,10 +826,16 @@ class ControlledBudgetProtocolTests(unittest.TestCase):
             validate_progress({**progress, 'sequence': 2, 'sample_begin_qpc': 19}, ready, progress)
 
     def test_ab_admission_refuses_less_noise_fewer_roundtrips_or_source_changes(self):
+        budget = {'workload_policy': 'CONTROLLED_NATIVE_60', 'requested_process_timeout_seconds': 60,
+            'workloads': [{'pid': 100 + n, 'role': 'COMPRESS' if n % 2 == 0 else 'EXTRACT', 'cycle': n // 2,
+                'configured_timeout_seconds': 60, 'elapsed_monitor_seconds': 31 if n % 2 == 0 else .5,
+                'exit_code': 0} for n in range(4)]}
         common = {'input_sha256': 'a' * 64, 'input_bytes': 8 * 1024**2, 'application_sha256': 'b' * 64,
             'native_image': {'code_kind': 'NATIVE_PE_NO_CLR_COM_DESCRIPTOR'}, 'helper_sha256': 'c' * 64,
             'script_hashes': {'driver': 'd' * 64},
             'actual_native_module_encoding': 'PER_EVENT_MODULES_V1',
+            'requested_workload_policy': 'CONTROLLED_NATIVE_60', 'requested_process_timeout_seconds': 60,
+            'workload_budget': budget,
             'noise_producer': {'implementation': 'NATIVE_WIN32', 'source_sha256': '3' * 64,
                                'executable_sha256': '4' * 64, 'expected_native_handles': 32},
             'source_identity': {'actual_source_sha': 'e' * 40, 'source_tree_sha': 'f' * 40},
@@ -770,9 +850,29 @@ class ControlledBudgetProtocolTests(unittest.TestCase):
         validate_comparison(first, second)
         for change in ({'noise_handoffs': 9999}, {'roundtrips_verified': 1}, {'application_sha256': '0' * 64},
                        {'noise_workload_coverage': {'all_16_threads_bracket': False}},
-                       {'prelude': {**second['prelude'], 'wait_seconds': 16}}):
+                       {'prelude': {**second['prelude'], 'wait_seconds': 16}},
+                       {'requested_workload_policy': 'ORDINARY_30'}, {'requested_process_timeout_seconds': 30},
+                       {'workload_budget': {**budget, 'workloads': [budget['workloads'][0],
+                            {**budget['workloads'][1], 'configured_timeout_seconds': 30}, *budget['workloads'][2:]]}}):
             with self.subTest(change=change), self.assertRaises(AssertionError):
                 validate_comparison(first, {**second, **change})
+
+    def test_workload_policy_requires_actual_budget_and_duration_of_every_returned_process(self):
+        workload = {'workload_policy': 'CONTROLLED_NATIVE_60', 'requested_process_timeout_seconds': 60,
+            'workloads': [{'pid': 100 + n, 'role': 'COMPRESS' if n == 0 else 'EXTRACT', 'cycle': 0,
+                'configured_timeout_seconds': 60, 'elapsed_monitor_seconds': 31 if n == 0 else .5,
+                'exit_code': 0} for n in range(2)]}
+        observed = validate_workload_budget(workload, 'CONTROLLED_NATIVE_60')
+        self.assertEqual(observed['workloads'][0]['elapsed_monitor_seconds'], 31)
+        self.assertEqual(observed['monitor_duration_scope'], 'OBSERVED_MONITOR_DURATION_NOT_HARD_OS_DEADLINE')
+        for change in ({'configured_timeout_seconds': 30}, {'configured_timeout_seconds': 60.0},
+                       {'elapsed_monitor_seconds': None}, {'elapsed_monitor_seconds': float('nan')},
+                       {'pid': 'PRIVATE_PATH'}, {'pid': True}, {'pid': 0}, {'pid': 2**32},
+                       {'exit_code': False},
+                       {'exit_code': 1}, {'role': 'COMPRESS'}, {'cycle': 1}):
+            bad = {**workload, 'workloads': [workload['workloads'][0], {**workload['workloads'][1], **change}]}
+            with self.subTest(change=change), self.assertRaisesRegex(AssertionError, 'WORKLOAD_BUDGET_NOT_OBSERVED'):
+                validate_workload_budget(bad, 'CONTROLLED_NATIVE_60')
 
     def test_each_noise_thread_must_make_real_handoffs_inside_workload_interval(self):
         first = {'sequence': 1, 'qpc': 20, 'sample_begin_qpc': 19, 'sample_end_qpc': 20,
