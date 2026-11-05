@@ -591,7 +591,7 @@ def _emit_app_diagnostic(name, item):
     summary = os.environ.get("GITHUB_STEP_SUMMARY")
     if summary:
         with Path(summary).open("a", encoding="utf-8") as stream:
-            stream.write("\\n- Third-party QA " + json.dumps(detail, sort_keys=True) + "\\n")
+            stream.write("\n- Third-party QA " + json.dumps(detail, sort_keys=True) + "\n")
 
 
 
