@@ -367,11 +367,138 @@ class BudgetCaptureOrderProtocolTests(unittest.TestCase):
                 if capture.active:
                     capture.cancel()
         self.assertIs(caught.exception, failure)
-        self.assertEqual(events, [('wpr_cancel',), ('noise_stop', None)])
+        self.assertEqual(events, [('noise_stop', None), ('wpr_cancel',)])
         self.assertEqual(capture.lifecycle['primary_error']['phase'], 'APPLICATION')
-        self.assertEqual([item['phase'] for item in capture.lifecycle['secondary_errors']], ['WPR_CANCEL', 'NOISE_STOP'])
+        self.assertEqual([item['phase'] for item in capture.lifecycle['secondary_errors']], ['NOISE_STOP', 'WPR_CANCEL'])
         self.assertTrue(capture.cleanup['cleanup_required'])
         self.assertEqual(captures, [])
+
+    def test_cancel_still_attempts_wpr_after_first_noise_failure_without_retrying_noise(self):
+        failure = AssertionError('NOISE_EXIT_NOT_CONFIRMED')
+        capture, events, captures, _ = self.capture(noise_error=failure)
+        with self.assertRaises(AssertionError) as caught:
+            capture.cancel()
+        self.assertIs(caught.exception, failure)
+        self.assertEqual(events, [('noise_stop', None), ('wpr_cancel',)])
+        self.assertEqual(capture.cleanup, {'status': 'CANCELLED', 'cleanup_required': False})
+        self.assertEqual(capture.noise.cleanup['status'], 'NOT_ESTABLISHED')
+        self.assertEqual(captures, [])
+        with self.assertRaises(AssertionError) as repeated:
+            capture.cancel()
+        self.assertIs(repeated.exception, failure)
+        self.assertEqual(events, [('noise_stop', None), ('wpr_cancel',)])
+
+    def scheduler_capture(self, *, noise_error=None, final_code=None):
+        capture, events, _, _ = self.capture(noise_error=noise_error)
+        ticks = iter(range(100, 120))
+        capture.end_counter = lambda: next(ticks)
+        capture.clock['qpc_frequency_hz'] = 1000
+        target = SimpleNamespace(process=SimpleNamespace(pid=501, poll=lambda: final_code))
+        capture.noise.owner = SimpleNamespace(process=SimpleNamespace(pid=502))
+        capture.noise.identity = {'creation_time_filetime_ticks': '200'}
+        capture.noise.ready = {'pid': 502, 'created_100ns': '200', 'workers': [
+            {'tid': 1000 + i, 'created_100ns': str(300 + i)} for i in range(16)]}
+        failure = {'pid': 501, 'creation_time_filetime_ticks': '100',
+            'owned_image_matches_requested': True, 'image_identity_source': 'OWNED_WINDOWS_PROCESS_HANDLE',
+            'private': 'PRIVATE_PAYLOAD /private/path'}
+        return capture, target, failure, events
+
+    def test_failure_callback_observes_two_owned_snapshots_before_noise_stop_without_accepting_completion(self):
+        for code in (None, 0):
+            with self.subTest(final_poll=code):
+                capture, target, failure, events = self.scheduler_capture(final_code=code)
+                primary = AssertionError('APP_WORKLOAD_DEADLINE'); results = []; buffer = io.StringIO()
+                def observe(process, created, thread_births=None):
+                    events.append(('observe', process.pid))
+                    return {'status': 'OBSERVED', 'pid': process.pid, 'observation_scope': 'PROTOCOL_FIXTURE_ONLY'}
+                with patch('tools.qa_decoder_apps.observe_owned_thread_priorities', side_effect=observe) as helper, \
+                        redirect_stdout(buffer):
+                    with self.assertRaises(AssertionError) as caught:
+                        try:
+                            raise primary
+                        except AssertionError:
+                            results.append(capture.observe_workload_failure(target, failure))
+                            raise
+                self.assertIs(caught.exception, primary)
+                self.assertIs(capture.first_error, primary)
+                result = results[0]
+                self.assertIs(capture.lifecycle['failure_scheduler_observation'], result)
+                self.assertEqual(helper.call_args_list[0].args, (target.process, '100'))
+                self.assertEqual(helper.call_args_list[1].args, (capture.noise.owner.process, '200'))
+                self.assertEqual(helper.call_args_list[1].kwargs, {'thread_births': {
+                    1000 + i: str(300 + i) for i in range(16)}})
+                self.assertEqual(events, [('observe', 501), ('observe', 502), ('noise_stop', None)])
+                self.assertEqual(result['scope'], 'OBSERVATIONS_ONLY_NOT_STATE_WAIT_OR_CAUSE')
+                self.assertEqual(result['workload_status'], 'INCOMPLETE_GUARD_FAILURE_BOUNDARY')
+                self.assertEqual(result['failure_boundary_qpc'], 100)
+                self.assertLess(result['target_end_qpc'], result['noise_begin_qpc'])
+                self.assertLess(result['snapshots_end_qpc'], result['after_noise_stop_poll_begin_qpc'])
+                self.assertNotIn('end_qpc', capture.clock)
+                after = result['target_after_noise_stop']
+                self.assertEqual(after['state'], 'RUNNING' if code is None else 'EXITED')
+                self.assertEqual(after['exit_code'], 'NOT_ESTABLISHED' if code is None else 0)
+                self.assertEqual(after['scope'], 'AFTER_NOISE_STOP_BEFORE_TARGET_CLEANUP')
+                self.assertIs(capture.observe_workload_failure(target, failure), result)
+                self.assertEqual(helper.call_count, 2)
+                self.assertIn('CONTROLLED_SCHEDULER_FAILURE_FACTS', buffer.getvalue())
+                self.assertNotIn('PRIVATE_', json.dumps(result) + buffer.getvalue())
+                self.assertNotIn('/private/', json.dumps(result) + buffer.getvalue())
+                with self.assertRaises(AssertionError) as cancelled:
+                    capture.cancel()
+                self.assertIs(cancelled.exception, primary)
+                self.assertEqual(events[-1], ('wpr_cancel',))
+                self.assertEqual(sum(item[0] == 'noise_stop' for item in events), 1)
+
+    def test_failure_callback_query_clock_and_noise_errors_remain_secondary_unknown_observations(self):
+        capture, target, failure, _ = self.scheduler_capture(noise_error=RuntimeError('NOISE_STOP_FAILED'))
+        ticks = iter(range(101, 120)); count = [0]
+        def clock():
+            count[0] += 1
+            if count[0] == 1:
+                raise OSError('/private/clock')
+            return next(ticks)
+        capture.end_counter = clock; capture.clock['qpc_frequency_hz'] = 'PRIVATE_FREQUENCY'
+        primary = AssertionError('APP_WORKLOAD_DEADLINE'); results = []
+        target.process.poll = lambda: (_ for _ in ()).throw(OSError('/private/poll'))
+        with patch('tools.qa_decoder_apps.observe_owned_thread_priorities', side_effect=OSError('/private/query')), \
+                redirect_stdout(io.StringIO()):
+            with self.assertRaises(AssertionError) as caught:
+                try:
+                    raise primary
+                except AssertionError:
+                    results.append(capture.observe_workload_failure(target, failure))
+                    raise
+        self.assertIs(caught.exception, primary)
+        self.assertIs(capture.first_error, primary)
+        result = results[0]
+        self.assertEqual(result['qpc_frequency_hz'], 'NOT_ESTABLISHED')
+        self.assertEqual(result['failure_boundary_qpc'], 'NOT_ESTABLISHED')
+        self.assertEqual(result['target']['status'], 'UNKNOWN')
+        self.assertEqual(result['noise']['status'], 'UNKNOWN')
+        self.assertEqual(result['target_after_noise_stop']['state'], 'UNKNOWN')
+        self.assertEqual(capture.lifecycle['secondary_errors'][0]['phase'], 'NOISE_STOP')
+        self.assertNotIn('/private/', json.dumps(result))
+        self.assertNotIn('PRIVATE_', json.dumps(result))
+
+    def test_failure_callback_never_queries_malformed_or_duplicate_noise_thread_identities(self):
+        for change in ({'tid': 'PRIVATE_PATH'}, {'tid': 1001}, {'created_100ns': '/private/birth'}):
+            with self.subTest(change=change):
+                capture, target, failure, _ = self.scheduler_capture()
+                capture.noise.ready['workers'][0].update(change)
+                primary = AssertionError('APP_WORKLOAD_DEADLINE'); results = []
+                with patch('tools.qa_decoder_apps.observe_owned_thread_priorities', return_value={'status': 'OBSERVED'}) as helper, \
+                        redirect_stdout(io.StringIO()):
+                    with self.assertRaises(AssertionError) as caught:
+                        try:
+                            raise primary
+                        except AssertionError:
+                            results.append(capture.observe_workload_failure(target, failure))
+                            raise
+                self.assertIs(caught.exception, primary)
+                self.assertEqual(helper.call_count, 1)
+                self.assertEqual(results[0]['noise']['status'], 'UNKNOWN')
+                self.assertEqual(results[0]['noise']['reason_code'], 'FAILURE_NOISE_THREAD_IDENTITIES_NOT_ESTABLISHED')
+                self.assertNotIn('PRIVATE_', json.dumps(results[0]))
 
 
 class NoiseStopObservationProtocolTests(unittest.TestCase):
@@ -1317,6 +1444,221 @@ class ApplicationArchiveBoundaryTests(unittest.TestCase):
             self.assertEqual((root / "output/localization/english.xml").read_bytes(), b"text")
             self.assertFalse((root / "output/updater").exists())
             self.assertFalse((root / "output/plugins").exists())
+
+
+class OwnedThreadPriorityDiagnosticProtocolTests(unittest.TestCase):
+    """Fake WinAPI/layout/owner contracts only; never native scheduler evidence."""
+    class Kernel:
+        def __init__(self, *, close_ok=True, close_raises=False, owner_ok=True, change_thread_birth=False,
+                     change_process_birth=False, affinity_ok=True):
+            self.close_ok = close_ok; self.close_raises = close_raises; self.owner_ok = owner_ok
+            self.change_thread_birth = change_thread_birth; self.change_process_birth = change_process_birth
+            self.affinity_ok = affinity_ok; self.opened = []; self.closed = []; self.times = {}; self.process_reads = 0
+            self.counter = 1000
+
+        def QueryPerformanceFrequency(self, output): output._obj.value = 10000000; return 1
+        def QueryPerformanceCounter(self, output): self.counter += 10; output._obj.value = self.counter; return 1
+        def GetProcessId(self, handle): return 123
+        def WaitForSingleObject(self, handle, milliseconds):
+            if milliseconds != 0: raise AssertionError('PROTOCOL_MUST_NOT_WAIT')
+            return 258
+        def GetProcessTimes(self, handle, created, exited, kernel, user):
+            self.process_reads += 1
+            created._obj.dwLowDateTime = 101 if self.change_process_birth and self.process_reads >= 3 else 100
+            kernel._obj.dwLowDateTime = 30 + self.process_reads
+            user._obj.dwLowDateTime = 0  # An actual queried zero must remain known.
+            return 1
+        def GetPriorityClass(self, handle): return 0x20
+        def GetProcessPriorityBoost(self, handle, output): output._obj.value = 0; return 1
+        def GetProcessAffinityMask(self, handle, process_mask, system_mask):
+            process_mask._obj.value = 3; system_mask._obj.value = 15
+            return int(self.affinity_ok)
+        def OpenThread(self, access, inherit, tid):
+            if access != 0x100040 or inherit: raise AssertionError('PROTOCOL_QUERY_RIGHTS_ONLY')
+            self.opened.append(tid); return 1000 + tid
+        def GetThreadId(self, handle): return handle - 1000
+        def GetProcessIdOfThread(self, handle): return 123 if self.owner_ok else 124
+        def GetThreadTimes(self, handle, created, exited, kernel, user):
+            self.times[handle] = self.times.get(handle, 0) + 1
+            created._obj.dwLowDateTime = handle - 900 + int(self.change_thread_birth and self.times[handle] > 1)
+            return 1
+        def GetThreadPriorityBoost(self, handle, output): output._obj.value = 0; return 1
+        def CloseHandle(self, handle):
+            self.closed.append(handle)
+            if self.close_raises: raise OSError('PRIVATE_CLOSE_PATH')
+            return int(self.close_ok)
+
+    def observe(self, *, kernel=None, ntstatus=0, returned=48, thread_births='DEFAULT',
+                expected='100', retained=None, enumeration=None, budget_expired=False,
+                native_pid=123, native_priority=10):
+        from tools import qa_decoder_apps as apps
+        kernel = kernel or self.Kernel(); queries = []
+        process = SimpleNamespace(pid=123, _handle=77)
+        retained = [] if retained is None else retained
+        def query(handle, information_class, output, size, length):
+            self.assertEqual((information_class, size), (0, 48))
+            queries.append(handle)
+            data = output._obj
+            data.client_id.process = native_pid; data.client_id.thread = handle - 1000
+            data.teb = 0x7fffdeadbeef; data.affinity = 0xa5  # Never public pointer/mask values.
+            data.priority = native_priority; data.base_priority = 8
+            length._obj.value = returned
+            return ntstatus
+        native = SimpleNamespace(NtQueryInformationThread=query)
+        if thread_births == 'DEFAULT': thread_births = {10: '110', 11: '111'}
+        fake_psutil = SimpleNamespace(Process=lambda pid: SimpleNamespace(threads=lambda: enumeration))
+        clock = iter((0., 3.)) if budget_expired else None
+        with patch.object(apps, '_priority_native_api', return_value=(kernel, native)), \
+                patch.object(apps, '_retained_priority_query_handles', retained), \
+                patch.object(apps.time, 'monotonic', side_effect=(lambda: next(clock)) if clock else lambda: 0.), \
+                patch.object(apps.os, 'cpu_count', return_value=2), \
+                patch.dict('sys.modules', {'psutil': fake_psutil}):
+            result = apps.observe_owned_thread_priorities(process, expected, thread_births)
+        return result, kernel, queries, retained, process
+
+    def test_actual_layout_and_identity_checked_priorities_cpu_and_capacity_have_no_pointer_fields(self):
+        from tools import qa_decoder_apps as apps
+        self.assertEqual(apps.C.sizeof(apps._PriorityFileTime), 8)
+        self.assertEqual(apps.C.sizeof(apps._ThreadBasicPriorityInformation), 48)
+        self.assertEqual(apps._ThreadBasicPriorityInformation.priority.offset, 40)
+        self.assertEqual(apps._ThreadBasicPriorityInformation.base_priority.offset, 44)
+        result, kernel, queries, _, _ = self.observe()
+        self.assertEqual(result['status'], 'OBSERVED')
+        self.assertTrue(result['process_identity_verified_before'])
+        self.assertTrue(result['process_identity_verified_after'])
+        self.assertEqual(result['priority_class'], 'NORMAL')
+        self.assertFalse(result['priority_boost_disabled'])
+        self.assertEqual(result['runtime_reported_logical_processors'], 2)
+        self.assertEqual(result['affinity']['process_mask_bit_count'], 2)
+        self.assertEqual(result['affinity']['system_mask_bit_count'], 4)
+        self.assertEqual(result['process_cpu']['user_100ns'], 0)
+        self.assertEqual(result['process_cpu']['kernel_100ns'], 33)
+        self.assertLess(result['process_cpu']['sample_begin_qpc'], result['process_cpu']['sample_end_qpc'])
+        self.assertEqual(queries, [1010, 1011]); self.assertEqual(kernel.closed, queries)
+        self.assertEqual((result['query_handles_opened'], result['query_handles_closed']), (2, 2))
+        self.assertTrue(result['query_handles_closed_verified'])
+        for row in result['threads']:
+            self.assertEqual((row['priority'], row['base_priority']), (10, 8))
+            self.assertFalse(row['priority_boost_disabled'])
+            self.assertLess(row['sample_begin_qpc'], row['sample_end_qpc'])
+        encoded = json.dumps(result)
+        for private in ('7fffdeadbeef', str(0x7fffdeadbeef), 'teb', 'thread_state', 'PRIVATE_PATH'):
+            self.assertNotIn(private, encoded)
+
+    def test_ntstatus_length_thread_and_process_identity_fail_closed_and_close_opened_handles(self):
+        cases = ({'ntstatus': -1073741821}, {'returned': 47}, {'expected': '99'},
+                 {'native_pid': 124}, {'native_priority': 32},
+                 {'kernel': self.Kernel(owner_ok=False)}, {'kernel': self.Kernel(change_thread_birth=True)},
+                 {'kernel': self.Kernel(change_process_birth=True)}, {'budget_expired': True})
+        for options in cases:
+            with self.subTest(options=options):
+                result, kernel, _, _, _ = self.observe(**options)
+                self.assertEqual(result['status'], 'NOT_ESTABLISHED')
+                self.assertTrue(result['errors'])
+                self.assertEqual(len(kernel.opened), len(kernel.closed))
+                self.assertTrue(result['query_handles_closed_verified'])
+
+    def test_target_enumeration_and_explicit_known_threads_are_bounded_before_thread_open(self):
+        result, kernel, _, _, _ = self.observe(thread_births=None,
+            enumeration=[SimpleNamespace(id=10), SimpleNamespace(id=11)])
+        self.assertEqual(result['status'], 'OBSERVED'); self.assertEqual(kernel.opened, [10, 11])
+        for births, entries in (({n: '110' for n in range(1, 34)}, None),
+                                (None, [SimpleNamespace(id=n) for n in range(1, 34)]),
+                                ({True: '110'}, None), ({10: 'PRIVATE_PATH'}, None)):
+            with self.subTest(explicit=births is not None):
+                result, kernel, _, _, _ = self.observe(thread_births=births, enumeration=entries)
+                self.assertEqual(result['status'], 'NOT_ESTABLISHED')
+                self.assertEqual(kernel.opened, [])
+                self.assertNotIn('PRIVATE_PATH', json.dumps(result))
+
+    def test_failed_close_retains_real_query_capability_and_retention_cap_blocks_new_open(self):
+        for kernel in (self.Kernel(close_ok=False), self.Kernel(close_raises=True)):
+            with self.subTest(close_raises=kernel.close_raises):
+                result, kernel, _, retained, process = self.observe(kernel=kernel, thread_births={10: '110'})
+                self.assertEqual(result['status'], 'NOT_ESTABLISHED')
+                self.assertFalse(result['query_handles_closed_verified']); self.assertTrue(result['cleanup_required'])
+                self.assertEqual(retained, [(kernel, 1010, process)])
+                self.assertEqual((result['query_handles_opened'], result['query_handles_closed']), (1, 0))
+                self.assertNotIn('PRIVATE_CLOSE_PATH', json.dumps(result))
+        existing = [object() for _ in range(128)]
+        blocked, kernel, _, retained, _ = self.observe(retained=existing)
+        self.assertEqual(blocked['status'], 'NOT_ESTABLISHED'); self.assertEqual(kernel.opened, [])
+        self.assertEqual(len(retained), 128)
+
+    def test_optional_affinity_failure_and_unsupported_native_api_stay_explicit(self):
+        from tools import qa_decoder_apps as apps
+        result, _, _, _, _ = self.observe(kernel=self.Kernel(affinity_ok=False))
+        self.assertEqual(result['affinity']['status'], 'NOT_ESTABLISHED')
+        for failure, code in ((AssertionError('PRIORITY_UNSUPPORTED_NATIVE_ABI'), 'PRIORITY_UNSUPPORTED_NATIVE_ABI'),
+                              (RuntimeError('PRIORITY_PRIVATE_TOKEN'), 'PRIORITY_QUERY_UNAVAILABLE')):
+            with patch.object(apps, '_priority_native_api', side_effect=failure):
+                unavailable = apps.observe_owned_thread_priorities(SimpleNamespace(pid=123, _handle=77), '100')
+            self.assertEqual(unavailable['status'], 'NOT_ESTABLISHED')
+            self.assertEqual(unavailable['errors'], [code])
+            self.assertEqual(unavailable['threads'], []); self.assertEqual(unavailable['query_handles_opened'], 0)
+
+    def test_observer_runs_in_original_exception_before_owned_cleanup_and_cannot_replace_it(self):
+        import sys
+        from contextlib import nullcontext, redirect_stdout
+        from tools import qa_decoder_apps as apps
+        with tempfile.TemporaryDirectory() as tmp:
+            now = [0.]; events = []; observed = []
+            process = SimpleNamespace(pid=123, poll=lambda: None)
+            owner = SimpleNamespace(process=process, close=lambda **kwargs: events.append('cleanup'))
+            sensor = SimpleNamespace(oneshot=nullcontext, cpu_times=lambda: SimpleNamespace(user=0., system=0.),
+                memory_info=lambda: SimpleNamespace(rss=1024), num_threads=lambda: 1,
+                io_counters=lambda: SimpleNamespace(read_bytes=0, write_bytes=0))
+            psutil = SimpleNamespace(Process=lambda pid: sensor, NoSuchProcess=type('NoSuchProcess', (Exception,), {}))
+            def observer(actual_owner, failure):
+                self.assertIs(actual_owner, owner); self.assertEqual(failure['reason_code'], 'APP_WORKLOAD_DEADLINE')
+                events.append('observer'); observed.append(sys.exc_info()[1])
+                raise RuntimeError('PRIVATE_PATH must not replace primary')
+            def sleep(seconds): now[0] += 31
+            output = io.StringIO()
+            with patch.dict('sys.modules', {'psutil': psutil}), \
+                    patch.object(apps, 'OwnedProcess', return_value=owner), \
+                    patch.object(apps, 'owned_process_identity', return_value={'creation_time_filetime_ticks': '100'}), \
+                    patch.object(apps.time, 'monotonic', side_effect=lambda: now[0]), \
+                    patch.object(apps.time, 'sleep', side_effect=sleep), redirect_stdout(output):
+                with self.assertRaisesRegex(AssertionError, '^APP_WORKLOAD_DEADLINE$') as caught:
+                    apps.monitored_run(['fixture.exe'], Path(tmp) / 'child.log', failure_observer=observer)
+            self.assertIs(observed[0], caught.exception); self.assertEqual(events, ['observer', 'cleanup'])
+            self.assertNotIn('PRIVATE_PATH', output.getvalue())
+
+    def test_noncallable_observer_is_denied_before_process_or_log_creation(self):
+        from tools import qa_decoder_apps as apps
+        with tempfile.TemporaryDirectory() as tmp:
+            log = Path(tmp) / 'must-not-exist.log'
+            with patch.object(apps, 'OwnedProcess') as owner:
+                with self.assertRaisesRegex(AssertionError, 'INVALID_WORKLOAD_FAILURE_OBSERVER'):
+                    apps.monitored_run(['fixture.exe'], log, failure_observer=object())
+                owner.assert_not_called()
+            self.assertFalse(log.exists())
+
+    def test_seven_zip_forwards_only_present_bound_observer_to_both_owned_roles(self):
+        from tools import qa_decoder_apps as apps
+        for with_observer in (False, True):
+            with self.subTest(with_observer=with_observer), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp); binary = root / 'fixture.exe'; binary.write_bytes(b'not-native-unit-fixture')
+                capture = SimpleNamespace(active=False)
+                callback = lambda owner, failure: None
+                if with_observer:
+                    capture.observe_workload_failure = callback
+                failure = AssertionError('APP_WORKLOAD_DEADLINE')
+                with patch.object(apps, 'installed', return_value=binary), \
+                        patch.object(apps, 'native_pe_identity', return_value={}), \
+                        patch.object(apps, 'binary_identity', return_value={'sha256': 'a' * 64}), \
+                        patch.object(apps, 'start_schedule', return_value=capture), \
+                        patch.object(apps, 'monitored_run', side_effect=[{'pid': 123}, failure]) as run:
+                    with self.assertRaises(AssertionError) as caught:
+                        apps.seven_zip(root, root / 'unused-helper')
+                self.assertIs(caught.exception, failure)
+                for number, call in enumerate(run.call_args_list):
+                    expected = {'role': 'COMPRESS' if number == 0 else 'EXTRACT', 'cycle': 0}
+                    if with_observer:
+                        expected['failure_observer'] = callback
+                    self.assertEqual(call.kwargs, expected)  # Ordinary timeout remains omitted/default30.
+                self.assertEqual(run.call_count, 2)
 
 
 if __name__ == "__main__":

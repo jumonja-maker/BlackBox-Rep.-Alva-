@@ -744,6 +744,87 @@ class BudgetCapture:
         except BaseException as error:
             self.remember(error, 'NOISE_STOP')
 
+    def observe_workload_failure(self, owner, failure):
+        existing = self.lifecycle.get('failure_scheduler_observation')
+        if existing is not None:
+            return existing
+        frequency = self.clock.get('qpc_frequency_hz')
+        observation = {'schema': 'blackbox.controlled-scheduler-failure/1',
+            'scope': 'OBSERVATIONS_ONLY_NOT_STATE_WAIT_OR_CAUSE',
+            'time_scope': 'TWO_SEQUENTIAL_NONATOMIC_POST_ASSERT_PRE_CLEANUP_SNAPSHOTS',
+            'workload_status': 'INCOMPLETE_GUARD_FAILURE_BOUNDARY', 'errors': {},
+            'qpc_frequency_hz': frequency if type(frequency) is int and 0 < frequency <= 2**63 - 1
+                else 'NOT_ESTABLISHED'}
+        self.lifecycle['failure_scheduler_observation'] = observation
+        pending = sys.exc_info()[1]
+        if pending is not None and self.first_error is None:
+            self.remember(pending, 'APPLICATION')
+
+        def mark(name):
+            try:
+                tick = self.end_counter()
+                apps.require(type(tick) is int and 0 <= tick <= 2**63 - 1,
+                             'FAILURE_OBSERVER_COUNTER_UNAVAILABLE')
+                observation[name] = tick
+            except Exception as error:
+                observation[name] = 'NOT_ESTABLISHED'
+                observation['errors'][name] = apps._qa_code(str(error))
+
+        mark('failure_boundary_qpc')
+        self.clock['failure_boundary_qpc'] = observation['failure_boundary_qpc']
+        for label in ('target', 'noise'):
+            mark(label + '_begin_qpc')
+            try:
+                if label == 'target':
+                    process = owner.process
+                    created = failure.get('creation_time_filetime_ticks')
+                    apps.require(type(failure.get('pid')) is int and failure['pid'] == process.pid and
+                        failure.get('owned_image_matches_requested') is True and
+                        failure.get('image_identity_source') == 'OWNED_WINDOWS_PROCESS_HANDLE' and
+                        isinstance(created, str) and re.fullmatch(r'[0-9]{1,20}', created),
+                        'FAILURE_TARGET_OWNED_IDENTITY_NOT_ESTABLISHED')
+                    result = apps.observe_owned_thread_priorities(process, created)
+                else:
+                    process = self.noise.owner.process
+                    created = self.noise.identity['creation_time_filetime_ticks']
+                    ready = self.noise.ready; workers = ready.get('workers')
+                    apps.require(ready.get('pid') == process.pid and ready.get('created_100ns') == created and
+                        type(workers) is list and len(workers) == 2 * PAIRS and all(type(worker) is dict and
+                            type(worker.get('tid')) is int and 1 <= worker['tid'] <= 2**32 - 1 and
+                            isinstance(worker.get('created_100ns'), str) and
+                            re.fullmatch(r'[0-9]{1,20}', worker['created_100ns']) for worker in workers) and
+                        len({worker['tid'] for worker in workers}) == 2 * PAIRS,
+                        'FAILURE_NOISE_THREAD_IDENTITIES_NOT_ESTABLISHED')
+                    result = apps.observe_owned_thread_priorities(process, created,
+                        thread_births={worker['tid']: worker['created_100ns'] for worker in workers})
+                apps.require(type(result) is dict, 'OWNED_PRIORITY_OBSERVER_RETURN_TYPE')
+                observation[label] = result
+            except Exception as error:
+                observation[label] = {'status': 'UNKNOWN', 'reason_code': apps._qa_code(str(error))}
+            mark(label + '_end_qpc')
+        mark('snapshots_end_qpc')
+        # The application guard has already failed. Release the noise before
+        # target teardown can consume the remaining fixed child lifetime.
+        self.stop_noise()
+        mark('after_noise_stop_poll_begin_qpc')
+        after = {'scope': 'AFTER_NOISE_STOP_BEFORE_TARGET_CLEANUP', 'state': 'UNKNOWN',
+                 'exit_code': 'NOT_ESTABLISHED'}
+        try:
+            code = owner.process.poll()
+            if code is None:
+                after['state'] = 'RUNNING'
+            elif type(code) is int and -(2**31) <= code <= 2**32 - 1:
+                after.update(state='EXITED', exit_code=code)
+        except Exception as error:
+            after['reason_code'] = apps._qa_code(str(error))
+        observation['target_after_noise_stop'] = after
+        mark('after_noise_stop_poll_end_qpc')
+        try:
+            print('CONTROLLED_SCHEDULER_FAILURE_FACTS ' + json.dumps(observation, sort_keys=True), flush=True)
+        except Exception as error:
+            observation['errors']['stdout'] = apps._qa_code(str(error))
+        return observation
+
     def stop(self):
         if self.first_error is not None:
             raise self.first_error
@@ -771,6 +852,8 @@ class BudgetCapture:
         pending = sys.exc_info()[1]
         if self.first_error is None and pending is not None:
             self.remember(pending, 'APPLICATION')
+        if self.noise.owner:
+            self.stop_noise()
         result = None
         if self.actual.active:
             try:
@@ -780,8 +863,6 @@ class BudgetCapture:
             except BaseException as error:
                 self.cleanup.update(status='UNCONFIRMED', cleanup_required=True)
                 self.remember(error, 'WPR_CANCEL')
-        if self.noise.owner:
-            self.stop_noise()
         if self.first_error is not None:
             raise self.first_error
         return result

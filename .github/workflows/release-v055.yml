@@ -89,9 +89,6 @@ jobs:
         run: python tools/qa_decoder_standard_token.py --helper decoder/BLACK.BOX-Decoder.exe --trace-root decoder-qa --output decoder-standard-token-qa
       - name: Real owned Windows Sleep, Event and Mutex waits
         run: python tools/qa_decoder_waits.py --helper decoder/BLACK.BOX-Decoder.exe --output decoder-waits-qa
-      - name: Controlled Python budget negatives and native Win32 A B acceptance
-        timeout-minutes: 6
-        run: python tools/qa_decoder_budget_diagnostic.py --helper decoder/BLACK.BOX-Decoder.exe --output decoder-budget-diagnostic --source-sha "${{ github.event.workflow_run.head_sha }}"
       - name: Actual third-party 7-Zip, PowerShell 7 and Notepad++ acceptance
         shell: pwsh
         run: |
@@ -101,6 +98,9 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw "Third-party decoder acceptance failed in trial $trial/3; all three trials must pass" }
             Write-Host "THIRD_PARTY_DECODER_QA_TRIAL_COMPLETE $trial/3"
           }
+      - name: Controlled Python budget negatives and native Win32 A B acceptance
+        timeout-minutes: 6
+        run: python tools/qa_decoder_budget_diagnostic.py --helper decoder/BLACK.BOX-Decoder.exe --output decoder-budget-diagnostic --source-sha "${{ github.event.workflow_run.head_sha }}"
       - name: Build real owned R10 native fixtures for one-UAC release acceptance
         run: python tools/qa_r10_fixture.py --output r10-probe-build --source-sha "${{ github.event.workflow_run.head_sha }}"
       - name: R10 real one-helper two-target Windows operations, rollback and cleanup

@@ -204,6 +204,228 @@ def owned_process_identity(process, binary):
             "exit_time_filetime_ticks": str((exited.dwHighDateTime << 32) | exited.dwLowDateTime)}
 
 
+class _PriorityClientId(C.Structure):
+    _fields_ = [('process', C.c_size_t), ('thread', C.c_size_t)]
+
+
+class _PriorityFileTime(C.Structure):
+    _fields_ = [('dwLowDateTime', C.c_uint32), ('dwHighDateTime', C.c_uint32)]
+
+
+class _ThreadBasicPriorityInformation(C.Structure):
+    # ThreadBasicInformation contains priorities, not ThreadState/wait reason.
+    _fields_ = [('exit_status', C.c_int32), ('teb', C.c_void_p), ('client_id', _PriorityClientId),
+                ('affinity', C.c_size_t), ('priority', C.c_int32), ('base_priority', C.c_int32)]
+
+
+_retained_priority_query_handles = []
+MAX_RETAINED_PRIORITY_QUERY_HANDLES = 128
+_PRIORITY_ERROR_CODES = frozenset({
+    'PRIORITY_UNSUPPORTED_NATIVE_ABI', 'PRIORITY_QUERY_BUDGET', 'PRIORITY_BIRTH_INVALID',
+    'PRIORITY_BIRTH_QUERY_FAILED', 'PRIORITY_COUNTER_UNAVAILABLE',
+    'PRIORITY_PROCESS_IDENTITY_CHANGED_OR_EXITED', 'PRIORITY_THREAD_OWNER_OR_EXIT_UNCONFIRMED',
+    'PRIORITY_THREAD_BIRTH_CHANGED', 'PRIORITY_OWNED_PROCESS_INVALID', 'PRIORITY_THREAD_COUNT_UNSUPPORTED',
+    'PRIORITY_THREAD_IDS_AMBIGUOUS', 'PRIORITY_THREAD_IDS_INVALID', 'PRIORITY_CLASS_UNAVAILABLE',
+    'PRIORITY_PROCESS_BOOST_UNAVAILABLE', 'PRIORITY_RETAINED_QUERY_HANDLE_CAP',
+    'PRIORITY_THREAD_OPEN_UNAVAILABLE', 'PRIORITY_NATIVE_QUERY_UNSUPPORTED',
+    'PRIORITY_NATIVE_IDENTITY_OR_VALUE_INVALID', 'PRIORITY_THREAD_BOOST_UNAVAILABLE',
+})
+
+
+def _priority_native_api():
+    require(os.name == 'nt' and C.sizeof(C.c_void_p) == 8 and
+            C.sizeof(_PriorityFileTime) == 8 and
+            C.sizeof(_ThreadBasicPriorityInformation) == 48 and
+            _ThreadBasicPriorityInformation.priority.offset == 40 and
+            _ThreadBasicPriorityInformation.base_priority.offset == 44,
+            'PRIORITY_UNSUPPORTED_NATIVE_ABI')
+    kernel = C.WinDLL('kernel32', use_last_error=True, winmode=0x800)
+    native = C.WinDLL('ntdll', use_last_error=True, winmode=0x800)
+    prototypes = {
+        'GetProcessId': ([C.c_void_p], C.c_uint32),
+        'GetThreadId': ([C.c_void_p], C.c_uint32),
+        'GetProcessIdOfThread': ([C.c_void_p], C.c_uint32),
+        'WaitForSingleObject': ([C.c_void_p, C.c_uint32], C.c_uint32),
+        'GetProcessTimes': ([C.c_void_p, *([C.POINTER(_PriorityFileTime)] * 4)], C.c_int32),
+        'GetThreadTimes': ([C.c_void_p, *([C.POINTER(_PriorityFileTime)] * 4)], C.c_int32),
+        'GetPriorityClass': ([C.c_void_p], C.c_uint32),
+        'GetProcessPriorityBoost': ([C.c_void_p, C.POINTER(C.c_int32)], C.c_int32),
+        'GetProcessAffinityMask': ([C.c_void_p, C.POINTER(C.c_size_t), C.POINTER(C.c_size_t)], C.c_int32),
+        'GetThreadPriorityBoost': ([C.c_void_p, C.POINTER(C.c_int32)], C.c_int32),
+        'OpenThread': ([C.c_uint32, C.c_int32, C.c_uint32], C.c_void_p),
+        'CloseHandle': ([C.c_void_p], C.c_int32),
+        'QueryPerformanceCounter': ([C.POINTER(C.c_int64)], C.c_int32),
+        'QueryPerformanceFrequency': ([C.POINTER(C.c_int64)], C.c_int32),
+    }
+    for name, (arguments, result) in prototypes.items():
+        function = getattr(kernel, name)
+        function.argtypes = arguments; function.restype = result
+    native.NtQueryInformationThread.argtypes = [C.c_void_p, C.c_uint32, C.c_void_p,
+                                               C.c_uint32, C.POINTER(C.c_uint32)]
+    native.NtQueryInformationThread.restype = C.c_int32
+    return kernel, native
+
+
+def observe_owned_thread_priorities(process, expected_creation_time, thread_births=None):
+    """Read bounded scheduling facts through held, identity-checked handles.
+
+    Two seconds is a best-effort query budget checked between APIs, never an
+    OS deadline. No thread is suspended, waited for, reprioritized or mutated.
+    Failed query-handle closure retains its capability and cannot be OBSERVED.
+    """
+    retained_before = len(_retained_priority_query_handles)
+    result = {'schema': 'blackbox.owned-thread-priorities/1', 'status': 'NOT_ESTABLISHED',
+        'scope': 'READ_ONLY_PRIORITIES_NOT_THREAD_STATE_WAIT_REASON_OR_CAUSE', 'queries_atomic': False,
+        'query_budget_seconds': 2, 'budget_scope': 'CHECKED_BETWEEN_APIS_NOT_HARD_OS_BOUND',
+        'process_identity_verified_before': False, 'process_identity_verified_after': False,
+        'query_handles_closed_verified': retained_before == 0, 'cleanup_required': retained_before > 0,
+        'retained_query_handles_before': retained_before,
+        'query_handles_opened': 0, 'query_handles_closed': 0,
+        'cleanup_scope': 'QUERY_HANDLES_ONLY_NOT_WORKLOAD_OR_JOB_CLEANUP_PROOF',
+        'runtime_reported_logical_processors': 'NOT_ESTABLISHED',
+        'processor_count_scope': 'RUNTIME_REPORTED_NOT_QUOTA_OR_EXCLUSIVE_ENTITLEMENT',
+        'affinity': {'status': 'NOT_ESTABLISHED', 'scope': 'PRIMARY_GROUP_MASK_BIT_COUNTS_NOT_CPU_QUOTA'},
+        'process_cpu': {'status': 'NOT_ESTABLISHED', 'scope': 'HELD_PROCESS_CUMULATIVE_100NS_NOT_UTILIZATION_OR_CAUSE'},
+        'threads': [], 'errors': ['PRIORITY_PREVIOUS_QUERY_HANDLES_UNCONFIRMED'] if retained_before else []}
+    deadline = time.monotonic() + 2
+    last_cpu = {}
+    try:
+        logical = os.cpu_count()
+        if type(logical) is int and 1 <= logical <= 4096:
+            result['runtime_reported_logical_processors'] = logical
+    except Exception:
+        pass
+
+    def check():
+        require(time.monotonic() < deadline, 'PRIORITY_QUERY_BUDGET')
+
+    def birth(value):
+        require(type(value) is str and re.fullmatch(r'[0-9]{1,20}', value) and
+                0 < int(value) <= 2**64 - 1, 'PRIORITY_BIRTH_INVALID')
+        return int(value)
+
+    def ticks(kernel, function, handle):
+        check()
+        first = _PriorityFileTime(); last = _PriorityFileTime(); kt = _PriorityFileTime(); ut = _PriorityFileTime()
+        require(getattr(kernel, function)(handle, C.byref(first), C.byref(last), C.byref(kt), C.byref(ut)),
+                'PRIORITY_BIRTH_QUERY_FAILED')
+        if function == 'GetProcessTimes':
+            last_cpu.update(user_100ns=(ut.dwHighDateTime << 32) | ut.dwLowDateTime,
+                            kernel_100ns=(kt.dwHighDateTime << 32) | kt.dwLowDateTime)
+        return (first.dwHighDateTime << 32) | first.dwLowDateTime
+
+    def qpc(kernel, name='QueryPerformanceCounter'):
+        check(); value = C.c_int64()
+        require(getattr(kernel, name)(C.byref(value)) and 0 < value.value <= 2**63 - 1,
+                'PRIORITY_COUNTER_UNAVAILABLE')
+        return value.value
+
+    def process_identity(kernel, handle, pid, expected):
+        first_qpc = qpc(kernel)
+        require(kernel.GetProcessId(handle) == pid and kernel.WaitForSingleObject(handle, 0) == 258 and
+                ticks(kernel, 'GetProcessTimes', handle) == expected, 'PRIORITY_PROCESS_IDENTITY_CHANGED_OR_EXITED')
+        return {**last_cpu, 'sample_begin_qpc': first_qpc, 'sample_end_qpc': qpc(kernel)}
+
+    def thread_identity(kernel, handle, pid, tid, expected=None):
+        check()
+        require(kernel.GetThreadId(handle) == tid and kernel.GetProcessIdOfThread(handle) == pid and
+                kernel.WaitForSingleObject(handle, 0) == 258, 'PRIORITY_THREAD_OWNER_OR_EXIT_UNCONFIRMED')
+        actual = ticks(kernel, 'GetThreadTimes', handle)
+        require(actual >= process_birth and (expected is None or actual == expected),
+                'PRIORITY_THREAD_BIRTH_CHANGED')
+        return actual
+
+    try:
+        kernel, native = _priority_native_api()
+        pid = process.pid; handle = int(process._handle); process_birth = birth(expected_creation_time)
+        require(type(pid) is int and 1 <= pid <= 2**32 - 1 and handle, 'PRIORITY_OWNED_PROCESS_INVALID')
+        result['qpc_frequency_hz'] = qpc(kernel, 'QueryPerformanceFrequency')
+        result['sample_begin_qpc'] = qpc(kernel)
+        process_identity(kernel, handle, pid, process_birth)
+        result.update(pid=pid, created_100ns=str(process_birth), process_identity_verified_before=True)
+        if thread_births is None:
+            import psutil
+            check(); entries = psutil.Process(pid).threads()
+            require(type(entries) is list and 1 <= len(entries) <= 32, 'PRIORITY_THREAD_COUNT_UNSUPPORTED')
+            selected = {entry.id: None for entry in entries}
+            require(len(selected) == len(entries), 'PRIORITY_THREAD_IDS_AMBIGUOUS')
+        else:
+            require(type(thread_births) is dict and 1 <= len(thread_births) <= 32,
+                    'PRIORITY_THREAD_COUNT_UNSUPPORTED')
+            selected = {tid: birth(created) for tid, created in thread_births.items()}
+        require(all(type(tid) is int and 1 <= tid <= 2**32 - 1 for tid in selected),
+                'PRIORITY_THREAD_IDS_INVALID')
+        process_identity(kernel, handle, pid, process_birth)
+        result['thread_count'] = len(selected)
+        check(); priority_class = kernel.GetPriorityClass(handle)
+        classes = {0x20: 'NORMAL', 0x40: 'IDLE', 0x80: 'HIGH', 0x100: 'REALTIME',
+                   0x4000: 'BELOW_NORMAL', 0x8000: 'ABOVE_NORMAL'}
+        require(priority_class in classes, 'PRIORITY_CLASS_UNAVAILABLE')
+        process_boost = C.c_int32(); check()
+        require(kernel.GetProcessPriorityBoost(handle, C.byref(process_boost)), 'PRIORITY_PROCESS_BOOST_UNAVAILABLE')
+        process_mask = C.c_size_t(); system_mask = C.c_size_t(); check()
+        if kernel.GetProcessAffinityMask(handle, C.byref(process_mask), C.byref(system_mask)) and process_mask.value and system_mask.value:
+            result['affinity'].update(status='OBSERVED', process_mask_bit_count=process_mask.value.bit_count(),
+                                      system_mask_bit_count=system_mask.value.bit_count())
+        for tid, expected_thread_birth in sorted(selected.items()):
+            check(); row = {'tid': tid, 'status': 'NOT_ESTABLISHED'}
+            require(len(_retained_priority_query_handles) < MAX_RETAINED_PRIORITY_QUERY_HANDLES,
+                    'PRIORITY_RETAINED_QUERY_HANDLE_CAP')
+            # SYNCHRONIZE | THREAD_QUERY_INFORMATION; no suspend/write rights.
+            thread = kernel.OpenThread(0x100000 | 0x40, False, tid)
+            require(thread, 'PRIORITY_THREAD_OPEN_UNAVAILABLE')
+            result['query_handles_opened'] += 1
+            try:
+                first_qpc = qpc(kernel)
+                thread_birth = thread_identity(kernel, thread, pid, tid, expected_thread_birth)
+                information = _ThreadBasicPriorityInformation(); returned = C.c_uint32()
+                check()
+                status = native.NtQueryInformationThread(thread, 0, C.byref(information),
+                    C.sizeof(information), C.byref(returned))
+                row['ntstatus'] = int(status) & 0xffffffff
+                require(status == 0 and returned.value == C.sizeof(information), 'PRIORITY_NATIVE_QUERY_UNSUPPORTED')
+                require(information.client_id.process == pid and information.client_id.thread == tid and
+                        0 <= information.priority <= 31 and 0 <= information.base_priority <= 31,
+                        'PRIORITY_NATIVE_IDENTITY_OR_VALUE_INVALID')
+                disabled = C.c_int32(); check()
+                require(kernel.GetThreadPriorityBoost(thread, C.byref(disabled)), 'PRIORITY_THREAD_BOOST_UNAVAILABLE')
+                require(thread_identity(kernel, thread, pid, tid, thread_birth) == thread_birth,
+                        'PRIORITY_THREAD_BIRTH_CHANGED')
+                row.update(status='OBSERVED', created_100ns=str(thread_birth),
+                    priority=information.priority, base_priority=information.base_priority,
+                    priority_boost_disabled=bool(disabled.value), sample_begin_qpc=first_qpc,
+                    sample_end_qpc=qpc(kernel))
+            finally:
+                try:
+                    closed = bool(kernel.CloseHandle(thread))
+                except BaseException:
+                    closed = False
+                if not closed:
+                    _retained_priority_query_handles.append((kernel, thread, process))
+                    result.update(query_handles_closed_verified=False, cleanup_required=True)
+                    row['status'] = 'NOT_ESTABLISHED'
+                    result['errors'].append('PRIORITY_QUERY_HANDLE_CLOSE_UNCONFIRMED')
+                else:
+                    result['query_handles_closed'] += 1
+                result['threads'].append(row)
+        cpu = process_identity(kernel, handle, pid, process_birth)
+        result.update(process_identity_verified_after=True, priority_class=classes[priority_class],
+                      priority_boost_disabled=bool(process_boost.value), sample_end_qpc=qpc(kernel))
+        result['process_cpu'].update(status='OBSERVED', **cpu)
+        if result['query_handles_closed_verified'] and all(row['status'] == 'OBSERVED' for row in result['threads']):
+            result['status'] = 'OBSERVED'
+    except BaseException as error:
+        # Only our fixed machine codes are public; OS text/pointers never are.
+        try:
+            code = str(error)
+        except BaseException:
+            code = ''
+        result['errors'].append(code if code in _PRIORITY_ERROR_CODES else 'PRIORITY_QUERY_UNAVAILABLE')
+    result['errors'] = result['errors'][:8]
+    result['retained_query_handles_after'] = len(_retained_priority_query_handles)
+    return result
+
+
 def binary_identity(binary, *, version_args=None):
     data = {"path": str(binary), "sha256": file_hash(binary),
             "bytes": binary.stat().st_size, "provenance": "RUNNER_INSTALLED_EXACT_BINARY"}
@@ -291,8 +513,9 @@ def emit_workload_failure(log, observation):
     return observation
 
 
-def monitored_run(args, log, *, env=None, timeout=30, role="OTHER", cycle=None):
+def monitored_run(args, log, *, env=None, timeout=30, role="OTHER", cycle=None, failure_observer=None):
     """Sample only a process launched here; terminate only its owned job."""
+    require(failure_observer is None or callable(failure_observer), 'INVALID_WORKLOAD_FAILURE_OBSERVER')
     import psutil
     with Path(log).open("xb") as stream:
         launch_started = time.monotonic()
@@ -391,6 +614,14 @@ def monitored_run(args, log, *, env=None, timeout=30, role="OTHER", cycle=None):
             except Exception as secondary:
                 failure["log_observation_error"] = _qa_code(str(secondary))
             failure = emit_workload_failure(log, failure)
+            if failure_observer is not None:
+                try:
+                    failure_observer(owner, failure)
+                except BaseException:
+                    try:
+                        print('APP_WORKLOAD_FAILURE_OBSERVER_UNAVAILABLE', flush=True)
+                    except BaseException:
+                        pass
             try:
                 error.workload_failure = failure
             except Exception:
@@ -629,6 +860,9 @@ def seven_zip(output, helper, *, profile="cpu_file", native_module_encoding=None
     proofs = []
     verified_roundtrips = 0
     try:
+        observer = getattr(capture, 'observe_workload_failure', None)
+        if callable(observer):
+            run_options = {**run_options, 'failure_observer': observer}
         started = time.monotonic()
         for cycle in range(3):
             archive = output / f"roundtrip-{cycle}.7z"

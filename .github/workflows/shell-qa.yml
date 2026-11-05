@@ -211,9 +211,6 @@ jobs:
         run: python tools/qa_decoder_standard_token.py --helper decoder/BLACK.BOX-Decoder.exe --trace-root decoder-qa --output decoder-standard-token-qa
       - name: Real owned Windows Sleep, Event and Mutex waits
         run: python tools/qa_decoder_waits.py --helper decoder/BLACK.BOX-Decoder.exe --output decoder-waits-qa
-      - name: Controlled Python budget negatives and native Win32 A B acceptance
-        timeout-minutes: 6
-        run: python tools/qa_decoder_budget_diagnostic.py --helper decoder/BLACK.BOX-Decoder.exe --output decoder-budget-diagnostic --source-sha "${{ github.event.pull_request.head.sha || github.sha }}"
       - name: Actual third-party 7-Zip, PowerShell 7 and Notepad++ acceptance
         shell: pwsh
         run: |
@@ -223,6 +220,9 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw "Third-party decoder acceptance failed in trial $trial/3; all three trials must pass" }
             Write-Host "THIRD_PARTY_DECODER_QA_TRIAL_COMPLETE $trial/3"
           }
+      - name: Controlled Python budget negatives and native Win32 A B acceptance
+        timeout-minutes: 6
+        run: python tools/qa_decoder_budget_diagnostic.py --helper decoder/BLACK.BOX-Decoder.exe --output decoder-budget-diagnostic --source-sha "${{ github.event.pull_request.head.sha || github.sha }}"
       - name: Generate original retro Windows icon
         run: python tools/generate_icon.py
       - name: Record actual source identity for the frozen executable
