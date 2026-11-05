@@ -77,6 +77,10 @@ jobs:
           Add-Content -Path $env:GITHUB_PATH -Value $toolDir
           $llvm = Join-Path $env:ProgramFiles 'LLVM\bin'
           if (Test-Path $llvm) { Add-Content -Path $env:GITHUB_PATH -Value $llvm }
+      - name: Prepare same-job owned native noise fixture before trace workloads
+        id: prepare_native_noise
+        timeout-minutes: 2
+        run: python tools/qa_decoder_noise_fixture.py --prepare-fixture --output decoder-budget-diagnostic/native-build --source-sha "${{ github.event.workflow_run.head_sha }}"
       - name: Real EventPipe/ETW and guardian capture-clock integration
         run: python tools/qa_decoder.py --helper decoder/BLACK.BOX-Decoder.exe --output decoder-qa
       - name: Real native ETW filtered trees and local PE/PDB acceptance
@@ -100,7 +104,7 @@ jobs:
           }
       - name: Controlled Python budget negatives and native Win32 A B acceptance
         timeout-minutes: 8
-        run: python tools/qa_decoder_budget_diagnostic.py --helper decoder/BLACK.BOX-Decoder.exe --output decoder-budget-diagnostic --source-sha "${{ github.event.workflow_run.head_sha }}"
+        run: python tools/qa_decoder_budget_diagnostic.py --helper decoder/BLACK.BOX-Decoder.exe --output decoder-budget-diagnostic --source-sha "${{ github.event.workflow_run.head_sha }}" --prepared-native-build --prepared-build-sha256 "${{ steps.prepare_native_noise.outputs.manifest_sha256 }}"
       - name: Build real owned R10 native fixtures for one-UAC release acceptance
         run: python tools/qa_r10_fixture.py --output r10-probe-build --source-sha "${{ github.event.workflow_run.head_sha }}"
       - name: R10 real one-helper two-target Windows operations, rollback and cleanup

@@ -47,6 +47,8 @@ APPROVED_DECODER_QA_FILES = {
     ".github/workflows/release-v055.yml": "modified",
     "tools/qa_decoder_apps.py": "modified",
     "tests/test_decoder_apps_qa.py": "modified",
+    "tests/test_decoder_alignment.py": "modified",
+    "tests/test_decoder_completion_gui.py": "modified",
     "tools/qa_decoder_budget_diagnostic.py": "added",
     "tools/qa_decoder_noise_fixture.py": "added",
     "tools/fixtures/DecoderBudgetProbe/noise.c": "added",

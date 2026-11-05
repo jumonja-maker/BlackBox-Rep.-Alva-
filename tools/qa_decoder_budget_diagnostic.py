@@ -10,6 +10,7 @@ from contextlib import closing
 import ctypes as C
 from ctypes import wintypes as W
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -1248,10 +1249,62 @@ def validate_comparison(first, second, *, positive=True):
                 if positive else 'NOT_APPLICABLE_PYTHON_POLICY'}
 
 
+def diagnostic_output_root(path, *, prepared=False):
+    """Adopt only the fresh same-job build directory, never old case output."""
+    apps.require(type(prepared) is bool, 'DIAGNOSTIC_PREPARED_MODE_INVALID')
+    output = Path(path).absolute()
+    if not prepared:
+        output.mkdir(parents=True, exist_ok=False)
+    else:
+        apps.require('..' not in output.parts, 'DIAGNOSTIC_PREPARED_OUTPUT_PATH')
+        try:
+            relative = output.relative_to(ROOT)
+        except ValueError:
+            raise AssertionError('DIAGNOSTIC_PREPARED_OUTPUT_OUTSIDE_CHECKOUT') from None
+        directories = [ROOT]
+        for component in relative.parts:
+            directories.append(directories[-1] / component)
+        directories.append(output / 'native-build')
+        for directory in directories:
+            info = directory.lstat()
+            apps.require(stat.S_ISDIR(info.st_mode) and not stat.S_ISLNK(info.st_mode) and
+                not getattr(info, 'st_file_attributes', 0) & getattr(stat, 'FILE_ATTRIBUTE_REPARSE_POINT', 0x400),
+                'DIAGNOSTIC_PREPARED_OUTPUT_NOT_REGULAR_DIRECTORY')
+        with os.scandir(output) as entries:
+            first = next(entries, None)
+            second = next(entries, None)
+            apps.require(first is not None and first.name == 'native-build' and second is None,
+                         'DIAGNOSTIC_PREPARED_OUTPUT_NOT_FRESH')
+    return output.resolve(strict=True)
+
+
+def prepared_budget_deadline(started, elapsed):
+    """Charge the earlier build to the same finite 420s active-work budget."""
+    apps.require(type(started) in (int, float) and math.isfinite(started) and 0 <= started <= 2**63 - 1 and
+        type(elapsed) in (int, float) and math.isfinite(elapsed) and 0 < elapsed <= 90,
+        'DIAGNOSTIC_PREPARED_ELAPSED_INVALID')
+    return started + 420 - elapsed
+
+
+def validate_prepared_recheck(initial, final):
+    """A later read must preserve the externally anchored preparation facts."""
+    facts = []
+    for record in (initial, final):
+        apps.require(type(record) is dict and type(record.get('prepared_validation')) is dict and
+            record['prepared_validation'].get('status') == 'VERIFIED_SAME_JOB_BUILD_FILES',
+            'DIAGNOSTIC_PREPARED_FINAL_VALIDATION_MISSING')
+        prepared_budget_deadline(0, record.get('prepared_build_elapsed_seconds'))
+        facts.append(json.dumps({key: record[key] for key in (
+            'prepared_validation', 'prepared_build_elapsed_seconds')}, sort_keys=True, allow_nan=False))
+    apps.require(facts[0] == facts[1], 'DIAGNOSTIC_PREPARED_CHANGED_AT_END')
+    return dict(final['prepared_validation'])
+
+
 def run_diagnostic(args):
     started = time.monotonic(); deadline = started + 420
+    prepaid_build_elapsed = 0
     require_hosted_windows()
-    output = args.output.resolve(); output.mkdir(parents=True, exist_ok=False)
+    output = diagnostic_output_root(args.output, prepared=args.prepared_native_build)
     proof = {'schema': 'blackbox.native-budget-acceptance/2', 'status': 'REPRODUCTION_NOT_ESTABLISHED',
         'historical_a80_cause': 'NOT_ESTABLISHED', 'previous_7f45_result': 'FAILED_FOCUSED_PROFILE_STILL_TRUNCATED',
         'evidence_footprint_scope': 'LIVE_OWNED_QA_TREE; EXISTING_PRODUCTION_PRIVATE_IMPORT_BUDGET_IS_SEPARATE',
@@ -1266,8 +1319,24 @@ def run_diagnostic(args):
         python = {'implementation': 'PYTHON_CTYPES_WIN32', 'executable': str(Path(sys.executable).resolve()),
             'source_sha256': apps.file_hash(Path(__file__)), 'executable_sha256': apps.file_hash(Path(sys.executable)),
             'expected_native_handles': 16}
-        from tools.qa_decoder_noise_fixture import build_native_noise
-        native = build_native_noise(output / 'native-build', args.source_sha)
+        if args.prepared_native_build:
+            from tools.qa_decoder_noise_fixture import load_prepared_native_noise
+            native = load_prepared_native_noise(output / 'native-build', args.source_sha,
+                expected_manifest_sha256=args.prepared_build_sha256)
+            elapsed = native['prepared_build_elapsed_seconds']
+            deadline = prepared_budget_deadline(started, elapsed)
+            prepaid_build_elapsed = elapsed
+            validation = native.get('prepared_validation')
+            apps.require(type(validation) is dict and validation.get('status') == 'VERIFIED_SAME_JOB_BUILD_FILES',
+                         'DIAGNOSTIC_PREPARED_VALIDATION_MISSING')
+            proof['prepared_native_build'] = validation
+            proof['expected_prepared_manifest_sha256'] = args.prepared_build_sha256
+            proof['prepared_build_elapsed_debit_seconds'] = prepaid_build_elapsed
+            proof['native_build_mode'] = 'SAME_JOB_PREPARED_BUILD_REVALIDATED_NO_FALLBACK'
+        else:
+            from tools.qa_decoder_noise_fixture import build_native_noise
+            native = build_native_noise(output / 'native-build', args.source_sha)
+            proof['native_build_mode'] = 'BUILT_IN_CONTROLLED_TOOL'
         max_live = 0
         for label, producer, positive in (('python', python, False), ('native', native, True)):
             live = sum(p.stat().st_size for p in output.rglob('*') if p.is_file())
@@ -1289,6 +1358,13 @@ def run_diagnostic(args):
             live = sum(p.stat().st_size for p in output.rglob('*') if p.is_file())
             max_live = max(max_live, live)
             apps.require(live <= MAX_OUTPUT and time.monotonic() < deadline, 'CONTROLLED_LIVE_OUTPUT_OR_DEADLINE')
+        if args.prepared_native_build:
+            final_native = load_prepared_native_noise(output / 'native-build', args.source_sha,
+                expected_manifest_sha256=args.prepared_build_sha256)
+            proof['prepared_native_build_final'] = validate_prepared_recheck(native, final_native)
+            live = sum(p.stat().st_size for p in output.rglob('*') if p.is_file())
+            max_live = max(max_live, live)
+            apps.require(live <= MAX_OUTPUT and time.monotonic() < deadline, 'CONTROLLED_FINAL_PREPARED_DEADLINE_OR_BUDGET')
         proof.update(status='CONTROLLED_NEGATIVE_BUDGETS_AND_NATIVE_A_B_VERIFIED',
                      max_measured_live_qa_bytes=max_live)
     except BaseException as error:
@@ -1298,6 +1374,9 @@ def run_diagnostic(args):
         elapsed = time.monotonic() - started
         proof['observed_elapsed_until_final_report_seconds'] = elapsed if 0 <= elapsed <= 2**63 - 1 else 'NOT_ESTABLISHED'
         proof['observed_elapsed_scope'] = 'BEFORE_JSON_WRITE_AND_STDOUT_NOT_HARD_OS'
+        active_elapsed = elapsed + prepaid_build_elapsed
+        proof['observed_compile_and_controlled_active_seconds'] = active_elapsed if 0 <= active_elapsed <= 2**63 - 1 else 'NOT_ESTABLISHED'
+        proof['active_elapsed_scope'] = 'COMPILE_PLUS_CONTROLLED_INTERVAL_EXCLUDES_INTERVENING_ORDINARY_TRIALS_AND_NEW_SEAL_PUBLICATION_AND_STEP_OUTPUT_NOT_HARD_OS'
         apps.write_json(output / 'budget-diagnostic.json', proof)
         print('CONTROLLED_NATIVE_BUDGET_DIAGNOSTIC ' + json.dumps(proof, sort_keys=True), flush=True)
         if os.environ.get('GITHUB_STEP_SUMMARY'):
@@ -1312,12 +1391,20 @@ def parse_args(argv=None):
     parser.add_argument('--helper', type=Path)
     parser.add_argument('--source-sha')
     parser.add_argument('--noise-child', action='store_true')
+    parser.add_argument('--prepared-native-build', action='store_true')
+    parser.add_argument('--prepared-build-sha256')
     args = parser.parse_args(argv)
     if args.noise_child:
-        if args.helper is not None or args.source_sha is not None:
+        if (args.helper is not None or args.source_sha is not None or args.prepared_native_build
+                or args.prepared_build_sha256 is not None):
             parser.error('noise child accepts only its own output directory')
     elif args.helper is None or args.source_sha is None:
         parser.error('parent requires --helper and --source-sha')
+    elif args.prepared_native_build:
+        if not re.fullmatch(r'[a-f0-9]{64}', args.prepared_build_sha256 or ''):
+            parser.error('prepared build requires the prior step manifest sha256')
+    elif args.prepared_build_sha256 is not None:
+        parser.error('prepared manifest sha256 requires --prepared-native-build')
     return args
 
 

@@ -1805,5 +1805,242 @@ class OwnedThreadPriorityDiagnosticProtocolTests(unittest.TestCase):
                 self.assertEqual(run.call_count, 2)
 
 
+class PreparedNativeBuildProtocolTests(unittest.TestCase):
+    """Literal files/fake compiler results test reuse boundaries, never native acceptance."""
+    head = 'a' * 40
+
+    def fixture(self, root, *, edit_build=None):
+        from contextlib import contextmanager, ExitStack
+        from tools import qa_decoder_noise_fixture as fixture
+        @contextmanager
+        def active():
+            identity = {'requested_head_sha': self.head, 'workflow_event_sha': 'b' * 40,
+                'actual_source_sha': self.head, 'source_tree_sha': 'c' * 40, 'tracked_worktree_clean': True,
+                'identity_source': 'ACTUAL_GIT_CHECKOUT', 'source_identity_status': 'VERIFIED_EXPECTED_HEAD'}
+            for name in (*fixture._CRITICAL_SCRIPTS, 'tools/fixtures/DecoderBudgetProbe/noise.c'):
+                path = root / name; path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text('literal protocol source: ' + name, encoding='utf-8')
+            github_output = root / 'step-output.txt'; github_output.write_bytes(b'')
+            output = root / 'decoder-budget-diagnostic' / 'native-build'
+            state = {'now': 0., 'calls': 0}
+            native = {'format': 'PE32_PLUS', 'machine': '0x8664', 'clr_com_descriptor_rva': 0,
+                'clr_com_descriptor_bytes': 0, 'code_kind': 'NATIVE_PE_NO_CLR_COM_DESCRIPTOR'}
+            def build(folder, head):
+                self.assertEqual(head, self.head); state['calls'] += 1
+                folder.mkdir(parents=True, exist_ok=False)
+                for name in ('noise.obj', 'noise-identity.h', 'compiler-request.json', 'compiler.log'):
+                    (folder / name).write_bytes(b'PROTOCOL_FIXTURE_ONLY')
+                executable = folder / 'scheduler-noise.exe'; executable.write_bytes(b'MZ PROTOCOL_FIXTURE_ONLY')
+                pdb_path = folder / 'scheduler-noise.pdb'
+                pdb_path.write_bytes(b'Microsoft C/C++ MSF 7.00\r\n\x1aDS\x00\x00\x00' + b'\x00' * 32)
+                digest = lambda path: hashlib.sha256(path.read_bytes()).hexdigest()
+                source_hash = digest(root / 'tools/fixtures/DecoderBudgetProbe/noise.c')
+                pdb = {'container': 'MSF7', 'bytes': pdb_path.stat().st_size, 'sha256': digest(pdb_path),
+                    'verification_scope': 'CONTAINER_SIGNATURE_SIZE_AND_SHA256_ONLY'}
+                value = {'schema': 'blackbox.native-noise-build/1', 'status': 'PASS', 'executable': str(executable),
+                    'source_sha256': source_hash, 'executable_sha256': digest(executable), 'implementation': 'NATIVE_WIN32',
+                    'expected_native_handles': 32, 'event_handles': 16, 'thread_handles': 16,
+                    'source_identity': dict(identity), 'native_image': dict(native), 'native_pdb': pdb,
+                    'cleanup': {'status': 'COMPLETED', 'process_exit_code': 0, 'process_created': True,
+                        'active_job_processes_before_close': 0, 'job_handle_closed_verified': True,
+                        'diagnostic_query_handles_closed_verified': True, 'cleanup_required': False,
+                        'observed_job_processes': 3, 'scope': 'COMPILER_LEADER_EXIT_AND_OWNED_JOB_OBJECT'},
+                    'compiler_job_observations': [{'phase': 'EMPTY_BEFORE_CLOSE', 'query_handles_closed_verified': True,
+                        'accounting': {'status': 'OBSERVED', 'active_processes': 0, 'total_processes': 3}}],
+                    'compiler_opt_out_policy': {'request_status': 'FIXED_ENVIRONMENT_REQUESTED',
+                        'worker_verification_status': 'WORKER_AND_COMPILER_ENVIRONMENT_VERIFIED'},
+                    'compiler_planned_shutdown': {'status': 'COMPLETED',
+                        'method': 'PLANNED_OWNED_SDK_BACKGROUND_SHUTDOWN_AFTER_SUCCESSFUL_COMPILATION',
+                        'active_job_processes_before_stop': 0, 'active_job_processes_after_stop': 0,
+                        'termination_requested': False, 'termination_succeeded': None, 'natural_background_exit_claimed': False,
+                        'last_job_query_winerror': 0},
+                    'completed_output_proof': {'status': 'VERIFIED_BEFORE_PLANNED_STOP', 'post_shutdown_revalidated': True,
+                        'source_sha256': source_hash, 'executable_sha256': digest(executable), 'native_image': dict(native),
+                        'native_pdb': pdb}, 'compiler_job_assignment_verified_before_go': True}
+                if edit_build:
+                    edit_build(value)
+                fixture.save(folder / 'build.json', value)
+                state['now'] = 9.25
+                return value
+            with ExitStack() as stack:
+                stack.enter_context(patch.object(fixture, 'ROOT', root))
+                stack.enter_context(patch.object(fixture, 'source_identity', return_value=identity))
+                stack.enter_context(patch.object(fixture, 'require_hosted_windows'))
+                stack.enter_context(patch.object(fixture, 'native_pe_identity', return_value=native))
+                stack.enter_context(patch.object(fixture, 'build_native_noise', side_effect=build))
+                stack.enter_context(patch.object(fixture.time, 'monotonic', side_effect=lambda: state['now']))
+                stack.enter_context(patch.dict(os.environ, {'GITHUB_REPOSITORY': 'literal/repository', 'GITHUB_RUN_ID': '123',
+                    'GITHUB_RUN_ATTEMPT': '1', 'GITHUB_JOB': 'portable', 'GITHUB_OUTPUT': str(github_output)}))
+                stack.enter_context(redirect_stdout(io.StringIO()))
+                yield fixture, output, state, identity, github_output
+        return active()
+
+    def prepare(self, fixture, output, github_output):
+        fixture.prepare_native_noise(output, self.head)
+        digest = hashlib.sha256((output / 'prepared-build.json').read_bytes()).hexdigest()
+        self.assertEqual(github_output.read_text(), 'manifest_sha256=' + digest + '\n')
+        return digest
+
+    def test_same_job_build_once_revalidated_files_and_runner_output_anchor(self):
+        with tempfile.TemporaryDirectory() as tmp, self.fixture(Path(tmp)) as (fixture, output, state, _, github_output):
+            anchor = self.prepare(fixture, output, github_output)
+            with patch.object(fixture, 'build_native_noise', side_effect=AssertionError('NO_COMPILE_FALLBACK')):
+                loaded = fixture.load_prepared_native_noise(output, self.head, expected_manifest_sha256=anchor)
+            self.assertEqual(state['calls'], 1)
+            self.assertEqual(loaded['prepared_build_elapsed_seconds'], 9.25)
+            facts = loaded['prepared_validation']
+            self.assertEqual(facts['status'], 'VERIFIED_SAME_JOB_BUILD_FILES')
+            self.assertEqual(facts['expected_manifest_sha256'], anchor)
+            self.assertEqual(facts['ci_context'], {'repository': 'literal/repository', 'run_id': '123', 'run_attempt': '1', 'job_key': 'portable'})
+            self.assertEqual(set(facts['critical_physical_sha256']), set(fixture._CRITICAL_SCRIPTS))
+            self.assertNotIn(str(Path(tmp)), json.dumps(facts))
+
+    def test_context_source_physical_script_and_artifact_changes_reject_reuse(self):
+        for change in ('run', 'attempt', 'job', 'repository', 'head', 'tree', 'source', 'script', 'exe', 'pdb', 'receipt'):
+            with self.subTest(change=change), tempfile.TemporaryDirectory() as tmp, self.fixture(Path(tmp)) as (fixture, output, _, identity, github_output):
+                anchor = self.prepare(fixture, output, github_output)
+                keys = {'run': 'GITHUB_RUN_ID', 'attempt': 'GITHUB_RUN_ATTEMPT', 'job': 'GITHUB_JOB', 'repository': 'GITHUB_REPOSITORY'}
+                environment = {keys[change]: 'other/repository' if change == 'repository' else 'other' if change == 'job' else '2'} if change in keys else {}
+                if change == 'tree':
+                    identity['source_tree_sha'] = 'd' * 40
+                paths = {'source': Path(tmp) / 'tools/fixtures/DecoderBudgetProbe/noise.c',
+                    'script': Path(tmp) / fixture._CRITICAL_SCRIPTS[0], 'exe': output / 'scheduler-noise.exe',
+                    'pdb': output / 'scheduler-noise.pdb', 'receipt': output / 'build.json'}
+                if change in paths:
+                    with paths[change].open('ab') as stream:
+                        stream.write(b'CHANGED')
+                with patch.dict(os.environ, environment), self.assertRaises(AssertionError):
+                    fixture.load_prepared_native_noise(output, 'e' * 40 if change == 'head' else self.head,
+                                                      expected_manifest_sha256=anchor)
+
+    def test_external_anchor_rejects_valid_elapsed_change_even_with_recomputed_inner_digest(self):
+        with tempfile.TemporaryDirectory() as tmp, self.fixture(Path(tmp)) as (fixture, output, _, _, github_output):
+            anchor = self.prepare(fixture, output, github_output)
+            seal_path = output / 'prepared-build.json'; seal = json.loads(seal_path.read_text())
+            seal['payload']['prepared_build_elapsed_seconds'] = 8.5
+            seal['payload_sha256'] = hashlib.sha256(fixture._canonical(seal['payload'])).hexdigest()
+            seal_path.write_bytes(fixture._canonical(seal))
+            with self.assertRaisesRegex(AssertionError, 'EXTERNAL_ANCHOR_MISMATCH'):
+                fixture.load_prepared_native_noise(output, self.head, expected_manifest_sha256=anchor)
+            for invalid in ('', 'F' * 64, None):
+                with self.subTest(anchor=invalid), self.assertRaises(AssertionError):
+                    fixture.load_prepared_native_noise(output, self.head, expected_manifest_sha256=invalid)
+            with self.assertRaises(TypeError):
+                fixture.load_prepared_native_noise(output, self.head)
+
+    def test_elapsed_types_nonfinite_duplicate_keys_and_failed_build_proof_are_rejected(self):
+        for elapsed in (0, -1, 90.001, True, '9.25', float('nan'), float('inf')):
+            with self.subTest(elapsed=elapsed), tempfile.TemporaryDirectory() as tmp, self.fixture(Path(tmp)) as (fixture, output, _, _, github_output):
+                self.prepare(fixture, output, github_output)
+                path = output / 'prepared-build.json'; seal = json.loads(path.read_text())
+                seal['payload']['prepared_build_elapsed_seconds'] = elapsed
+                canonical = lambda value: json.dumps(value, sort_keys=True, separators=(',', ':')).encode()
+                seal['payload_sha256'] = hashlib.sha256(canonical(seal['payload'])).hexdigest()
+                path.write_bytes(canonical(seal)); anchor = hashlib.sha256(path.read_bytes()).hexdigest()
+                with self.assertRaises(AssertionError):
+                    fixture.load_prepared_native_noise(output, self.head, expected_manifest_sha256=anchor)
+        for bad in ('duplicate', 'forced', 'no_close', 'postproof', 'worker'):
+            def edit(value):
+                if bad == 'forced': value['cleanup']['status'] = 'FORCED_CLOSED'
+                if bad == 'no_close': value['cleanup']['job_handle_closed_verified'] = False
+                if bad == 'postproof': value['completed_output_proof']['post_shutdown_revalidated'] = False
+                if bad == 'worker': value['cleanup']['process_exit_code'] = 1
+            with self.subTest(proof=bad), tempfile.TemporaryDirectory() as tmp, self.fixture(Path(tmp), edit_build=edit) as (fixture, output, _, _, github_output):
+                if bad != 'duplicate':
+                    with self.assertRaises(AssertionError):
+                        fixture.prepare_native_noise(output, self.head)
+                    self.assertFalse((output / 'prepared-build.json').exists())
+                    self.assertEqual(github_output.read_bytes(), b'')
+                else:
+                    self.prepare(fixture, output, github_output)
+                    path = output / 'prepared-build.json'; raw = path.read_bytes().replace(b'{', b'{"schema":"DUPLICATE",', 1)
+                    path.write_bytes(raw)
+                    with self.assertRaisesRegex(AssertionError, 'DUPLICATE_KEY'):
+                        fixture.load_prepared_native_noise(output, self.head, expected_manifest_sha256=hashlib.sha256(raw).hexdigest())
+
+    def test_hardlinks_reparse_and_source_or_seal_change_during_load_are_rejected(self):
+        for change in ('hardlink', 'reparse', 'source_during', 'seal_during'):
+            with self.subTest(change=change), tempfile.TemporaryDirectory() as tmp, self.fixture(Path(tmp)) as (fixture, output, _, _, github_output):
+                anchor = self.prepare(fixture, output, github_output)
+                if change == 'hardlink':
+                    os.link(output / 'scheduler-noise.exe', Path(tmp) / 'second-link.exe')
+                original_stat = Path.lstat; original_snapshot = fixture._prepared_snapshot; calls = [0]
+                def lstat(path, *args, **kwargs):
+                    info = original_stat(path, *args, **kwargs)
+                    return SimpleNamespace(st_mode=info.st_mode, st_file_attributes=0x400) if change == 'reparse' and path == output else info
+                def snapshot(*args):
+                    result = original_snapshot(*args); calls[0] += 1
+                    if calls[0] == 1 and change == 'source_during':
+                        with (Path(tmp) / fixture._CRITICAL_SCRIPTS[0]).open('ab') as stream: stream.write(b'CHANGED')
+                    if calls[0] == 1 and change == 'seal_during':
+                        with (output / 'prepared-build.json').open('ab') as stream: stream.write(b' ')
+                    return result
+                with patch('pathlib.Path.lstat', lstat), patch.object(fixture, '_prepared_snapshot', side_effect=snapshot), self.assertRaises(AssertionError):
+                    fixture.load_prepared_native_noise(output, self.head, expected_manifest_sha256=anchor)
+
+    def test_driver_prepared_only_root_is_fresh_no_clobber_and_budget_debits_duration(self):
+        from tools.qa_decoder_budget_diagnostic import diagnostic_output_root, prepared_budget_deadline
+        with tempfile.TemporaryDirectory() as tmp, patch('tools.qa_decoder_budget_diagnostic.ROOT', Path(tmp)):
+            root = Path(tmp) / 'diagnostic'; build = root / 'native-build'; build.mkdir(parents=True)
+            self.assertEqual(diagnostic_output_root(root, prepared=True), root.resolve())
+            original_stat = Path.lstat
+            def lstat(path, *args, **kwargs):
+                info = original_stat(path, *args, **kwargs)
+                return SimpleNamespace(st_mode=info.st_mode, st_file_attributes=0x400) if path == Path(tmp) else info
+            with patch('pathlib.Path.lstat', lstat), self.assertRaises(AssertionError):
+                diagnostic_output_root(root, prepared=True)
+            with tempfile.TemporaryDirectory() as outside:
+                with self.assertRaises(AssertionError): diagnostic_output_root(Path(outside), prepared=True)
+                self.assertEqual(list(Path(outside).iterdir()), [])
+            for name in ('native-schedule', 'budget-diagnostic.json'):
+                sibling = root / name; sibling.write_bytes(b'KEEP')
+                with self.assertRaises(AssertionError): diagnostic_output_root(root, prepared=True)
+                self.assertEqual(sibling.read_bytes(), b'KEEP'); sibling.unlink()
+            with self.assertRaises(AssertionError): diagnostic_output_root(root, prepared=1)
+            wrong_root = Path(tmp) / 'not-directory'; wrong_root.write_bytes(b'KEEP')
+            with self.assertRaises(AssertionError): diagnostic_output_root(wrong_root, prepared=True)
+            self.assertEqual(wrong_root.read_bytes(), b'KEEP')
+            build.rmdir(); build.write_bytes(b'KEEP')
+            with self.assertRaises(AssertionError): diagnostic_output_root(root, prepared=True)
+            self.assertEqual(build.read_bytes(), b'KEEP')
+        self.assertEqual(prepared_budget_deadline(10, 9.25), 420.75)
+        for bad in (0, -1, True, float('nan'), float('inf'), 90.01):
+            with self.subTest(elapsed=bad), self.assertRaises(AssertionError): prepared_budget_deadline(10, bad)
+
+    def test_final_prepared_recheck_rejects_changed_valid_elapsed_hash_status_missing_and_types(self):
+        from tools.qa_decoder_budget_diagnostic import validate_prepared_recheck
+        initial = {'prepared_build_elapsed_seconds': 9.25, 'prepared_validation': {
+            'schema': 'blackbox.native-noise-prepared-validation/1', 'status': 'VERIFIED_SAME_JOB_BUILD_FILES',
+            'source_sha': self.head, 'source_tree_sha': 'c' * 40, 'prepared_receipt_sha256': 'd' * 64}}
+        final = json.loads(json.dumps(initial))
+        self.assertEqual(validate_prepared_recheck(initial, final), initial['prepared_validation'])
+        for change in ('elapsed', 'hash', 'status', 'missing', 'type', 'bool_elapsed', 'nonfinite'):
+            with self.subTest(change=change):
+                changed = json.loads(json.dumps(initial))
+                if change == 'elapsed': changed['prepared_build_elapsed_seconds'] = 8.5
+                if change == 'hash': changed['prepared_validation']['prepared_receipt_sha256'] = 'e' * 64
+                if change == 'status': changed['prepared_validation']['status'] = 'NOT_ESTABLISHED'
+                if change == 'missing': del changed['prepared_validation']
+                if change == 'type': changed['prepared_validation'] = []
+                if change == 'bool_elapsed': changed['prepared_build_elapsed_seconds'] = True
+                if change == 'nonfinite': changed['prepared_validation']['extra'] = float('nan')
+                with self.assertRaises((AssertionError, ValueError)):
+                    validate_prepared_recheck(initial, changed)
+
+    def test_prepared_modes_require_anchor_and_missing_seal_never_compiles(self):
+        from tools.qa_decoder_budget_diagnostic import parse_args
+        invalid = [['--noise-child', '--output', 'literal', '--prepared-native-build'],
+            ['--output', 'literal', '--helper', 'helper.exe', '--source-sha', self.head, '--prepared-native-build'],
+            ['--output', 'literal', '--helper', 'helper.exe', '--source-sha', self.head, '--prepared-build-sha256', 'a' * 64]]
+        from contextlib import redirect_stderr
+        for arguments in invalid:
+            with self.subTest(arguments=arguments), redirect_stderr(io.StringIO()), self.assertRaises(SystemExit): parse_args(arguments)
+        with tempfile.TemporaryDirectory() as tmp, self.fixture(Path(tmp)) as (fixture, output, state, _, _):
+            output.mkdir(parents=True)
+            with self.assertRaises(AssertionError):
+                fixture.load_prepared_native_noise(output, self.head, expected_manifest_sha256='a' * 64)
+            self.assertEqual(state['calls'], 0)
+
+
 if __name__ == "__main__":
     unittest.main()

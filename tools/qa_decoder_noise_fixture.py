@@ -8,10 +8,13 @@ from __future__ import annotations
 import argparse
 import ctypes as C
 from ctypes import wintypes as W
+import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
+import stat
 import subprocess
 import sys
 import time
@@ -32,6 +35,12 @@ MAX_JOB_SNAPSHOTS = 4
 _retained_build_resources = []
 _COMPILE_GO = b'BLACKBOX_NATIVE_NOISE_BUILD_GO\n'
 _COMPILER_OPT_OUT = {'VSCMD_SKIP_SENDTELEMETRY': '1', 'VCToolsTelemetryOptOut': '1'}
+_PREPARED_SCHEMA = 'blackbox.native-noise-prepared/1'
+_PREPARED_LIMIT = 64 * 1024
+_PREPARED_ELAPSED_SCOPE = 'PREPARE_BUILD_AND_PRESEAL_VALIDATION_EXCLUDES_SEAL_PUBLICATION_STEP_OUTPUT_AND_BETWEEN_STEP_GAP'
+_CRITICAL_SCRIPTS = ('tools/qa_decoder_noise_fixture.py', 'tools/qa_decoder_budget_diagnostic.py',
+    'tools/qa_decoder_apps.py', 'tools/qa_deep_inspection.py', 'src/blackbox_core/optional_jobs.py',
+    'blackbox_universal/provenance.py')
 
 
 def _compiler_worker_environment(inherited):
@@ -375,6 +384,276 @@ def _built_pdb(path):
             'verification_scope': 'CONTAINER_SIGNATURE_SIZE_AND_SHA256_ONLY'}
 
 
+def _canonical(value):
+    return json.dumps(value, sort_keys=True, ensure_ascii=False, allow_nan=False, separators=(',', ':')).encode('utf-8')
+
+
+def _prepared_context():
+    fields = {'repository': 'GITHUB_REPOSITORY', 'run_id': 'GITHUB_RUN_ID',
+              'run_attempt': 'GITHUB_RUN_ATTEMPT', 'job_key': 'GITHUB_JOB'}
+    context = {name: os.environ.get(variable, '') for name, variable in fields.items()}
+    require(re.fullmatch(r'[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}', context['repository']) and
+            re.fullmatch(r'[1-9][0-9]{0,19}', context['run_id']) and
+            re.fullmatch(r'[1-9][0-9]{0,9}', context['run_attempt']) and
+            re.fullmatch(r'[A-Za-z_][A-Za-z0-9_-]{0,95}', context['job_key']), 'PREPARED_NATIVE_CI_CONTEXT_REQUIRED')
+    return context
+
+
+def _prepared_identity(source_sha):
+    require(type(source_sha) is str and re.fullmatch(r'[0-9a-f]{40}', source_sha), 'PREPARED_NATIVE_EXACT_HEAD_REQUIRED')
+    identity = source_identity(source_sha)
+    require(identity.get('source_identity_status') == 'VERIFIED_EXPECTED_HEAD' and
+            identity.get('actual_source_sha') == identity.get('requested_head_sha') == source_sha and
+            identity.get('tracked_worktree_clean') is True and type(identity.get('source_tree_sha')) is str and
+            re.fullmatch(r'[0-9a-f]{40}', identity['source_tree_sha']), 'PREPARED_NATIVE_SOURCE_MISMATCH')
+    return identity
+
+
+def _prepared_location(path, *, existing=True, directory=False):
+    path = Path(os.path.abspath(path))
+    try:
+        relative = path.relative_to(ROOT)
+    except ValueError:
+        raise AssertionError('PREPARED_NATIVE_PATH_OUTSIDE_CHECKOUT') from None
+    require('..' not in relative.parts, 'PREPARED_NATIVE_PARENT_PATH')
+    current = ROOT
+    for index, component in enumerate(('', *relative.parts)):
+        if component:
+            current = current / component
+        try:
+            info = current.lstat()
+        except FileNotFoundError:
+            require(not existing, 'PREPARED_NATIVE_PATH_MISSING')
+            break
+        require(not stat.S_ISLNK(info.st_mode) and not getattr(info, 'st_file_attributes', 0) & 0x400,
+                'PREPARED_NATIVE_LINK_OR_REPARSE')
+        if index < len(relative.parts) or directory:
+            require(stat.S_ISDIR(info.st_mode), 'PREPARED_NATIVE_DIRECTORY_REQUIRED')
+        else:
+            require(stat.S_ISREG(info.st_mode) and info.st_nlink == 1, 'PREPARED_NATIVE_REGULAR_SINGLE_LINK_REQUIRED')
+    return path
+
+
+def _prepared_file(path, limit, *, capture=0):
+    path = _prepared_location(path)
+    def fingerprint(info):
+        return [info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns, info.st_nlink]
+    expected = path.lstat()
+    require(0 <= expected.st_size <= limit, 'PREPARED_NATIVE_FILE_BUDGET')
+    digest = hashlib.sha256(); total = 0; captured = bytearray()
+    with path.open('rb') as stream:
+        before = os.fstat(stream.fileno())
+        require(stat.S_ISREG(before.st_mode) and before.st_nlink == 1 and
+                fingerprint(before) == fingerprint(expected), 'PREPARED_NATIVE_FILE_CHANGED')
+        while True:
+            block = stream.read(min(1024**2, limit + 1 - total))
+            if not block:
+                break
+            total += len(block)
+            require(total <= limit, 'PREPARED_NATIVE_FILE_BUDGET')
+            digest.update(block)
+            if len(captured) < capture:
+                captured.extend(block[:capture - len(captured)])
+        after = os.fstat(stream.fileno())
+    current = _prepared_location(path).lstat()
+    require(total == expected.st_size and fingerprint(expected) == fingerprint(before) ==
+            fingerprint(after) == fingerprint(current), 'PREPARED_NATIVE_FILE_CHANGED')
+    return {'bytes': total, 'sha256': digest.hexdigest(), 'identity': fingerprint(current)}, bytes(captured)
+
+
+def _prepared_json(path):
+    fact, raw = _prepared_file(path, _PREPARED_LIMIT, capture=_PREPARED_LIMIT)
+    def unique(items):
+        result = {}
+        for key, value in items:
+            require(key not in result, 'PREPARED_NATIVE_DUPLICATE_KEY')
+            result[key] = value
+        return result
+    def invalid_constant(value):
+        raise ValueError('PREPARED_NATIVE_NONFINITE_JSON')
+    try:
+        value = json.loads(raw.decode('utf-8'), object_pairs_hook=unique, parse_constant=invalid_constant)
+    except (UnicodeError, ValueError, TypeError):
+        raise AssertionError('PREPARED_NATIVE_INVALID_JSON') from None
+    require(type(value) is dict, 'PREPARED_NATIVE_OBJECT_REQUIRED')
+    return value, fact
+
+
+def _prepared_tree(output):
+    files = {}; total = 0
+    for path in output.iterdir():
+        require(len(files) < 32 and re.fullmatch(r'[A-Za-z0-9_.-]{1,96}', path.name), 'PREPARED_NATIVE_TREE_BUDGET')
+        if path.name == 'prepared-build.json':
+            continue
+        require(path.name != 'build-failure.json' and not path.name.endswith('.tmp'), 'PREPARED_NATIVE_INCOMPLETE_BUILD')
+        fact, _ = _prepared_file(path, MAX_BUILD_BYTES)
+        files[path.name] = fact; total += fact['bytes']
+        require(total <= MAX_BUILD_BYTES, 'PREPARED_NATIVE_TREE_BUDGET')
+    require({'build.json', 'scheduler-noise.exe', 'scheduler-noise.pdb', 'noise.obj', 'noise-identity.h',
+             'compiler-request.json', 'compiler.log'} <= set(files), 'PREPARED_NATIVE_BUILD_FILES_MISSING')
+    require(files['compiler.log']['bytes'] <= MAX_BUILD_LOG, 'PREPARED_NATIVE_LOG_BUDGET')
+    return files, total
+
+
+def _prepared_snapshot(output, source_sha):
+    output = _prepared_location(output, directory=True)
+    require(output.name == 'native-build', 'PREPARED_NATIVE_FIXED_DIRECTORY_REQUIRED')
+    identity = _prepared_identity(source_sha); context = _prepared_context()
+    critical = {name: _prepared_file(ROOT / name, 2 * 1024**2)[0] for name in _CRITICAL_SCRIPTS}
+    source_fact, _ = _prepared_file(ROOT / 'tools/fixtures/DecoderBudgetProbe/noise.c', 2 * 1024**2)
+    require(source_fact['bytes'] > 0 and all(fact['bytes'] > 0 for fact in critical.values()), 'PREPARED_NATIVE_EMPTY_SOURCE')
+    files, total = _prepared_tree(output)
+    build, build_fact = _prepared_json(output / 'build.json')
+    require(_canonical(build_fact) == _canonical(files['build.json']), 'PREPARED_NATIVE_RECEIPT_CHANGED')
+    native = native_pe_identity(output / 'scheduler-noise.exe')
+    pdb_fact, header = _prepared_file(output / 'scheduler-noise.pdb', MAX_BUILD_BYTES, capture=32)
+    require(header == b'Microsoft C/C++ MSF 7.00\r\n\x1aDS\x00\x00\x00' and pdb_fact['bytes'] > 32 and
+            _canonical(pdb_fact) == _canonical(files['scheduler-noise.pdb']), 'PREPARED_NATIVE_PDB_INVALID')
+    pdb = {'container': 'MSF7', 'bytes': pdb_fact['bytes'], 'sha256': pdb_fact['sha256'],
+           'verification_scope': 'CONTAINER_SIGNATURE_SIZE_AND_SHA256_ONLY'}
+    expected = {'schema', 'status', 'executable', 'source_sha256', 'executable_sha256', 'implementation',
+        'expected_native_handles', 'event_handles', 'thread_handles', 'source_identity', 'native_image', 'native_pdb',
+        'cleanup', 'compiler_job_observations', 'compiler_opt_out_policy', 'compiler_planned_shutdown',
+        'completed_output_proof', 'compiler_job_assignment_verified_before_go'}
+    require(set(build) == expected and build['schema'] == 'blackbox.native-noise-build/1' and build['status'] == 'PASS'
+            and build['executable'] == str(output / 'scheduler-noise.exe') and build['implementation'] == 'NATIVE_WIN32'
+            and _canonical(build['source_identity']) == _canonical(identity)
+            and build['source_sha256'] == source_fact['sha256']
+            and build['executable_sha256'] == files['scheduler-noise.exe']['sha256']
+            and native.get('machine') == '0x8664' and native.get('format') == 'PE32_PLUS'
+            and _canonical(build['native_image']) == _canonical(native)
+            and _canonical(build['native_pdb']) == _canonical(pdb)
+            and build['compiler_job_assignment_verified_before_go'] is True
+            and _canonical([build['expected_native_handles'], build['event_handles'], build['thread_handles']]) == b'[32,16,16]',
+            'PREPARED_NATIVE_BUILD_NOT_VERIFIED')
+    cleanup = build['cleanup']; shutdown = build['compiler_planned_shutdown']; proof = build['completed_output_proof']
+    require(type(cleanup) is dict and cleanup.get('status') == 'COMPLETED' and cleanup.get('cleanup_required') is False
+            and type(cleanup.get('process_exit_code')) is int and cleanup['process_exit_code'] == 0
+            and cleanup.get('process_created') is True and type(cleanup.get('active_job_processes_before_close')) is int
+            and cleanup['active_job_processes_before_close'] == 0 and cleanup.get('job_handle_closed_verified') is True
+            and cleanup.get('diagnostic_query_handles_closed_verified') is True
+            and type(cleanup.get('observed_job_processes')) is int and 1 <= cleanup['observed_job_processes'] <= 2**32 - 1
+            and cleanup.get('scope') == 'COMPILER_LEADER_EXIT_AND_OWNED_JOB_OBJECT', 'PREPARED_NATIVE_CLEANUP_NOT_VERIFIED')
+    require(type(shutdown) is dict and shutdown.get('status') == 'COMPLETED' and
+            shutdown.get('method') == 'PLANNED_OWNED_SDK_BACKGROUND_SHUTDOWN_AFTER_SUCCESSFUL_COMPILATION' and
+            type(shutdown.get('active_job_processes_before_stop')) is int and shutdown['active_job_processes_before_stop'] >= 0
+            and type(shutdown.get('active_job_processes_after_stop')) is int and shutdown['active_job_processes_after_stop'] == 0
+            and shutdown.get('natural_background_exit_claimed') is False and
+            type(shutdown.get('last_job_query_winerror')) is int and shutdown['last_job_query_winerror'] == 0 and
+            ((shutdown['active_job_processes_before_stop'] > 0 and shutdown.get('termination_requested') is True
+              and shutdown.get('termination_succeeded') is True) or
+             (shutdown['active_job_processes_before_stop'] == 0 and shutdown.get('termination_requested') is False
+              and shutdown.get('termination_succeeded') is None)), 'PREPARED_NATIVE_SHUTDOWN_NOT_VERIFIED')
+    require(_canonical(proof) == _canonical({'status': 'VERIFIED_BEFORE_PLANNED_STOP', 'post_shutdown_revalidated': True,
+            'source_sha256': source_fact['sha256'], 'executable_sha256': files['scheduler-noise.exe']['sha256'],
+            'native_image': native, 'native_pdb': pdb}) and _canonical(build['compiler_opt_out_policy']) == _canonical({
+            'request_status': 'FIXED_ENVIRONMENT_REQUESTED', 'worker_verification_status': 'WORKER_AND_COMPILER_ENVIRONMENT_VERIFIED'}),
+            'PREPARED_NATIVE_POST_CLOSE_PROOF_REQUIRED')
+    observations = build['compiler_job_observations']
+    require(type(observations) is list and 1 <= len(observations) <= MAX_JOB_SNAPSHOTS and
+            type(observations[-1]) is dict and observations[-1].get('phase') == 'EMPTY_BEFORE_CLOSE' and
+            observations[-1].get('query_handles_closed_verified') is True and
+            type(observations[-1].get('accounting')) is dict and
+            observations[-1]['accounting'].get('status') == 'OBSERVED' and
+            _canonical(observations[-1]['accounting'].get('total_processes')) == _canonical(cleanup['observed_job_processes']) and
+            _canonical(observations[-1].get('accounting', {}).get('active_processes')) == b'0',
+            'PREPARED_NATIVE_JOB_OBSERVATION_REQUIRED')
+    return {'ci_context': context, 'source_identity': identity, 'relative_directory': output.relative_to(ROOT).as_posix(),
+            'source_file': source_fact, 'critical_scripts': critical, 'build_files': files,
+            'build_receipt_sha256': build_fact['sha256'], 'build_tree_bytes': total}, build
+
+
+def prepare_native_noise(output: Path, source_sha: str) -> dict:
+    require_hosted_windows()
+    started = time.monotonic()
+    output = _prepared_location(output, existing=False, directory=True)
+    require(output.name == 'native-build' and not output.exists(), 'PREPARED_NATIVE_FRESH_DIRECTORY_REQUIRED')
+    before = (_prepared_context(), _prepared_identity(source_sha),
+              {name: _prepared_file(ROOT / name, 2 * 1024**2)[0] for name in _CRITICAL_SCRIPTS})
+    build_native_noise(output, source_sha)  # Exactly one fresh real compilation.
+    snapshot, _ = _prepared_snapshot(output, source_sha)
+    again, _ = _prepared_snapshot(output, source_sha)
+    require(_canonical(snapshot) == _canonical(again) and _canonical(before) == _canonical((
+        snapshot['ci_context'], snapshot['source_identity'], snapshot['critical_scripts'])), 'PREPARED_NATIVE_PRESEAL_CHANGED')
+    elapsed = time.monotonic() - started
+    require(type(elapsed) in (int, float) and math.isfinite(elapsed) and 0 < elapsed <= MAX_BUILD_SECONDS,
+            'PREPARED_NATIVE_ELAPSED_INVALID')
+    payload = {**snapshot, 'prepared_build_elapsed_seconds': elapsed, 'elapsed_scope': _PREPARED_ELAPSED_SCOPE}
+    seal = {'schema': _PREPARED_SCHEMA, 'payload': payload, 'payload_sha256': hashlib.sha256(_canonical(payload)).hexdigest()}
+    raw = _canonical(seal)
+    require(len(raw) <= _PREPARED_LIMIT and snapshot['build_tree_bytes'] + len(raw) <= MAX_BUILD_BYTES,
+            'PREPARED_NATIVE_SEAL_BUDGET')
+    temporary = output / 'prepared-build.json.tmp'; destination = output / 'prepared-build.json'
+    with temporary.open('xb') as stream:
+        require(stream.write(raw) == len(raw), 'PREPARED_NATIVE_SEAL_WRITE_FAILED')
+        stream.flush(); os.fsync(stream.fileno())
+    # On the required Windows runner rename fails if the target already exists.
+    require(not destination.exists(), 'PREPARED_NATIVE_SEAL_EXISTS')
+    temporary.rename(destination)
+    sealed, sealed_fact = _prepared_json(destination)
+    require(_canonical(sealed) == raw and sealed_fact['sha256'] == hashlib.sha256(raw).hexdigest(),
+            'PREPARED_NATIVE_SEAL_PUBLICATION_CHANGED')
+    _publish_prepared_anchor(sealed_fact['sha256'])
+    print('NATIVE_NOISE_PREPARED_BUILD ' + json.dumps({'schema': _PREPARED_SCHEMA, 'status': 'PREPARED_SAME_JOB_BUILD_FILES',
+          'source_sha': source_sha, 'source_tree_sha': snapshot['source_identity']['source_tree_sha'],
+          'ci_context': snapshot['ci_context'], 'prepared_build_elapsed_seconds': elapsed,
+          'elapsed_scope': _PREPARED_ELAPSED_SCOPE, 'build_receipt_sha256': snapshot['build_receipt_sha256'],
+          'prepared_receipt_sha256': hashlib.sha256(raw).hexdigest()}, sort_keys=True), flush=True)
+    return seal
+
+
+def _publish_prepared_anchor(digest):
+    """Only the runner's per-step output becomes the later step's trust anchor."""
+    value = os.environ.get('GITHUB_OUTPUT', '')
+    require(re.fullmatch(r'[0-9a-f]{64}', digest) and value and os.path.isabs(value),
+            'PREPARED_NATIVE_STEP_OUTPUT_REQUIRED')
+    path = Path(value); before = path.lstat()
+    require(stat.S_ISREG(before.st_mode) and not stat.S_ISLNK(before.st_mode) and before.st_nlink == 1 and
+            not getattr(before, 'st_file_attributes', 0) & 0x400 and before.st_size <= _PREPARED_LIMIT,
+            'PREPARED_NATIVE_STEP_OUTPUT_INVALID')
+    line = ('manifest_sha256=' + digest + '\n').encode('ascii')
+    with path.open('ab') as stream:
+        opened = os.fstat(stream.fileno())
+        require((opened.st_dev, opened.st_ino, opened.st_nlink) == (before.st_dev, before.st_ino, 1),
+                'PREPARED_NATIVE_STEP_OUTPUT_CHANGED')
+        require(stream.write(line) == len(line), 'PREPARED_NATIVE_STEP_OUTPUT_WRITE_FAILED')
+        stream.flush()
+
+
+def load_prepared_native_noise(output: Path, source_sha: str, *, expected_manifest_sha256: str) -> dict:
+    require_hosted_windows()
+    require(type(expected_manifest_sha256) is str and re.fullmatch(r'[0-9a-f]{64}', expected_manifest_sha256),
+            'PREPARED_NATIVE_EXTERNAL_ANCHOR_REQUIRED')
+    output = _prepared_location(output, directory=True)
+    seal, seal_fact = _prepared_json(output / 'prepared-build.json')
+    require(seal_fact['sha256'] == expected_manifest_sha256, 'PREPARED_NATIVE_EXTERNAL_ANCHOR_MISMATCH')
+    require(set(seal) == {'schema', 'payload', 'payload_sha256'} and seal['schema'] == _PREPARED_SCHEMA and
+            type(seal['payload']) is dict and type(seal['payload_sha256']) is str and
+            hashlib.sha256(_canonical(seal['payload'])).hexdigest() == seal['payload_sha256'], 'PREPARED_NATIVE_SEAL_INVALID')
+    snapshot, build = _prepared_snapshot(output, source_sha)
+    payload = seal['payload']; elapsed = payload.get('prepared_build_elapsed_seconds')
+    require(set(payload) == set(snapshot) | {'prepared_build_elapsed_seconds', 'elapsed_scope'} and
+            type(elapsed) in (int, float) and math.isfinite(elapsed) and 0 < elapsed <= MAX_BUILD_SECONDS and
+            payload['elapsed_scope'] == _PREPARED_ELAPSED_SCOPE and
+            _canonical({name: payload[name] for name in snapshot}) == _canonical(snapshot), 'PREPARED_NATIVE_BINDING_MISMATCH')
+    again, _ = _prepared_snapshot(output, source_sha)
+    seal_again, fact_again = _prepared_json(output / 'prepared-build.json')
+    require(_canonical(snapshot) == _canonical(again) and _canonical(seal) == _canonical(seal_again) and
+            _canonical(seal_fact) == _canonical(fact_again) and
+            fact_again['sha256'] == expected_manifest_sha256 and
+            snapshot['build_tree_bytes'] + seal_fact['bytes'] <= MAX_BUILD_BYTES, 'PREPARED_NATIVE_CHANGED_DURING_LOAD')
+    build['prepared_build_elapsed_seconds'] = elapsed
+    build['prepared_validation'] = {'schema': 'blackbox.native-noise-prepared-validation/1',
+        'status': 'VERIFIED_SAME_JOB_BUILD_FILES', 'source_sha': source_sha,
+        'source_tree_sha': snapshot['source_identity']['source_tree_sha'], 'ci_context': snapshot['ci_context'],
+        'source_sha256': snapshot['source_file']['sha256'], 'build_receipt_sha256': snapshot['build_receipt_sha256'],
+        'prepared_receipt_sha256': seal_fact['sha256'],
+        'expected_manifest_sha256': expected_manifest_sha256,
+        'critical_physical_sha256': {name: fact['sha256'] for name, fact in snapshot['critical_scripts'].items()},
+        'actual_tree_bytes': snapshot['build_tree_bytes'] + seal_fact['bytes'], 'elapsed_scope': _PREPARED_ELAPSED_SCOPE}
+    return build
+
+
 def build_native_noise(output: Path, source_sha: str) -> dict:
     build_deadline = time.monotonic() + MAX_BUILD_SECONDS
     require_hosted_windows()
@@ -540,11 +819,13 @@ def _main(arguments=None):
         require(len(arguments) == 2 and arguments[0] == '--compile-worker', 'NATIVE_NOISE_BUILD_WORKER_ARGUMENTS')
         return _compile_worker(Path(arguments[1]))
     parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
-    parser.add_argument('--build-fixture', action='store_true', required=True)
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument('--build-fixture', action='store_true')
+    mode.add_argument('--prepare-fixture', action='store_true')
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--source-sha', required=True)
     options = parser.parse_args(arguments)
-    build_native_noise(options.output, options.source_sha)
+    (prepare_native_noise if options.prepare_fixture else build_native_noise)(options.output, options.source_sha)
     return 0
 
 
