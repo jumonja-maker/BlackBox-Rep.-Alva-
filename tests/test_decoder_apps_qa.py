@@ -497,7 +497,7 @@ class BudgetCaptureOrderProtocolTests(unittest.TestCase):
 
     def test_native_qos_rejection_preserves_first_error_and_still_stops_noise_and_capture(self):
         for begin, end, reason, wpr_error in ((20100, 85101, 'NATIVE_QOS_WORKLOAD_EXCEEDED', None),
-                (20101, 85101, 'NATIVE_QOS_READY_TO_WORK_EXCEEDED', RuntimeError('WPR_STOP_FAILED'))):
+                (90101, 155101, 'NATIVE_QOS_READY_TO_WORK_EXCEEDED', RuntimeError('WPR_STOP_FAILED'))):
             with self.subTest(reason=reason):
                 capture, events, _, _ = self.capture(stop_error=wpr_error)
                 capture.noise.producer = {'implementation': 'NATIVE_WIN32'}
@@ -2412,6 +2412,86 @@ class PreludeFailureAndBudgetCompositionTests(unittest.TestCase):
             self.assertEqual(proof['capture_lifecycle']['primary_error']['phase'], 'NOISE_START_OR_PRELUDE')
             self.assertEqual(proof['capture_lifecycle']['primary_error']['winerror'], 5)
             abort.assert_not_called()
+
+
+class OwnedGuiQueueProtocolTests(unittest.TestCase):
+    """Fake User32 contract tests, not evidence of a real responsive window."""
+    def user(self, *, pid=77, tid=88, post_success=True, query_success=True):
+        class Function:
+            def __init__(self, call): self.call = call
+            def __call__(self, *args): return self.call(*args)
+        calls = []
+        def identity(hwnd, pointer):
+            calls.append(('identity', hwnd)); pointer._obj.value = pid
+            return tid
+        def post(*args):
+            calls.append(('post', *args)); return int(post_success)
+        def query(*args):
+            calls.append(('query', *args[:6])); args[-1]._obj.value = 12
+            return int(query_success)
+        return SimpleNamespace(GetWindowThreadProcessId=Function(identity),
+            PostMessageW=Function(post), SendMessageTimeoutW=Function(query)), calls
+
+    def test_only_fixed_pointer_free_actions_are_queued_once_after_each_ownership_check(self):
+        from tools import qa_decoder_apps as apps
+        user, calls = self.user()
+        with patch.object(apps.C, 'WinDLL', return_value=user, create=True), \
+                patch.object(apps.C, 'set_last_error', create=True):
+            for message, first, second, phase in ((2160, 12, 12, 'SELECT_END'),
+                    (0x102, 65, 0, 'APPEND_CHARACTER'), (0x111, 41006, 0, 'SAVE_DOCUMENT'),
+                    (0x10, 0, 0, 'CLOSE_WINDOW')):
+                apps.post_owned(77, 101, message, first, second, expected_tid=88, phase=phase)
+        self.assertEqual([row[0] for row in calls], ['identity', 'post'] * 4)
+        self.assertEqual([row[2] for row in calls if row[0] == 'post'], [2160, 0x102, 0x111, 0x10])
+        for message, first, second in ((0x102, 65, 1), (2160, 12, 13), (0x111, 1, 0), (0x10, 1, 0), (9999, 0, 0)):
+            with patch.object(apps.C, 'WinDLL', create=True) as library, \
+                    self.assertRaisesRegex(AssertionError, 'UNSUPPORTED_GUI_ACTION'):
+                apps.post_owned(77, 101, message, first, second, expected_tid=88, phase='SAVE_DOCUMENT')
+            library.assert_not_called()
+
+    def test_ownership_and_queue_tid_changes_reject_before_posting(self):
+        from tools import qa_decoder_apps as apps
+        for pid, tid, reason in ((78, 88, 'OWNERSHIP_CHANGED'), (77, 89, 'GUI_THREAD_CHANGED'), (77, 0, 'OWNERSHIP_CHANGED')):
+            user, calls = self.user(pid=pid, tid=tid)
+            with patch.object(apps.C, 'WinDLL', return_value=user, create=True), \
+                    self.assertRaisesRegex(AssertionError, reason):
+                apps.post_owned(77, 101, 0x10, expected_tid=88, phase='CLOSE_WINDOW')
+            self.assertFalse(any(row[0] == 'post' for row in calls))
+
+    def test_failed_query_keeps_five_hundred_ms_and_safe_phase_error_facts(self):
+        from tools import qa_decoder_apps as apps
+        user, calls = self.user(query_success=False); printed = io.StringIO()
+        with patch.object(apps.C, 'WinDLL', return_value=user, create=True), \
+                patch.object(apps.C, 'set_last_error', create=True), \
+                patch.object(apps.C, 'get_last_error', return_value=1460, create=True), redirect_stdout(printed), \
+                self.assertRaisesRegex(AssertionError, 'OWNED_GUI_MESSAGE_FAILED_1460_VERIFY_DOCUMENT_LENGTH'):
+            apps.send_owned(77, 101, 2006, phase='VERIFY_DOCUMENT_LENGTH')
+        fact = json.loads(printed.getvalue().split('THIRD_PARTY_DECODER_GUI_FAILURE_FACTS ', 1)[1])
+        self.assertEqual((fact['phase'], fact['message_code'], fact['winerror']), ('VERIFY_DOCUMENT_LENGTH', 2006, 1460))
+        self.assertEqual((fact['configured_timeout_ms'], fact['window_tid_at_query']), (500, 88))
+        self.assertEqual([row[-2:] for row in calls if row[0] == 'query'], [(34, 500)])
+
+    def test_readiness_retries_only_readonly_timeout_and_other_failures_keep_identity(self):
+        from tools import qa_decoder_apps as apps
+        owner = SimpleNamespace(process=SimpleNamespace(pid=77, poll=lambda: None)); now = [0.0]
+        def advance(seconds): now[0] += seconds
+        timeout = AssertionError('OWNED_GUI_MESSAGE_FAILED_1460_VERIFY_DOCUMENT_LENGTH')
+        with patch.object(apps.time, 'monotonic', side_effect=lambda: now[0]), \
+                patch.object(apps.time, 'sleep', side_effect=advance), \
+                patch.object(apps, 'send_owned', side_effect=[timeout, 4, 12]) as probe, \
+                patch.object(apps, 'post_owned') as action:
+            self.assertEqual(apps.await_owned_length(owner, 101, 12, 1, 'VERIFY_DOCUMENT_LENGTH'), 12)
+        self.assertEqual(probe.call_count, 3); action.assert_not_called()
+        failure = AssertionError('NOTEPAD_WINDOW_OWNERSHIP_CHANGED')
+        with patch.object(apps.time, 'monotonic', return_value=0), \
+                patch.object(apps, 'send_owned', side_effect=failure) as probe, \
+                patch.object(apps.time, 'sleep') as sleep, self.assertRaises(AssertionError) as caught:
+            apps.await_owned_length(owner, 101, 12, 1, 'VERIFY_DOCUMENT_LENGTH')
+        self.assertIs(caught.exception, failure); probe.assert_called_once(); sleep.assert_not_called()
+        with patch.object(apps.time, 'monotonic', side_effect=[0, 2]), \
+                patch.object(apps, 'send_owned', return_value=12), \
+                self.assertRaisesRegex(AssertionError, 'DOCUMENT_READY_NOT_ESTABLISHED'):
+            apps.await_owned_length(owner, 101, 12, 1, 'VERIFY_DOCUMENT_LENGTH')
 
 
 if __name__ == "__main__":

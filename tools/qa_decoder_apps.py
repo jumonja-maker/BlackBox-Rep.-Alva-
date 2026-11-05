@@ -1076,20 +1076,82 @@ def owned_windows(pid):
     return found
 
 
-def send_owned(pid, hwnd, message, wparam=0, lparam=0):
-    """Only pointer-free commands to a window revalidated as our owned child."""
+def owned_gui_user(pid, hwnd):
     user = C.WinDLL("user32", use_last_error=True)
     user.GetWindowThreadProcessId.argtypes = [W.HWND, C.POINTER(W.DWORD)]
+    user.GetWindowThreadProcessId.restype = W.DWORD
+    owner = W.DWORD()
+    tid = int(user.GetWindowThreadProcessId(hwnd, C.byref(owner)))
+    require(owner.value == pid and tid > 0, "NOTEPAD_WINDOW_OWNERSHIP_CHANGED")
+    return user, tid
+
+
+def gui_message_failure(api, pid, tid, message, phase, timeout_ms):
+    error = C.get_last_error()
+    failure = AssertionError("OWNED_GUI_MESSAGE_FAILED_" + str(error) + '_' + phase)
+    fact = {
+        'schema': 'blackbox.owned-gui-failure/1', 'api': api, 'phase': phase,
+        'pid': pid, 'window_tid_at_query': tid, 'message_code': message,
+        'configured_timeout_ms': timeout_ms, 'winerror': error,
+        'scope': 'OWNED_WINDOW_AT_QUERY_NOT_CAUSE_OR_THREAD_BIRTH_PROOF'}
+    try:
+        print('THIRD_PARTY_DECODER_GUI_FAILURE_FACTS ' + json.dumps(fact, sort_keys=True), flush=True)
+    except Exception as diagnostic_error:
+        failure.add_note('GUI_FAILURE_STDOUT_UNAVAILABLE:' + type(diagnostic_error).__name__)
+    raise failure
+
+
+def validate_gui_phase(phase):
+    require(phase in ('UNSPECIFIED', 'STARTUP_LENGTH', 'VERIFY_DOCUMENT_LENGTH',
+        'SELECT_END', 'APPEND_CHARACTER', 'SAVE_DOCUMENT', 'CLOSE_WINDOW'), 'NOTEPAD_UNSUPPORTED_GUI_PHASE')
+
+
+def send_owned(pid, hwnd, message, wparam=0, lparam=0, *, phase='UNSPECIFIED'):
+    """A synchronous read-only probe; action completion is checked separately."""
+    require(message == 2006 and wparam == 0 and lparam == 0, 'NOTEPAD_UNSUPPORTED_GUI_QUERY')
+    validate_gui_phase(phase)
+    user, tid = owned_gui_user(pid, hwnd)
     user.SendMessageTimeoutW.argtypes = [W.HWND, W.UINT, W.WPARAM, W.LPARAM,
                                         W.UINT, W.UINT, C.POINTER(C.c_size_t)]
     user.SendMessageTimeoutW.restype = C.c_ssize_t
-    owner = W.DWORD(); user.GetWindowThreadProcessId(hwnd, C.byref(owner))
-    require(owner.value == pid, "NOTEPAD_WINDOW_OWNERSHIP_CHANGED")
     result = C.c_size_t()
     C.set_last_error(0)
     ok = user.SendMessageTimeoutW(hwnd, message, wparam, lparam, 0x2 | 0x20, 500, C.byref(result))
-    require(ok, "OWNED_GUI_MESSAGE_FAILED_" + str(C.get_last_error()))
+    if not ok:
+        gui_message_failure('SendMessageTimeoutW', pid, tid, message, phase, 500)
     return result.value
+
+
+def post_owned(pid, hwnd, message, wparam=0, lparam=0, *, expected_tid, phase):
+    """Queue one fixed pointer-free action; never retry an ambiguous write."""
+    require(type(message) is int and type(wparam) is int and type(lparam) is int and
+        ((message == 2160 and 0 <= wparam == lparam <= 2**31 - 1) or
+         (message == 0x0102 and 32 <= wparam <= 126 and lparam == 0) or
+         (message == 0x0111 and wparam == 41006 and lparam == 0) or
+         (message == 0x0010 and wparam == 0 and lparam == 0)), 'NOTEPAD_UNSUPPORTED_GUI_ACTION')
+    validate_gui_phase(phase)
+    user, tid = owned_gui_user(pid, hwnd)
+    require(type(expected_tid) is int and tid == expected_tid, 'NOTEPAD_GUI_THREAD_CHANGED')
+    user.PostMessageW.argtypes = [W.HWND, W.UINT, W.WPARAM, W.LPARAM]
+    user.PostMessageW.restype = W.BOOL
+    C.set_last_error(0)
+    if not user.PostMessageW(hwnd, message, wparam, lparam):
+        gui_message_failure('PostMessageW', pid, tid, message, phase, None)
+
+
+def await_owned_length(owner, hwnd, expected, deadline, phase):
+    while time.monotonic() < deadline:
+        require(owner.process.poll() is None, 'NOTEPAD_OWNED_PROCESS_EXITED_DURING_LOAD')
+        try:
+            length = send_owned(owner.process.pid, hwnd, 2006, phase=phase)
+            if length == expected:
+                require(time.monotonic() <= deadline, 'NOTEPAD_DOCUMENT_READY_NOT_ESTABLISHED')
+                return length
+        except AssertionError as error:
+            if not str(error).startswith('OWNED_GUI_MESSAGE_FAILED_1460_'):
+                raise
+        time.sleep(.05)
+    raise AssertionError('NOTEPAD_DOCUMENT_READY_NOT_ESTABLISHED')
 
 
 def notepad(output, helper):
@@ -1107,32 +1169,44 @@ def notepad(output, helper):
         pid = owner.process.pid
         deadline = time.monotonic() + 15
         main = editor = None
+        document_ready = False
         while time.monotonic() < deadline and owner.process.poll() is None:
             windows = owned_windows(pid)
             main = next((w for w in windows if w["class"] == "Notepad++"), None)
             editor = next((w for w in windows if w["class"] == "Scintilla" and w["visible"]), None)
             if main and editor:
                 try:
-                    if send_owned(pid, editor["hwnd"], 2006) == len(original):
+                    if send_owned(pid, editor["hwnd"], 2006, phase='STARTUP_LENGTH') == len(original):
+                        document_ready = True
                         break
-                except AssertionError:
+                except AssertionError as error:
                     # Startup may still be loading the owned document. The
                     # overall deadline and process identity remain bounded.
-                    pass
+                    if not str(error).startswith('OWNED_GUI_MESSAGE_FAILED_1460_'):
+                        raise
             time.sleep(.05)
         require(main and editor, "NOTEPAD_OWNED_EDITOR_WINDOW_MISSING")
+        require(document_ready, 'NOTEPAD_DOCUMENT_READY_NOT_ESTABLISHED')
+        require(main['tid'] == editor['tid'] and main['tid'] > 0, 'NOTEPAD_GUI_THREAD_NOT_ESTABLISHED')
         before = window_observations(pid)
-        length = send_owned(pid, editor["hwnd"], 2006)  # SCI_GETLENGTH; no pointer.
+        length = await_owned_length(owner, editor['hwnd'], len(original), deadline, 'VERIFY_DOCUMENT_LENGTH')
         require(length == len(original), "NOTEPAD_INPUT_FILE_NOT_LOADED")
-        send_owned(pid, editor["hwnd"], 2160, length, length)  # SCI_SETSEL.
-        for character in marker:
-            send_owned(pid, editor["hwnd"], 0x0102, ord(character))  # WM_CHAR.
-        send_owned(pid, main["hwnd"], 0x0111, 41006)  # WM_COMMAND / IDM_FILE_SAVE.
-        expected = (original + marker).encode("ascii")
+        # The same GUI queue receives each action once in order. Actual saved
+        # bytes, not queue acceptance, establish that editing and save completed.
         deadline = time.monotonic() + 5
+        require(owner.process.poll() is None, 'NOTEPAD_OWNED_PROCESS_EXITED_BEFORE_EDIT')
+        post_owned(pid, editor['hwnd'], 2160, length, length,
+                   expected_tid=editor['tid'], phase='SELECT_END')
+        for character in marker:
+            post_owned(pid, editor['hwnd'], 0x0102, ord(character),
+                       expected_tid=editor['tid'], phase='APPEND_CHARACTER')
+        post_owned(pid, main['hwnd'], 0x0111, 41006,
+                   expected_tid=main['tid'], phase='SAVE_DOCUMENT')
+        expected = (original + marker).encode("ascii")
         while source.read_bytes() != expected and time.monotonic() < deadline:
             time.sleep(.05)
         require(source.read_bytes() == expected, "NOTEPAD_REAL_SAVE_BYTES_MISMATCH")
+        require(time.monotonic() <= deadline, 'NOTEPAD_REAL_SAVE_DEADLINE_EXCEEDED')
         # Observe several idle message-loop waits, not an invented hang.
         responsiveness = [before]
         for _ in range(6):
@@ -1150,12 +1224,17 @@ def notepad(output, helper):
                       r.get("totals", {}).get("observed_off_cpu_ms", 0) > 0
                       for r in trace["wait_reports"]),
                   "pid_lifetime_attribution": observed["pid_lifetimes_confirmed"]}
-        send_owned(pid, main["hwnd"], 0x0010)  # WM_CLOSE after verified save.
-        owner.process.wait(timeout=10)
+        close_deadline = time.monotonic() + 10
+        require(owner.process.poll() is None, 'NOTEPAD_OWNED_PROCESS_EXITED_BEFORE_CLOSE')
+        post_owned(pid, main['hwnd'], 0x0010, expected_tid=main['tid'], phase='CLOSE_WINDOW')
+        exit_code = owner.process.wait(timeout=max(0, close_deadline - time.monotonic()))
+        require(exit_code == 0, 'NOTEPAD_OWNED_NORMAL_EXIT_NOT_CONFIRMED')
+        require(time.monotonic() <= close_deadline, 'NOTEPAD_OWNED_CLOSE_DEADLINE_EXCEEDED')
         return {"status": "PASS" if all(checks.values()) else "FAIL",
                 "capabilities": {k: "PASS" if v else "FAIL_NOT_OBSERVED" for k, v in checks.items()},
                 "application": identity, "pid": pid,
                 "oracle": {"opened_bytes": len(original), "saved_bytes": len(expected),
+                           "normal_window_close_exit_code": exit_code,
                            "saved_sha256": hashlib.sha256(expected).hexdigest()},
                 "window_observations": responsiveness, **trace,
                 "hang_or_lock_cause": "NOT_CLAIMED_RESPONSIVE_IDLE_WORKLOAD"}
