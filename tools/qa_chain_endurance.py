@@ -1,9 +1,11 @@
 """Actual 5h30 R60 scheduler lifecycle on standard GitHub-hosted Windows.
 
-331 real reads of a genuine closed ETL are separated by 60-second engine
-intervals while the existing ResearchSession records the owned Wave02 workload.
-Both spans are independently read from persisted evidence. Job uptime cannot
-establish acceptance. This does not replace the existing two one-hour profiles.
+Two production engines own the actual work: 331 real closed-ETL reads at
+60-second intervals and a long OBSERVE adapter owning ResearchSession. The QA
+controller only drives the native workload and inspects progress; it never ticks
+or stops the successful recorder outside its adapter. An expected cancellation
+ends OBSERVE after both independently persisted spans reach 5h30. This does not
+replace the existing two one-hour profiles or turn CANCELLED into COMPLETED.
 """
 from __future__ import annotations
 
@@ -20,7 +22,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT), str(ROOT / "src")]
 
 from blackbox_core.chain_qa import (actual_invocations, definition, file_hash, independent_journal,
-                                    require, save, source_proof)
+                                    link, require, save, source_proof)
 from tools.qa_wave02_endurance import (
     MAX_OUTPUT_BYTES, MAX_RSS, MAX_RSS_GROWTH, MAX_SESSION_BYTES, NativeController,
     actual_progress, command, directory_bytes, inspect_live, policy, verify_saved,
@@ -82,9 +84,68 @@ def verify_engine_history(records, trace_sha256):
             "scope": "ACTUAL_EXISTING_FILE_ADAPTER_CALLS_NOT_COLLECTOR_OR_JOB_UPTIME"}
 
 
+def verify_observe_history(snapshot, records, repeat_records, cancel_requested_ns, expected_identity):
+    """Independent persisted proof of a long production adapter and its stop.
+
+    The requested graph is intentionally CANCELLED after the real 5h30 work.
+    That product state remains CANCELLED even though this acceptance scenario
+    passes and the underlying recording writer closed normally.
+    """
+    require(snapshot["state"] == "CANCELLED" and snapshot["cleanup"].get("confirmed") is True,
+            "R60_ENDURANCE_LONG_OBSERVE_FALSE_COMPLETION_OR_UNKNOWN_CLEANUP")
+    rows = {row["node_id"]: row for row in snapshot["nodes"]}
+    observed, selected = rows["long-observe"], rows["long-observe-target"]
+    require(selected["state"] == "COMPLETED" and
+            all(selected["outputs"]["process"][0]["value"]["identity"][key] == value
+                for key, value in expected_identity.items()),
+            "R60_ENDURANCE_LONG_OBSERVE_PERSISTED_TARGET_MISMATCH")
+    results = [event["data"] for event in records if event.get("event") == "node.result" and
+               event.get("node_id") == "long-observe"]
+    intents = [event["data"] for event in records if event.get("event") == "node.intent" and
+               event.get("node_id") == "long-observe"]
+    invocations = actual_invocations(records, "workflow.observe")
+    require(len(results) == len(intents) == len(invocations) == 1 and
+            results[0]["node_run_id"] == intents[0]["node_run_id"] == observed["node_run_id"],
+            "R60_ENDURANCE_LONG_OBSERVE_MISSING_OR_REPLAYED_ACTUAL_CALL")
+    context, receipt = invocations[0]
+    cleanup = results[0]["cleanup"]
+    stopped = cleanup.get("stop_result", {})
+    require(results[0]["state"] == observed["state"] == "CANCELLED" and
+            results[0]["component_status"] == receipt["status"] == "CANCELLED" and
+            results[0]["execution_started"] is receipt["execution_started"] is True and
+            cleanup.get("confirmed") is True and receipt["cleanup"].get("confirmed") is True and
+            stopped.get("cleanup_required") is False and not stopped.get("errors") and
+            stopped.get("state") == stopped.get("base_recording_state") == "COMPLETED",
+            "R60_ENDURANCE_LONG_OBSERVE_ACTUAL_CANCELLATION_OR_STOP_ACK_MISSING")
+    start_ns, end_ns = context["started_monotonic_ns"], results[0]["ended_monotonic_ns"]
+    repeats = actual_invocations(repeat_records, "workflow.load_source")
+    first_read, last_read = repeats[0][0]["started_monotonic_ns"], repeats[-1][0]["started_monotonic_ns"]
+    require(type(cancel_requested_ns) is int and type(end_ns) is int and
+            start_ns <= first_read <= last_read <= cancel_requested_ns <= end_ns and
+            end_ns - start_ns >= REQUESTED_SECONDS * 10**9 and
+            type(receipt.get("duration_ns")) is int and receipt["duration_ns"] >= REQUESTED_SECONDS * 10**9,
+            "R60_ENDURANCE_REPEAT_NOT_WITHIN_PERSISTED_LONG_OBSERVE_INVOCATION")
+    output = results[0]["outputs"].get("session", [])
+    require(type(output) is list and len(output) == 1 and output[0]["kind"] == "SESSION" and
+            output[0]["value"].get("recording_state") == "CANCELLED" and
+            len(output[0]["value"].get("files", [])) == 3,
+            "R60_ENDURANCE_LONG_OBSERVE_RESULT_REFERENCE_MISSING")
+    return {"workflow_state": "CANCELLED", "node_state": "CANCELLED", "receipt_status": receipt["status"],
+        "expected_workflow_state": "CANCELLED", "expected_cancellation_scenario": True,
+        "actual_invocations": 1, "run_id": snapshot["run_id"], "node_run_id": observed["node_run_id"],
+        "context_started_monotonic_ns": start_ns, "result_ended_monotonic_ns": end_ns,
+        "actual_invocation_span_seconds": (end_ns - start_ns) / 10**9,
+        "receipt_duration_ns": receipt["duration_ns"], "cancel_requested_monotonic_ns": cancel_requested_ns,
+        "first_repeat_started_monotonic_ns": first_read, "last_repeat_started_monotonic_ns": last_read,
+        "all_repeat_calls_within_observe": True, "target_identity": expected_identity,
+        "cleanup": cleanup, "engine_cleanup": snapshot["cleanup"],
+        "recording_source_sha256": output[0]["value"]["sha256"],
+        "scope": "ACTUAL_LONG_RUNNING_PRODUCTION_OBSERVE_ADAPTER_NOT_EXTERNAL_TICKING"}
+
+
 def run(args):
     identity = source_proof(args.source_sha)
-    from blackbox_core.chain_adapters import build_catalog
+    from blackbox_core.chain_adapters import ChainRuntime, build_catalog
     from blackbox_core.chain_engine import WorkflowEngine
     from blackbox_core.chain_store import WorkflowRunStore
     from blackbox_core.deep_native import capture_identity
@@ -97,16 +158,17 @@ def run(args):
     output.mkdir(parents=True, exist_ok=False)
     proof = {"schema": "blackbox.r60.endurance-qa/1", "status": "FAIL", "source_sha": args.source_sha,
         "source_identity": identity, "requested_seconds": REQUESTED_SECONDS,
-        "scope": "R60_ACTUAL_REPEAT_SCHEDULER_PLUS_EXISTING_RESEARCHSESSION_OWNED_WORKLOAD",
+        "scope": "TWO_PRODUCTION_ENGINES_REAL_REPEAT_AND_LONG_OBSERVE_ADAPTER_OWNERSHIP",
         "physical_windows_10_11": "NOT_TESTED", "physical_secure_desktop": "NOT_TESTED",
         "gui_endurance": "NOT_TESTED", "eight_hour_acceptance": False,
         "sampler_or_recorder_limits_changed": False, "actions_artifacts": False}
     fixture = capture = session = controller = engine = engine_thread = None
-    engine_result, engine_errors = [], []
+    observe_engine = observe_thread = observe_store = None
+    engine_result, engine_errors, observe_result, observe_errors, created_sessions = [], [], [], [], []
     writer = journal = None
     maxima = {"writer_queue_depth": 0, "event_queue_depth": 0, "ring_accounted_bytes": 0,
               "ring_samples": 0, "self_rss_bytes": 0, "self_threads": 0,
-              "recording_bytes": 0, "output_bytes": 0, "tick_ms": 0.}
+              "recording_bytes": 0, "output_bytes": 0}
     try:
         executable = args.probe.resolve(strict=True) if args.probe else build(output / "build", args.source_sha)
         executable_hash = file_hash(executable)
@@ -139,15 +201,51 @@ def run(args):
         trace_hash = file_hash(trace)
         require(0 < trace.stat().st_size <= 256 * 1024**2, "R60_ENDURANCE_INITIAL_ETL_BUDGET")
         capture = None
-        session = ResearchSession(output / "recordings")
-        command(session, "attach", pid=target.pid)
-        command(session, "configure", scenario="BB-R60-5H30-SCHEDULER-LIFECYCLE", scenario_version="1",
+        def research_factory(output_root=None):
+            # This factory runs inside the production OBSERVE adapter. Only
+            # metadata is configured here; attach/start/tick/stop remain owned
+            # by _direct_observe throughout the actual 5h30 recording.
+            actual = ResearchSession(output_root)
+            command(actual, "configure", scenario="BB-R60-5H30-SCHEDULER-LIFECYCLE", scenario_version="1",
                 workload="owned-six-second-cpu-memory-file-burst-every-300s-v1", target_version=executable_hash)
-        command(session, "capture_policy", policy=policy("STANDARD"))
-        folder = Path(command(session, "start")["folder"]).resolve(strict=True)
-        require(session.interval_ms == 1000 and session.context["run_identity"]["process_identity"] == expected,
+            created_sessions.append(actual)
+            return actual
+        runtime = ChainRuntime(output_root=output / "recordings", research_factory=research_factory)
+        observe_workflow = definition([
+            {"node_id": "long-observe-target", "tool_id": "process_select", "budget_seconds": 5,
+             "parameters": {"pid": target.pid}},
+            {"node_id": "long-observe", "tool_id": "observe", "budget_seconds": 21540,
+             "parameters": {"duration_seconds": 21500, "policy": policy("STANDARD")}}], [
+                link("long-observe-target", "process", "long-observe", "process")],
+            identity="5h30-owned-observe", seconds=21600, workers=1)
+        observe_store = WorkflowRunStore.create(output / "observe-runs", observe_workflow)
+        observe_engine = WorkflowEngine(observe_workflow, catalog=build_catalog(runtime),
+                                       store=observe_store, runtime=runtime)
+        def execute_observe():
+            try:
+                observe_result.append(observe_engine.run())
+            except BaseException as error:
+                observe_errors.append(error)
+        observe_thread = threading.Thread(target=execute_observe,
+                                          name="r60-long-observe-engine", daemon=True)
+        observe_thread.start()
+        setup_deadline = time.monotonic() + 30
+        while True:
+            require(not observe_errors, "R60_ENDURANCE_OBSERVE_START_EXCEPTION: " +
+                    (str(observe_errors[0])[:500] if observe_errors else ""))
+            require(observe_thread.is_alive(), "R60_ENDURANCE_OBSERVE_ENDED_BEFORE_ACTUAL_RECORDING")
+            session = runtime.research
+            if session is not None and session.probe.active and session.probe.total_samples >= 1:
+                break
+            require(time.monotonic() < setup_deadline, "R60_ENDURANCE_OBSERVE_ADAPTER_DID_NOT_START")
+            threading.Event().wait(.05)
+        folder = Path(session.probe.session_folder).resolve(strict=True)
+        require(len(created_sessions) == 1 and session is created_sessions[0] and
+                session.interval_ms == 1000 and session.context["run_identity"]["process_identity"] == expected,
                 "R60_ENDURANCE_SAMPLER_CADENCE_OR_IDENTITY_CHANGED")
         writer, journal = session.probe._store.v2, session.probe._store._journal
+        inspect_live(session, [], maxima)
+        proof["observe_run_id"] = observe_store.run_id
         workflow = definition([{"node_id": "repeat-etl-read", "kind": "REPEAT", "tool_id": "load_source",
             "parameters": {"kind": "TRACE", "path": str(trace)}, "repeat_count": ITERATIONS,
             "repeat_interval_seconds": INTERVAL_SECONDS, "budget_seconds": 5}], [],
@@ -160,13 +258,13 @@ def run(args):
             except BaseException as error:
                 engine_errors.append(error)
         engine_thread = threading.Thread(target=execute, name="r60-actual-endurance-engine", daemon=True)
-        # Publish the first genuine recorder sample before the repeated calls.
-        session.tick()
+        # Its own adapter has already published the first recorder sample.
+        # Starting REPEAT now places every read within the long OBSERVE call.
         engine_thread.start()
         controller = NativeController(fixture)
         me = psutil.Process()
         started = time.monotonic()
-        next_tick, next_check, next_log, next_burst, next_state = started, started, started, started + 10, started + 45
+        next_check, next_log, next_burst, next_state = started, started, started + 10, started + 45
         sampled_rss_baseline = None
         state_checks, minute_count = 0, 0
         cpu_start = me.cpu_times()
@@ -176,12 +274,9 @@ def run(args):
             require(fixture.process.poll() is None, "R60_ENDURANCE_OWNED_TARGET_EXITED")
             require(not engine_errors, "R60_ENDURANCE_ENGINE_EXCEPTION: " +
                     (str(engine_errors[0])[:500] if engine_errors else ""))
+            require(not observe_errors and observe_thread.is_alive() and not observe_result,
+                    "R60_ENDURANCE_LONG_OBSERVE_ENDED_BEFORE_EXPECTED_CANCELLATION")
             controller.poll()
-            if now >= next_tick:
-                tick_started = time.monotonic()
-                session.tick()
-                maxima["tick_ms"] = max(maxima["tick_ms"], (time.monotonic() - tick_started) * 1000)
-                next_tick = time.monotonic() + session.interval_ms / 1000
             if now >= next_burst and engine_thread.is_alive() and controller.thread is None:
                 controller.start()
                 next_burst = now + 300
@@ -193,6 +288,8 @@ def run(args):
                 next_state = now + 60
             if now >= next_check:
                 inspect_live(session, [], maxima)
+                require(1000 <= session.interval_ms <= 5000,
+                        "R60_ENDURANCE_UNEXPECTED_PRODUCTION_SAMPLER_CADENCE")
                 progress = actual_progress(folder)
                 rss = me.memory_info().rss
                 maxima["self_rss_bytes"] = max(maxima["self_rss_bytes"], rss)
@@ -217,10 +314,12 @@ def run(args):
                 require(minute_count <= 345, "R60_ENDURANCE_PROGRESS_LOG_BUDGET")
                 print("R60_ENDURANCE_PROGRESS " + json.dumps({"source_sha": args.source_sha,
                     "elapsed_seconds": round(now - started, 3), "recorded_samples": session.probe.total_samples,
-                    "engine_state": engine.snapshot()["state"], "native_bursts": controller.completed,
+                    "engine_state": engine.snapshot()["state"],
+                    "observe_engine_state": observe_engine.snapshot()["state"],
+                    "native_bursts": controller.completed,
                     "state_checks": state_checks, "rss_bytes": me.memory_info().rss}, sort_keys=True), flush=True)
                 next_log = now + 60
-            threading.Event().wait(max(.02, min(.2, next_tick - time.monotonic())))
+            threading.Event().wait(.2)
         engine_thread.join(timeout=5)
         controller.join()
         require(not engine_thread.is_alive() and controller.completed >= REQUESTED_SECONDS // 300 and
@@ -228,15 +327,29 @@ def run(args):
         records, journal_proof = independent_journal(store.folder)
         proof["engine"] = verify_engine_history(records, trace_hash)
         proof["engine_journal"] = journal_proof
-        stopped = command(session, "stop")
-        require(stopped["cleanup_required"] is False and not stopped["errors"] and
-                session._recording_resources_closed() and not writer.thread.is_alive() and
-                (journal is None or not journal._worker.is_alive()) and not OwnedProcess.pending_cleanup(),
-                "R60_ENDURANCE_RECORDER_ACTUAL_OWNERS_NOT_CLOSED")
+        require(observe_thread.is_alive() and not observe_result and not observe_errors,
+                "R60_ENDURANCE_LONG_OBSERVE_NOT_RUNNING_AT_EXPECTED_STOP")
+        cancel_requested_ns = time.monotonic_ns()
+        observe_engine.request_cancel()
+        observe_thread.join(timeout=30)
+        require(not observe_thread.is_alive() and not observe_errors and len(observe_result) == 1,
+                "R60_ENDURANCE_LONG_OBSERVE_CANCEL_NOT_ACKNOWLEDGED")
+        observe_snapshot = observe_result[0]
+        observe_records, observe_journal_proof = independent_journal(observe_store.folder)
+        observed = verify_observe_history(observe_snapshot, observe_records, records,
+                                         cancel_requested_ns, expected)
+        stopped = observed["cleanup"]["stop_result"]
+        require(session._recording_resources_closed() and session.book is None and not session.probe.active and
+                not writer.thread.is_alive() and (journal is None or not journal._worker.is_alive()) and
+                not OwnedProcess.pending_cleanup(), "R60_ENDURANCE_RECORDER_ACTUAL_OWNERS_NOT_CLOSED")
+        proof["observe_engine"] = observed
+        proof["observe_engine_journal"] = observe_journal_proof
         proof["recording"] = verify_saved(folder, "STANDARD", REQUESTED_SECONDS, expected, executable_hash, [])
         proof["recorder_cleanup"] = {"stop": stopped, "writer_thread_alive": writer.thread.is_alive(),
             "journal_thread_alive": bool(journal is not None and journal._worker.is_alive()),
-            "recording_resources_closed": session._recording_resources_closed()}
+            "recording_resources_closed": session._recording_resources_closed(),
+            "stop_owner": "PRODUCTION_OBSERVE_ADAPTER_AFTER_EXPLICIT_ENGINE_CANCELLATION",
+            "workflow_state": observe_snapshot["state"], "expected_workflow_state": "CANCELLED"}
         proof["target_cleanup"] = fixture.close()
         fixture = None
         require(proof["target_cleanup"]["status"] == "COMPLETED" and not OwnedProcess.pending_cleanup() and
@@ -248,7 +361,10 @@ def run(args):
             measured_active_seconds=time.monotonic() - started,
             observer_cpu_seconds=cpu_end.user + cpu_end.system - cpu_start.user - cpu_start.system,
             final_source_identity=source_proof(args.source_sha), original_sources_unchanged=True,
-            worker_thread_closed=True, pending_owned_process_owners=0)
+            worker_thread_closed=True, observe_engine_thread_closed=not observe_thread.is_alive(),
+            external_recorder_start_tick_stop_calls=0,
+            tick_timing="NOT_EXTERNALLY_INTERCEPTED; PRODUCTION_ADAPTER_OWNS_SAMPLING",
+            pending_owned_process_owners=0)
     except BaseException as error:
         proof.update(status="FAIL", error=type(error).__name__, reason=str(error)[:2000])
         traceback.print_exc(limit=12)
@@ -259,16 +375,28 @@ def run(args):
             engine_thread.join(timeout=10)
             if engine_thread.is_alive():
                 cleanup_errors.append("ENGINE_WORKER_CLEANUP_UNCONFIRMED")
+        if observe_engine is not None and observe_thread is not None and observe_thread.is_alive():
+            observe_engine.request_cancel()
+            observe_thread.join(timeout=30)
+            if observe_thread.is_alive():
+                cleanup_errors.append("LONG_OBSERVE_ENGINE_CLEANUP_UNCONFIRMED")
         if controller is not None:
             try:
                 controller.join()
             except BaseException as error:
                 cleanup_errors.append("NATIVE_CONTROLLER:" + type(error).__name__)
+        if session is None and created_sessions:
+            session = created_sessions[0]
         if session is not None and (session.book is not None or session.probe.active):
-            try:
-                proof["failure_stop"] = session.stop("R60_QA_FAILURE")
-            except BaseException as error:
-                cleanup_errors.append("RESEARCH_STOP:" + type(error).__name__)
+            if observe_thread is not None and observe_thread.is_alive():
+                # The production owner remains reachable. Never issue a second
+                # stop concurrently against its thread-affine SQLite objects.
+                cleanup_errors.append("RECORDING_RETAINED_BY_LIVE_PRODUCTION_OBSERVE_OWNER")
+            else:
+                try:
+                    proof["failure_stop"] = session.stop("R60_QA_FAILURE")
+                except BaseException as error:
+                    cleanup_errors.append("RESEARCH_STOP:" + type(error).__name__)
         if capture is not None and capture.active:
             try:
                 capture.cancel()

@@ -274,7 +274,7 @@ class WorkflowEngine:
             self.store.append("node.state", node_id=ctx.node_id,
                 data={"node_id": ctx.node_id, "node_run_id": ctx.node_run_id, "state": state,
                       "phase": str(phase)[:128]})
-            self._notify(force=True)
+            self._notify(force=state == "WAITING_FOR_HUMAN")
 
     def _run_state(self, state):
         with self._lock:
@@ -490,7 +490,7 @@ class WorkflowEngine:
                 row["state"] = "QUEUED"
                 self._not_before[node.node_id] = time.monotonic() + node.repeat_interval_seconds
             self._finish_lease(node, ctx.node_run_id, cleanup)
-            self._notify(force=True)
+            self._notify()
 
     def _exception(self, node, ctx, error):
         receipt = getattr(error, "run_receipt", None)
@@ -612,8 +612,6 @@ class WorkflowEngine:
         except Exception as error:
             cleanup = {"confirmed": False, "status": "RECOVERY_UNCONFIRMED", "owner_retained": True,
                        "reason_code": getattr(error, "code", type(error).__name__)}
-        self.store.append("run.cleanup", data={"cleanup": cleanup, "scope": "ACTUAL_RUNTIME_OWNER_BOUNDARY",
-                                               "actual_cleanup_call": actual_cleanup_call})
         if cleanup.get("confirmed") is True:
             with _LEASE_LOCK:
                 for key in list(_LEASES):
@@ -631,7 +629,7 @@ class WorkflowEngine:
         if not identity_cleanup["confirmed"]:
             self._errors.append({"code": "WORKFLOW_IDENTITY_CLEANUP_UNCONFIRMED"})
         self.store.append("run.cleanup", data={"cleanup": self._runtime_cleanup,
-            "scope": "SEPARATE_ACTUAL_OWNER_ACKNOWLEDGEMENTS"})
+            "scope": "SEPARATE_ACTUAL_OWNER_ACKNOWLEDGEMENTS", "actual_cleanup_call": actual_cleanup_call})
 
     def _drain_retained(self, pool, pending):
         """Preserve a late real outcome and eventually release the same owners.

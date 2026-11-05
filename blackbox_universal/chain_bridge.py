@@ -26,13 +26,47 @@ class _RuntimeUnconfirmed(RuntimeError):
 
 class _ChainTask(QThread):
     result_ready = Signal(str, object, str)
-    snapshot_ready = Signal(object)
+    progress_available = Signal()
 
     def __init__(self, bridge, operation, arguments):
         super().__init__(bridge)
         self.bridge, self.operation, self.arguments = bridge, operation, arguments
         self.engine = None
         self.cancel_event = threading.Event()
+        self._progress_lock = threading.Lock()
+        self._latest_progress = None
+        self._progress_wake_pending = False
+        self._progress_closed = False
+
+    def publish_snapshot(self, snapshot):
+        """Retain one latest immutable snapshot and at most one tiny Qt wake.
+
+        The engine passes an independent snapshot; individual receipts remain
+        durable in its journal. A stalled GUI must not accumulate full copies
+        of every intermediate progress state in the Qt event queue.
+        """
+        with self._progress_lock:
+            if self._progress_closed:
+                return
+            self._latest_progress = snapshot
+            if self._progress_wake_pending:
+                return
+            self._progress_wake_pending = True
+        self.progress_available.emit()
+
+    def take_snapshot(self):
+        with self._progress_lock:
+            latest = self._latest_progress
+            self._latest_progress = None
+            self._progress_wake_pending = False
+            return latest
+
+    def close_progress(self):
+        """The full terminal result supersedes any pending progress wake."""
+        with self._progress_lock:
+            self._progress_closed = True
+            self._latest_progress = None
+            self._progress_wake_pending = False
 
     def run(self):
         store = None
@@ -147,16 +181,18 @@ class _ChainTask(QThread):
                         self.engine = WorkflowEngine.restore(store, catalog=catalog, runtime=runtime)
                     if self.cancel_event.is_set() or operation == "cancel_saved_run":
                         self.engine.request_cancel()
-                    self.snapshot_ready.emit({"run_id": store.run_id, "folder": str(store.folder), "state": "QUEUED", "nodes": []})
+                    self.publish_snapshot({"run_id": store.run_id, "folder": str(store.folder), "state": "QUEUED", "nodes": []})
                     if operation in ("resume", "cancel_saved_run"):
-                        answer = self.engine.resume(on_event=self.snapshot_ready.emit)
+                        answer = self.engine.resume(on_event=self.publish_snapshot)
                     else:
-                        answer = self.engine.run(on_event=self.snapshot_ready.emit)
+                        answer = self.engine.run(on_event=self.publish_snapshot)
                     answer = dict(answer, folder=str(store.folder))
                 else:
                     raise ValueError("UNKNOWN_CHAIN_GUI_OPERATION")
+            self.close_progress()
             self.result_ready.emit(operation, answer, "")
         except Exception as error:
+            self.close_progress()
             self.result_ready.emit(self.operation, None, str(getattr(error, "code", error))[:1500])
         finally:
             if store is not None:
@@ -227,11 +263,19 @@ class ChainBuilderBridge(QObject):
             self._paused_run = None
         self.worker = worker
         worker.result_ready.connect(self._receive)
-        worker.snapshot_ready.connect(self.snapshot_changed.emit)
+        worker.progress_available.connect(self._progress_ready, Qt.ConnectionType.QueuedConnection)
         worker.finished.connect(self._finished)
         self.busy_changed.emit(True)
         worker.start()
         return True
+
+    def _progress_ready(self):
+        worker = self.sender()
+        if not isinstance(worker, _ChainTask):
+            return
+        latest = worker.take_snapshot()
+        if worker is self.worker and latest is not None:
+            self.snapshot_changed.emit(latest)
 
     def runtime(self):
         """Called by the worker, never reads Qt objects or live widget state."""

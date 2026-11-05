@@ -21,6 +21,7 @@ from PySide6.QtWidgets import QApplication, QMessageBox, QWidget
 
 from blackbox_core.deep_contracts import ProcessIdentity
 from blackbox_universal.chain_builder import ObjectParameterEditor, ConditionParameterEditor, OptionalParameterEditor
+from blackbox_universal.chain_bridge import _ChainTask
 from blackbox_universal.deep_inspector_bridge import DeepInspectorBridge, _DeepTask
 from blackbox_universal.deep_inspector_panel import OverviewInspectorPanel
 from blackbox_universal.window import UniversalWindow
@@ -316,6 +317,52 @@ class ChainEditorTests(unittest.TestCase):
         self.assertTrue(self.results[-1][2])
         self.assertEqual("WORKFLOW_GRAPH_SIZE_BUDGET", self.results[-1][2])
         self.assertFalse(self.window.probe.active)
+
+    def test_bulk_progress_queues_one_wake_and_terminal_result_cannot_be_replaced(self):
+        # This is an actual Qt handoff test with explicit injected progress;
+        # it makes no claim about native diagnostic invocation or cleanup.
+        bridge = self.panel.bridge
+        task = _ChainTask(bridge, "start", {})
+        wakes, displayed = [], []
+        task.progress_available.connect(lambda: wakes.append(True), Qt.ConnectionType.DirectConnection)
+        task.progress_available.connect(bridge._progress_ready, Qt.ConnectionType.QueuedConnection)
+        task.result_ready.connect(bridge._receive)
+        bridge.snapshot_changed.connect(displayed.append)
+        bridge.worker = task
+        try:
+            def publish():
+                for sequence in range(512):
+                    task.publish_snapshot({"run_id": "bulk-fixture", "state": "RUNNING", "sequence": sequence,
+                        "nodes": [{"node_id": "large_" + str(index), "state": "COMPLETED"} for index in range(256)]})
+            producer = threading.Thread(target=publish, name="explicit-qt-progress-fixture")
+            producer.start()
+            producer.join(timeout=3)
+            self.assertFalse(producer.is_alive())
+            self.assertEqual(len(wakes), 1)
+            self.assertEqual(displayed, [])
+            self.assertTrue(task._progress_wake_pending)
+            self.assertEqual(task._latest_progress["sequence"], 511)
+            self.app.processEvents()
+            self.assertEqual(len(displayed), 1)
+            self.assertEqual(self.panel.snapshot["sequence"], 511)
+            self.assertFalse(task._progress_wake_pending)
+            self.assertIsNone(task._latest_progress)
+            task.publish_snapshot({"run_id": "bulk-fixture", "state": "RUNNING", "sequence": 512, "nodes": []})
+            self.assertEqual(len(wakes), 2)
+            task.close_progress()
+            terminal = {"run_id": "bulk-fixture", "state": "COMPLETED", "nodes": [], "folder": self.temp.name}
+            task.result_ready.emit("start", terminal, "")
+            self.app.processEvents()
+            self.assertEqual(displayed[-1], terminal)
+            self.assertEqual(len(displayed), 2)
+            task.publish_snapshot({"run_id": "bulk-fixture", "state": "RUNNING", "sequence": 513, "nodes": []})
+            self.app.processEvents()
+            self.assertEqual(len(wakes), 2)
+            self.assertEqual(self.panel.snapshot["state"], "COMPLETED")
+        finally:
+            bridge.worker = None
+            task.close_progress()
+            task.deleteLater()
 
 
 class GuardBridge(QObject):
