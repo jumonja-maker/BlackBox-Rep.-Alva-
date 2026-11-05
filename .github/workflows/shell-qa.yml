@@ -252,6 +252,9 @@ jobs:
           if (-not (Test-Path "dist/BLACK.BOX-Universal/_internal/assets/blackbox.png")) { throw 'App icon missing' }
       - name: Verify explicit privilege boundaries in the packaged GUI and diagnostic helper
         run: python tools/verify_diagnostic_package.py dist/BLACK.BOX-Universal
+      - name: Release-grade real native actions through packaged Diagnostic Helper
+        timeout-minutes: 8
+        run: python tools/qa_deep_inspection.py --output deep-frozen-premerge-qa --helper dist/BLACK.BOX-Universal/diagnostic/BLACK.BOX-Diagnostic.exe
       - name: Verify real embedded research modules before startup
         run: python tools/verify_frozen_research.py "dist/BLACK.BOX-Universal/BLACK.BOX-Universal.exe"
       - name: Verify Explorer icon is the same as the taskbar icon for both EXEs

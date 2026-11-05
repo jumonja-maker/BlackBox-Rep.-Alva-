@@ -604,6 +604,33 @@ def notepad(output, helper):
             owner.close(kill=True)
 
 
+
+def _qa_code(value):
+    """Print only a bounded machine code, never application paths or payloads."""
+    if not isinstance(value, str) or not value:
+        return "UNSPECIFIED"
+    candidate = value.split(":", 1)[0].strip()
+    return candidate if re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,95}", candidate) else "REDACTED_UNSTRUCTURED"
+
+
+def _emit_app_diagnostic(name, item):
+    """Keep actual PASS/FAIL semantics; make release-only failures inspectable."""
+    status = _qa_code(item.get("status"))
+    error_type = _qa_code(item.get("error"))
+    reason_code = _qa_code(item.get("reason"))
+    capability_map = item.get("capabilities")
+    failing = (sorted(_qa_code(key) for key, value in capability_map.items()
+                      if value != "PASS")[:24] if isinstance(capability_map, dict) else [])
+    detail = {"application": name, "status": status, "error_type": error_type,
+              "reason_code": reason_code, "failing_capabilities": failing}
+    print("THIRD_PARTY_DECODER_QA_DETAIL " + json.dumps(detail, sort_keys=True), flush=True)
+    summary = os.environ.get("GITHUB_STEP_SUMMARY")
+    if summary:
+        with Path(summary).open("a", encoding="utf-8") as stream:
+            stream.write("\n- Third-party QA " + json.dumps(detail, sort_keys=True) + "\n")
+
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--helper", type=Path, required=True)
@@ -637,6 +664,7 @@ def main():
         report["applications"][name] = item
         write_json(work / "application-qa.json", item)
         write_json(output / "apps-qa.json", report)
+        _emit_app_diagnostic(name, item)
     states = [x["status"] for x in report["applications"].values()]
     report["status"] = "FAIL" if "FAIL" in states else "NOT_EXECUTED" if "NOT_EXECUTED" in states else "PASS"
     report["duration_seconds"] = time.monotonic() - started

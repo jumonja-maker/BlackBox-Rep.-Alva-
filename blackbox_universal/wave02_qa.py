@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (QApplication, QComboBox, QDialogButtonBox,
 from .provenance import source_identity
 from .theme import font_coverage
 from .wave02_comparison_oracles import read_comparison_export
+from .wave02_export_oracles import read_graph_export
 
 
 def require(value, reason):
@@ -318,6 +319,7 @@ def run_wave02_e2e(app, window, output, evidence_root, container, expected_sha):
                 proof['geometry'].append({'language': language, 'case': case_kind,
                     'viewport_width': window.width(), 'viewport_height': window.height(),
                     'screenshot_sha256': digest(shot)})
+            json_reference = None
             for kind in ('json', 'html'):
                 proof['phase'] = 'ACTUAL_GUI_EXPORT_' + case_kind + '_' + kind
                 path = output / (case_kind + '-gui-export.' + kind)
@@ -333,8 +335,13 @@ def run_wave02_e2e(app, window, output, evidence_root, container, expected_sha):
                     require(parsed['case_id'] == panel.case['case_id'] and
                             len(parsed['nodes']) == len(panel.case['nodes']),
                             'WAVE02_GUI_INDEPENDENT_JSON_READBACK_FAILED')
+                parsed, semantic = read_graph_export(path, format=kind,
+                    expected_case=panel.case, json_reference=json_reference)
+                if kind == 'json':
+                    json_reference = parsed
                 proof['exports'].append({'case_id': panel.case['case_id'], 'format': kind,
-                    'sha256': digest(path), 'bytes': path.stat().st_size, 'independent_readback': True})
+                    'sha256': digest(path), 'bytes': path.stat().st_size, 'independent_readback': True,
+                    'independent_semantic_readback': semantic})
         if 'R40' in scopes[container]:
             proof['phase']='R40_ACTUAL_SAVED_DUMP_BUTTON_AND_MATCHED_LOCAL_SYMBOLS'
             crash=native['container_results']['R40']

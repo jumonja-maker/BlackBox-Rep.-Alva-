@@ -83,8 +83,10 @@ def semantic_export_summaries(proof):
         result.append({'case_id': case_id, 'format': kind, 'sha256': digest,
             **{key: semantic[key] for key in ('source_count', 'node_count', 'edge_count', 'bytes')},
             'semantic_verified': True,
-            'no_clobber_verified': item['no_clobber_verified']
-                if type(item.get('no_clobber_verified')) is bool else None})
+            # Existing GUI routes export once. A native repeated-export proof
+            # cannot be relabelled as this GUI operation's no-clobber proof.
+            'no_clobber_verified': (item['no_clobber_verified']
+                if type(item.get('no_clobber_verified')) is bool else None)})
     return result
 
 

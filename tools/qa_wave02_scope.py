@@ -1,4 +1,5 @@
 """Finite QA scope is tracked with the source, never inferred from missing code."""
+import argparse
 from pathlib import Path
 import json
 import os
@@ -21,7 +22,10 @@ def load_scope(requested=None):
 
 
 if __name__ == '__main__':
-    scope = load_scope()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--container', choices=tuple(SCOPES))
+    args = parser.parse_args()
+    scope = load_scope(args.container)
     print(json.dumps(scope, sort_keys=True))
     if os.environ.get('GITHUB_OUTPUT'):
         with Path(os.environ['GITHUB_OUTPUT']).open('a', encoding='utf-8') as stream:
