@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import re
+import hashlib
 
 from .evidence_correlation import (bounds, correlate_evidence, process_identity_key,
                                    thread_identity_key, validate_trace_identity_consistency)
@@ -58,6 +59,37 @@ def _sources(values, budget):
         digest = source.get("source_sha256")
         if type(digest) is not str or not _SHA.fullmatch(digest):
             raise InvestigationError("INVALID_SOURCE_SHA256")
+        if "source_size_bytes" in source:
+            size, manifest = source["source_size_bytes"], source.get("content_manifest")
+            if (type(size) is not int or not 1 <= size < 2**63 or type(manifest) is not list or
+                    not 1 <= len(manifest) <= 64):
+                raise InvestigationError("INVALID_SOURCE_SIZE_MANIFEST")
+            total = 0
+            for entry in manifest:
+                if (type(entry) is not dict or type(entry.get("role")) is not str or
+                        not 1 <= len(entry["role"]) <= 128 or
+                        type(entry.get("sha256")) is not str or not _SHA.fullmatch(entry["sha256"]) or
+                        type(entry.get("size_bytes")) is not int or not 1 <= entry["size_bytes"] < 2**63):
+                    raise InvestigationError("INVALID_SOURCE_SIZE_MANIFEST")
+                total += entry["size_bytes"]
+            if size != total:
+                raise InvestigationError("SOURCE_SIZE_MANIFEST_MISMATCH")
+            roles = [entry["role"] for entry in manifest]
+            if len(set(roles)) != len(roles) or source.get("source_file_count") != len(manifest):
+                raise InvestigationError("INVALID_SOURCE_MANIFEST_CARDINALITY")
+            from .investigation_graph_contracts import canonical_json
+            expected = (manifest[0]["sha256"] if len(manifest) == 1 else
+                hashlib.sha256(canonical_json(sorted((entry["role"], entry["sha256"]) for entry in manifest)).encode("ascii")).hexdigest())
+            if expected != digest:
+                raise InvestigationError("SOURCE_CONTENT_MANIFEST_HASH_MISMATCH")
+        provenance = source.get("provenance")
+        if provenance is not None and (type(provenance) is not dict or
+                provenance.get("producer_authentication") != "NOT_ESTABLISHED"):
+            raise InvestigationError("IMPORTED_SOURCE_AUTHENTICATION_NOT_ESTABLISHED")
+        coverage = source.get("coverage")
+        if coverage is not None and (type(coverage) is not dict or
+                coverage.get("capture_status") not in ("INCOMPLETE_EVIDENCE", "UNKNOWN_CAPTURE_COMPLETENESS")):
+            raise InvestigationError("SOURCE_CAPTURE_COMPLETENESS_NOT_ESTABLISHED")
         _json_shape(source, budget)
         identifier = source["source_id"]
         if identifier in result and result[identifier] != source:
@@ -219,6 +251,13 @@ def validate_case(case, *, budget=None):
     if case.get("file_trust", "UNVERIFIED_IMPORT") != "UNVERIFIED_IMPORT":
         raise InvestigationError("INVESTIGATION_IMPORT_AUTHENTICITY_NOT_ESTABLISHED")
     sources = _sources(case.get("sources"), budget)
+    coverage = case.get("coverage", {})
+    if (type(coverage) is not dict or "evidence_completeness" in coverage and
+            coverage["evidence_completeness"] not in ("INCOMPLETE_EVIDENCE", "UNKNOWN_CAPTURE_COMPLETENESS")):
+        raise InvestigationError("INVALID_EVIDENCE_COMPLETENESS")
+    if (coverage.get("evidence_completeness") == "UNKNOWN_CAPTURE_COMPLETENESS" and
+            any(source.get("coverage", {}).get("capture_status") == "INCOMPLETE_EVIDENCE" for source in sources.values())):
+        raise InvestigationError("INCOMPLETE_SOURCE_CANNOT_BE_PROMOTED")
     nodes, edges = case.get("nodes"), case.get("edges")
     if type(nodes) is not list or type(edges) is not list or len(nodes) > budget.max_nodes or len(edges) > budget.max_edges:
         raise InvestigationError("INVESTIGATION_GRAPH_ELEMENT_BUDGET")
@@ -323,6 +362,13 @@ def validate_case(case, *, budget=None):
         if name in case and (type(case[name]) is not list or len(case[name]) > 10000):
             raise InvestigationError("INVALID_INVESTIGATION_" + name.upper())
     _models(case, indexed, edge_ids, budget)
+    if "delay_investigation" in case:
+        from .delay_investigation import validate_delay_report
+        validate_delay_report(case["delay_investigation"], nodes=indexed,
+            critical_segments={row.get("segment_id") for row in (case.get("critical_path") or {}).get("segments", [])}, budget=budget)
+    if "crash_investigation" in case:
+        from .crash_investigation import validate_crash_report
+        validate_crash_report(case["crash_investigation"], nodes=indexed, budget=budget)
     if "_source_paths" in case:
         paths = case["_source_paths"]
         if (type(paths) is not dict or len(paths) > 64 or any(key not in sources or type(value) is not str or
@@ -344,6 +390,10 @@ def build_graph(normalized, *, target_identity=None, scenario=None, app_identity
             not isinstance(clocks, (list, tuple)) or len(clocks) > budget.max_events):
         raise InvestigationError("INVALID_NORMALIZED_EVIDENCE_METADATA")
     sources = _sources(normalized.get("sources"), budget)
+    evidence_completeness = ("INCOMPLETE_EVIDENCE" if
+        coverage.get("has_more") or coverage.get("events_omitted") or coverage.get("nodes_omitted") or
+        any(source.get("coverage", {}).get("capture_status") == "INCOMPLETE_EVIDENCE"
+            for source in sources.values()) else "UNKNOWN_CAPTURE_COMPLETENESS")
     raw_nodes = normalized.get("nodes")
     if type(raw_nodes) is not list or len(raw_nodes) > budget.max_events:
         raise InvestigationError("INVALID_NORMALIZED_NODE_BUDGET")
@@ -393,6 +443,7 @@ def build_graph(normalized, *, target_identity=None, scenario=None, app_identity
         "sources": sorted(sources.values(), key=lambda source: source["source_id"]),
         "nodes": shown, "edges": correlations["edges"], "gaps": correlations["gaps"],
         "coverage": {**coverage, **correlations["coverage"],
+            "evidence_completeness": evidence_completeness,
             "normalized_nodes": len(raw_nodes), "unique_nodes": len(ordered),
             "shown_nodes": len(shown), "normalization_nodes_omitted": upstream_omitted,
             "graph_nodes_omitted": omitted, "nodes_omitted": total_omitted,

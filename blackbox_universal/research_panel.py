@@ -75,7 +75,7 @@ class EvidenceTimeline(QWidget):
 class ResearchPanel(QWidget):
     def __init__(self,window):
         super().__init__(window);self.window=window;self.bridge=window.probe
-        self._labels=[];self.result=None;self._comparison_result=None
+        self._labels=[];self.result=None;self._comparison_result=None;self._comparison_sources=None;self._comparison_pending_sources=None
         layout=QVBoxLayout(self);layout.setContentsMargins(0,0,0,0)
         self.status=QLabel();self.status.setWordWrap(True);layout.addWidget(self.status)
         context=QGridLayout()
@@ -92,7 +92,8 @@ class ResearchPanel(QWidget):
             ("Apply context","Применить контекст",self.configure),
             ("Prepare my application","Подготовить мою программу",self.prepare),
             ("Verify native PDB…","Проверить native PDB…",self.symbols),
-            ("Inspect dump stacks…","Разобрать стеки дампа…",self.inspect_dump),
+            ("Inspect saved dump (built-in)…","Исследовать дамп (встроенный анализатор)…",self.inspect_dump),
+            ("Inspect dump with optional CDB…","Исследовать дамп через необязательный CDB…",self.inspect_dump_cdb),
             ("Windows snapshot","Снимок Windows / WCT",self.native),
             ("ETW recording","Запись ETW",self.etw),
             ("EventPipe 10 s","EventPipe 10 с",self.eventpipe),
@@ -102,6 +103,8 @@ class ResearchPanel(QWidget):
             ("Diagnostic permissions…","Права для диагностики…",self.elevate),
             ("Export investigation…","Сохранить исследование…",self.export),
             ("Compare investigations…","Сравнить исследования…",self.compare),
+            ("Save comparison JSON / HTML…","Сохранить сравнение JSON / HTML…",self.export_comparison),
+            ("Open saved comparison…","Открыть сохранённое сравнение…",self.open_comparison),
             ("Verify package…","Проверить пакет…",self.verify),
             ("Recover interrupted session…","Восстановить прерванный сеанс…",self.recover),
             ("Open saved session…","Открыть сохранённый сеанс…",self.open_session))
@@ -164,6 +167,9 @@ class ResearchPanel(QWidget):
             self.by_action[name].setEnabled(status not in ("UNSUPPORTED_PLATFORM","TOOL_UNAVAILABLE"))
             self.by_action[name].setToolTip(status)
         self.status.setToolTip(json.dumps(data.get("sensor_health",{}),ensure_ascii=False,indent=2))
+        self.by_action['Save comparison JSON / HTML…'].setEnabled(self._comparison_sources is not None and not getattr(self.bridge,'pending',False))
+        for name in ('Compare investigations…','Open saved comparison…'):
+            self.by_action[name].setEnabled(not getattr(self.bridge,'pending',False))
     def send(self,op,**args):
         try:return self.bridge.send(op,**args)
         except (RuntimeError,ValueError) as exc:self.details.setPlainText(str(exc))
@@ -181,6 +187,17 @@ class ResearchPanel(QWidget):
         pdb,_=QFileDialog.getOpenFileName(self,self.tr("Matching native PDB","Подходящий native PDB"),"","PDB (*.pdb)")
         if pdb:self.send("symbols",pdb=pdb)
     def inspect_dump(self):
+        panel = getattr(self.window, 'deep_inspector_panel', None)
+        toggle = getattr(self.window, 'deep_inspector_toggle', None)
+        if panel is None:
+            self.details.setPlainText(self.tr('Built-in saved-dump inspection requires the desktop Evidence Graph workspace.',
+                'Встроенный анализ дампа требует рабочего пространства Графа доказательств в основном приложении.'))
+            return False
+        if toggle is not None:
+            toggle.setChecked(True)
+        return panel._inspect_dump()
+    def inspect_dump_cdb(self):
+        # Keep the original optional debugger API as an explicit alternative.
         dump,_=QFileDialog.getOpenFileName(self,self.tr("Process dump","Дамп процесса"),"","Dump (*.dmp)")
         if not dump:return
         symbols=QFileDialog.getExistingDirectory(self,self.tr("Local symbols (Cancel: none)","Локальные символы (Отмена: без них)"))
@@ -209,10 +226,27 @@ class ResearchPanel(QWidget):
         destination,_=QFileDialog.getSaveFileName(self,self.tr("Save investigation","Сохранить исследование"),"BLACKBOX-Investigation.zip","ZIP (*.zip)")
         if destination:self.send("export",folder=str(self.folder) if self.folder else None,destination=destination,include_sensitive=self.sensitive.isChecked())
     def compare(self):
+        if getattr(self.bridge,'pending',False):return
         first=QFileDialog.getExistingDirectory(self,self.tr("Before session","Сеанс до"))
         if not first:return
         second=QFileDialog.getExistingDirectory(self,self.tr("After session","Сеанс после"))
-        if second:self.send("compare",before=first,after=second)
+        if second:
+            self._comparison_sources=None;self._comparison_pending_sources=(first,second)
+            if self.send("compare",before=first,after=second) is None:self._comparison_pending_sources=None
+            self.refresh()
+    def export_comparison(self):
+        if self._comparison_sources is None or getattr(self.bridge,'pending',False):return
+        destination,selected=QFileDialog.getSaveFileName(self,self.tr('Save comparison metadata','Сохранить метаданные сравнения'),
+            'BLACKBOX-Comparison.json','JSON (*.json);;HTML (*.html)')
+        if destination:
+            format='html' if destination.lower().endswith('.html') or 'HTML' in selected else 'json'
+            self.send('compare_export',before=self._comparison_sources[0],after=self._comparison_sources[1],destination=destination,format=format)
+    def open_comparison(self):
+        if getattr(self.bridge,'pending',False):return
+        path,_=QFileDialog.getOpenFileName(self,self.tr('Open comparison metadata','Открыть метаданные сравнения'),'','Comparison (*.json *.html)')
+        if path:
+            self._comparison_sources=None;self._comparison_pending_sources=None
+            self.send('load_comparison',path=path);self.refresh()
     def verify(self):
         path,_=QFileDialog.getOpenFileName(self,self.tr("Verify investigation","Проверить исследование"),"","ZIP (*.zip)")
         if path:self.send("verify",path=path)
@@ -249,6 +283,7 @@ class ResearchPanel(QWidget):
     def receive(self,op,result,error):
         if op.startswith("library_") or op in ("investigation","incident_card","events_query","export_recovery_scan","export_recover"):return
         if error:
+            if op=='compare':self._comparison_sources=None;self._comparison_pending_sources=None;self.refresh()
             from .research_messages import explain
             self.details.setPlainText(explain(error,self.window.language));return
         if op=="start":self.folder=None
@@ -257,7 +292,10 @@ class ResearchPanel(QWidget):
             self.details.setPlainText(json.dumps({"facts":result["facts"],"limitations":result["limitations"],
                 "more_evidence_available":result["evidence"]["has_more"]},ensure_ascii=False,indent=2))
         elif op=="compare" and type(result) is dict:
-            self._comparison_result=result;self._render_comparison()
+            self._comparison_sources=self._comparison_pending_sources;self._comparison_pending_sources=None
+            self._comparison_result=result;self._render_comparison();self.refresh()
+        elif op=='load_comparison' and type(result) is dict:
+            self._comparison_sources=None;self._comparison_result=result['comparison'];self._render_comparison();self.refresh()
         elif op=="evidence_page" and type(result) is dict:self.render_page(result)
         elif op=="prepare_client" and type(result) is dict:
             self.details.setPlainText(result["instructions"]+"\n\n"+result["folder"])

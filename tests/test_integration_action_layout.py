@@ -84,10 +84,11 @@ class ActionLayoutTests(unittest.TestCase):
         layout = QVBoxLayout(host); panel = ResearchPanel(host); layout.addWidget(panel)
         expected = (
             "Context / capabilities", "Apply context", "Prepare my application",
-            "Verify native PDB…", "Inspect dump stacks…", "Windows snapshot",
+            "Verify native PDB…", "Inspect saved dump (built-in)…", "Inspect dump with optional CDB…", "Windows snapshot",
             "ETW recording", "EventPipe 10 s", "System failure events",
             "Read saved ETL…", "Capture minidump", "Diagnostic permissions…",
-            "Export investigation…", "Compare investigations…", "Verify package…",
+            "Export investigation…", "Compare investigations…", "Save comparison JSON / HTML…",
+            "Open saved comparison…", "Verify package…",
             "Recover interrupted session…", "Open saved session…")
         original = list(panel.buttons)
         panel.scenario.setText("Keep my experiment")

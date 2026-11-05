@@ -1,13 +1,14 @@
 """Bounded user-selected policies. Standard never starts opt-in collectors."""
 from copy import deepcopy
-TRIGGERS=('CPU_SUSTAINED','PRIVATE_GROWTH','RSS_GROWTH','HANDLE_GROWTH','IO_BURST','UI_TIMEOUT','PROCESS_EXIT_OBSERVED','SAMPLING_GAP')
+TRIGGERS=('CPU_SUSTAINED','PRIVATE_GROWTH','RSS_GROWTH','HANDLE_GROWTH','IO_BURST','UI_TIMEOUT','PROCESS_EXIT_OBSERVED','MANUAL_PROBLEM','CRASH_OBSERVED','APP_CRASH_MARKER','SAMPLING_GAP')
 DEFAULT={'schema_version':1,'profile':'STANDARD','detail_interval_ms':2000,'thread_limit':256,
  'child_limit':256,'top_threads':32,'burst_seconds':20,'burst_interval_ms':500,'session_seconds':0,
  'max_session_mb':1024,'max_trace_mb':256,'windows_enabled':False,'incident_enabled':False,'adaptive_throttle':True,
  'incident':{'threshold':85.,'min_duration_ms':3000,'gap_ms':5500,'pre_ms':60000,'post_ms':20000,
  'cooldown_ms':30000,'max_incidents':20,'memory_growth_bytes':32*1024**2,'handle_growth':128,
  'growth_window_ms':10000,'io_rate_bytes_s':64*1024**2,'gap_incidents':False,
- 'enabled_triggers':list(TRIGGERS[:-1]),'cpu_reference':'ABSOLUTE'}}
+ 'enabled_triggers':list(TRIGGERS[:-1]),'cpu_reference':'ABSOLUTE',
+ 'max_buffer_samples':512,'max_buffer_bytes':1024*1024}}
 def validate_policy(value=None):
  result=deepcopy(DEFAULT)
  if value is None:return result

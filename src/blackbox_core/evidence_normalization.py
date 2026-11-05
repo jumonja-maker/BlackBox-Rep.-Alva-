@@ -269,6 +269,9 @@ def _trace_thread(trace, row):
     sample = row.get("cpu_sample")
     if isinstance(sample, dict) and isinstance(sample.get("thread"), dict):
         candidate = sample["thread"]
+    io = row.get("io_observation")
+    if isinstance(io, dict) and isinstance(io.get("event_thread"), dict):
+        candidate = io["event_thread"]
     if isinstance(candidate, dict) and _int(candidate.get("thread_instance")):
         return {**process, "kind": "TRACE_THREAD", "thread_instance": candidate["thread_instance"],
                 "tid": row["tid"]}
@@ -392,15 +395,47 @@ def _selection(spec, shared):
 
 def _source(kind, stable, *, selection, extra=None, hash_roles=None):
     hashes = sorted(stable.hashes.values())
-    manifest = sorted(zip(hash_roles or (str(index) for index in range(len(stable.paths))),
-                          (stable.hashes[path] for path in stable.paths)))
+    roles = list(hash_roles or (str(index) for index in range(len(stable.paths))))
+    manifest = sorted(zip(roles, (stable.hashes[path] for path in stable.paths)))
     digest = hashes[0] if len(hashes) == 1 else hashlib.sha256(canonical_json(manifest).encode("ascii")).hexdigest()
     return {"source_id": stable_id("source", kind, digest), "source_type": kind,
             "source_sha256": digest, "source_file_count": len(hashes),
             "verification_class": "UNVERIFIED_IMPORT", "selection": selection,
-            "content_hashes": hashes, "content_manifest": [{"role": role, "sha256": value} for role, value in manifest],
+            "source_size_bytes": sum(stable.stamps[path][2] for path in stable.paths),
+            "content_hashes": hashes,
+            "content_manifest": sorted([{"role": role, "sha256": stable.hashes[path],
+                "size_bytes": stable.stamps[path][2]} for role, path in zip(roles, stable.paths)],
+                key=lambda item: item["role"]),
+            "provenance": {"origin": "EXPLICIT_LOCAL_FILE_SELECTION",
+                "producer_authentication": "NOT_ESTABLISHED",
+                "content_integrity": "STABLE_HASHED_NO_ACTIVE_WAL"},
             "source_consistency": "STABLE_HASHED_NO_ACTIVE_WAL",
             **(extra or {})}
+
+
+def source_coverage(source):
+    """Separate a complete bounded scan from unknown original capture coverage."""
+    issues = []
+    if source.get("scan_complete") is not True:
+        issues.append("SOURCE_SCAN_INCOMPLETE")
+    if source.get("decoded_status") == "TRUNCATED":
+        issues.append("DECODED_PREFIX_ONLY")
+    if (type(source.get("decoder_reported_lost_events")) is int and
+            source["decoder_reported_lost_events"] > 0):
+        issues.append("REPORTED_EVENT_LOSS")
+    for key in ("writer_dropped_commands", "sensor_errors_count", "event_sequence_gaps",
+                "scheduler_nodes_omitted", "application_client_dropped_total",
+                "application_order_errors", "application_sequence_gaps", "events_with_errors",
+                "events_without_fields_or_schema", "bounded_events"):
+        if type(source.get(key)) is int and source[key] > 0:
+            issues.append(key.upper())
+    if source.get("decode_errors_observed") is True:
+        issues.append("DECODE_ERRORS_OBSERVED")
+    if source.get("source_type") == "SESSION" and source.get("source_closed") is not True:
+        issues.append("SESSION_CLOSE_NOT_CONFIRMED")
+    return {"scan_status": "COMPLETE_AVAILABLE_ROWS" if source.get("scan_complete") is True else "INCOMPLETE",
+        "capture_status": "INCOMPLETE_EVIDENCE" if issues else "UNKNOWN_CAPTURE_COMPLETENESS",
+        "scope": "AVAILABLE_RECORDED_EVIDENCE_NOT_PROOF_OF_COMPLETE_CAPTURE", "issues": issues}
 
 
 def _register_source(source, stable, path, out):
@@ -418,7 +453,7 @@ def _register_source(source, stable, path, out):
 
 def _trace(spec, selection, out):
     from .decoder_index import APP_ID, _saved_json, read_index, validate_event
-    from .decoder_io import validate_io_clock
+    from .decoder_io import validate_io_clock, build_file_io_report, build_disk_io_report
     from .decoder_waits import build_wait_report
     from .decoder_cpu import classify_cpu_sample
     path = safe_path(Path(spec["path"]))
@@ -443,6 +478,9 @@ def _trace(spec, selection, out):
     source = _source("TRACE_INDEX", stable, selection=selection, hash_roles=["trace_index", *extra_roles],
         extra={"trace_sha256": trace, "trace_input_sha256": trace, "index_sha256": stable.hashes[path],
         "decoded_status": summary.get("status"), "decoder_reported_lost_events": summary.get("decoder_reported_lost_events"),
+        "events_with_errors": summary.get("events_with_errors"),
+        "events_without_fields_or_schema": summary.get("events_without_fields_or_schema"),
+        "bounded_events": summary.get("bounded_events"),
         "scheduler_complete": False, "time_domain": "TRACE_RELATIVE:" + trace})
     if not _register_source(source, stable, path, out):
         return
@@ -453,6 +491,7 @@ def _trace(spec, selection, out):
         alignment = assess_session_alignment(path, spec["clock_journal"], spec["session_path"], cancel=out.budget)
         source["clock_alignment"] = _metadata(alignment)
     count = selected = schedule_nodes = schedule_omitted = 0
+    file_candidates = disk_request_candidates = 0
     previous_time = None
     out_of_order = errors = False
     after = selection.get("after", 0)
@@ -501,6 +540,8 @@ def _trace(spec, selection, out):
                 "event_id": row.get("event_id"), "opcode": row.get("opcode"), "version": row.get("version"),
                 "fields": row.get("payload", {}), "errors": row.get("errors", [])}
             typed = row.get("io_observation")
+            file_candidates += row["name"].startswith(("FileIO/", "FileIo/"))
+            disk_request_candidates += row["name"] in ("DiskIO/ReadInit", "DiskIO/WriteInit")
             cpu_source = "etw"
             cpu_class = classify_cpu_sample(row, cpu_source)
             if cpu_class == "OTHER_SOURCE":
@@ -592,8 +633,91 @@ def _trace(spec, selection, out):
             time_domain=domain, time_bounds=_bounds(interval["start_ms"], interval["end_ms"], "ms"),
             metadata={**interval, "record_refs": ["events:" + str(x) for x in interval["source_event_ids"]],
                       "record_ref_relation": "SCHEDULER_INTERVAL_BOUNDARY"})
+    # Request pairing needs the complete recorded inventory, as scheduler
+    # pairing does. A source prefix/continuation never starts another full scan.
+    file_report = disk_report = None
+    file_nodes_added = disk_nodes_added = 0
+
+    def io_boundary(record, name, timestamp, identity, kind, *, phase, details=None):
+        """A retained projection of an actually validated source index row.
+
+        Completion headers may describe a system/completer thread outside the
+        selected issuing process. Keep that real boundary so its direct record
+        reference remains navigable; never relabel it with the issuer's PID.
+        """
+        if name is None:
+            return
+        process = _trace_process(trace, identity or {})
+        thread = ({**process, "kind": "TRACE_THREAD", "tid": identity["tid"], "thread_instance": identity["thread_instance"]}
+            if process is not None and _int((identity or {}).get("thread_instance")) else None)
+        out.add(source, "events:" + str(record), kind, process_identity=process, thread_identity=thread,
+            time_domain=domain, time_bounds=_bounds(timestamp, unit="ms"),
+            metadata={"event_name": name, "event_kind": name, "source_event_id": record,
+                "request_boundary_phase": phase, "event_thread": identity,
+                "projection_kind": "VALIDATED_INDEX_IO_BOUNDARY", **(details or {})})
+
+    if count == total and after == 0:
+        io_filters = {"pid": selection.get("pid", 0), "process_instance": selection.get("process_instance"),
+            "tid": selection.get("tid"), "start_ms": selection.get("start_ms"),
+            "end_ms": selection.get("end_ms"), "cancel": out.budget}
+        if file_candidates:
+            file_report = build_file_io_report(path, max_operations=min(10_000, out.budget.max_nodes), **io_filters)
+            source["file_io_coverage"] = _metadata(file_report["coverage"])
+            for operation in file_report["operations"]:
+                out.budget.check()
+                refs = operation["source_event_ids"]
+                io_boundary(refs[0], operation["start_event_name"], operation["source_start_ms"],
+                    operation["issuing_thread"], "FILE_OPERATION", phase="start")
+                if len(refs) == 2:
+                    io_boundary(refs[1], operation["end_event_name"], operation["source_end_ms"],
+                        operation["completion_thread"], "FILE_OPERATION", phase="end",
+                        details={"observed_completion_ntstatus": operation["observed_completion_ntstatus"],
+                                 "status_attribution": "COMPLETION_EVENT_HEADER_NOT_ISSUER"})
+                process = _trace_process(trace, operation)
+                thread = ({**process, "kind": "TRACE_THREAD", "thread_instance": operation["thread_instance"],
+                    "tid": operation["tid"]} if process is not None and _int(operation.get("thread_instance")) else None)
+                added = out.add(source, "file-io:" + operation["operation_id"], "FILE_OPERATION",
+                    process_identity=process, thread_identity=thread, time_domain=domain,
+                    time_bounds=_bounds(operation["start_ms"], operation["end_ms"], "ms"),
+                    completeness_status="OBSERVED_REQUEST_BOUNDARIES" if operation["quality"] == "OBSERVED_REQUEST_PAIR" else "INCOMPLETE_EVIDENCE",
+                    metadata={**operation, "file_io_pair": True,
+                        "recorded_source": "ETW_KERNEL_FILE_IO",
+                        "status": "ERROR" if type(operation.get("ntstatus")) is int and operation["ntstatus"] >> 30 == 3 else
+                                  "RECORDED_NTSTATUS" if operation.get("ntstatus") is not None else "NOT_ESTABLISHED",
+                        "record_refs": ["events:" + str(x) for x in operation["source_event_ids"]],
+                        "record_ref_relation": "FILE_IO_REQUEST_BOUNDARIES"})
+                file_nodes_added += added is not None
+            source["file_io_coverage"]["graph_operation_nodes_added"] = file_nodes_added
+        if disk_request_candidates:
+            disk_report = build_disk_io_report(path, max_requests=min(10_000, out.budget.max_nodes), **io_filters)
+            source["disk_io_coverage"] = _metadata(disk_report["coverage"])
+            for request in disk_report["requests"]:
+                out.budget.check()
+                refs = request["source_event_ids"]
+                io_boundary(refs[0], request["start_event_name"], request["source_start_ms"],
+                    request["issuing_thread"], "ANNOTATION", phase="start")
+                io_boundary(refs[1], request["end_event_name"], request["source_end_ms"],
+                    request["completion_thread"], "DISK_COMPLETION", phase="end",
+                    details={"reported_response_ms": request["reported_response_ms"],
+                             "status_attribution": "COMPLETION_EVENT_HEADER_NOT_ISSUER"})
+                process = _trace_process(trace, request)
+                thread = {**process, "kind": "TRACE_THREAD", "thread_instance": request["thread_instance"], "tid": request["tid"]}
+                added = out.add(source, "disk-io:" + request["request_id"], "DISK_COMPLETION",
+                    process_identity=process, thread_identity=thread, time_domain=domain,
+                    time_bounds=_bounds(request["start_ms"], request["end_ms"], "ms"),
+                    completeness_status="OBSERVED_REQUEST_BOUNDARIES" if request["quality"] == "OBSERVED_REQUEST_PAIR" else "INCOMPLETE_EVIDENCE",
+                    metadata={**request, "disk_io_pair": True, "recorded_source": "ETW_KERNEL_DISK_IO",
+                        "record_refs": ["events:" + str(x) for x in request["source_event_ids"]],
+                        "record_ref_relation": "DISK_IO_REQUEST_BOUNDARIES"})
+                disk_nodes_added += added is not None
+            source["disk_io_coverage"]["graph_request_nodes_added"] = disk_nodes_added
+    elif file_candidates or disk_request_candidates:
+        out.limitations.add("IO_REQUEST_ANALYSIS_REQUIRES_COMPLETE_SOURCE_SCAN")
     out.coverage["source_coverage"].append({"source_id": source["source_id"], "events_scanned": count,
-        "selected_events": selected, "events_total_after_cursor": total, "wait_intervals": len(waits.get("intervals", []))})
+        "selected_events": selected, "events_total_after_cursor": total, "wait_intervals": len(waits.get("intervals", [])),
+        "file_operations": len(file_report["operations"]) if file_report is not None else None,
+        "disk_requests": len(disk_report["requests"]) if disk_report is not None else None,
+        "file_operation_nodes_added": file_nodes_added, "disk_request_nodes_added": disk_nodes_added})
     if count < total:
         out.coverage["next_cursor"].append({"source_id": source["source_id"], "source_sha256": source["source_sha256"],
             "after": last_identifier, "algorithm_version": ALGORITHM_VERSION, "selection": selection})
@@ -1146,17 +1270,105 @@ def _investigation_v2(spec, selection, out):
     out.receipts.append(stable)
 
 
+def _dump_anchor(report):
+    """Keep the source anchor bounded; detailed rows have existing typed nodes."""
+    data = report.get("data", {})
+    fields = ("schema", "file", "size_bytes", "sha256", "architecture", "recorded_pid",
+              "recorded_creation_unix_seconds", "live_process_binding", "memory_contents_included")
+    summary = {key: data.get(key) for key in fields}
+    coverage = data.get("coverage", {})
+    summary["coverage"] = {key: coverage.get(key) for key in
+        ("module_count", "thread_count", "memory_range_count", "modules_omitted", "threads_omitted", "memory_ranges_omitted")}
+    exception = data.get("exception")
+    summary["exception"] = ({key: exception.get(key) for key in
+        ("tid", "code", "flags", "address", "parameter_count", "context_bytes_recorded")}
+        if isinstance(exception, dict) else None)
+    return {"kind": "SAVED_MINIDUMP", "report": {"status": report.get("status"), "data": summary},
+            "details": "EXISTING_TYPED_MODULE_THREAD_STACK_EXCEPTION_NODES",
+            "memory_contents_included": False, "live_process_binding": "NOT_ESTABLISHED"}
+
+
 def _dump(spec, selection, out):
     from .deep_dump import inspect_dump
     path = safe_path(Path(spec["path"]))
-    stable = _StableSource([path], out.budget)
+    _require(not spec.get("pdb_path") or bool(spec.get("image_path")), "LOCAL_IMAGE_REQUIRED_FOR_DUMP_UNWIND")
+    _require("max_frames" not in spec, "DUMP_NORMALIZATION_USES_FIXED_FRAME_BUDGET")
+    related = [(key, safe_path(Path(spec[key]))) for key in ("image_path", "pdb_path") if spec.get(key)]
+    stable = _StableSource([path, *[value for _, value in related]], out.budget)
+    options = {key: str(value) for key, value in related}
     report = inspect_dump(path, max_bytes=min(out.budget.max_source_bytes, 2 * 1024**3),
-                          cancel_event=out.budget, deadline=out.budget.deadline)
-    source = _source("DUMP_METADATA", stable, selection=selection)
+        cancel_event=out.budget, deadline=out.budget.deadline, **options)
+    data = report.get("data", {})
+    _require(data.get("sha256") == stable.hashes[path], "SOURCE_CHANGED_BETWEEN_HASH_AND_DUMP_INSPECTION")
+    native_started = data.get("stack_unwind_status") not in (None, "UNSUPPORTED_PLATFORM")
+    image_metadata = data.get("stack_unwind", {}).get("local_image_metadata", {})
+    if native_started:
+        chosen_image = next((value for key, value in related if key == "image_path"), None)
+        _require(chosen_image is not None and image_metadata.get("source") == "LOCAL_PINNED_PE_UNWIND_METADATA" and
+                 image_metadata.get("sha256") == stable.hashes[chosen_image],
+                 "PINNED_PE_METADATA_SOURCE_HASH_MISMATCH")
+    source = _source("DUMP_METADATA", stable, selection=selection,
+                     hash_roles=["minidump", *["local_image" if key == "image_path" else "local_pdb" for key, _ in related]])
     if not _register_source(source, stable, path, out):
         return
-    out.add(source, "minidump:metadata", "ARTIFACT", metadata={"kind": "SAVED_MINIDUMP", "report": report,
-        "memory_contents_included": False, "live_process_binding": "NOT_ESTABLISHED"})
+    out.add(source, "minidump:metadata", "ARTIFACT", metadata=_dump_anchor(report))
+    source["native_resources_started"] = native_started
+    if native_started:
+        source["local_image_metadata"] = _metadata(image_metadata)
+        source["native_resource_cleanup"] = _metadata(data.get("cleanup", {
+            "status": "NOT_COLLECTED", "confirmed": False, "resource_owner": "SAVED_DBGHELP_SESSION"}))
+    domain = "MINIDUMP_RECORDED:" + stable.hashes[path]
+    process = ({"kind": "UNRESOLVED_PROCESS", "pid": data["recorded_pid"],
+                "source_scope": source["source_id"], "exact": False}
+               if _int(data.get("recorded_pid"), 1, 2**32 - 1) else None)
+    source.update(time_domain=domain, dump_sha256=stable.hashes[path],
+                  live_process_binding="NOT_ESTABLISHED")
+    if process is not None:
+        out.add(source, "minidump:process", "PROCESS", process_identity=process, time_domain=domain,
+            metadata={"recorded_pid": data["recorded_pid"],
+                "recorded_creation_unix_seconds": data.get("recorded_creation_unix_seconds"),
+                "record_refs": ["minidump:metadata"], "identity_quality": "RECORDED_NOT_LIVE_FILETIME"})
+    for index, module in enumerate(data.get("modules", [])[:200]):
+        if not out.scan():
+            break
+        out.add(source, "minidump:module:" + str(index), "MODULE", process_identity=process,
+            time_domain=domain, metadata={**module, "record_refs": ["minidump:metadata"],
+                "record_ref_relation": "CAPTURED_MINIDUMP_MODULE"})
+    unwind = data.get("stack_unwind", {})
+    unwind_threads = {row["tid"]: row for row in unwind.get("threads", []) if isinstance(row, dict) and
+                      _int(row.get("tid"), 1)} if isinstance(unwind, dict) else {}
+    for row in data.get("threads", [])[:200]:
+        if not out.scan():
+            break
+        tid = row.get("tid")
+        if not _int(tid, 1, 2**32 - 1):
+            continue
+        record = "minidump:thread:" + str(tid)
+        thread = {"kind": "UNRESOLVED_THREAD", "tid": tid, "source_scope": source["source_id"], "exact": False}
+        out.add(source, record, "THREAD", process_identity=process, thread_identity=thread,
+            time_domain=domain, metadata={**row, "record_refs": ["minidump:metadata"],
+                "record_ref_relation": "CAPTURED_MINIDUMP_THREAD", "live_thread_binding": "NOT_ESTABLISHED"})
+        saved = unwind_threads.get(tid, {})
+        frames = saved.get("frames") or row.get("frames") or []
+        if not frames and isinstance(row.get("context"), dict) and _int(row["context"].get("rip")):
+            frames = [{"address": row["context"]["rip"], "origin": "CAPTURED_CONTEXT_PC"}]
+        if frames:
+            out.add(source, "minidump:stack:" + str(tid), "STACK", process_identity=process,
+                thread_identity=thread, time_domain=domain,
+                metadata={"frames": frames[:64], "method": saved.get("method", "CAPTURED_CONTROL_CONTEXT_PC_ONLY"),
+                    "context_status": row.get("context", {}).get("status"),
+                    "context_source": saved.get("context_source", row.get("context_source", "SAVED_MINIDUMP_THREAD_CONTEXT")),
+                    "frames_omitted_from_view": max(0, len(frames) - 64),
+                    "unwind_status": saved.get("status", row.get("context", {}).get("unwind_status", "NOT_ESTABLISHED")),
+                    "record_refs": [record], "record_ref_relation": "SAVED_MINIDUMP_STACK",
+                    "memory_contents_included": False, "root_cause": "UNKNOWN"})
+    if isinstance(data.get("exception"), dict):
+        out.add(source, "minidump:exception", "ERROR", process_identity=process, time_domain=domain,
+            metadata={"kind": "SAVED_MINIDUMP_EXCEPTION", "exception": data["exception"],
+                "record_refs": ["minidump:metadata"], "root_cause": "UNKNOWN"})
+    source["scan_complete"] = (not out.coverage["has_more"] and
+        not any(data.get("coverage", {}).get(key, 0) for key in
+                ("modules_omitted", "threads_omitted", "memory_ranges_omitted")))
     stable.verify()
     out.receipts.append(stable)
 
@@ -1194,6 +1406,12 @@ def normalize_sources(sources, *, selection=None, budget=None):
         _require(old is None or old.get("selection") == source.get("selection"), "DUPLICATE_SOURCE_SELECTION_AMBIGUOUS")
         by_source[source["source_id"]] = source
     out.sources = sorted(by_source.values(), key=lambda x: x["source_id"])
+    for source in out.sources:
+        source["coverage"] = source_coverage(source)
+    out.coverage["evidence_completeness"] = ("INCOMPLETE_EVIDENCE" if
+        out.coverage["has_more"] or out.coverage["events_omitted"] or out.coverage["nodes_omitted"] or
+        any(source["coverage"]["capture_status"] == "INCOMPLETE_EVIDENCE" for source in out.sources)
+        else "UNKNOWN_CAPTURE_COMPLETENESS")
     _finish_clocks(out)
     result = budget.result({"sources": out.sources, "nodes": out.nodes, "coverage": out.coverage,
         "limitations": sorted(out.limitations), "clock_relations": []})

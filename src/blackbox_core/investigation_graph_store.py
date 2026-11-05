@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from contextlib import closing
+from dataclasses import replace
 import hashlib
 import html
 import json
@@ -60,10 +61,13 @@ def public_metadata(value, depth=0):
 
 def _validated(case, budget):
     from .evidence_graph import validate_case
+    from .crash_investigation import project_crash_evidence
     budget.check()
     validate_case(case, budget=budget)
     value = public_metadata(case)
     validate_case(value, budget=budget)
+    if "crash_investigation" in value:
+        value["crash_investigation"] = project_crash_evidence(value, budget=budget)
     return budget.result(value)
 
 
@@ -72,11 +76,15 @@ def _stamp(path):
     return stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns
 
 
-def _hash(path, budget):
+def _hash(path, budget, *, max_bytes=None):
     digest = hashlib.sha256()
+    size = 0
     with path.open("rb") as stream:
         while block := stream.read(1024 * 1024):
             budget.check()
+            size += len(block)
+            if max_bytes is not None and size > max_bytes:
+                raise InvestigationError("INVESTIGATION_PUBLICATION_READBACK_BYTE_BUDGET")
             digest.update(block)
     return digest.hexdigest()
 
@@ -99,13 +107,21 @@ def save_investigation(case, path, *, budget=None, before_publish=None):
     value = _validated(case, budget)
     destination = safe_path(Path(path))
     if destination.exists():
+        initial_stamp, initial_digest = _stamp(destination), _hash(destination, budget)
         existing = load_investigation(destination, budget=budget)
+        if _stamp(destination) != initial_stamp or _hash(destination, budget) != initial_digest:
+            raise InvestigationError("INVESTIGATION_INDEX_CHANGED_BEFORE_PUBLICATION")
         if canonical_json(existing) != canonical_json(value):
             raise FileExistsError("INVESTIGATION_INDEX_DESTINATION_EXISTS")
         if before_publish is not None:
             before_publish()
+        if _stamp(destination) != initial_stamp or _hash(destination, budget) != initial_digest:
+            raise InvestigationError("INVESTIGATION_INDEX_CHANGED_DURING_PUBLICATION")
+        verified = load_investigation(destination, budget=budget)
+        if canonical_json(verified) != canonical_json(value) or _stamp(destination) != initial_stamp:
+            raise InvestigationError("INVESTIGATION_INDEX_READBACK_MISMATCH")
         return {"status": "COMPLETED", "path": str(destination), "case_id": value["case_id"],
-                "sha256": _hash(destination, budget), "publication": "IDENTICAL_EXISTING_INDEX"}
+                "sha256": initial_digest, "publication": "IDENTICAL_EXISTING_INDEX", "readback_verified": True}
     descriptor, temporary = tempfile.mkstemp(prefix=".blackbox-investigation-", suffix=".sqlite3", dir=destination.parent)
     os.close(descriptor)
     temporary = Path(temporary)
@@ -150,14 +166,36 @@ def save_investigation(case, path, *, budget=None, before_publish=None):
             before_publish()
         budget.check()
         # Atomic create-new publication; an existing source or index is never overwritten.
+        expected_stamp = _stamp(temporary)
+        expected_identity, expected_size = expected_stamp[:2], expected_stamp[2]
         os.link(temporary, destination)
     except sqlite3.Error:
         budget.check()  # SQLite translates progress-handler cancellation into OperationalError.
         raise
     finally:
-        temporary.unlink(missing_ok=True)
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError as error:
+            error.cleanup_unconfirmed = True
+            raise
+    try:
+        # Publication is the commit point: cancellation after it cannot undo
+        # success. Verify committed bytes without that late cancellation, while
+        # retaining the original deadline and every other caller budget limit.
+        readback_budget = replace(budget, cancel_event=None)
+        readback_stamp = _stamp(destination)
+        if (readback_stamp[:2] != expected_identity or readback_stamp[2] != expected_size or
+                _hash(destination, readback_budget, max_bytes=expected_size) != digest or
+                canonical_json(load_investigation(destination, budget=readback_budget)) != canonical_json(value) or
+                _stamp(destination) != readback_stamp):
+            raise InvestigationError("INVESTIGATION_INDEX_PUBLICATION_READBACK_UNCONFIRMED")
+    except Exception as error:
+        # The published name may now belong to another writer. Never remove it
+        # in an attempt to roll back an unconfirmed result.
+        error.publication_unconfirmed = True
+        raise
     return {"status": "COMPLETED", "path": str(destination), "case_id": value["case_id"],
-            "sha256": digest, "publication": "ATOMIC_CREATE_NEW"}
+            "sha256": digest, "publication": "ATOMIC_CREATE_NEW", "readback_verified": True}
 
 
 def _open_index(path, budget):
@@ -224,7 +262,10 @@ def load_investigation(path, *, budget=None):
         raise InvestigationError("INVESTIGATION_INDEX_CHANGED_DURING_READ")
     value["analysis_provenance"] = "UNVERIFIED_DERIVATION_RECOMPUTE_SOURCES_FOR_CURRENT_LINK_VALIDATION"
     value["file_trust"] = "UNVERIFIED_IMPORT"
-    return value
+    from .crash_investigation import project_crash_evidence
+    if "crash_investigation" in value:
+        value["crash_investigation"] = project_crash_evidence(value, budget=budget)
+    return budget.result(value)
 
 
 def query_graph(path, *, kind="nodes", after=0, limit=100, budget=None):
@@ -254,7 +295,12 @@ def export_investigation(case, destination, *, format="json", budget=None, cance
         for hypothesis in value.get("hypotheses", []):
             budget.check()
             content += "<li>" + html.escape(str(hypothesis.get("description", ""))) + " — " + html.escape(str(hypothesis.get("status", ""))) + "</li>"
-        content += "</ul><h2>Source-linked investigation</h2><pre>" + html.escape(json.dumps(value, ensure_ascii=False, indent=2, allow_nan=False)) + "</pre></body></html>"
+        from .delay_investigation import render_delay_html
+        content += "</ul>" + render_delay_html(value.get("delay_investigation"))
+        from .crash_investigation import crash_report_html
+        if "crash_investigation" in value:
+            content += crash_report_html(value["crash_investigation"], nodes=value["nodes"], budget=budget)
+        content += "<h2>Source-linked investigation</h2><pre>" + html.escape(json.dumps(value, ensure_ascii=False, indent=2, allow_nan=False)) + "</pre></body></html>"
         payload = content.encode("utf-8")
     else:
         payload = raw.encode("ascii")
@@ -270,11 +316,27 @@ def export_investigation(case, destination, *, format="json", budget=None, cance
             stream.flush()
             os.fsync(stream.fileno())
         budget.check()
+        expected_identity = _stamp(Path(temporary))[:2]
         os.link(temporary, target)
     finally:
-        Path(temporary).unlink(missing_ok=True)
+        try:
+            Path(temporary).unlink(missing_ok=True)
+        except OSError as error:
+            error.cleanup_unconfirmed = True
+            raise
+    try:
+        readback_budget = replace(budget, cancel_event=None)
+        stamp = _stamp(target)
+        if (stamp[:2] != expected_identity or stamp[2] != len(payload) or
+                _hash(target, readback_budget, max_bytes=len(payload)) != hashlib.sha256(payload).hexdigest() or
+                _stamp(target) != stamp):
+            raise InvestigationError("INVESTIGATION_EXPORT_PUBLICATION_READBACK_UNCONFIRMED")
+    except Exception as error:
+        error.publication_unconfirmed = True
+        raise
     return {"status": "COMPLETED", "path": str(target), "case_id": value["case_id"],
             "format": format, "bytes": len(payload), "sha256": hashlib.sha256(payload).hexdigest(),
+            "readback_verified": True,
             "privacy": "METADATA_ONLY_DEFINED_SENSITIVE_KEYS_AND_RECOGNIZABLE_PATHS_URLS_REDACTED",
             "universal_secret_detection": False, "source_files_modified": False}
 

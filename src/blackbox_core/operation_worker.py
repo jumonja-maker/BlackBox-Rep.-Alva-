@@ -15,7 +15,7 @@ LIBRARY_OPERATIONS = frozenset({'library_query','library_register','library_scan
     'library_compare','library_policy','library_retention','library_plan_trash',
     'library_apply_trash','library_restore','library_reconcile','library_plan_purge','library_apply_purge','library_trace_scan','library_trace_recover','library_export','library_note'})
 OPERATIONS = LIBRARY_OPERATIONS | frozenset({'native', 'symbols', 'inspect_dump', 'inspect', 'prepare_client',
-    'episode', 'evidence_page', 'export', 'compare', 'verify', 'recover', 'dump', 'processes','investigation','incident_card','events_query','export_recovery_scan','export_recover','crash_events','decode_trace'})
+    'episode', 'evidence_page', 'export', 'compare', 'compare_export', 'load_comparison', 'verify', 'recover', 'dump', 'processes','investigation','incident_card','events_query','export_recovery_scan','export_recover','crash_events','decode_trace'})
 TARGET_OPERATIONS = frozenset({'native', 'symbols', 'inspect', 'dump'})
 MAX_RESULT_BYTES = 4 * 1024 * 1024
 
@@ -105,7 +105,14 @@ def execute(packet):
         if folder is None:raise ValueError('START_RECORDING_FIRST')
         if op=='crash_events':
             from .crash_events import query
-            result=query(pid,created)
+            identity=packet.get('exact_process_identity')
+            expected=None
+            if identity is not None:
+                if (not isinstance(identity,dict) or identity.get('pid')!=pid or
+                        type(identity.get('created_100ns')) is not int or identity['created_100ns']<=0):
+                    raise ValueError('CRASH_QUERY_TARGET_IDENTITY_MISMATCH')
+                expected=identity['created_100ns']
+            result=query(pid,created,expected_created_100ns=expected,image_name=packet.get('target_image_name'))
         else:
             from .trace_decode import decode
             result=decode(a['path'],target_pid=pid)
@@ -166,6 +173,12 @@ def execute(packet):
         else:
             from .report import compare
             result = compare(Path(a['before']), Path(a['after']))
+    elif op == 'compare_export':
+        from .casebook import export_comparison
+        result=export_comparison(a['before'],a['after'],a['destination'],format=a.get('format','json'))
+    elif op == 'load_comparison':
+        from .casebook import load_comparison
+        result=load_comparison(a['path'])
     elif op == 'verify':
         from .casebook import verify_package
         result = verify_package(a['path'])

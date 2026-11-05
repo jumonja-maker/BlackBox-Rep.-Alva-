@@ -267,7 +267,7 @@ class DeepMediumTokenNativeContract(unittest.TestCase):
         self.assertEqual(child["interactive_uac_secure_desktop"], "NOT_TESTED")
         self.assertNotEqual(proof["grandchild"]["pid"], proof["pid"])
         self.assertEqual(proof["grandchild"]["pid"], proof["owned_process"]["pid"])
-        self.assertEqual(proof["owned_process"]["windows_creation_flags"], 0x8)
+        self.assertEqual(proof["owned_process"]["windows_creation_flags"], 0xC)
         self.assertTrue(proof["grandchild"]["received_expected_marker"], details)
         self.assertEqual(proof["startup"]["stages"]["create_pipe_default_security"]["status"], "SUCCEEDED", details)
         self.assertEqual(proof["startup"]["stages"]["duplicate_owned_temporary_file"]["status"], "SUCCEEDED", details)

@@ -1,12 +1,14 @@
 """Offline trace decode supervisor; the recorder and its databases are not touched."""
 from __future__ import annotations
+from contextlib import contextmanager
 import os
 from pathlib import Path
 import sys
 import tempfile
 import time
 
-from .decoder_index import build_index, file_hash
+from .decoder_index import (FRAME_MODULE_INLINE, FRAME_MODULE_PER_EVENT,
+                            build_index, file_hash)
 from .decoder_limits import DecodeBudget, MAX_INPUT_BYTES, MAX_WORK_BYTES, failure_details
 
 
@@ -35,8 +37,84 @@ def _local_file(path):
     return path
 
 
-def decode_file(path, destination, *, cancel=None, timeout=180):
+def _check_work_bytes(root, budget):
+    """Count a changing private workspace, tolerating only vanished children.
+
+    TraceEvent removes its .etlx scratch directory before the helper exits.
+    pathlib.rglob can raise while advancing the iterator, outside a per-file
+    stat guard. Check each scandir advancement and each entry while preserving
+    permission and other I/O failures as import failures.
+    """
+    root = Path(root)
+    budget.check("NATIVE_DECODE")
+    pending = [root]
+    size = 0
+    while pending:
+        budget.check("NATIVE_DECODE")
+        directory = pending.pop()
+        try:
+            with os.scandir(directory) as entries:
+                for entry in entries:
+                    budget.check("NATIVE_DECODE")
+                    try:
+                        # As with rglob, never traverse directory symlinks.
+                        if entry.is_dir(follow_symlinks=False):
+                            pending.append(Path(entry.path))
+                        elif entry.is_file():
+                            size += entry.stat().st_size
+                    except FileNotFoundError:
+                        continue
+                    if size > MAX_WORK_BYTES:
+                        raise ValueError("DECODER_DISK_BUDGET")
+        except FileNotFoundError:
+            if directory == root:
+                raise  # Loss of our staging root is not ordinary scratch cleanup.
+            budget.check("NATIVE_DECODE")
+    return size
+
+
+@contextmanager
+def _private_decode_stage():
+    stage = tempfile.TemporaryDirectory(prefix="blackbox-decode-")
+    released = False
+    def release():
+        nonlocal released
+        if not released:
+            stage.cleanup()
+            released = True
+    try:
+        yield stage.name, release
+    except BaseException as error:
+        owner = getattr(error, "owner", None)
+        if owner is not None and getattr(owner, "cleanup_required", False):
+            # Keep the actual TemporaryDirectory object alive with its native
+            # owner until an explicit verified close can release both.
+            owner.retain_cleanup_resource(stage)
+            released = True
+        raise
+    finally:
+        release()
+
+
+def decode_file(path, destination, *, cancel=None, timeout=180, native_module_encoding=None):
+    if native_module_encoding not in (None, FRAME_MODULE_INLINE, FRAME_MODULE_PER_EVENT):
+        raise ValueError("UNSUPPORTED_FRAME_MODULE_ENCODING")
+    from .deep_tool_contracts import begin_evidence_run, record_evidence_failure
+    # Preserve the established validation error before constructing metadata.
+    DecodeBudget(cancel, timeout)
+    context = begin_evidence_run("decoder.decode", timeout_seconds=timeout)
+    try:
+        return _decode_file(path, destination, cancel=cancel, timeout=timeout, context=context,
+                            native_module_encoding=native_module_encoding)
+    except Exception as error:
+        record_evidence_failure(context, error)
+        raise
+
+
+def _decode_file(path, destination, *, cancel, timeout, context, native_module_encoding=None):
     from .session_v2 import safe_path
+    if native_module_encoding not in (None, FRAME_MODULE_INLINE, FRAME_MODULE_PER_EVENT):
+        raise ValueError("UNSUPPORTED_FRAME_MODULE_ENCODING")
     budget = DecodeBudget(cancel, timeout)
     budget.check("VALIDATE")
     path = _local_file(path)
@@ -46,7 +124,7 @@ def decode_file(path, destination, *, cancel=None, timeout=180):
     if path.suffix.lower() == ".etl" and os.name != "nt":
         raise OSError("ETL_REQUIRES_WINDOWS")
     before = file_hash(path, cancel, budget=budget, max_bytes=MAX_INPUT_BYTES)
-    with tempfile.TemporaryDirectory(prefix="blackbox-decode-") as temp:
+    with _private_decode_stage() as (temp, release_private_stage):
         root = Path(temp)
         snapshot = root / ("input" + path.suffix.lower())
         # Decoder sees a private snapshot, not the mutable original file.
@@ -72,9 +150,12 @@ def decode_file(path, destination, *, cancel=None, timeout=180):
             env = {**os.environ, "DOTNET_CLI_TELEMETRY_OPTOUT": "1", "DOTNET_GCHeapHardLimit": "40000000",
                    "_NT_SYMBOL_PATH": "", "_NT_ALT_SYMBOL_PATH": ""}
             owner = None
+            command = [str(tool), str(snapshot), str(decoded)]
+            if native_module_encoding == FRAME_MODULE_INLINE:
+                command.append("--inline-modules")
             with (root / "decoder.log").open("xb") as log:
                 try:
-                    owner = OwnedProcess([str(tool), str(snapshot), str(decoded)], stdout=log, stderr=log,
+                    owner = OwnedProcess(command, stdout=log, stderr=log,
                                          env=env, detach_console=True)
                     process = psutil.Process(owner.process.pid)
                     try: process.nice(psutil.BELOW_NORMAL_PRIORITY_CLASS if os.name == "nt" else 5)
@@ -85,22 +166,14 @@ def decode_file(path, destination, *, cancel=None, timeout=180):
                             if process.memory_info().rss > 1536 * 1024**2:
                                 raise MemoryError("DECODER_RSS_BUDGET")
                         except psutil.NoSuchProcess: pass
-                        size = 0
-                        for item in root.rglob("*"):
-                            try:
-                                if item.is_file(): size += item.stat().st_size
-                            except FileNotFoundError: pass
-                        if size > MAX_WORK_BYTES:
-                            raise ValueError("DECODER_DISK_BUDGET")
+                        _check_work_bytes(root, budget)
                         time.sleep(.1)
                     if owner.process.returncode != 0:
                         raise OSError("DECODER_FAILED_EXIT_" + str(owner.process.returncode))
                     budget.check("NATIVE_DECODE")
                     # A fast helper can finish between polls. Enforce its
                     # final disk budget as well, before indexing any output.
-                    if sum(item.stat().st_size for item in root.rglob("*")
-                           if item.is_file()) > MAX_WORK_BYTES:
-                        raise ValueError("DECODER_DISK_BUDGET")
+                    _check_work_bytes(root, budget)
                 finally:
                     if owner is not None:
                         owner.close(kill=True)
@@ -110,6 +183,29 @@ def decode_file(path, destination, *, cancel=None, timeout=180):
                     path, cancel, budget=budget, max_bytes=MAX_INPUT_BYTES) != before:
                 raise ValueError("ORIGINAL_INPUT_CHANGED_DURING_DECODE")
 
+        def complete_metadata(meta):
+            from .deep_tool_contracts import attach_evidence_run_receipt
+            verify_original()
+            # build_index has closed the parser and its private SQLite writer.
+            # Native OwnedProcess.close must also have returned successfully.
+            release_private_stage()
+            source = {"source_id": "trace-input:" + before, "source_type": "TRACE_FILE",
+                "source_sha256": before, "source_size_bytes": total,
+                "verification_class": "UNVERIFIED_IMPORT",
+                "provenance": "EXPLICIT_LOCAL_FILE_SELECTION_NOT_PRODUCER_AUTHENTICATION"}
+            partial = (meta["status"] == "TRUNCATED" or meta.get("events_with_errors", 0) > 0 or
+                       meta.get("events_without_fields_or_schema", 0) > 0 or meta.get("bounded_events", 0) > 0 or
+                       (meta.get("decoder_reported_lost_events") or 0) > 0)
+            return attach_evidence_run_receipt(context, meta, sources=(source,),
+                source_revalidated=True, execution_started=True,
+                coverage={"completeness": "INCOMPLETE_EVIDENCE" if partial else "UNKNOWN_CAPTURE_COMPLETENESS",
+                    "rows": meta["rows"], "import_completeness": meta["import_completeness"],
+                    "original_capture_complete": None},
+                cleanup={"status": "CONFIRMED", "confirmed": True,
+                    "scope": "DECODE_HELPER_AND_PRIVATE_INPUT_STAGING",
+                    "private_staging_removed": True, "capture_started": False})
+
         verify_original()
         return build_index(decoded, destination, input_sha256=before, format_name=path.suffix.lower(),
-                           cancel=cancel, budget=budget, before_publish=verify_original)
+                           cancel=cancel, budget=budget, before_publish=verify_original,
+                           metadata_adapter=complete_metadata)

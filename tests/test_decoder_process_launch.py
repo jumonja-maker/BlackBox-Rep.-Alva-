@@ -23,7 +23,9 @@ class DetachedDecoderProcessTests(unittest.TestCase):
                                      stdout=stream, stderr=stream, detach_console=True)
                 try:
                     self.assertEqual(owner.process.wait(timeout=20), 0)
-                    self.assertEqual(owner.windows_creation_flags, 0x8 if os.name == "nt" else 0)
+                    # Suspended start closes the spawn-before-job-binding race;
+                    # DETACHED_PROCESS still suppresses the decoder console.
+                    self.assertEqual(owner.windows_creation_flags, 0xC if os.name == "nt" else 0)
                 finally:
                     owner.close(kill=True)
             self.assertEqual(set(log.read_text(encoding="utf-8").splitlines()), {"OUT", "ERR"})

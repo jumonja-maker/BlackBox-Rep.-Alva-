@@ -19,10 +19,24 @@ INCIDENT={
  'post_ms':('Post-context, ms','Контекст после, мс',0,60000),
  'cooldown_ms':('Cooldown, ms','Пауза между инцидентами, мс',0,3600000),
  'max_incidents':('Incident limit','Лимит инцидентов',1,1000),
+ 'max_buffer_samples':('Prehistory sample limit','Лимит измерений предыстории',1,4096),
+ 'max_buffer_bytes':('Prehistory memory budget, accounted bytes','Бюджет памяти предыстории, оценка в байтах',1024,16*1024*1024),
  'memory_growth_bytes':('Memory growth, bytes','Рост памяти, байт',0,2147483647),
  'handle_growth':('Handle growth','Рост дескрипторов',0,1048576),
  'growth_window_ms':('Growth window, ms','Окно роста, мс',0,60000),
  'io_rate_bytes_s':('I/O threshold, bytes/s','Порог I/O, байт/с',0,2147483647)}
+TRIGGER_LABELS={
+ 'CPU_SUSTAINED':('Sustained CPU threshold','Длительное превышение CPU'),
+ 'PRIVATE_GROWTH':('Private memory growth','Рост private memory'),
+ 'RSS_GROWTH':('RSS growth','Рост RSS'),
+ 'HANDLE_GROWTH':('Handle count growth','Рост числа дескрипторов'),
+ 'IO_BURST':('I/O throughput burst','Всплеск объёма I/O'),
+ 'UI_TIMEOUT':('Observed UI timeout','Наблюдаемый неответ UI'),
+ 'PROCESS_EXIT_OBSERVED':('Observed process exit','Наблюдаемое завершение процесса'),
+ 'MANUAL_PROBLEM':('User problem marker','Отметка проблемы пользователем'),
+ 'CRASH_OBSERVED':('OS crash event: exact instance','Событие аварии точного процесса'),
+ 'APP_CRASH_MARKER':('Application crash marker','Метка аварии от приложения'),
+ 'SAMPLING_GAP':('Observed sampling gap','Наблюдаемый разрыв опроса')}
 class CaptureSettings(QWidget):
  def __init__(self,window):
   super().__init__(window);self.window=window;self.bridge=window.probe;self.labels=[];self.boxes={};self.triggers={}
@@ -42,10 +56,12 @@ class CaptureSettings(QWidget):
   form.addRow('CPU reference',self.reference)
   self.labels.append((self.adaptive,'Reduce sampling frequency on sustained observer usage','Снижать частоту при длительной нагрузке наблюдателя'));form.addRow(self.adaptive)
   for trigger in TRIGGERS:
-   box=QCheckBox(trigger);box.setChecked(trigger in DEFAULT['incident']['enabled_triggers']);self.triggers[trigger]=box;form.addRow(box)
+   box=QCheckBox();box.setChecked(trigger in DEFAULT['incident']['enabled_triggers']);self.triggers[trigger]=box
+   en,ru=TRIGGER_LABELS[trigger];self.labels.append((box,en,ru));form.addRow(box)
   layout.addWidget(self.form_widget);self.form_widget.hide();toggle.toggled.connect(self.form_widget.setVisible)
   self.apply=QPushButton();self.labels.append((self.apply,'Apply before recording','Применить до начала записи'));self.apply.clicked.connect(self.commit);layout.addWidget(self.apply)
   self.status=QLabel();self.status.setWordWrap(True);layout.addWidget(self.status)
+  self.coverage_status=QLabel();self.coverage_status.setWordWrap(True);layout.addWidget(self.coverage_status)
   if hasattr(self.bridge,'result_ready'):self.bridge.result_ready.connect(self.receive);self.bridge.updated.connect(self.refresh)
   else:self.setEnabled(False)
   self.retranslate()
@@ -54,6 +70,9 @@ class CaptureSettings(QWidget):
   for w,en,ru in self.labels:w.setText(self.tr(en,ru))
   self.note.setText(self.tr('Standard: base counters. Detailed: extra thread/child/memory queries. Burst: bounded detail after an incident. Profiles do not start ETW or dumps. Actual overhead requires a benchmark.',
    'Standard: базовые счётчики. Detailed: дополнительные запросы потоков, потомков и памяти. Burst: подробная запись на ограниченное время после инцидента. Профили не запускают ETW и дампы. Нагрузку нужно измерять.'))
+  self.triggers['APP_CRASH_MARKER'].setToolTip(self.tr('The application reports this marker. It does not prove an operating-system crash.',
+   'Это сообщение приложения, а не подтверждение аварии операционной системой.'))
+  self.refresh()
  def values(self):
   p={};incident={}
   for key,box in self.boxes.items():
@@ -67,7 +86,18 @@ class CaptureSettings(QWidget):
   except (ValueError,RuntimeError) as exc:
    from .research_messages import explain
    self.status.setText(explain(str(exc),self.window.language))
- def refresh(self):self.apply.setEnabled(not self.bridge.active and not self.bridge.pending);self.form_widget.setEnabled(not self.bridge.active);self.profile.setEnabled(not self.bridge.active)
+ def refresh(self):
+  active=getattr(self.bridge,'active',False);pending=getattr(self.bridge,'pending',False)
+  self.apply.setEnabled(not active and not pending);self.form_widget.setEnabled(not active);self.profile.setEnabled(not active)
+  coverage=getattr(self.bridge,'data',{}).get('incident_coverage')
+  if type(coverage) is dict:
+   self.coverage_status.setText(self.tr('Retained prehistory: ','Сохранено в буфере предыстории: ')+
+    str(coverage.get('retained_samples',0))+'/'+str(coverage.get('max_buffer_samples',0))+
+    self.tr(' samples · accounted memory ',' измерений · учтённая память ')+
+    str(coverage.get('accounted_buffer_bytes',0))+'/'+str(coverage.get('max_buffer_bytes',0))+
+    self.tr(' bytes · capacity evictions ',' байт · вытеснено по лимиту ')+str(coverage.get('capacity_evictions',0))+
+    self.tr(' · omitted triggers ',' · пропущено триггеров ')+str(coverage.get('dropped_triggers',0)))
+  else:self.coverage_status.clear()
  def receive(self,op,result,error):
   if op not in ('capture_policy','capture_profile'):return
   if error:self.status.setText(error);return
