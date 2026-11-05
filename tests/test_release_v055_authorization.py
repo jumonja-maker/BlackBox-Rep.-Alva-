@@ -5,6 +5,8 @@ import unittest
 from tools.publish_v055_after_ci import (
     approved_release_source, REPOSITORY, CI_NAME, APPROVED_RELEASE_BRANCH,
     APPROVED_REPAIR_BRANCH, APPROVED_VERSION_HEAD_SHA, V055_VERSION_MAIN_SHA,
+    APPROVED_ETW_MAIN_SHA, APPROVED_REPAIR_HEAD_SHA,
+    APPROVED_RELEASE_QA_PR, APPROVED_RELEASE_QA_BRANCH, APPROVED_RELEASE_QA_SCOPE,
     R10_MAIN_SHA, PRIOR_RELEASE_SHA, PRIOR_ZIP_SHA256, REQUIRED_JOBS,
 )
 
@@ -29,8 +31,20 @@ class R10V055PublicationAuthorityTests(unittest.TestCase):
         self.version_parent = R10_MAIN_SHA
         self.version_other_parent = APPROVED_VERSION_HEAD_SHA
         self.repair_branch = APPROVED_REPAIR_BRANCH
-        self.repair_merge = SHA
-        self.parent = V055_VERSION_MAIN_SHA
+        self.repair_merge = APPROVED_ETW_MAIN_SHA
+        self.repair_head = APPROVED_REPAIR_HEAD_SHA
+        self.repair_merged = True
+        self.repair_parent = V055_VERSION_MAIN_SHA
+        self.repair_other_parent = APPROVED_REPAIR_HEAD_SHA
+        self.qa_branch = APPROVED_RELEASE_QA_BRANCH
+        self.qa_merge = SHA
+        self.qa_merged = True
+        self.qa_head = HEAD
+        self.qa_base = "main"
+        self.qa_files = [{"filename": name, "status": "modified"}
+                         for name in sorted(APPROVED_RELEASE_QA_SCOPE)]
+        self.qa_changed_files = len(self.qa_files)
+        self.parent = APPROVED_ETW_MAIN_SHA
         self.other_parent = HEAD
         self.jobs = [{"name": name, "status": "completed", "conclusion": "success"}
                      for name in sorted(REQUIRED_JOBS)]
@@ -56,12 +70,21 @@ class R10V055PublicationAuthorityTests(unittest.TestCase):
                 "parents": [{"sha": self.version_parent},
                             {"sha": self.version_other_parent}],
             },
-            prefix + "pulls?state=closed&per_page=100": [{
-                "merged_at": "2026-11-04T20:00:00Z", "number": 32,
-                "merge_commit_sha": self.repair_merge,
-                "head": {"ref": self.repair_branch, "sha": HEAD},
+            prefix + "pulls/32": {
+                "merged": self.repair_merged, "merge_commit_sha": self.repair_merge,
+                "head": {"ref": self.repair_branch, "sha": self.repair_head},
                 "base": {"ref": "main"},
-            }],
+            },
+            prefix + "git/commits/" + APPROVED_ETW_MAIN_SHA: {
+                "parents": [{"sha": self.repair_parent}, {"sha": self.repair_other_parent}],
+            },
+            prefix + f"pulls/{APPROVED_RELEASE_QA_PR}": {
+                "merged": self.qa_merged, "merge_commit_sha": self.qa_merge,
+                "head": {"ref": self.qa_branch, "sha": self.qa_head},
+                "base": {"ref": self.qa_base},
+                "changed_files": self.qa_changed_files,
+            },
+            prefix + f"pulls/{APPROVED_RELEASE_QA_PR}/files?per_page=100": self.qa_files,
             prefix + "git/commits/" + SHA: {
                 "parents": [{"sha": self.parent}, {"sha": self.other_parent}],
             },
@@ -90,6 +113,7 @@ class R10V055PublicationAuthorityTests(unittest.TestCase):
         receipt = self.verify()
         self.assertEqual(receipt["version_pr"], 31)
         self.assertEqual(receipt["etw_repair_pr"], 32)
+        self.assertEqual(receipt["release_qa_pr"], APPROVED_RELEASE_QA_PR)
         self.assertEqual(receipt["r10_pr"], 30)
         self.assertEqual(receipt["required_jobs"], 8)
         self.assertEqual(receipt["main_sha"], SHA)
@@ -134,21 +158,63 @@ class R10V055PublicationAuthorityTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "V055_VERSION_MERGE_ANCESTRY_MISMATCH"):
             self.verify()
 
-    def test_repair_branch_and_merge_source_must_be_exact(self):
+    def test_original_etw_repair_and_merge_ancestry_must_be_exact(self):
         self.repair_branch = "unapproved"
-        with self.assertRaisesRegex(ValueError, "OWNER_APPROVED_V055_ETW_REPAIR_MERGE_MISSING"):
+        with self.assertRaisesRegex(ValueError, "APPROVED_ETW_REPAIR_MERGE_CHANGED"):
             self.verify()
         self.repair_branch = APPROVED_REPAIR_BRANCH
         self.repair_merge = HEAD
-        with self.assertRaisesRegex(ValueError, "OWNER_APPROVED_V055_ETW_REPAIR_MERGE_MISSING"):
+        with self.assertRaisesRegex(ValueError, "APPROVED_ETW_REPAIR_MERGE_CHANGED"):
             self.verify()
-        self.repair_merge = SHA
-        self.parent = R10_MAIN_SHA
-        with self.assertRaisesRegex(ValueError, "V055_REPAIR_MERGE_ANCESTRY_MISMATCH"):
+        self.repair_merge = APPROVED_ETW_MAIN_SHA
+        self.repair_merged = False
+        with self.assertRaisesRegex(ValueError, "APPROVED_ETW_REPAIR_MERGE_CHANGED"):
             self.verify()
+        self.repair_merged = True
+        self.repair_parent = R10_MAIN_SHA
+        with self.assertRaisesRegex(ValueError, "V055_ETW_REPAIR_ANCESTRY_MISMATCH"):
+            self.verify()
+        self.repair_parent = V055_VERSION_MAIN_SHA
+        self.repair_other_parent = HEAD
+        with self.assertRaisesRegex(ValueError, "V055_ETW_REPAIR_ANCESTRY_MISMATCH"):
+            self.verify()
+
+    def test_only_owner_approved_release_qa_merge_can_publish(self):
+        self.qa_branch = "unapproved"
+        with self.assertRaisesRegex(ValueError, "APPROVED_V055_RELEASE_QA_MERGE_MISSING"):
+            self.verify()
+        self.qa_branch = APPROVED_RELEASE_QA_BRANCH
+        self.qa_merged = False
+        with self.assertRaisesRegex(ValueError, "APPROVED_V055_RELEASE_QA_MERGE_MISSING"):
+            self.verify()
+        self.qa_merged = True
+        self.qa_merge = HEAD
+        with self.assertRaisesRegex(ValueError, "APPROVED_V055_RELEASE_QA_MERGE_MISSING"):
+            self.verify()
+        self.qa_merge = SHA
+        self.qa_base = "release"
+        with self.assertRaisesRegex(ValueError, "APPROVED_V055_RELEASE_QA_MERGE_MISSING"):
+            self.verify()
+        self.qa_base = "main"
         self.parent = V055_VERSION_MAIN_SHA
+        with self.assertRaisesRegex(ValueError, "V055_RELEASE_QA_MERGE_ANCESTRY_MISMATCH"):
+            self.verify()
+        self.parent = APPROVED_ETW_MAIN_SHA
         self.other_parent = "c" * 40
-        with self.assertRaisesRegex(ValueError, "V055_REPAIR_MERGE_ANCESTRY_MISMATCH"):
+        with self.assertRaisesRegex(ValueError, "V055_RELEASE_QA_MERGE_ANCESTRY_MISMATCH"):
+            self.verify()
+
+    def test_release_qa_file_scope_fails_closed(self):
+        self.qa_files[0]["filename"] = "docs/roadmap.md"
+        with self.assertRaisesRegex(ValueError, "UNAPPROVED_V055_RELEASE_QA_FILE_SCOPE"):
+            self.verify()
+        self.qa_files[0]["filename"] = sorted(APPROVED_RELEASE_QA_SCOPE)[0]
+        self.qa_files[0]["status"] = "added"
+        with self.assertRaisesRegex(ValueError, "UNAPPROVED_V055_RELEASE_QA_FILE_SCOPE"):
+            self.verify()
+        self.qa_files[0]["status"] = "modified"
+        self.qa_changed_files += 1
+        with self.assertRaisesRegex(ValueError, "UNAPPROVED_V055_RELEASE_QA_FILE_SCOPE"):
             self.verify()
 
     def test_any_missing_failed_skipped_or_duplicate_mandatory_job_blocks(self):

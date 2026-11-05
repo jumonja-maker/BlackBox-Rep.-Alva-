@@ -12,6 +12,7 @@ import json
 import os
 from pathlib import Path
 import queue
+import re
 import shutil
 import struct
 import subprocess
@@ -817,6 +818,34 @@ def exited_target_check(output: Path, executable: Path, helper: Path | None) -> 
             probe.close(kill=True)
 
 
+
+def verify_normal_helper_shutdown(output: Path, probe: Probe, helper: Path | None) -> dict:
+    """A separate *non-crashed* Helper must still ACK cleanly and really exit."""
+    from blackbox_core.deep_contracts import ActionRequest
+    from blackbox_core.deep_service import InspectorService
+    service = InspectorService(journal_root=output / "normal-final-shutdown", helper_executable=helper)
+    observed = None
+    helper_pid = None
+    try:
+        identity = service.identity(probe.process.pid)
+        observed = service.execute(ActionRequest("modules", identity))
+        helper_pid = service.helper_pid
+        require(observed.get("status") in ("COMPLETED", "INCOMPLETE_EVIDENCE") and
+                helper_pid not in (None, os.getpid(), probe.process.pid),
+                "NORMAL_FROZEN_HELPER_OBSERVATION_NOT_VERIFIED")
+    finally:
+        closed = service.close()
+    status = service.session_status()
+    require(closed.get("status") == "COMPLETED" and service.helper is None and
+            status.get("helper_pid") is None and status.get("state") == "INACTIVE" and
+            status.get("cleanup_required") is False,
+            "NORMAL_FROZEN_HELPER_CLOSE_ACK_OR_EXIT_UNCONFIRMED")
+    return {"status": "PASS", "helper_pid": helper_pid,
+            "observation_status": observed["status"], "close_status": closed["status"],
+            "helper_exit_confirmed": True, "cleanup_required": False}
+
+
+
 def run_acceptance(output: Path, executable: Path, helper: Path | None, *, require_medium_integrity=False) -> dict:
     from blackbox_core.windows_research import privilege
     require_hosted_windows()
@@ -856,6 +885,7 @@ def run_acceptance(output: Path, executable: Path, helper: Path | None, *, requi
         proof["before_after_journal"] = acceptance.compare_and_journal()
         proof["helper_crash"] = acceptance.crash_recovery()
         proof["target_exit_race"] = exited_target_check(output, executable, helper)
+        proof["normal_helper_close"] = verify_normal_helper_shutdown(output, probe, helper)
         proof["operation_count"] = len(acceptance.operations)
         proof["status"] = "PASS"
     except BaseException as error:
@@ -874,8 +904,34 @@ def run_acceptance(output: Path, executable: Path, helper: Path | None, *, requi
             try:
                 proof["helper_cleanup"] = acceptance.service.close()
                 if proof["status"] == "PASS":
-                    require(proof["helper_cleanup"].get("status") == "COMPLETED",
-                            "NORMAL_HELPER_FINAL_CLEANUP_UNCONFIRMED")
+                    crash = proof.get("helper_crash", {})
+                    crashed_close = crash.get("service_recovery", {}).get("status")
+                    if (crash.get("status") == "PASS" and crashed_close == "RECOVERY_UNCONFIRMED"
+                            and crash.get("target_progress_verified") is True
+                            and crash.get("selected_bytes_restored_verified") is True
+                            and crash.get("own_thread_resumed_verified") is True):
+                        # The owned Helper was deliberately killed. Guardian/target
+                        # recovery was independently observed, but no authenticated
+                        # close ACK exists. The application MUST preserve that
+                        # uncertainty rather than falsely claiming normal cleanup.
+                        remaining = acceptance.service.session_status()
+                        require(proof["helper_cleanup"].get("status") == "RECOVERY_UNCONFIRMED"
+                                and acceptance.service.helper is None
+                                and remaining.get("helper_pid") is None
+                                and remaining.get("state") == "CLEANUP_REQUIRED"
+                                and remaining.get("cleanup_required") is True
+                                and remaining.get("active") is False
+                                and proof.get("normal_helper_close", {}).get("status") == "PASS",
+                                "CRASH_RECOVERY_FAIL_CLOSED_STATE_NOT_PRESERVED")
+                        proof["post_crash_cleanup"] = {
+                            "status": "EXPECTED_RECOVERY_UNCONFIRMED",
+                            "original_helper_exit_verified": True,
+                            "owned_target_recovery_independently_verified": True,
+                            "replacement_normal_helper_cleanup": "PASS",
+                            "unknown_cleanup_ack_retained": True}
+                    else:
+                        require(proof["helper_cleanup"].get("status") == "COMPLETED",
+                                "NORMAL_HELPER_FINAL_CLEANUP_UNCONFIRMED")
             except BaseException as error:
                 proof.update(status="FAIL", cleanup_error=type(error).__name__, cleanup_reason=str(error)[:1000])
         if probe is not None:
@@ -886,6 +942,36 @@ def run_acceptance(output: Path, executable: Path, helper: Path | None, *, requi
                              target_cleanup_reason=str(error)[:1000])
         save(output / "acceptance.json", proof)
     return proof
+
+
+
+def _safe_qa_code(value):
+    """Bound release diagnostics to identifier-like codes, never paths or trace bytes."""
+    if not isinstance(value, str) or not value:
+        return "UNSPECIFIED"
+    candidate = value.split(":", 1)[0].strip()
+    return candidate if re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,95}", candidate) else "REDACTED_UNSTRUCTURED"
+
+
+def _emit_deep_release_diagnostic(report, phase):
+    detail = {"phase": phase, "status": _safe_qa_code(report.get("status")),
+              "error_type": _safe_qa_code(report.get("error")),
+              "reason_code": _safe_qa_code(report.get("reason")),
+              "helper_cleanup_error": _safe_qa_code(report.get("cleanup_error")),
+              "helper_cleanup_reason": _safe_qa_code(report.get("cleanup_reason")),
+              "target_cleanup_error": _safe_qa_code(report.get("target_cleanup_error")),
+              "target_cleanup_reason": _safe_qa_code(report.get("target_cleanup_reason")),
+              "helper_cleanup_status": _safe_qa_code(
+                  (report.get("helper_cleanup") or {}).get("status")),
+              "target_cleanup_status": _safe_qa_code(
+                  (report.get("target_cleanup") or {}).get("status"))}
+    record = json.dumps(detail, sort_keys=True)
+    print("DEEP_NATIVE_ACCEPTANCE_DIAGNOSTICS " + record, flush=True)
+    summary = os.environ.get("GITHUB_STEP_SUMMARY")
+    if summary:
+        with Path(summary).open("a", encoding="utf-8") as stream:
+            stream.write("\n- Frozen Diagnostic Helper QA " + record + "\n")
+
 
 
 def main() -> int:
@@ -902,7 +988,8 @@ def main() -> int:
     helper = args.helper.resolve(strict=True) if args.helper else None
     report = run_acceptance(output, executable, helper, require_medium_integrity=args.standard_worker)
     if report["status"] != "PASS":
-        print("DEEP_NATIVE_ACCEPTANCE_FAIL", report.get("reason", ""))
+        _emit_deep_release_diagnostic(report, "native-acceptance")
+        print("DEEP_NATIVE_ACCEPTANCE_FAIL", _safe_qa_code(report.get("reason")))
         return 1
     if not args.standard_worker:
         from tools.qa_decoder_standard_token import restricted_child, restricted_interpreter
@@ -934,7 +1021,8 @@ def main() -> int:
             save(output / "standard-startup-access.json", startup_access_diagnostics(
                 [executable, executable.parent, standard_output, standard_output / "probe",
                  Path(command[0])]))
-            print("DEEP_STANDARD_TOKEN_ACCEPTANCE_FAIL", report["reason"])
+            _emit_deep_release_diagnostic(report, "standard-token")
+            print("DEEP_STANDARD_TOKEN_ACCEPTANCE_FAIL", _safe_qa_code(report.get("reason")))
             return 1
         finally:
             save(output / "acceptance.json", report)
