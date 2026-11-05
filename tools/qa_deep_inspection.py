@@ -12,6 +12,7 @@ import json
 import os
 from pathlib import Path
 import queue
+import re
 import shutil
 import struct
 import subprocess
@@ -888,6 +889,36 @@ def run_acceptance(output: Path, executable: Path, helper: Path | None, *, requi
     return proof
 
 
+
+def _safe_qa_code(value):
+    """Bound release diagnostics to identifier-like codes, never paths or trace bytes."""
+    if not isinstance(value, str) or not value:
+        return "UNSPECIFIED"
+    candidate = value.split(":", 1)[0].strip()
+    return candidate if re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,95}", candidate) else "REDACTED_UNSTRUCTURED"
+
+
+def _emit_deep_release_diagnostic(report, phase):
+    detail = {"phase": phase, "status": _safe_qa_code(report.get("status")),
+              "error_type": _safe_qa_code(report.get("error")),
+              "reason_code": _safe_qa_code(report.get("reason")),
+              "helper_cleanup_error": _safe_qa_code(report.get("cleanup_error")),
+              "helper_cleanup_reason": _safe_qa_code(report.get("cleanup_reason")),
+              "target_cleanup_error": _safe_qa_code(report.get("target_cleanup_error")),
+              "target_cleanup_reason": _safe_qa_code(report.get("target_cleanup_reason")),
+              "helper_cleanup_status": _safe_qa_code(
+                  (report.get("helper_cleanup") or {}).get("status")),
+              "target_cleanup_status": _safe_qa_code(
+                  (report.get("target_cleanup") or {}).get("status"))}
+    record = json.dumps(detail, sort_keys=True)
+    print("DEEP_NATIVE_ACCEPTANCE_DIAGNOSTICS " + record, flush=True)
+    summary = os.environ.get("GITHUB_STEP_SUMMARY")
+    if summary:
+        with Path(summary).open("a", encoding="utf-8") as stream:
+            stream.write("\n- Frozen Diagnostic Helper QA " + record + "\n")
+
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", required=True, type=Path)
@@ -902,7 +933,8 @@ def main() -> int:
     helper = args.helper.resolve(strict=True) if args.helper else None
     report = run_acceptance(output, executable, helper, require_medium_integrity=args.standard_worker)
     if report["status"] != "PASS":
-        print("DEEP_NATIVE_ACCEPTANCE_FAIL", report.get("reason", ""))
+        _emit_deep_release_diagnostic(report, "native-acceptance")
+        print("DEEP_NATIVE_ACCEPTANCE_FAIL", _safe_qa_code(report.get("reason")))
         return 1
     if not args.standard_worker:
         from tools.qa_decoder_standard_token import restricted_child, restricted_interpreter
@@ -934,7 +966,8 @@ def main() -> int:
             save(output / "standard-startup-access.json", startup_access_diagnostics(
                 [executable, executable.parent, standard_output, standard_output / "probe",
                  Path(command[0])]))
-            print("DEEP_STANDARD_TOKEN_ACCEPTANCE_FAIL", report["reason"])
+            _emit_deep_release_diagnostic(report, "standard-token")
+            print("DEEP_STANDARD_TOKEN_ACCEPTANCE_FAIL", _safe_qa_code(report.get("reason")))
             return 1
         finally:
             save(output / "acceptance.json", report)
