@@ -388,6 +388,67 @@ def saved_evidence_graph(evidence):
     return definition(nodes, edges), hashes
 
 
+def _verify_live_case_budget(snapshot, records, *, fixture_pid, maximum):
+    """Independently check the actual explicit result limit and saved view.
+
+    The limit measures logical CASE JSON and export bytes. The SQLite index
+    also stores navigation rows and has its existing separate physical cap.
+    """
+    observed = {}
+    for operation in ("investigation.create", "investigation.export"):
+        calls = actual_invocations(records, operation)
+        require(len(calls) == 1 and calls[0][0].get("parameters", {}).get("max_result_bytes") == maximum,
+                "R60_LIVE_ACTUAL_COMPONENT_RESULT_LIMIT_NOT_EXPLICIT:" + operation)
+        observed[operation] = {"run_id": calls[0][0]["run_id"], "max_result_bytes": maximum}
+    rows = {row["node_id"]: row for row in snapshot["nodes"]}
+    artifacts = {"trace": rows["capture"]["outputs"]["trace"][0],
+                 "index": rows["decoder"]["outputs"]["index"][0],
+                 "case": rows["graph"]["outputs"]["case"][0],
+                 "export": rows["report"]["outputs"]["report"][0]}
+    paths = {name: Path(artifact["value"]["_path"]) for name, artifact in artifacts.items()}
+    hashes = {name: file_hash(path) for name, path in paths.items()}
+    require(all(hashes[name] == artifact["value"]["sha256"] for name, artifact in artifacts.items()) and
+            artifacts["index"]["value"]["trace_sha256"] == hashes["trace"],
+            "R60_LIVE_CASE_ORIGINAL_SOURCE_OR_OUTPUT_HASH_MISMATCH")
+    with closing(sqlite3.connect(paths["case"].resolve().as_uri() + "?mode=ro", uri=True, timeout=5)) as db:
+        db.execute("PRAGMA query_only=ON")
+        db.execute("PRAGMA trusted_schema=OFF")
+        db.setlimit(sqlite3.SQLITE_LIMIT_LENGTH, maximum + 65536)
+        deadline = time.monotonic() + 30
+        db.set_progress_handler(lambda: int(time.monotonic() >= deadline), 1000)
+        require(db.execute("PRAGMA integrity_check").fetchall() == [("ok",)], "R60_LIVE_CASE_SQL_INTEGRITY")
+        contents = db.execute("SELECT case_id,schema,content_json,content_sha256 FROM investigation LIMIT 2").fetchall()
+        require(len(contents) == 1, "R60_LIVE_CASE_SINGLE_SAVED_RESULT_REQUIRED")
+        case_id, schema, raw, content_sha = contents[0]
+        content_bytes = len(raw.encode("ascii"))
+        require(content_bytes <= maximum and hashlib.sha256(raw.encode("ascii")).hexdigest() == content_sha,
+                "R60_LIVE_CASE_EXPLICIT_LOGICAL_BYTE_BUDGET_OR_HASH")
+        case = json.loads(raw)
+        require(case.get("schema") == schema == "blackbox.investigation-graph/1" and
+                case.get("case_id") == case_id == artifacts["case"]["value"]["case_id"] and
+                db.execute("SELECT count(*) FROM nodes").fetchone()[0] == len(case["nodes"]) and
+                db.execute("SELECT count(*) FROM edges").fetchone()[0] == len(case["edges"]),
+                "R60_LIVE_CASE_SAVED_CONTENT_IDENTITY_OR_NAVIGATION")
+    exported = read_json(paths["export"], maximum=maximum)
+    selected = {"pid": fixture_pid}
+    for name, value in (("saved", case), ("export", exported)):
+        sources = value.get("sources", [])
+        require(value.get("case_id") == case_id and value.get("schema") == schema and
+                len(sources) == 1 and sources[0].get("source_type") == "TRACE_INDEX" and
+                sources[0].get("selection") == selected and sources[0].get("index_sha256") == hashes["index"] and
+                value.get("root_cause_proven") is False,
+                "R60_LIVE_CASE_EXPLICIT_RESULT_LIMIT_CHANGED_PID_OR_SOURCE_SCOPE:" + name)
+    require(all(file_hash(path) == hashes[name] for name, path in paths.items()),
+            "R60_LIVE_CASE_READBACK_MODIFIED_ORIGINAL_SOURCE_OR_OUTPUT")
+    return {"status": "PASS", "scope": "EXPLICIT_PER_NODE_LOGICAL_RESULT_LIMIT_AND_RECORDED_PID_VIEW",
+            "max_result_bytes": maximum, "actual_component_contexts": observed,
+            "case_content_bytes": content_bytes, "case_content_sha256": content_sha,
+            "case_index_file_bytes": paths["case"].stat().st_size,
+            "json_export_bytes": paths["export"].stat().st_size,
+            "selected_pid": fixture_pid, "source_hashes_unchanged": hashes,
+            "root_cause_proven": False}
+
+
 def native_live_graph(output, executable, source_sha, diagnostic_helper=None):
     """Real current-consent capture -> decoder -> graph, plus owned observation."""
     from blackbox_core.chain_adapters import ChainRuntime
@@ -397,6 +458,10 @@ def native_live_graph(output, executable, source_sha, diagnostic_helper=None):
     from .chain_qa_native import actual_token, OwnedWaveProbe
     from uuid import uuid4
     owned_run_id = uuid4().hex
+    # Run11's unchanged full workload exceeded the default32MiB result cap
+    # (34,024,440 bytes at BUILD_GRAPH). Exercise the public per-node setting
+    # with explicit headroom; retain that actual32MiB refusal as negative QA.
+    live_result_bytes = 48 * 1024**2
     service = fixture = None
     proof, approvals, launches = {"status": "FAIL"}, [], []
     burst_thread, burst_errors = None, []
@@ -455,11 +520,12 @@ def native_live_graph(output, executable, source_sha, diagnostic_helper=None):
             {"node_id": "decoder", "tool_id": "decode_trace", "budget_seconds": 180,
              "allow_partial_inputs": True},
             {"node_id": "graph", "tool_id": "investigate", "budget_seconds": 120,
-             "allow_partial_inputs": True, "parameters": {"selection": {"pid": target.pid}}},
+             "allow_partial_inputs": True, "parameters": {"selection": {"pid": target.pid},
+                "max_result_bytes": live_result_bytes}},
             {"node_id": "observe", "tool_id": "observe", "budget_seconds": 30,
              "parameters": {"duration_seconds": 3}},
             {"node_id": "report", "tool_id": "export_report", "allow_partial_inputs": True,
-             "parameters": {"format": "json"}}]
+             "parameters": {"format": "json", "max_result_bytes": live_result_bytes}}]
         edges = [link("target", "process", "capture", "process"),
                  link("capture", "trace", "decoder", "trace"), link("decoder", "index", "graph", "evidence"),
                  link("target", "process", "observe", "process"), link("graph", "case", "report", "case")]
@@ -470,6 +536,8 @@ def native_live_graph(output, executable, source_sha, diagnostic_helper=None):
         captures = actual_invocations(records, "profile.etw")
         require(len(captures) == 1 and captures[0][1]["execution_started"] is True and
                 captures[0][1]["cleanup"]["confirmed"] is True, "R60_ACTUAL_CAPTURE_RECEIPT_OR_CLEANUP")
+        result_budget_proof = _verify_live_case_budget(snapshot, records, fixture_pid=target.pid,
+                                                       maximum=live_result_bytes)
         live = service.session_status(refresh=True)
         require(live["helper_identity"] is None and len(launches) == 1 and
                 runtime.owned_session_run_id is None and runtime.native_context_ref is None and
@@ -506,7 +574,7 @@ def native_live_graph(output, executable, source_sha, diagnostic_helper=None):
             "fresh_consent_count": len(approvals), "denied_fresh_consent_count": len(refused),
             "helper_token": token, "runas_count": len(launches), "helper_identity": helper_identity,
             "source_sha": source_sha, "denied_branch_state": rows["denied"]["state"],
-            "ordinary_branch_state": rows["ordinary"]["state"]}
+            "ordinary_branch_state": rows["ordinary"]["state"], "explicit_result_budget": result_budget_proof}
     finally:
         if burst_thread is not None and burst_thread.is_alive():
             burst_thread.join(timeout=30)

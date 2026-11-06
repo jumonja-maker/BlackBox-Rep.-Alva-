@@ -25,7 +25,7 @@ def create_investigation(sources, *, target_identity=None, selection=None, scena
     budget = use_budget(budget, cancel_event=cancel_event)
     context = begin_evidence_run("investigation.create", target=target_identity,
         timeout_seconds=budget.timeout_seconds,
-        parameters={"selection": selection or {}, "scenario": scenario or {}})
+        parameters={"selection": selection or {}, "scenario": scenario or {}, "max_result_bytes": budget.max_result_bytes})
     try:
         return _create_investigation(sources, target_identity=target_identity, selection=selection,
             scenario=scenario, app_identity=app_identity, budget=budget,
@@ -267,7 +267,7 @@ def export_investigation(case, destination, *, format="json", budget=None, cance
     budget = use_budget(budget, cancel_event=cancel_event)
     sources = case.get("sources", []) if type(case) is dict else []
     context = begin_evidence_run("investigation.export", sources=sources,
-        timeout_seconds=budget.timeout_seconds, parameters={"format": format})
+        timeout_seconds=budget.timeout_seconds, parameters={"format": format, "max_result_bytes": budget.max_result_bytes})
     try:
         result = export(case, destination, format=format, budget=budget)
         return attach_evidence_run_receipt(context, result, sources=sources,

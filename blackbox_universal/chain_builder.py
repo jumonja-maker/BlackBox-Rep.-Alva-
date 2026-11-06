@@ -60,6 +60,7 @@ PARAMETER_LABELS = {
     "scenario": ("Declared scenario context", "Заявленный контекст сценария"),
     "parameters": ("Action parameters", "Параметры действия"),
     "duration_seconds": ("Duration, seconds", "Длительность, секунды"),
+    "max_result_bytes": ("CASE result budget, bytes", "Бюджет результата CASE, байт"),
     "policy": ("Capture policy overrides", "Переопределения политики записи"),
     "incident_id": ("Saved incident ID", "ID сохранённого инцидента"),
     "pre_seconds": ("Prehistory, seconds", "Предыстория, секунды"),
@@ -1149,6 +1150,10 @@ class ChainBuilderPanel(QWidget):
                                                   language=self.window.language)
             label = spec.get("label_ru") if self.window.language == "RU" else spec.get("label")
             label = str(label or spec.get("label") or PARAMETER_LABELS.get(key, (key, key))[1 if self.window.language == "RU" else 0])
+            if key == "max_result_bytes":
+                widget.setToolTip(self.tr2(
+                    "Default 32 MiB; explicit range 1 KiB–64 MiB. Configure the same budget on later CASE readers/exporters. This bounds serialized results, not total RAM.",
+                    "По умолчанию 32 МиБ; явный диапазон 1 КиБ–64 МиБ. Задайте тот же бюджет последующим узлам чтения/экспорта CASE. Это предел сериализованного результата, а не всей оперативной памяти."))
             self._form_row(key, label, widget)
             if key in ("path", "destination", "pdb_path", "pe_path", "index_path"):
                 button = QPushButton(self.tr2("Choose file/folder…", "Выбрать файл/папку…"))

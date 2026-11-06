@@ -50,6 +50,9 @@ _SOURCE_TYPES = {"TRACE_INDEX": "TRACE_INDEX", "SESSION": "SESSION", "DUMP": "DU
                  "DEEP_RESULT": "DEEP_JOURNAL"}
 _CLEAN_FILES = {"status": "CONFIRMED", "confirmed": True,
                 "scope": "OPERATION_FILE_HANDLES_CLOSED_AND_RESULT_READ_BACK"}
+_CASE_BUDGET_TOOLS = frozenset(("load_graph", "investigate", "critical_path", "crash", "incident", "compare", "export_report"))
+_DEFAULT_CASE_BYTES = 32 * 1024**2
+_MAX_CASE_BYTES = 64 * 1024**2
 
 
 def _descriptor(name, inputs, outputs, *, resources=(), effects="READ_ONLY_SOURCE; CREATE_NEW_RESULT_ONLY",
@@ -136,7 +139,8 @@ def _output(ctx, name):
 def _budget(ctx):
     from .investigation_graph_contracts import InvestigationBudget
     return InvestigationBudget(timeout_seconds=min(300, max(.001, ctx.remaining_seconds())),
-                               cancel_event=ctx.cancel, deadline=ctx.deadline)
+                               cancel_event=ctx.cancel, deadline=ctx.deadline,
+                               max_result_bytes=getattr(ctx, "_analysis_result_byte_limit", _DEFAULT_CASE_BYTES))
 
 
 def _save_metadata(ctx, value, name):
@@ -145,7 +149,7 @@ def _save_metadata(ctx, value, name):
     from .investigation_graph_store import public_metadata
     value = public_metadata(value)
     raw = canonical(value).encode("ascii")
-    require(len(raw) <= 32 * 1024**2, "WORKFLOW_RESULT_METADATA_BUDGET")
+    require(len(raw) <= _budget(ctx).max_result_bytes, "WORKFLOW_RESULT_METADATA_BUDGET")
     destination = _output(ctx, name).with_suffix(".json")
     with export_stage(destination.parent, kind="WORKFLOW_METADATA") as transaction:
         staged = transaction.reserve(destination.name)
@@ -205,12 +209,33 @@ def _wrap(name, descriptor, call):
         started, outcome = False, None
         try:
             ctx.check()
+            case_limit = parameters.get("max_result_bytes", _DEFAULT_CASE_BYTES) if name in _CASE_BUDGET_TOOLS else None
+            if name in _CASE_BUDGET_TOOLS:
+                require(type(case_limit) is int and 1024 <= case_limit <= _MAX_CASE_BYTES,
+                        "WORKFLOW_ANALYSIS_RESULT_BYTE_LIMIT")
+                run.limits["max_result_bytes"] = case_limit
             for artifact in artifacts:
                 _verify(artifact, ctx)
             # A returned component outcome supplies its actual execution flag.
             # A validation/dispatch exception alone cannot prove collection ran.
             started = None
-            outcome = call(ctx, inputs, parameters)
+            if name in _CASE_BUDGET_TOOLS:
+                had_limit = hasattr(ctx, "_analysis_result_byte_limit")
+                previous_limit = getattr(ctx, "_analysis_result_byte_limit", None)
+                ctx._analysis_result_byte_limit = case_limit
+                try:
+                    # Workflow-only limits are not component action arguments
+                    # or saved-source authority. Native paths retain their own
+                    # existing typed allowlists and confirmation contracts.
+                    component_parameters = {key: value for key, value in parameters.items() if key != "max_result_bytes"}
+                    outcome = call(ctx, inputs, component_parameters)
+                finally:
+                    if had_limit:
+                        ctx._analysis_result_byte_limit = previous_limit
+                    else:
+                        del ctx._analysis_result_byte_limit
+            else:
+                outcome = call(ctx, inputs, parameters)
             # Revalidate consumed originals after analysis, not after native
             # intervention (which legitimately changes the live process).
             for artifact in artifacts:
@@ -740,6 +765,9 @@ def build_catalog(runtime=None):
     catalog = {}
     def add(name, inputs, outputs, parameters, call, *, resources=(), read_only=True, confirmation=False,
             required_rights="READ_ONLY_LOCAL_EVIDENCE"):
+        if name in _CASE_BUDGET_TOOLS:
+            parameters = {**parameters, "max_result_bytes": _param("integer", default=_DEFAULT_CASE_BYTES,
+                                                                min=1024, max=_MAX_CASE_BYTES)}
         descriptor = _descriptor(name, inputs, outputs, resources=resources, required_rights=required_rights,
             effects="READ_ONLY_SOURCE; CREATE_NEW_RESULT_ONLY" if read_only else "EXPLICIT_OWNED_SESSION_FINALIZATION")
         catalog[name] = ToolAdapter(name, descriptor, inputs, outputs, parameters,
