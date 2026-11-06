@@ -18,13 +18,14 @@ jobs:
   scope:
     if: >-
       (github.event_name == 'pull_request' && github.head_ref == 'feature/r60-chain-builder-wave03') ||
-      (github.event_name == 'push' && (contains(github.event.head_commit.message, '[r60-contracts]') || contains(github.event.head_commit.message, '[r60-native]'))) ||
+      (github.event_name == 'push' && (contains(github.event.head_commit.message, '[r60-contracts]') || contains(github.event.head_commit.message, '[r60-native]') || contains(github.event.head_commit.message, '[r60-gui]'))) ||
       github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
       contracts: ${{ steps.scope.outputs.contracts }}
       native: ${{ steps.scope.outputs.native }}
+      gui_only: ${{ steps.scope.outputs.gui_only }}
       lifecycle: ${{ steps.scope.outputs.lifecycle }}
     steps:
       - id: scope
@@ -37,15 +38,21 @@ jobs:
         run: |
           set -euo pipefail
           if [[ "$EVENT" == pull_request || "$EVENT" == workflow_dispatch ]]; then
-            printf '%s\n' 'contracts=true' 'native=true' 'lifecycle=true' >> "$GITHUB_OUTPUT"
+            printf '%s\n' 'contracts=true' 'native=true' 'gui_only=false' 'lifecycle=true' >> "$GITHUB_OUTPUT"
             printf '%s\n' 'Full R60 candidate: contracts, actual native source/frozen/UI, real 5h30 lifecycle.' >> "$GITHUB_STEP_SUMMARY"
           else
             contracts=false
             native=false
+            gui_only=false
             if [[ "$MESSAGE" == *'[r60-contracts]'* ]]; then contracts=true; fi
-            if [[ "$MESSAGE" == *'[r60-native]'* ]]; then native=true; fi
-            printf 'contracts=%s\nnative=%s\nlifecycle=false\n' "$contracts" "$native" >> "$GITHUB_OUTPUT"
+            if [[ "$MESSAGE" == *'[r60-gui]'* ]]; then native=true; gui_only=true; fi
+            # A full native development request takes precedence over GUI-only.
+            if [[ "$MESSAGE" == *'[r60-native]'* ]]; then native=true; gui_only=false; fi
+            printf 'contracts=%s\nnative=%s\ngui_only=%s\nlifecycle=false\n' "$contracts" "$native" "$gui_only" >> "$GITHUB_OUTPUT"
             printf '%s\n' 'Targeted development checks only; full candidate acceptance is not established.' >> "$GITHUB_STEP_SUMMARY"
+            if [[ "$gui_only" == true ]]; then
+              printf '%s\n' 'GUI_ONLY: source GUI over actual R20 ETL/index. Full native/source/frozen/Standard/DPI/lifecycle acceptance: NOT_RUN.' >> "$GITHUB_STEP_SUMMARY"
+            fi
           fi
           printf 'Source SHA: %s\nRun: %s attempt %s\n' "$SOURCE_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" >> "$GITHUB_STEP_SUMMARY"
 
@@ -116,7 +123,7 @@ jobs:
     if: >-
       always() && needs.scope.result == 'success' && needs.scope.outputs.native == 'true' &&
       (needs.scope.outputs.contracts != 'true' || needs.contracts.result == 'success')
-    name: R60 actual Windows source / frozen / RU-EN DPI / native
+    name: ${{ needs.scope.outputs.gui_only == 'true' && 'R60 diagnostic source GUI / real R20 data only' || 'R60 actual Windows source / frozen / RU-EN DPI / native' }}
     runs-on: windows-latest
     # Initial composed bound: two real full core runs, two medium-token runs,
     # eight source/frozen DPI routes, existing native baseline and frozen builds.
@@ -125,6 +132,7 @@ jobs:
       QT_QPA_PLATFORM: offscreen
       PYTHONUTF8: '1'
       BB_QA_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      BB_R60_GUI_ONLY: ${{ needs.scope.outputs.gui_only }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
@@ -144,6 +152,7 @@ jobs:
       - name: Build real self-contained decoder
         run: python tools/build_decoder.py --rid win-x64
       - name: Actual R10 current-consent one-helper two-target and helper-crash baseline
+        if: needs.scope.outputs.gui_only != 'true'
         timeout-minutes: 10
         run: |
           python tools/qa_r10_fixture.py --output r60-r10-probe-build --source-sha "$env:BB_QA_SOURCE_SHA"
@@ -151,12 +160,23 @@ jobs:
           python tools/qa_r10_native.py --probe r60-r10-probe-build/deep-probe.exe --output r60-r10-native --source-sha "$env:BB_QA_SOURCE_SHA"
           if ($LASTEXITCODE -ne 0) { throw 'R60 actual R10 regression failed' }
       - name: Actual Standard medium token helper and native effects baseline
+        if: needs.scope.outputs.gui_only != 'true'
         timeout-minutes: 12
         run: python tools/qa_deep_inspection.py --output r60-standard-token-baseline --probe r60-r10-probe-build/deep-probe.exe
       - name: Actual Wave02 sources and full R60 source engine/native/editor chain
+        if: needs.scope.outputs.gui_only != 'true'
         timeout-minutes: 25
         run: python tools/qa_chain_builder.py --output r60-source --decoder decoder/BLACK.BOX-Decoder.exe --source-sha "$env:BB_QA_SOURCE_SHA"
+      - name: Diagnostic only - prepare actual R20 ETL and full decoder index
+        if: needs.scope.outputs.gui_only == 'true'
+        timeout-minutes: 8
+        run: python tools/qa_wave02.py --container r20 --output r60-gui-diagnostic-data --decoder decoder/BLACK.BOX-Decoder.exe --source-sha "$env:BB_QA_SOURCE_SHA"
+      - name: Diagnostic only - source editor over actual R20 data
+        if: needs.scope.outputs.gui_only == 'true'
+        timeout-minutes: 8
+        run: python tools/qa_chain_builder.py --gui-only --evidence-root r60-gui-diagnostic-data --output r60-source --source-sha "$env:BB_QA_SOURCE_SHA"
       - name: Source real editor RU/EN at DPI 125 150 200 with artifactless screenshot proof
+        if: needs.scope.outputs.gui_only != 'true'
         timeout-minutes: 8
         shell: pwsh
         run: |
@@ -167,9 +187,11 @@ jobs:
           }
           Remove-Item Env:\QT_SCALE_FACTOR -ErrorAction SilentlyContinue
       - name: Actual R60 source graph, sampler and native helper under Standard medium token
+        if: needs.scope.outputs.gui_only != 'true'
         timeout-minutes: 12
         run: python tools/qa_chain_builder.py --standard-token --evidence-root r60-source-actual-wave02 --output r60-source-standard --source-sha "$env:BB_QA_SOURCE_SHA"
       - name: Record exact source identity and build separate packaged helpers
+        if: needs.scope.outputs.gui_only != 'true'
         run: |
           python tools/generate_icon.py
           python tools/write_build_provenance.py "$env:BB_QA_SOURCE_SHA"
@@ -178,6 +200,7 @@ jobs:
           python -m PyInstaller --noconfirm --clean --paths src --paths . --onedir --windowed --collect-submodules blackbox_core --exclude-module PySide6 --exclude-module blackbox_universal --icon assets/blackbox.ico --add-data ".qa-build/blackbox-build.json;." --name BLACK.BOX-Diagnostic diagnostic_entry.py
           if ($LASTEXITCODE -ne 0) { throw 'R60 diagnostic helper build failed' }
       - name: Build frozen R60 product and copy existing portable payload
+        if: needs.scope.outputs.gui_only != 'true'
         shell: pwsh
         run: |
           python -m PyInstaller --noconfirm --clean --paths src --paths . --onedir --windowed --collect-submodules blackbox_core --collect-submodules blackbox_investigation --collect-submodules blackbox_universal --icon assets/blackbox.ico --add-data "assets/blackbox.png;assets" --add-data "src/blackbox_core/instrumentation.py;blackbox_core" --add-data ".qa-build/blackbox-build.json;." --name BLACK.BOX-Universal app.py
@@ -187,13 +210,16 @@ jobs:
           Copy-Item '.blackbox-portable.json' 'dist/BLACK.BOX-Universal/.blackbox-portable.json'
           Copy-Item 'decoder' 'dist/BLACK.BOX-Universal/decoder' -Recurse
       - name: Verify packaged privilege boundaries and frozen modules
+        if: needs.scope.outputs.gui_only != 'true'
         run: |
           python tools/verify_diagnostic_package.py dist/BLACK.BOX-Universal
           python tools/verify_frozen_research.py dist/BLACK.BOX-Universal/BLACK.BOX-Universal.exe
       - name: Same actual full chain in frozen EXE using packaged helpers
+        if: needs.scope.outputs.gui_only != 'true'
         timeout-minutes: 20
         run: python tools/qa_chain_builder.py --exe dist/BLACK.BOX-Universal/BLACK.BOX-Universal.exe --evidence-root r60-source-actual-wave02 --output r60-frozen --source-sha "$env:BB_QA_SOURCE_SHA"
       - name: Frozen real editor RU/EN at DPI 125 150 200 with artifactless screenshot proof
+        if: needs.scope.outputs.gui_only != 'true'
         timeout-minutes: 8
         shell: pwsh
         run: |
@@ -204,14 +230,21 @@ jobs:
           }
           Remove-Item Env:\QT_SCALE_FACTOR -ErrorAction SilentlyContinue
       - name: Same R60 graph in frozen EXE under Standard medium token
+        if: needs.scope.outputs.gui_only != 'true'
         timeout-minutes: 12
         run: python tools/qa_chain_builder.py --standard-token --exe dist/BLACK.BOX-Universal/BLACK.BOX-Universal.exe --evidence-root r60-source-actual-wave02 --output r60-frozen-standard --source-sha "$env:BB_QA_SOURCE_SHA"
       - name: Bounded source/frozen proof and failure identity
         if: always()
         shell: pwsh
         run: |
-          "R60 native result: ${{ job.status }}`nSource: $env:BB_QA_SOURCE_SHA`nRun: $env:GITHUB_RUN_ID attempt $env:GITHUB_RUN_ATTEMPT`nArtifacts/cache/publication: none`nPhysical Windows 10/11 and Secure Desktop: NOT_TESTED" >> $env:GITHUB_STEP_SUMMARY
-          foreach ($path in @('r60-source/result.json', 'r60-frozen/result.json')) {
+          if ($env:BB_R60_GUI_ONLY -eq 'true') {
+            "R60 development scope: GUI_ONLY`nGUI diagnostic result: ${{ job.status }}`nFull native/source/frozen/Standard/DPI/lifecycle acceptance: NOT_RUN`nComplete candidate acceptance: NOT_ESTABLISHED`nA clean-process GUI diagnostic does not establish the combined same-process native/editor path.`nSource: $env:BB_QA_SOURCE_SHA`nRun: $env:GITHUB_RUN_ID attempt $env:GITHUB_RUN_ATTEMPT`nArtifacts/cache/publication: none`nPhysical Windows 10/11 and Secure Desktop: NOT_TESTED" >> $env:GITHUB_STEP_SUMMARY
+            $paths = @('r60-source/result.json', 'r60-source/gui/result.json', 'r60-gui-diagnostic-data/wave02-native.json')
+          } else {
+            "R60 native result: ${{ job.status }}`nSource: $env:BB_QA_SOURCE_SHA`nRun: $env:GITHUB_RUN_ID attempt $env:GITHUB_RUN_ATTEMPT`nArtifacts/cache/publication: none`nPhysical Windows 10/11 and Secure Desktop: NOT_TESTED" >> $env:GITHUB_STEP_SUMMARY
+            $paths = @('r60-source/result.json', 'r60-frozen/result.json')
+          }
+          foreach ($path in $paths) {
             if (Test-Path $path) {
               Get-FileHash -Algorithm SHA256 -LiteralPath $path | Format-List
               $proof = Get-Content -Raw -LiteralPath $path | ConvertFrom-Json

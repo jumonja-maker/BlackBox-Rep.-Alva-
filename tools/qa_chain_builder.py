@@ -46,7 +46,7 @@ def run(args):
         evidence = args.output.with_name(args.output.name + "-actual-wave02")
         prepare_actual_evidence(argparse.Namespace(output=evidence, decoder=args.decoder,
             source_sha=args.source_sha, probe=args.probe, diagnostic_helper=args.diagnostic_helper, container="full"))
-    executable = [str(args.exe.resolve(strict=True))] if args.exe else [sys.executable, str(ROOT / "app.py")]
+    executable = [str(args.exe.resolve(strict=True))] if args.exe else [sys.executable, "-X", "faulthandler", str(ROOT / "app.py")]
     command = executable + ["--chain-e2e", str(args.output.resolve()), "--chain-evidence",
         str(evidence.resolve(strict=True)), "--qa-commit-sha", args.source_sha]
     if args.gui_only:
@@ -63,10 +63,19 @@ def run(args):
         print("R60_CHAIN_STANDARD_TOKEN_CHILD " + json.dumps(child, sort_keys=True), flush=True)
     else:
         completed = subprocess.run(command, timeout=1200, check=False)
-        require(completed.returncode == 0, "R60_SOURCE_OR_FROZEN_CHAIN_PROCESS_FAILED")
+        print("R60_CHAIN_CHILD_EXIT " + json.dumps({"source_sha": args.source_sha, "frozen": bool(args.exe),
+            "gui_only": args.gui_only, "returncode": completed.returncode,
+            "windows_status_hex": "0x%08x" % (completed.returncode & 0xffffffff)}, sort_keys=True), flush=True)
+        require(completed.returncode == 0, "R60_SOURCE_OR_FROZEN_CHAIN_PROCESS_FAILED: " + str(completed.returncode))
     result = read_json(args.output / "result.json")
     require(result.get("status") == "PASS" and result.get("frozen") is bool(args.exe) and
             result.get("source_sha") == args.source_sha, "R60_CHAIN_PROOF_INCOMPLETE")
+    if not args.gui_only and (args.exe or args.standard_token):
+        # Windowed/restricted children may have no console. Retain the actual
+        # persisted native and negative-flow proof in this artifactless job;
+        # a file hash or a short PASS summary alone cannot expose its scope.
+        print("R60_CHAIN_NATIVE_RECEIPT " + json.dumps({**result,
+            "result_sha256": file_hash(args.output / "result.json")}, sort_keys=True), flush=True)
     if args.standard_token:
         require(result.get("standard_token") is True and result["live"]["own_token"]["elevated"] is False,
                 "R60_STANDARD_CHAIN_TOKEN_PROOF_MISSING")
