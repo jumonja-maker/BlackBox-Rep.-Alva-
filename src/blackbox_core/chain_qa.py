@@ -700,5 +700,3 @@ def run_embedded(output, evidence_root, source_sha, diagnostic_helper=None, *, s
         print("R60_CHAIN_NATIVE_RECEIPT " + json.dumps({**proof, "result_sha256": file_hash(output / "result.json")},
                                                       sort_keys=True), flush=True)
     return 0 if proof["status"] == "PASS" else 1
-
-
