@@ -144,9 +144,9 @@ def exercise_canvas():
             "flat_path_painted_bounds": True, "edge_endpoints_current": True,
             "scene_contains_nodes_and_paths": True}), flush=True)
     finally:
+        from qt_test_support import dispose_closed_fixture
         canvas.close()
-        canvas.deleteLater()
-        app.processEvents()
+        dispose_closed_fixture(canvas, app)
 
 
 class CanvasGeometryChildTests(unittest.TestCase):

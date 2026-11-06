@@ -430,7 +430,8 @@ class ChainEditorTests(unittest.TestCase):
         finally:
             bridge.worker = None
             task.close_progress()
-            task.deleteLater()
+            from qt_test_support import dispose_closed_fixture
+            dispose_closed_fixture(task, self.app)
 
 
 class GuardBridge(QObject):
@@ -500,10 +501,13 @@ class RuntimeExecutionGuardTests(unittest.TestCase):
         self.live = True
 
     def tearDown(self):
+        from qt_test_support import dispose_closed_fixture
         self.panel.investigation_graph_panel.shutdown()
-        self.panel.deleteLater()
-        self.parent.deleteLater()
-        self.app.processEvents()
+        self.assertFalse(self.panel.investigation_graph_panel.bridge.busy)
+        self.parent.close()
+        dispose_closed_fixture(self.parent, self.app)
+        self.bridge.shutdown()
+        dispose_closed_fixture(self.bridge, self.app)
 
     def test_cancellation_inside_action_consent_modal_prevents_native_submit(self):
         def confirm(*_):
@@ -572,7 +576,8 @@ class NativeOwnerReceiptBoundaryTests(unittest.TestCase):
         task = _DeepTask(None, command, service, target, lambda: service)
         with self.assertRaisesRegex(ProcessLookupError, "WORKFLOW_EXACT_PROCESS_IDENTITY_CHANGED"):
             task._owned(command, "action", "memory.write")
-        task.deleteLater()
+        from qt_test_support import dispose_closed_fixture
+        dispose_closed_fixture(task, self.app)
 
     def test_stale_ui_generation_still_delivers_owner_receipt_without_legacy_result(self):
         bridge = DeepInspectorBridge(service_factory=lambda: None)
@@ -587,4 +592,5 @@ class NativeOwnerReceiptBoundaryTests(unittest.TestCase):
         bridge._receive(result)
         self.assertEqual(owner, [result])
         self.assertEqual(legacy, [])
-        bridge.deleteLater()
+        from qt_test_support import dispose_closed_fixture
+        dispose_closed_fixture(bridge, self.app)

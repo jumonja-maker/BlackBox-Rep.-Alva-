@@ -23,9 +23,9 @@ class AcceptanceMouseGeometryTests(unittest.TestCase):
         self.layout = QVBoxLayout(self.window)
 
     def tearDown(self):
+        from qt_test_support import dispose_closed_fixture
         self.window.close()
-        self.window.deleteLater()
-        self.app.processEvents()
+        dispose_closed_fixture(self.window, self.app)
 
     def show_control(self, control):
         self.layout.addWidget(control)
