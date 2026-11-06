@@ -132,6 +132,7 @@ def _real_button_click(widget):
 def run_chain_gui(app, window, output, evidence_root, source_sha, *, failure_guard=None):
     _gui_phase("ENTER")
     from PySide6.QtCore import QBuffer, QIODevice, QPoint, QPointF, QRect, Qt
+    from PySide6.QtGui import QWheelEvent
     from PySide6.QtTest import QTest
     from PySide6.QtWidgets import QScrollArea
     from blackbox_core.chain_qa import (actual_invocations, file_hash, require, read_json, save,
@@ -268,7 +269,83 @@ def run_chain_gui(app, window, output, evidence_root, source_sha, *, failure_gua
             rect = geometry[name]["visible_logical_rect"]
             require(rect[2] >= (300 if name == "canvas" else 240) and rect[3] >= 180,
                     "R60_GUI_WORKSPACE_VIEW_TOO_CLIPPED:" + name + ":" + json.dumps(geometry[name], sort_keys=True))
+        visible_panel_height = workspace_geometry(panel)["visible_logical_rect"][3]
+        visible_canvas_height = geometry["canvas"]["visible_logical_rect"][3]
+        require(visible_panel_height > 0 and visible_canvas_height >= visible_panel_height * .5,
+                "R60_GUI_CANVAS_NOT_PRIMARY_WORKSPACE:" + json.dumps({
+                    "visible_panel_height": visible_panel_height,
+                    "visible_canvas_height": visible_canvas_height}, sort_keys=True))
+        geometry["workspace_priority"] = {
+            "visible_panel_height": visible_panel_height,
+            "visible_canvas_height": visible_canvas_height,
+            "canvas_height_fraction": visible_canvas_height / visible_panel_height,
+            "required_minimum_fraction": .5}
         return geometry
+
+    def verify_canvas_navigation():
+        """Exercise navigation through Qt input without changing the saved graph."""
+        canvas = panel.canvas
+        canvas.resetTransform()
+        canvas.zoom(2.0)
+        canvas.centerOn(canvas.sceneRect().center())
+        canvas.setFocus()
+        app.processEvents()
+        document_before = json.dumps(panel.document, sort_keys=True)
+        positions_before = {key: [item.x(), item.y()] for key, item in canvas.items_by_id.items()}
+        viewport = canvas.viewport()
+        point = _ensure_visible_hit_point(app, viewport)
+        measures = {}
+        for name, button, delta in (("middle_button_pan", Qt.MouseButton.MiddleButton, QPoint(40, 25)),
+                                    ("space_left_pan", Qt.MouseButton.LeftButton, QPoint(-35, -25))):
+            _assert_visible_hit_point(viewport, point)
+            _assert_visible_hit_point(viewport, point + delta)
+            for bar, movement in ((canvas.horizontalScrollBar(), delta.x()),
+                                  (canvas.verticalScrollBar(), delta.y())):
+                require(bar.minimum() <= bar.value() - movement <= bar.maximum(),
+                        "R60_GUI_CANVAS_PAN_FIXTURE_HAS_NO_HEADROOM:" + name)
+            before = canvas.mapToScene(point)
+            if name == "space_left_pan":
+                QTest.keyPress(canvas, Qt.Key.Key_Space)
+            try:
+                QTest.mousePress(viewport, button, pos=point)
+                QTest.mouseMove(viewport, point + delta, delay=30)
+                QTest.mouseRelease(viewport, button, pos=point + delta)
+            finally:
+                if name == "space_left_pan":
+                    QTest.keyRelease(canvas, Qt.Key.Key_Space)
+            app.processEvents()
+            after = canvas.mapToScene(point)
+            actual_delta = after - before
+            expected_delta = [-delta.x() / canvas.transform().m11(), -delta.y() / canvas.transform().m11()]
+            require(abs(actual_delta.x() - expected_delta[0]) <= 2 and
+                    abs(actual_delta.y() - expected_delta[1]) <= 2,
+                    "R60_GUI_CANVAS_NAVIGATION_DID_NOT_PAN:" + name)
+            measures[name] = {"scene_delta": [actual_delta.x(), actual_delta.y()],
+                              "expected_scene_delta": expected_delta,
+                              "actual_qt_input": True}
+        point = QPoint(viewport.width() // 3, viewport.height() // 3)
+        _assert_visible_hit_point(viewport, point)
+        QTest.mouseMove(viewport, point)
+        app.processEvents()
+        before_scale, before_anchor = canvas.transform().m11(), canvas.mapToScene(point)
+        wheel = QWheelEvent(QPointF(point), QPointF(viewport.mapToGlobal(point)), QPoint(), QPoint(0, 120),
+                            Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier,
+                            Qt.ScrollPhase.NoScrollPhase, False)
+        app.sendEvent(viewport, wheel)
+        app.processEvents()
+        after_scale, after_anchor = canvas.transform().m11(), canvas.mapToScene(point)
+        anchor_error = (after_anchor - before_anchor).manhattanLength()
+        require(after_scale > before_scale and anchor_error <= 3,
+                "R60_GUI_WHEEL_ZOOM_CURSOR_ANCHOR_FAILED:" + json.dumps({
+                    "before_scale": before_scale, "after_scale": after_scale,
+                    "anchor_error_scene_units": anchor_error}, sort_keys=True))
+        require(json.dumps(panel.document, sort_keys=True) == document_before and
+                {key: [item.x(), item.y()] for key, item in canvas.items_by_id.items()} == positions_before,
+                "R60_GUI_CANVAS_NAVIGATION_CHANGED_SAVED_GRAPH")
+        measures["plain_wheel_zoom"] = {"before_scale": before_scale, "after_scale": after_scale,
+            "anchor_error_scene_units": anchor_error, "actual_qt_input": True}
+        measures["saved_graph_and_positions_unchanged"] = True
+        return measures
 
     def screenshot(language, geometry):
         image = window.grab().toImage()
@@ -459,6 +536,7 @@ def run_chain_gui(app, window, output, evidence_root, source_sha, *, failure_gua
         QTest.keyClick(panel.canvas, Qt.Key.Key_Right)
         require(item.x() == before_x + 10, "R60_EDITOR_KEYBOARD_MOVE_NOT_PERSISTED")
         proof["canvas"] = {"actual_pointer_drag": True, "keyboard_move": True}
+        proof["canvas"]["navigation"] = verify_canvas_navigation()
         _gui_phase("CONNECT_TYPED_GRAPH_BEGIN")
         connect(first, "source", waits, "index", reject=True)
         connect(first, "source", decoder, "trace")
@@ -520,7 +598,18 @@ def run_chain_gui(app, window, output, evidence_root, source_sha, *, failure_gua
             proof.setdefault("workspace_reachability", []).append({"language": language,
                 "controls": [name for name, _ in reachable],
                 "scope": "ACTUAL_SCROLL_AND_VISIBLE_HIT_POINT_NOT_DISABLED_ACTION_EXECUTION"})
-            geometry = prepare_workspace_capture()
+            for width, height in ((1280, 800), (1600, 1000)):
+                window.resize(width, height)
+                app.processEvents()
+                require(window.width() == width and window.height() == height,
+                        "R60_GUI_RESPONSIVE_WINDOW_CANNOT_FIT_DECLARED_SIZE")
+                panel.fit_graph()
+                app.processEvents()
+                geometry = prepare_workspace_capture()
+                proof.setdefault("responsive_workspace", []).append({
+                    "language": language, "requested_logical_client": [width, height],
+                    "actual_logical_client": [window.width(), window.height()],
+                    "geometry": geometry})
             screenshot(language, geometry)
         _gui_phase("SCREENSHOTS_FINISHED_EXECUTION_BEGIN")
         proof["passive_open_profile"] = True

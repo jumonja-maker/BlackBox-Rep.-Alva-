@@ -12,7 +12,7 @@ from PySide6.QtWidgets import QLayout, QWidgetItem
 class ActionGrid(QLayout):
     def __init__(self, parent=None, *, max_columns: int = 2, spacing: int = 6):
         super().__init__(parent)
-        if type(max_columns) is not int or not 1 <= max_columns <= 4:
+        if type(max_columns) is not int or not 1 <= max_columns <= 6:
             raise ValueError("INVALID_ACTION_COLUMNS")
         self._items = []
         self.max_columns = max_columns

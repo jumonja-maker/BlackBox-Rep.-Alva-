@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 from uuid import uuid4
 
-from PySide6.QtCore import Qt, QPointF, QRectF, QMimeData, Signal, QTimer
+from PySide6.QtCore import Qt, QPointF, QRectF, QMimeData, Signal, QTimer, QEvent
 from PySide6.QtGui import (QBrush, QColor, QDrag, QKeySequence, QPainter,
                           QPainterPath, QPen, QShortcut)
 from PySide6.QtWidgets import (
@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (
     QGraphicsPathItem, QGraphicsScene, QGraphicsView, QGridLayout, QHBoxLayout,
     QLabel, QLineEdit, QListWidget, QListWidgetItem, QPlainTextEdit, QPushButton,
     QScrollArea, QSpinBox, QSplitter, QTabWidget, QTableWidget, QTableWidgetItem,
-    QVBoxLayout, QWidget, QStackedWidget,
+    QVBoxLayout, QWidget, QStackedWidget, QSizePolicy,
 )
 
 from .action_grid import ActionGrid
@@ -521,7 +521,7 @@ class WorkflowCanvas(QGraphicsView):
         self.setScene(QGraphicsScene(self))
         self.setObjectName("chainCanvas")
         self.setAccessibleName("Workflow nodes and typed ports / Узлы цепочки и типизированные порты")
-        self.setMinimumSize(350, 340)
+        self.setMinimumSize(350, 240)
         self.setAcceptDrops(True)
         self.setRenderHint(QPainter.RenderHint.Antialiasing)
         self.setDragMode(QGraphicsView.DragMode.RubberBandDrag)
@@ -530,6 +530,9 @@ class WorkflowCanvas(QGraphicsView):
         self.edges, self.language, self.pending_port = [], "EN", None
         self.editable = True
         self._drag_start = {}
+        self._space_down = False
+        self._pan_origin = self._pan_scroll = None
+        self._ignore_pan_release = False
         self._updating_edges = self._edges_dirty = False
         self._edge_update_timer = QTimer(self)
         self._edge_update_timer.setSingleShot(True)
@@ -630,6 +633,17 @@ class WorkflowCanvas(QGraphicsView):
         return None
 
     def mousePressEvent(self, event):
+        self._ignore_pan_release = False
+        if (event.button() == Qt.MouseButton.MiddleButton or
+                event.button() == Qt.MouseButton.LeftButton and self._space_down):
+            self.pending_port = None
+            self._drag_start = {}
+            self._pan_origin = event.position().toPoint()
+            self._pan_scroll = (self.horizontalScrollBar().value(), self.verticalScrollBar().value())
+            self._ignore_pan_release = True
+            self.viewport().setCursor(Qt.CursorShape.ClosedHandCursor)
+            event.accept()
+            return
         self._drag_start = {key: item.pos() for key, item in self.items_by_id.items()}
         port = self.port_at(event.pos())
         if port and self.editable:
@@ -638,7 +652,27 @@ class WorkflowCanvas(QGraphicsView):
             return
         super().mousePressEvent(event)
 
+    def mouseMoveEvent(self, event):
+        if self._pan_origin is not None:
+            delta = event.position().toPoint() - self._pan_origin
+            self.horizontalScrollBar().setValue(self._pan_scroll[0] - delta.x())
+            self.verticalScrollBar().setValue(self._pan_scroll[1] - delta.y())
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def _stop_pan(self, *, release_space=False):
+        self._pan_origin = self._pan_scroll = None
+        if release_space:
+            self._space_down = False
+        self.viewport().setCursor(Qt.CursorShape.OpenHandCursor if self._space_down else Qt.CursorShape.ArrowCursor)
+
     def mouseReleaseEvent(self, event):
+        if self._pan_origin is not None or self._ignore_pan_release:
+            self._stop_pan()
+            self._ignore_pan_release = False
+            event.accept()
+            return
         if self.pending_port is not None:
             target, first = self.port_at(event.pos()), self.pending_port
             self.pending_port = None
@@ -656,23 +690,41 @@ class WorkflowCanvas(QGraphicsView):
         if moved and self.editable:
             self.positions_changed.emit(moved)
 
-    def zoom(self, multiplier):
+    def zoom(self, multiplier, position=None):
         scale = self.transform().m11()
         requested = max(.15, min(3.5, scale * multiplier))
+        if requested == scale:
+            return
+        position = position if position is not None else self.viewport().rect().center()
+        before = self.mapToScene(position)
+        anchor = self.transformationAnchor()
+        self.setTransformationAnchor(QGraphicsView.ViewportAnchor.NoAnchor)
         self.scale(requested / scale, requested / scale)
+        after = self.mapToScene(position)
+        self.translate(after.x() - before.x(), after.y() - before.y())
+        self.setTransformationAnchor(anchor)
 
     def wheelEvent(self, event):
-        if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
-            self.zoom(1.15 if event.angleDelta().y() > 0 else 1 / 1.15)
-            event.accept()
-        else:
+        if event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
             super().wheelEvent(event)
+            return
+        delta = event.angleDelta().y() or event.pixelDelta().y()
+        if not delta:
+            event.ignore()
+            return
+        self.zoom(1.15 ** max(-8, min(8, delta / 120)), event.position().toPoint())
+        event.accept()
 
     def keyPressEvent(self, event):
         key = event.key()
-        if key in (Qt.Key.Key_Plus, Qt.Key.Key_Equal, Qt.Key.Key_Minus):
+        if key == Qt.Key.Key_Space:
+            self._space_down = True
+            if self._pan_origin is None:
+                self.viewport().setCursor(Qt.CursorShape.OpenHandCursor)
+        elif key in (Qt.Key.Key_Plus, Qt.Key.Key_Equal, Qt.Key.Key_Minus):
             self.zoom(1 / 1.15 if key == Qt.Key.Key_Minus else 1.15)
         elif key == Qt.Key.Key_Escape:
+            self._stop_pan(release_space=True)
             self.pending_port = None
             self.scene().clearSelection()
         elif key == Qt.Key.Key_Delete and self.editable:
@@ -694,6 +746,23 @@ class WorkflowCanvas(QGraphicsView):
             return
         event.accept()
 
+    def keyReleaseEvent(self, event):
+        if event.key() == Qt.Key.Key_Space:
+            if not event.isAutoRepeat():
+                self._stop_pan(release_space=True)
+            event.accept()
+            return
+        super().keyReleaseEvent(event)
+
+    def focusOutEvent(self, event):
+        self._stop_pan(release_space=True)
+        super().focusOutEvent(event)
+
+    def viewportEvent(self, event):
+        if (event.type() == QEvent.Type.WindowDeactivate or
+                event.type() == QEvent.Type.UngrabMouse and getattr(self, "_pan_origin", None) is not None):
+            self._stop_pan(release_space=True)
+        return super().viewportEvent(event)
     def dragEnterEvent(self, event):
         if self.editable and event.mimeData().hasFormat(MIME):
             event.acceptProposedAction()
@@ -720,6 +789,7 @@ class ChainBuilderPanel(QWidget):
         self.bridge = bridge or ChainBuilderBridge(window, root)
         self.catalog, self.controls, self.snapshot, self.validation = {}, {}, {}, {}
         self._labels, self._fields, self._selected = [], {}, None
+        self._tooltips = []
         self._folder, self._loading, self._run_active = None, False, False
         self._human_pending = False
         self.document = {"schema": "blackbox.workflow-definition/1", "schema_version": 1,
@@ -752,18 +822,30 @@ class ChainBuilderPanel(QWidget):
 
     def _build(self):
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(5)
+        self.setStyleSheet("""
+            QWidget#chainBuilder QPushButton { min-height: 20px; padding: 2px 7px; }
+            QWidget#chainBuilder QComboBox, QWidget#chainBuilder QLineEdit,
+            QWidget#chainBuilder QSpinBox, QWidget#chainBuilder QDoubleSpinBox {
+                min-height: 20px; padding: 2px 5px;
+            }
+        """)
         self.notice = self._text(QLabel(),
-            "Build a diagnostic chain. Opening, preview and validation never run tools. Interventions require fresh confirmation.",
-            "Создайте диагностическую цепочку. Открытие, предпросмотр и проверка не запускают инструменты. Вмешательства требуют нового подтверждения.")
+            "Opening and preview do not run tools. Interventions require fresh confirmation.",
+            "Открытие и предпросмотр не запускают инструменты. Вмешательства — с новым подтверждением.")
         self.notice.setWordWrap(True)
         layout.addWidget(self.notice)
-        header = QFormLayout()
+        header = QGridLayout()
+        header.setContentsMargins(0, 0, 0, 0)
         self.title = QLineEdit(self.document["title"])
         self.title.setMaxLength(256)
         self.title.setObjectName("chainTitle")
         self.title.editingFinished.connect(self._title_changed)
         title_label = self._text(QLabel(), "Chain name", "Название цепочки")
-        header.addRow(title_label, self.title)
+        self.title.setMinimumWidth(120)
+        header.addWidget(title_label, 0, 0)
+        header.addWidget(self.title, 0, 1)
         self.profile = QComboBox()
         self.profile.setEditable(True)
         for key in ("windows", "application", "case"):
@@ -771,37 +853,58 @@ class ChainBuilderPanel(QWidget):
         self.profile.setCurrentIndex(1)
         self.profile.currentIndexChanged.connect(self._profile_changed)
         self.profile.lineEdit().editingFinished.connect(self._profile_changed)
-        header.addRow(self._text(QLabel(), "Profile", "Профиль"), self.profile)
+        header.addWidget(self._text(QLabel(), "Profile", "Профиль"), 0, 2)
+        header.addWidget(self.profile, 0, 3)
         self.profile_parent = QComboBox()
         self.profile_parent.addItem("—", "")
         for key in ("windows", "application", "case"):
             self.profile_parent.addItem(key, key)
         self.profile_parent.currentIndexChanged.connect(self._profile_changed)
-        header.addRow(self._text(QLabel(), "Inherit from", "Наследовать от"), self.profile_parent)
+        header.addWidget(self._text(QLabel(), "Inherit", "Наследовать"), 0, 4)
+        header.addWidget(self.profile_parent, 0, 5)
+        for combo in (self.profile, self.profile_parent):
+            combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+            combo.setMinimumContentsLength(8)
+        for column, stretch in ((1, 3), (3, 2), (5, 2)):
+            header.setColumnStretch(column, stretch)
         layout.addLayout(header)
-        actions = ActionGrid()
-        self.open_button = self._button("chainOpen", "Open chain…", "Открыть цепочку…", self.open_definition)
-        self.save_button = self._button("chainSave", "Save chain…", "Сохранить цепочку…", self.save_definition)
-        self.profile_save = self._button("chainSaveProfile", "Save profile…", "Сохранить профиль…", lambda: self.profile_file("save_profile"))
-        self.profile_open = self._button("chainOpenProfile", "Open profile…", "Открыть профиль…", lambda: self.profile_file("open_profile"))
-        self.validate_button = self._button("chainValidate", "Validate / preview", "Проверить / предпросмотр", self.validate)
+        self.action_bar = QWidget()
+        self.action_bar.setObjectName("chainActionBar")
+        actions = ActionGrid(self.action_bar, max_columns=6, spacing=4)
+        self.open_button = self._button("chainOpen", "Open…", "Открыть…", self.open_definition)
+        self.save_button = self._button("chainSave", "Save…", "Сохранить…", self.save_definition)
+        self.profile_save = self._button("chainSaveProfile", "Save profile…", "Профиль: сохранить…", lambda: self.profile_file("save_profile"))
+        self.profile_open = self._button("chainOpenProfile", "Load profile…", "Профиль: открыть…", lambda: self.profile_file("open_profile"))
+        self.validate_button = self._button("chainValidate", "Check / preview", "Проверить", self.validate)
         self.start_button = self._button("chainStart", "Start", "Запустить", self.start)
-        self.pause_button = self._button("chainPause", "Pause at safe boundary", "Пауза на безопасной границе", self.bridge.pause)
-        self.cancel_button = self._button("chainCancel", "Stop owned operations", "Остановить свои операции", self.bridge.cancel)
-        self.resume_button = self._button("chainResume", "Continue / resume", "Продолжить", self.resume)
-        self.grant_button = self._button("chainGrantPermission", "Request scoped permission…", "Запросить ограниченные права…", self.bridge.grant_permission)
+        self.pause_button = self._button("chainPause", "Pause", "Пауза", self.bridge.pause)
+        self.cancel_button = self._button("chainCancel", "Stop chain", "Остановить цепочку", self.bridge.cancel)
+        self.resume_button = self._button("chainResume", "Continue", "Продолжить", self.resume)
+        self.grant_button = self._button("chainGrantPermission", "Request permission…", "Запросить права…", self.bridge.grant_permission)
+        self._tooltips.extend(((self.open_button, "Open a saved diagnostic chain without executing it", "Открыть сохранённую цепочку без выполнения"),
+            (self.save_button, "Save the diagnostic chain to a new file", "Сохранить цепочку в новый файл"),
+            (self.validate_button, "Validate and preview; no diagnostic tools run", "Проверить и показать план без запуска диагностических инструментов"),
+            (self.pause_button, "Pause at a safe boundary", "Пауза на безопасной границе"),
+            (self.cancel_button, "Stop only operations owned by this chain", "Остановить только операции этой цепочки"),
+            (self.grant_button, "Request scoped permission; a fresh confirmation is still required", "Запросить ограниченные права; новое подтверждение остаётся обязательным")))
         for button in (self.open_button, self.save_button, self.profile_open, self.profile_save, self.validate_button,
                        self.start_button, self.pause_button, self.cancel_button, self.resume_button, self.grant_button):
             actions.addWidget(button)
-        layout.addLayout(actions)
+        layout.addWidget(self.action_bar)
         self.status = QLabel()
         self.status.setObjectName("chainStatus")
         self.status.setWordWrap(True)
         self.status.setTextFormat(Qt.TextFormat.PlainText)
         layout.addWidget(self.status)
-        split = QSplitter(Qt.Orientation.Horizontal)
+        split = self.workspace = QSplitter(Qt.Orientation.Horizontal)
+        split.setObjectName("chainWorkspace")
+        split.setChildrenCollapsible(False)
         palette_area, palette_layout = QWidget(), QVBoxLayout()
         palette_area.setLayout(palette_layout)
+        palette_layout.setContentsMargins(0, 0, 0, 0)
+        palette_layout.setSpacing(4)
+        palette_area.setMinimumWidth(160)
+        palette_area.setMaximumWidth(280)
         self.palette = ToolPalette()
         self.palette.setObjectName("chainTools")
         self.palette.setAccessibleName("Available tools / Доступные инструменты")
@@ -820,9 +923,32 @@ class ChainBuilderPanel(QWidget):
         self.canvas.connection_requested.connect(self.connect_ports)
         self.canvas.delete_requested.connect(self.delete_nodes)
         self.canvas.tool_dropped.connect(self.add_tool)
-        split.addWidget(self.canvas)
+        canvas_area = QWidget()
+        canvas_layout = QVBoxLayout(canvas_area)
+        canvas_layout.setContentsMargins(0, 0, 0, 0)
+        canvas_layout.setSpacing(3)
+        navigation = QHBoxLayout()
+        navigation.setSpacing(3)
+        for name, en, ru, callback in (("chainZoomOut", "−", "−", lambda: self.canvas.zoom(1 / 1.15)),
+                ("chainZoomIn", "+", "+", lambda: self.canvas.zoom(1.15)),
+                ("chainFit", "Fit graph", "Весь граф", self.fit_graph),
+                ("chainActualSize", "100%", "100%", self.canvas.resetTransform)):
+            button = self._button(name, en, ru, callback)
+            button.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
+            navigation.addWidget(button)
+        self.navigation_hint = self._text(QLabel(), "Wheel: zoom · Middle / Space-drag: pan",
+                                         "Колесо: масштаб · Средняя кнопка / Пробел+перетаскивание: сдвиг")
+        self.navigation_hint.setObjectName("chainNavigationHint")
+        self.navigation_hint.setWordWrap(True)
+        navigation.addWidget(self.navigation_hint, 1)
+        canvas_layout.addLayout(navigation)
+        canvas_layout.addWidget(self.canvas, 1)
+        split.addWidget(canvas_area)
         inspector = QWidget()
         inspector_layout = QVBoxLayout(inspector)
+        inspector_layout.setContentsMargins(0, 0, 0, 0)
+        inspector_layout.setSpacing(4)
+        inspector.setMinimumWidth(260)
         self.inspector_tabs = QTabWidget()
         self.parameter_page = QWidget()
         self.parameter_form = QFormLayout(self.parameter_page)
@@ -844,9 +970,11 @@ class ChainBuilderPanel(QWidget):
         inspector_layout.addWidget(self.apply_button)
         inspector_layout.addWidget(self.delete_button)
         split.addWidget(inspector)
-        split.setSizes([180, 540, 300])
-        layout.addWidget(split)
-        connection = QGridLayout()
+        split.setSizes([190, 700, 300])
+        split.setStretchFactor(1, 1)
+        layout.addWidget(split, 1)
+        connection = QHBoxLayout()
+        connection.setSpacing(4)
         self.source_node, self.target_node = QComboBox(), QComboBox()
         self.source_port, self.target_port = QComboBox(), QComboBox()
         for name, widget in (("chainSourceNode", self.source_node), ("chainTargetNode", self.target_node),
@@ -857,34 +985,30 @@ class ChainBuilderPanel(QWidget):
             widget.setMinimumContentsLength(6)
         self.source_node.currentIndexChanged.connect(self._connection_ports)
         self.target_node.currentIndexChanged.connect(self._connection_ports)
-        connection.addWidget(self._text(QLabel(), "From output", "Из выхода"), 0, 0)
-        connection.addWidget(self.source_node, 0, 1)
-        connection.addWidget(self.source_port, 0, 2)
-        connection.addWidget(self._text(QLabel(), "To input", "Во вход"), 1, 0)
-        connection.addWidget(self.target_node, 1, 1)
-        connection.addWidget(self.target_port, 1, 2)
-        self.connect_button = self._button("chainConnect", "Connect compatible ports", "Соединить совместимые порты", self.connect_from_controls)
-        connection.addWidget(self.connect_button, 0, 3, 2, 1)
+        connection.addWidget(self._text(QLabel(), "From", "Из"))
+        connection.addWidget(self.source_node, 2)
+        connection.addWidget(self.source_port, 1)
+        connection.addWidget(self._text(QLabel(), "To", "В"))
+        connection.addWidget(self.target_node, 2)
+        connection.addWidget(self.target_port, 1)
+        self.connect_button = self._button("chainConnect", "Connect ports", "Соединить", self.connect_from_controls)
+        connection.addWidget(self.connect_button)
         layout.addLayout(connection)
-        zoom = QHBoxLayout()
-        for name, en, ru, callback in (("chainZoomOut", "−", "−", lambda: self.canvas.zoom(1 / 1.15)),
-                ("chainZoomIn", "+", "+", lambda: self.canvas.zoom(1.15)),
-                ("chainFit", "Fit graph", "Весь граф", self.fit_graph),
-                ("chainActualSize", "100%", "100%", self.canvas.resetTransform)):
-            zoom.addWidget(self._button(name, en, ru, callback))
+        self.scope_page = QWidget()
+        scope_layout = QVBoxLayout(self.scope_page)
+        scope_layout.setContentsMargins(5, 5, 5, 5)
+        budget = QFormLayout()
         self.budget_seconds = QDoubleSpinBox()
         self.budget_seconds.setRange(.01, 21600)
         self.budget_seconds.setValue(1800)
         self.budget_seconds.valueChanged.connect(self._budget_changed)
-        zoom.addWidget(self._text(QLabel(), "Total budget, s", "Общий бюджет, с"))
-        zoom.addWidget(self.budget_seconds)
+        budget.addRow(self._text(QLabel(), "Total budget, s", "Общий бюджет, с"), self.budget_seconds)
         self.parallel = QSpinBox()
         self.parallel.setRange(1, 4)
         self.parallel.setValue(2)
         self.parallel.valueChanged.connect(self._budget_changed)
-        zoom.addWidget(self._text(QLabel(), "Read-only workers", "Read-only исполнители"))
-        zoom.addWidget(self.parallel)
-        layout.addLayout(zoom)
+        budget.addRow(self._text(QLabel(), "Read-only workers", "Read-only исполнители"), self.parallel)
+        scope_layout.addLayout(budget)
         # Scope/profile overrides have ordinary typed controls, not a JSON editor.
         overrides = QGridLayout()
         self.allowed_tools = QListWidget()
@@ -925,7 +1049,12 @@ class ChainBuilderPanel(QWidget):
         overrides.addWidget(self.source_ids, 4, 0)
         overrides.addWidget(self.override_nodes, 3, 1)
         overrides.addWidget(self.allowed_nodes, 4, 1)
-        layout.addLayout(overrides)
+        scope_layout.addLayout(overrides)
+        scope_layout.addStretch()
+        scope_scroll = QScrollArea()
+        scope_scroll.setWidgetResizable(True)
+        scope_scroll.setWidget(self.scope_page)
+        self.inspector_tabs.addTab(scope_scroll, "Scope / limits")
         self._shortcuts = []
         for sequence, callback in ((QKeySequence.StandardKey.Save, self.save_definition),
                                    (QKeySequence.StandardKey.Open, self.open_definition)):
@@ -1511,7 +1640,11 @@ class ChainBuilderPanel(QWidget):
                 widget.setAccessibleName(widget.text())
             except RuntimeError:
                 pass
+        for widget, en, ru in self._tooltips:
+            widget.setToolTip(self.tr2(en, ru))
+            widget.setAccessibleName(self.tr2(en, ru))
         self.canvas.language = self.window.language
+        self.canvas.setAccessibleDescription(self.navigation_hint.text())
         self.source_ids.setToolTip(self.tr2(
             "Use the saved source's exact SHA-256 shown in node outputs. Sessions use their aggregate fingerprint. "
             "This does not select or authorize a live PID/creation FILETIME.",
@@ -1521,7 +1654,8 @@ class ChainBuilderPanel(QWidget):
                                       ("Specific investigation", "Конкретное расследование"))):
             self.profile.setItemText(index, self.tr2(*pair))
             self.profile_parent.setItemText(index + 1, self.tr2(*pair))
-        for index, pair in enumerate((("Parameters", "Параметры"), ("Preview", "Предпросмотр"), ("Details", "Подробности"))):
+        for index, pair in enumerate((("Parameters", "Параметры"), ("Preview", "Предпросмотр"),
+                                      ("Details", "Подробности"), ("Scope / limits", "Область / лимиты"))):
             self.inspector_tabs.setTabText(index, self.tr2(*pair))
         if self.catalog:
             self._populate_palette()
