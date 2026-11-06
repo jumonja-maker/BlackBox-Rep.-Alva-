@@ -18,7 +18,7 @@ jobs:
   scope:
     if: >-
       (github.event_name == 'pull_request' && github.head_ref == 'feature/r60-chain-builder-wave03') ||
-      (github.event_name == 'push' && (contains(github.event.head_commit.message, '[r60-contracts]') || contains(github.event.head_commit.message, '[r60-native]') || contains(github.event.head_commit.message, '[r60-gui]') || contains(github.event.head_commit.message, '[r60-medium]'))) ||
+      (github.event_name == 'push' && (contains(github.event.head_commit.message, '[r60-contracts]') || contains(github.event.head_commit.message, '[r60-native]') || contains(github.event.head_commit.message, '[r60-gui]') || contains(github.event.head_commit.message, '[r60-medium]') || contains(github.event.head_commit.message, '[r60-workspace]'))) ||
       github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -27,6 +27,7 @@ jobs:
       native: ${{ steps.scope.outputs.native }}
       gui_only: ${{ steps.scope.outputs.gui_only }}
       medium_only: ${{ steps.scope.outputs.medium_only }}
+      workspace_only: ${{ steps.scope.outputs.workspace_only }}
       lifecycle: ${{ steps.scope.outputs.lifecycle }}
     steps:
       - id: scope
@@ -39,25 +40,33 @@ jobs:
         run: |
           set -euo pipefail
           if [[ "$EVENT" == pull_request || "$EVENT" == workflow_dispatch ]]; then
-            printf '%s\n' 'contracts=true' 'native=true' 'gui_only=false' 'medium_only=false' 'lifecycle=true' >> "$GITHUB_OUTPUT"
+            printf '%s\n' 'contracts=true' 'native=true' 'gui_only=false' 'medium_only=false' 'workspace_only=false' 'lifecycle=true' >> "$GITHUB_OUTPUT"
             printf '%s\n' 'Full R60 candidate: contracts, actual native source/frozen/UI, real 5h30 lifecycle.' >> "$GITHUB_STEP_SUMMARY"
           else
             contracts=false
             native=false
             gui_only=false
             medium_only=false
+            workspace_only=false
             if [[ "$MESSAGE" == *'[r60-contracts]'* ]]; then contracts=true; fi
             if [[ "$MESSAGE" == *'[r60-gui]'* ]]; then native=true; gui_only=true; fi
             # Medium diagnostics take precedence over GUI-only; a full native
             # development request takes precedence over either diagnostic.
             if [[ "$MESSAGE" == *'[r60-medium]'* ]]; then native=true; gui_only=false; medium_only=true; fi
             if [[ "$MESSAGE" == *'[r60-native]'* ]]; then native=true; gui_only=false; medium_only=false; fi
-            printf 'contracts=%s\nnative=%s\ngui_only=%s\nmedium_only=%s\nlifecycle=false\n' "$contracts" "$native" "$gui_only" "$medium_only" >> "$GITHUB_OUTPUT"
+            # An owner-requested workspace-only development check never
+            # repeats full suites, native acceptance, or long lifecycle jobs.
+            if [[ "$MESSAGE" == *'[r60-workspace]'* ]]; then
+              contracts=true; native=true; gui_only=true; medium_only=false; workspace_only=true
+            fi
+            printf 'contracts=%s\nnative=%s\ngui_only=%s\nmedium_only=%s\nworkspace_only=%s\nlifecycle=false\n' "$contracts" "$native" "$gui_only" "$medium_only" "$workspace_only" >> "$GITHUB_OUTPUT"
             printf '%s\n' 'Targeted development checks only; full candidate acceptance is not established.' >> "$GITHUB_STEP_SUMMARY"
             if [[ "$medium_only" == true ]]; then
               printf '%s\n' 'SOURCE_MEDIUM_DIAGNOSTIC: actual Standard medium-token source chain over full real Wave02 evidence. Full native/frozen/DPI/lifecycle acceptance: NOT_RUN. Complete candidate acceptance: NOT_ESTABLISHED.' >> "$GITHUB_STEP_SUMMARY"
             fi
-            if [[ "$gui_only" == true ]]; then
+            if [[ "$workspace_only" == true ]]; then
+              printf '%s\n' 'UI_ONLY_SOURCE_FROZEN: only four fresh-child workspace GUI cases per OS plus new-layout source/frozen RU-EN at four Qt scales. Previous full contracts/native/Standard/lifecycle acceptance: NOT_RUN. Complete candidate acceptance: NOT_ESTABLISHED.' >> "$GITHUB_STEP_SUMMARY"
+            elif [[ "$gui_only" == true ]]; then
               printf '%s\n' 'GUI_ONLY: source GUI over actual R20 ETL/index. Full native/source/frozen/Standard/DPI/lifecycle acceptance: NOT_RUN.' >> "$GITHUB_STEP_SUMMARY"
             fi
           fi
@@ -66,7 +75,7 @@ jobs:
   contracts:
     needs: scope
     if: needs.scope.outputs.contracts == 'true'
-    name: R60 contracts / ${{ matrix.os }}
+    name: ${{ needs.scope.outputs.workspace_only == 'true' && 'R60 UI_ONLY workspace contracts' || 'R60 contracts' }} / ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -101,10 +110,14 @@ jobs:
         run: |
           python -m pip install --require-hashes -r ${{ matrix.lock }}
           python -m pip install --no-build-isolation --no-deps -e .
+      - name: R60 workspace-only four fresh-child GUI layout and navigation tests
+        if: needs.scope.outputs.workspace_only == 'true'
+        run: python -m unittest discover -s tests -p 'test_chain_workspace_gui.py' -v
       - name: R60 full contract, scheduler, recovery, profiles, adapters, reports and real Qt editor tests
+        if: needs.scope.outputs.workspace_only != 'true'
         run: python -m unittest discover -s tests -p 'test_chain_*.py' -v
       - name: Preserve the original dashboard expansion and retained Deep owner close contracts
-        if: always() && steps.dependencies.outcome == 'success'
+        if: always() && steps.dependencies.outcome == 'success' && needs.scope.outputs.workspace_only != 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -113,7 +126,7 @@ jobs:
           python -m unittest discover -s tests -p test_deep_inspector_gui.py -k test_window_close_is_deferred_while_diagnostic_owner_is_retained -v || failed=1
           exit "$failed"
       - name: Existing native ownership and R10 permission regressions
-        if: always() && steps.dependencies.outcome == 'success'
+        if: always() && steps.dependencies.outcome == 'success' && needs.scope.outputs.workspace_only != 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -131,7 +144,11 @@ jobs:
         env:
           SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
           RESULT: ${{ job.status }}
+          WORKSPACE_ONLY: ${{ needs.scope.outputs.workspace_only }}
         run: |
+          if [[ "$WORKSPACE_ONLY" == true ]]; then
+            printf '%s\n' 'UI_ONLY workspace: four fresh-child GUI cases plus undefined-name lint. Previous full contracts/dashboard/Deep/native regressions/lifecycle: NOT_RUN. Complete candidate acceptance: NOT_ESTABLISHED.' >> "$GITHUB_STEP_SUMMARY"
+          fi
           printf 'R60 contracts: %s\nSource: %s\nRunner: %s\nRun: %s attempt %s\n' "$RESULT" "$SOURCE_SHA" "$RUNNER_OS" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" >> "$GITHUB_STEP_SUMMARY"
 
   native:
@@ -139,7 +156,7 @@ jobs:
     if: >-
       always() && !cancelled() && needs.scope.result == 'success' && needs.scope.outputs.native == 'true' &&
       (needs.scope.outputs.contracts != 'true' || needs.contracts.result == 'success')
-    name: ${{ needs.scope.outputs.medium_only == 'true' && 'R60 SOURCE_MEDIUM_DIAGNOSTIC / actual Standard token source chain' || needs.scope.outputs.gui_only == 'true' && 'R60 diagnostic source GUI / real Wave02 data only' || 'R60 actual Windows source / frozen / RU-EN DPI / native' }}
+    name: ${{ needs.scope.outputs.workspace_only == 'true' && 'R60 UI_ONLY_SOURCE_FROZEN / workspace RU-EN DPI' || needs.scope.outputs.medium_only == 'true' && 'R60 SOURCE_MEDIUM_DIAGNOSTIC / actual Standard token source chain' || needs.scope.outputs.gui_only == 'true' && 'R60 diagnostic source GUI / real Wave02 data only' || 'R60 actual Windows source / frozen / RU-EN DPI / native' }}
     runs-on: windows-latest
     # Initial composed bound: two real full core runs, two medium-token runs,
     # eight source/frozen DPI routes, existing native baseline and frozen builds.
@@ -150,6 +167,7 @@ jobs:
       BB_QA_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
       BB_R60_GUI_ONLY: ${{ needs.scope.outputs.gui_only }}
       BB_R60_MEDIUM_ONLY: ${{ needs.scope.outputs.medium_only }}
+      BB_R60_WORKSPACE_ONLY: ${{ needs.scope.outputs.workspace_only }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
@@ -227,7 +245,7 @@ jobs:
         timeout-minutes: 12
         run: python tools/qa_chain_builder.py --standard-token --evidence-root r60-source-actual-wave02 --output r60-source-standard --source-sha "$env:BB_QA_SOURCE_SHA"
       - name: Record exact source identity and build separate packaged helpers
-        if: needs.scope.outputs.gui_only != 'true' && needs.scope.outputs.medium_only != 'true'
+        if: needs.scope.outputs.workspace_only == 'true' || (needs.scope.outputs.gui_only != 'true' && needs.scope.outputs.medium_only != 'true')
         run: |
           python tools/generate_icon.py
           python tools/write_build_provenance.py "$env:BB_QA_SOURCE_SHA"
@@ -236,7 +254,7 @@ jobs:
           python -m PyInstaller --noconfirm --clean --paths src --paths . --onedir --windowed --collect-submodules blackbox_core --exclude-module PySide6 --exclude-module blackbox_universal --icon assets/blackbox.ico --add-data ".qa-build/blackbox-build.json;." --name BLACK.BOX-Diagnostic diagnostic_entry.py
           if ($LASTEXITCODE -ne 0) { throw 'R60 diagnostic helper build failed' }
       - name: Build frozen R60 product and copy existing portable payload
-        if: needs.scope.outputs.gui_only != 'true' && needs.scope.outputs.medium_only != 'true'
+        if: needs.scope.outputs.workspace_only == 'true' || (needs.scope.outputs.gui_only != 'true' && needs.scope.outputs.medium_only != 'true')
         shell: pwsh
         run: |
           python -m PyInstaller --noconfirm --clean --paths src --paths . --onedir --windowed --collect-submodules blackbox_core --collect-submodules blackbox_investigation --collect-submodules blackbox_universal --icon assets/blackbox.ico --add-data "assets/blackbox.png;assets" --add-data "src/blackbox_core/instrumentation.py;blackbox_core" --add-data ".qa-build/blackbox-build.json;." --name BLACK.BOX-Universal app.py
@@ -245,6 +263,21 @@ jobs:
           Copy-Item 'dist/BLACK.BOX-Diagnostic' 'dist/BLACK.BOX-Universal/diagnostic' -Recurse
           Copy-Item '.blackbox-portable.json' 'dist/BLACK.BOX-Universal/.blackbox-portable.json'
           Copy-Item 'decoder' 'dist/BLACK.BOX-Universal/decoder' -Recurse
+      - name: UI_ONLY_SOURCE_FROZEN - packaged workspace RU-EN at four scales over actual saved data
+        if: needs.scope.outputs.workspace_only == 'true'
+        timeout-minutes: 8
+        shell: pwsh
+        run: |
+          try {
+            foreach ($scale in @('1', '1.25', '1.5', '2')) {
+              $env:QT_SCALE_FACTOR = $scale
+              $r60GuiOutput = if ($scale -eq '1') { 'r60-frozen' } else { "r60-frozen-gui-$scale" }
+              python tools/qa_chain_builder.py --gui-only --exe dist/BLACK.BOX-Universal/BLACK.BOX-Universal.exe --evidence-root r60-gui-diagnostic-data --output $r60GuiOutput --source-sha "$env:BB_QA_SOURCE_SHA"
+              if ($LASTEXITCODE -ne 0) { throw "R60 workspace frozen editor failed at scale $scale" }
+            }
+          } finally {
+            Remove-Item Env:\QT_SCALE_FACTOR -ErrorAction SilentlyContinue
+          }
       - name: Verify packaged privilege boundaries and frozen modules
         if: needs.scope.outputs.gui_only != 'true' && needs.scope.outputs.medium_only != 'true'
         run: |
@@ -273,7 +306,10 @@ jobs:
         if: always()
         shell: pwsh
         run: |
-          if ($env:BB_R60_MEDIUM_ONLY -eq 'true') {
+          if ($env:BB_R60_WORKSPACE_ONLY -eq 'true') {
+            "R60 development scope: UI_ONLY_SOURCE_FROZEN`nWorkspace-only result: ${{ job.status }}`nScope: four new fresh-child workspace GUI cases per OS plus source/frozen real editor RU-EN at Qt scales 1/1.25/1.5/2`nPrevious full contracts/native/helper/Standard/package regression/lifecycle acceptance: NOT_RUN`nFixture preparation supplies actual saved input data; it is not a repeat claim for native acceptance.`nComplete candidate acceptance: NOT_ESTABLISHED`nSource: $env:BB_QA_SOURCE_SHA`nRun: $env:GITHUB_RUN_ID attempt $env:GITHUB_RUN_ATTEMPT`nArtifacts/cache/publication: none`nPhysical Windows 10/11 and Secure Desktop: NOT_TESTED" >> $env:GITHUB_STEP_SUMMARY
+            $paths = @('r60-source/gui/result.json', 'r60-source-gui-1.25/gui/result.json', 'r60-source-gui-1.5/gui/result.json', 'r60-source-gui-2/gui/result.json', 'r60-frozen/gui/result.json', 'r60-frozen-gui-1.25/gui/result.json', 'r60-frozen-gui-1.5/gui/result.json', 'r60-frozen-gui-2/gui/result.json', 'r60-gui-diagnostic-data/wave02-native.json')
+          } elseif ($env:BB_R60_MEDIUM_ONLY -eq 'true') {
             "R60 development scope: SOURCE_MEDIUM_DIAGNOSTIC`nStandard medium-token source diagnostic result: ${{ job.status }}`nScope: actual source engine/native-helper/editor chain over full real Wave02 evidence`nFull native/frozen/DPI/lifecycle acceptance: NOT_RUN`nComplete candidate acceptance: NOT_ESTABLISHED`nSource: $env:BB_QA_SOURCE_SHA`nRun: $env:GITHUB_RUN_ID attempt $env:GITHUB_RUN_ATTEMPT`nArtifacts/cache/publication: none`nPhysical Windows 10/11 and Secure Desktop: NOT_TESTED" >> $env:GITHUB_STEP_SUMMARY
             $paths = @('r60-source-standard/result.json', 'r60-source-standard/gui/result.json', 'r60-medium-diagnostic-data/wave02-native.json')
           } elseif ($env:BB_R60_GUI_ONLY -eq 'true') {
