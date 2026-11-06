@@ -2617,9 +2617,37 @@ class UniversalWindow(QMainWindow):
                    "The original session deadline is not extended. Safe target recovery remains unconfirmed.")
         QMessageBox.warning(self, "BLACK.BOX — RECOVERY_UNCONFIRMED", message)
 
+    def _chain_can_close_independent_deep(self):
+        """Passive workflow work must not postpone another diagnostic owner.
+
+        Active/unknown workflow operations and live runtime references retain
+        the existing chain-first drain. Saved history never supplies authority
+        to close a shared helper before its current workflow has finished.
+        """
+        chain = self.chain_builder_panel.bridge
+        worker = chain.worker
+        passive = worker is None or (getattr(worker, "operation", None) in {
+            "catalog", "history", "open", "open_run", "export", "validate", "connect",
+            "save", "save_profile", "open_profile"} and getattr(worker, "engine", None) is None)
+        runtime_idle = all(getattr(chain, key, None) is None for key in
+            ("_native", "_finalizing", "_owned_session_run_id", "_observe_owner", "_selection", "_paused_run"))
+        pending = any(getattr(chain, key, None) for key in
+            ("_requests", "_native_contexts", "_paused_runs", "_research", "_observe_cleanup_unknown"))
+        return passive and runtime_idle and not pending
+
     def closeEvent(self, event) -> None:
         if hasattr(self, "chain_builder_panel") and not self._chain_close_complete:
             self._pending_close = True
+            # The catalog/history workers do not own Deep Inspection. Request
+            # its independent cleanup immediately, while still awaiting both
+            # real closed signals. A chain using the shared helper must drain
+            # and release its exact runtime context before this shutdown path.
+            if (self._chain_can_close_independent_deep() and hasattr(self, "deep_inspector_panel")
+                    and not self._deep_close_complete and self.deep_inspector_panel.bridge.has_session
+                    and not (hasattr(self, "investigation_graph_panel")
+                             and self.investigation_graph_panel.bridge.busy)):
+                self._timer.stop()
+                self.deep_inspector_panel.shutdown()
             self.chain_builder_panel.bridge.shutdown()
             event.ignore()
             return

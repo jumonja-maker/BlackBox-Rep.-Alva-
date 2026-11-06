@@ -6,8 +6,11 @@ Unhandled callback errors cannot be cleared by later successful UI assertions.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
+import re
 import sys
+import time
 
 
 class ChainQaFailureGuard:
@@ -16,6 +19,13 @@ class ChainQaFailureGuard:
         self.failed = False
         self.count = 0
         self.first = None
+        self.pid = os.getpid()
+        self.source_sha = None
+        if "--qa-commit-sha" in sys.argv:
+            index = sys.argv.index("--qa-commit-sha") + 1
+            if index < len(sys.argv) and re.fullmatch(r"[0-9a-f]{40}", sys.argv[index]):
+                self.source_sha = sys.argv[index]
+        self.first_recorded_monotonic_ns = None
 
     def install(self):
         previous = sys.excepthook
@@ -28,6 +38,7 @@ class ChainQaFailureGuard:
         self.failed = True
         self.count = min(self.count + 1, 1_000_000)
         if self.first is None:
+            self.first_recorded_monotonic_ns = time.monotonic_ns()
             frames = []
             while tb is not None and len(frames) < 12:
                 code = tb.tb_frame.f_code
@@ -51,6 +62,8 @@ class ChainQaFailureGuard:
 
     def metadata(self):
         return {"scope": "CHAIN_QA_PYTHON_FAILURE_METADATA_ONLY", "count": self.count,
+                "pid": self.pid, "source_sha": self.source_sha,
+                "first_recorded_monotonic_ns": self.first_recorded_monotonic_ns,
                 "first": self.first}
 
     def apply(self, proof):

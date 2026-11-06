@@ -7,11 +7,80 @@ import json
 from pathlib import Path
 import subprocess
 import sys
+import time
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT), str(ROOT / "src")]
 
 from blackbox_core.chain_qa import file_hash, read_json, require, source_proof
+
+
+def _guard_stamp(path):
+    try:
+        value = path.stat()
+        return (value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns, value.st_ctime_ns)
+    except OSError:
+        return None
+
+
+def _fresh_guard_failure(path, *, pid, source_sha, started_ns, previous_stamp):
+    """Read only bounded, fresh metadata bound to this actual returned child.
+
+    A stale/missing file or absent process receipt is not a startup diagnosis.
+    No exception text, command line, source paths or payloads are transported.
+    """
+    try:
+        stamp = _guard_stamp(path)
+        if stamp is None:
+            return {"status": "NOT_PRESENT_OR_UNREADABLE"}
+        if stamp == previous_stamp:
+            return {"status": "UNCHANGED_PREVIOUS_FILE_NOT_CURRENT_CHILD"}
+        value = read_json(path, maximum=32768)
+        first = value.get("first", {})
+        frames = first.get("frames") if type(first) is dict else None
+        recorded = value.get("first_recorded_monotonic_ns")
+        valid = (type(pid) is int and pid > 0 and value.get("pid") == pid and
+            value.get("source_sha") == source_sha and
+            value.get("scope") == "CHAIN_QA_PYTHON_FAILURE_METADATA_ONLY" and
+            type(value.get("count")) is int and 1 <= value["count"] <= 1_000_000 and
+            type(recorded) is int and started_ns <= recorded <= time.monotonic_ns() and
+            type(first) is dict and type(first.get("error_type")) is str and
+            0 < len(first["error_type"]) <= 64 and type(frames) is list and len(frames) <= 12)
+        if not valid:
+            return {"status": "NOT_BOUND_TO_CURRENT_CHILD"}
+        safe_frames = []
+        for frame in frames:
+            valid = (type(frame) is dict and type(frame.get("file")) is str and
+                0 < len(frame["file"]) <= 128 and not any(char in frame["file"] for char in ("/", "\\")) and
+                type(frame.get("function")) is str and len(frame["function"]) <= 96 and
+                type(frame.get("line")) is int and 0 <= frame["line"] <= 2**31 - 1)
+            if not valid:
+                return {"status": "INVALID_BOUNDED_GUARD_METADATA"}
+            safe_frames.append({key: frame[key] for key in ("file", "function", "line")})
+        require(_guard_stamp(path) == stamp, "R60_GUARD_METADATA_CHANGED_DURING_READBACK")
+        return {"status": "BOUND_CURRENT_CHILD_METADATA", "pid": pid, "source_sha": source_sha,
+            "count": value["count"], "first_recorded_monotonic_ns": recorded,
+            "first": {"error_type": first["error_type"], "frames": safe_frames}}
+    except Exception as error:
+        return {"status": "READBACK_UNCONFIRMED", "error_type": type(error).__name__[:64]}
+
+
+def _medium_child_diagnostic(child, *, source_sha, frozen, guard_path, started_ns, previous_stamp):
+    def integrity(key):
+        value = child.get(key)
+        if type(value) is not dict:
+            return None
+        return {field: value.get(field) for field in ("sid", "rid", "level", "source")}
+    code = child.get("exit_code")
+    return {"source_sha": source_sha, "frozen": frozen, "pid": child.get("pid"),
+        "exit_code": code, "windows_status_hex": "0x%08x" % (code & 0xffffffff) if type(code) is int else None,
+        "medium_integrity_requested": child.get("medium_integrity_requested"),
+        "token_integrity": integrity("token_integrity"), "child_token_integrity": integrity("child_token_integrity"),
+        "creation_flags": child.get("creation_flags"), "job_assigned_before_resume": child.get("job_assigned_before_resume"),
+        "parent_token_unchanged": child.get("parent_token_unchanged"),
+        "guard": _fresh_guard_failure(guard_path, pid=child.get("pid"), source_sha=source_sha,
+            started_ns=started_ns, previous_stamp=previous_stamp),
+        "scope": "ACTUAL_MEDIUM_CHILD_EXIT_AND_FRESH_PYTHON_METADATA_NOT_ROOT_CAUSE"}
 
 
 def verify_gui_screenshots(proof, folder, *, emit=False):
@@ -55,9 +124,22 @@ def run(args):
         require(not args.gui_only, "R60_STANDARD_REQUIRES_ACTUAL_CORE_CHAIN")
         command.append("--chain-standard-token")
         from tools.qa_decoder_standard_token import restricted_child, restricted_interpreter
-        if not args.exe:
-            command[0] = str(restricted_interpreter(sys.executable))
-        child = restricted_child(command, cwd=ROOT, timeout_seconds=1200, medium_integrity=True)
+        guard_path = ROOT / "blackbox-chain-qa-error.json"
+        previous_stamp, started_ns = _guard_stamp(guard_path), time.monotonic_ns()
+        try:
+            if not args.exe:
+                command[0] = str(restricted_interpreter(sys.executable))
+            child = restricted_child(command, cwd=ROOT, timeout_seconds=1200, medium_integrity=True)
+        except BaseException as error:
+            print("R60_CHAIN_STANDARD_TOKEN_DIAGNOSTIC " + json.dumps({"source_sha": args.source_sha,
+                "frozen": bool(args.exe), "pid": None, "exit_code": None, "windows_status_hex": None,
+                "status": "CHILD_RESULT_NOT_RETURNED", "error_type": type(error).__name__[:64],
+                "winerror": getattr(error, "winerror", None) if type(getattr(error, "winerror", None)) is int else None,
+                "scope": "NO_CHILD_EXIT_OR_TOKEN_RESULT_AVAILABLE"}, sort_keys=True), flush=True)
+            raise
+        print("R60_CHAIN_STANDARD_TOKEN_DIAGNOSTIC " + json.dumps(_medium_child_diagnostic(child,
+            source_sha=args.source_sha, frozen=bool(args.exe), guard_path=guard_path,
+            started_ns=started_ns, previous_stamp=previous_stamp), sort_keys=True), flush=True)
         require(child["exit_code"] == 0 and child["child_token_integrity"]["sid"] == "S-1-16-8192",
                 "R60_ACTUAL_CHAIN_MEDIUM_TOKEN_PROCESS_FAILED")
         print("R60_CHAIN_STANDARD_TOKEN_CHILD " + json.dumps(child, sort_keys=True), flush=True)

@@ -68,6 +68,9 @@ def run_fixture(name):
             self.assertNotIn("CONTROLLED_SECRET", raw)
             self.assertNotIn(str(self.root), raw)
             data = json.loads(raw)
+            self.assertEqual(data["pid"], os.getpid())
+            self.assertIsNone(data["source_sha"])
+            self.assertIsInstance(data["first_recorded_monotonic_ns"], int)
             self.assertEqual(data["first"]["error_type"], "RuntimeError")
             self.assertLessEqual(len(data["first"]["frames"]), 12)
             self.assertTrue(all(Path(row["file"]).name == row["file"] for row in data["first"]["frames"]))
@@ -138,14 +141,17 @@ def run_fixture(name):
                 "        raise ImportError('CONTROLLED_STARTUP_SECRET_MUST_NOT_BE_LOGGED')",
                 "    return original(name, *args, **kwargs)",
                 "builtins.__import__ = controlled_import",
-                "sys.argv = ['app.py', '--chain-e2e', 'unused-qa-output']",
+                "sys.argv = ['app.py', '--chain-e2e', 'unused-qa-output', '--qa-commit-sha', '" + "c" * 40 + "']",
                 "runpy.run_path(" + repr(str(Path(product.__file__).resolve())) + ", run_name='__main__')",
             ))
             completed = subprocess.run([sys.executable, "-c", script], cwd=self.root,
                                        capture_output=True, text=True, timeout=20)
             self.assertEqual(completed.returncode, 1, completed.stderr)
             raw = (self.root / "blackbox-chain-qa-error.json").read_text(encoding="ascii")
-            self.assertEqual(json.loads(raw)["first"]["error_type"], "ImportError")
+            metadata = json.loads(raw)
+            self.assertEqual(metadata["first"]["error_type"], "ImportError")
+            self.assertEqual(metadata["source_sha"], "c" * 40)
+            self.assertGreater(metadata["pid"], 0)
             self.assertNotIn("CONTROLLED_STARTUP_SECRET", raw)
             self.assertNotIn("Traceback", completed.stderr)
 
