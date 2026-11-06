@@ -8,6 +8,7 @@ from copy import deepcopy
 import io
 import json
 from pathlib import Path
+from types import SimpleNamespace
 import tempfile
 import time
 import unittest
@@ -81,6 +82,10 @@ class MediumDiagnosticsTests(unittest.TestCase):
                     with self.assertRaisesRegex(AssertionError, "R60_ACTUAL_CHAIN_MEDIUM_TOKEN_PROCESS_FAILED"):
                         qa.run(args)
                 self.assertEqual(launch.call_count, 1)
+                actual_command = launch.call_args.args[0]
+                self.assertEqual(actual_command[0], "pythonw.exe")
+                self.assertNotIn("-X", actual_command)
+                self.assertNotIn("faulthandler", actual_command)
                 lines = [line.partition("R60_CHAIN_STANDARD_TOKEN_DIAGNOSTIC ")[2]
                          for line in output.getvalue().splitlines()
                          if line.startswith("R60_CHAIN_STANDARD_TOKEN_DIAGNOSTIC ")]
@@ -90,6 +95,71 @@ class MediumDiagnosticsTests(unittest.TestCase):
                 self.assertEqual(observed["windows_status_hex"], "0x%08x" % code)
                 self.assertEqual(observed["child_token_integrity"]["sid"], sid)
                 self.assertNotIn("R60_CHAIN_ACCEPTANCE_RECEIPT", output.getvalue())
+
+    def test_bootstrap_controls_differ_only_by_option_and_do_not_create_application_output(self):
+        # Receipt/marker injection verifies orchestration, not Windows behavior.
+        output = self.root / "application-output"
+        directory = self.root / "application-output-bootstrap"
+        interpreter = self.root / "pythonw.exe"
+        interpreter.write_bytes(b"CONTROLLED_INTERPRETER_FILE_NOT_A_WINDOWS_BINARY")
+        args = argparse.Namespace(output=output, source_sha=self.sha)
+        commands = []
+
+        def controlled_launch(command, **kwargs):
+            commands.append(list(command))
+            self.assertTrue(kwargs["medium_integrity"])
+            self.assertEqual(kwargs["timeout_seconds"], 30)
+            self.assertEqual(kwargs["cwd"], qa.ROOT)
+            option = "-X" in command
+            pid = 10000 + len(commands)
+            if not option:
+                (directory / "without-option.entered").write_bytes(b"ENTRY_REACHED\n")
+                (directory / "without-option.json").write_text(json.dumps({
+                    "schema": "blackbox.r60.windowed-bootstrap/1", "pid": pid, "source_sha": self.sha,
+                    "option_present": False, "stderr_is_none": True, "faulthandler_enabled": False,
+                    "version": [3, 11, 9]}), encoding="ascii")
+            return {"pid": pid, "exit_code": 1 if option else 0,
+                "token_integrity": {"sid": "S-1-16-8192"}, "child_token_integrity": {"sid": "S-1-16-8192"},
+                "medium_integrity_requested": True, "job_assigned_before_resume": True,
+                "parent_token_unchanged": True, "qa_default_dacl_adjustment": {
+                    "after": {"fixture": "CONTROLLED_SAME_POLICY"}, "child_readback": {"fixture": "CONTROLLED_SAME_POLICY"}}}
+
+        with redirect_stdout(io.StringIO()):
+            result = qa._diagnose_windowed_bootstrap(args, interpreter, controlled_launch)
+        self.assertEqual(len(commands), 2)
+        self.assertEqual(commands[0][1:3], ["-X", "faulthandler"])
+        self.assertEqual(commands[0][:1] + commands[0][3:], commands[1])
+        self.assertTrue(result["hypothesis_supported"])
+        self.assertFalse(result["application_acceptance_established"])
+        self.assertFalse(result["application_or_native_query_retried"])
+        self.assertFalse(output.exists())
+        self.assertEqual(json.loads((directory / "result.json").read_text())["scope"],
+                         "BOOTSTRAP_DIAGNOSTIC_NOT_APPLICATION_ACCEPTANCE")
+
+    def test_console_keeps_option_and_frozen_medium_keeps_its_original_executable(self):
+        args = argparse.Namespace(source_sha=self.sha, evidence_root=self.root, output=self.root / "out",
+            exe=None, gui_only=False, standard_token=False, decoder=None, probe=None, diagnostic_helper=None)
+        with patch.object(qa, "source_proof"), \
+                patch.object(qa.subprocess, "run", return_value=SimpleNamespace(returncode=7)) as console, \
+                redirect_stdout(io.StringIO()):
+            with self.assertRaisesRegex(AssertionError, "R60_SOURCE_OR_FROZEN_CHAIN_PROCESS_FAILED"):
+                qa.run(args)
+        self.assertEqual(console.call_count, 1)
+        self.assertEqual(console.call_args.args[0][1:3], ["-X", "faulthandler"])
+        args.exe = self.root / "frozen.exe"
+        args.exe.write_bytes(b"CONTROLLED_EXECUTABLE_REFERENCE_NOT_A_NATIVE_FIXTURE")
+        args.standard_token = True
+        child = {"pid": 1, "exit_code": 1, "child_token_integrity": {"sid": "S-1-16-8192"}}
+        with patch.object(qa, "source_proof"), \
+                patch("tools.qa_decoder_standard_token.restricted_interpreter") as select, \
+                patch("tools.qa_decoder_standard_token.restricted_child", return_value=child) as launch, \
+                redirect_stdout(io.StringIO()):
+            with self.assertRaisesRegex(AssertionError, "R60_ACTUAL_CHAIN_MEDIUM_TOKEN_PROCESS_FAILED"):
+                qa.run(args)
+        select.assert_not_called()
+        self.assertEqual(launch.call_count, 1)
+        self.assertEqual(launch.call_args.args[0][0], str(args.exe.resolve()))
+        self.assertNotIn("-X", launch.call_args.args[0])
 
 
 if __name__ == "__main__":

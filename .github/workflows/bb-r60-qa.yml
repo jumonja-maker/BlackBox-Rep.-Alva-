@@ -210,7 +210,7 @@ jobs:
       - name: Source medium diagnostic only - actual Standard medium-token engine and editor chain
         if: needs.scope.outputs.medium_only == 'true'
         timeout-minutes: 12
-        run: python tools/qa_chain_builder.py --standard-token --evidence-root r60-medium-diagnostic-data --output r60-source-standard --source-sha "$env:BB_QA_SOURCE_SHA"
+        run: python tools/qa_chain_builder.py --standard-token --diagnose-windowed-bootstrap --evidence-root r60-medium-diagnostic-data --output r60-source-standard --source-sha "$env:BB_QA_SOURCE_SHA"
       - name: Source real editor RU/EN at DPI 125 150 200 with artifactless screenshot proof
         if: needs.scope.outputs.gui_only != 'true' && needs.scope.outputs.medium_only != 'true'
         timeout-minutes: 8

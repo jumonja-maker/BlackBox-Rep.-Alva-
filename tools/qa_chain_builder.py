@@ -12,7 +12,7 @@ import time
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT), str(ROOT / "src")]
 
-from blackbox_core.chain_qa import file_hash, read_json, require, source_proof
+from blackbox_core.chain_qa import file_hash, read_json, require, save, source_proof
 
 
 def _guard_stamp(path):
@@ -83,6 +83,101 @@ def _medium_child_diagnostic(child, *, source_sha, frozen, guard_path, started_n
         "scope": "ACTUAL_MEDIUM_CHILD_EXIT_AND_FRESH_PYTHON_METADATA_NOT_ROOT_CAUSE"}
 
 
+def _diagnose_windowed_bootstrap(args, interpreter, launch):
+    """Two owned bootstrap controls, never an application/native-query retry."""
+    output = args.output.resolve().with_name(args.output.name + "-bootstrap")
+    output.mkdir(parents=True, exist_ok=False)
+    interpreter = Path(interpreter).resolve(strict=True)
+    original_hash = file_hash(interpreter)
+    with_marker, without_marker = output / "with-option.entered", output / "without-option.entered"
+    with_metadata, without_metadata = output / "with-option.json", output / "without-option.json"
+    # Identical script and cwd in both commands. Only -X faulthandler differs.
+    # sys is already a builtin runtime module: no stdlib filesystem import
+    # precedes this first exclusive marker write.
+    script = "\n".join((
+        "open(" + repr(str(with_marker)) + " if 'faulthandler' in __import__('sys')._xoptions else " +
+            repr(str(without_marker)) + ", 'xb').write(b'ENTRY_REACHED\\n')",
+        "import sys, os, json, faulthandler",
+        "enabled_option = 'faulthandler' in sys._xoptions",
+        "metadata = {'schema': 'blackbox.r60.windowed-bootstrap/1', 'pid': os.getpid(), " +
+            "'source_sha': " + repr(args.source_sha) + ", 'option_present': enabled_option, " +
+            "'stderr_is_none': sys.stderr is None, 'faulthandler_enabled': faulthandler.is_enabled(), " +
+            "'version': list(sys.version_info[:3])}",
+        "with open(" + repr(str(with_metadata)) + " if enabled_option else " + repr(str(without_metadata)) +
+            ", 'x', encoding='ascii') as stream:",
+        "    json.dump(metadata, stream, ensure_ascii=True, sort_keys=True)",
+    ))
+    cases, child_receipts = [], []
+    for option in (True, False):
+        command = [str(interpreter)] + (["-X", "faulthandler"] if option else []) + ["-c", script]
+        try:
+            child = launch(command, cwd=ROOT, timeout_seconds=30, medium_integrity=True)
+        except BaseException as error:
+            print("R60_MEDIUM_BOOTSTRAP_CASE " + json.dumps({"option_present": option,
+                "source_sha": args.source_sha, "status": "CHILD_RESULT_NOT_RETURNED", "pid": None,
+                "exit_code": None, "error_type": type(error).__name__[:64],
+                "scope": "BOOTSTRAP_DIAGNOSTIC_NOT_APPLICATION_ACCEPTANCE"}, sort_keys=True), flush=True)
+            raise
+        marker = with_marker if option else without_marker
+        metadata_path = with_metadata if option else without_metadata
+        code = child.get("exit_code")
+        observed = {"option_present": option, "source_sha": args.source_sha, "pid": child.get("pid"),
+            "exit_code": code, "windows_status_hex": "0x%08x" % (code & 0xffffffff) if type(code) is int else None,
+            "token_integrity": child.get("token_integrity"), "child_token_integrity": child.get("child_token_integrity"),
+            "medium_integrity_requested": child.get("medium_integrity_requested"),
+            "job_assigned_before_resume": child.get("job_assigned_before_resume"),
+            "parent_token_unchanged": child.get("parent_token_unchanged"),
+            "first_statement_marker_present": marker.is_file() and not marker.is_symlink(),
+            "bootstrap_metadata": None, "scope": "BOOTSTRAP_DIAGNOSTIC_NOT_APPLICATION_ACCEPTANCE"}
+        # Retain the real process exit/token facts before any readback refuses
+        # an unreadable, missing, malformed or mismatched bootstrap result.
+        print("R60_MEDIUM_BOOTSTRAP_CASE " + json.dumps(observed, sort_keys=True), flush=True)
+        require(child.get("token_integrity", {}).get("sid") == "S-1-16-8192" and
+                child.get("child_token_integrity", {}).get("sid") == "S-1-16-8192" and
+                child.get("medium_integrity_requested") is True and
+                child.get("job_assigned_before_resume") is True and child.get("parent_token_unchanged") is True,
+                "R60_BOOTSTRAP_ACTUAL_MEDIUM_TOKEN_OR_JOB_PROOF_MISSING")
+        if marker.exists():
+            require(not marker.is_symlink() and marker.is_file() and marker.stat().st_size == 14 and
+                    marker.read_bytes() == b"ENTRY_REACHED\n",
+                    "R60_BOOTSTRAP_FIRST_STATEMENT_MARKER_INVALID")
+        if metadata_path.exists():
+            metadata = read_json(metadata_path, maximum=8192)
+            require(set(metadata) == {"schema", "pid", "source_sha", "option_present", "stderr_is_none",
+                                      "faulthandler_enabled", "version"} and
+                    metadata["schema"] == "blackbox.r60.windowed-bootstrap/1" and
+                    metadata["pid"] == child["pid"] and metadata["source_sha"] == args.source_sha and
+                    metadata["option_present"] is option and type(metadata["stderr_is_none"]) is bool and
+                    type(metadata["faulthandler_enabled"]) is bool and type(metadata["version"]) is list and
+                    len(metadata["version"]) == 3 and all(type(value) is int and 0 <= value <= 65535
+                                                       for value in metadata["version"]) and
+                    observed["first_statement_marker_present"], "R60_BOOTSTRAP_METADATA_NOT_BOUND_TO_ACTUAL_CHILD")
+            observed["bootstrap_metadata"] = metadata
+        print("R60_MEDIUM_BOOTSTRAP_READBACK " + json.dumps(observed, sort_keys=True), flush=True)
+        require(file_hash(interpreter) == original_hash, "R60_BOOTSTRAP_INTERPRETER_CHANGED")
+        cases.append(observed)
+        child_receipts.append(child)
+    first, second = cases
+    baseline = second["bootstrap_metadata"] or {}
+    dacl_policy = [row.get("qa_default_dacl_adjustment", {}) for row in child_receipts]
+    policy_equal = (all(type(row.get("after")) is dict and row.get("child_readback") == row["after"]
+                        for row in dacl_policy) and dacl_policy[0]["after"] == dacl_policy[1]["after"])
+    require(policy_equal, "R60_BOOTSTRAP_EPHEMERAL_TOKEN_DACL_POLICY_CHANGED")
+    supported = (first["exit_code"] == 1 and not first["first_statement_marker_present"] and
+        first["bootstrap_metadata"] is None and second["exit_code"] == 0 and
+        second["first_statement_marker_present"] and baseline.get("stderr_is_none") is True and
+        baseline.get("faulthandler_enabled") is False)
+    proof = {"status": "OBSERVED", "scope": "BOOTSTRAP_DIAGNOSTIC_NOT_APPLICATION_ACCEPTANCE",
+        "source_sha": args.source_sha, "interpreter_sha256": original_hash, "cases": cases,
+        "same_interpreter_script_and_cwd": True, "same_medium_token_default_dacl_policy": policy_equal,
+        "separate_owned_ephemeral_tokens": True, "hypothesis_supported": supported,
+        "application_or_native_query_retried": False, "application_acceptance_established": False}
+    save(output / "result.json", proof)
+    print("R60_MEDIUM_BOOTSTRAP_DIAGNOSTIC " + json.dumps({**proof,
+        "result_sha256": file_hash(output / "result.json")}, sort_keys=True), flush=True)
+    return proof
+
+
 def verify_gui_screenshots(proof, folder, *, emit=False):
     rows = proof.get("screenshots")
     require(type(rows) is list and len(rows) == 2 and {row.get("language") for row in rows} == {"RU", "EN"},
@@ -108,6 +203,9 @@ def verify_gui_screenshots(proof, folder, *, emit=False):
 
 def run(args):
     source_proof(args.source_sha)
+    diagnose_bootstrap = getattr(args, "diagnose_windowed_bootstrap", False)
+    require(not diagnose_bootstrap or args.standard_token and not args.exe and not args.gui_only,
+            "R60_BOOTSTRAP_DIAGNOSIS_REQUIRES_SOURCE_MEDIUM_ONLY")
     evidence = args.evidence_root
     if evidence is None:
         require(args.exe is None and args.decoder is not None, "R60_REAL_DECODER_EVIDENCE_REQUIRED")
@@ -115,7 +213,11 @@ def run(args):
         evidence = args.output.with_name(args.output.name + "-actual-wave02")
         prepare_actual_evidence(argparse.Namespace(output=evidence, decoder=args.decoder,
             source_sha=args.source_sha, probe=args.probe, diagnostic_helper=args.diagnostic_helper, container="full"))
-    executable = [str(args.exe.resolve(strict=True))] if args.exe else [sys.executable, "-X", "faulthandler", str(ROOT / "app.py")]
+    # pythonw has no guaranteed stderr descriptor before application startup.
+    # Keep console diagnostics on console Python; windowed source and packaged
+    # EXE use their explicit QA guard, without a console-only startup option.
+    executable = ([str(args.exe.resolve(strict=True))] if args.exe else
+        [sys.executable] + ([] if args.standard_token else ["-X", "faulthandler"]) + [str(ROOT / "app.py")])
     command = executable + ["--chain-e2e", str(args.output.resolve()), "--chain-evidence",
         str(evidence.resolve(strict=True)), "--qa-commit-sha", args.source_sha]
     if args.gui_only:
@@ -129,6 +231,8 @@ def run(args):
         try:
             if not args.exe:
                 command[0] = str(restricted_interpreter(sys.executable))
+                if diagnose_bootstrap:
+                    _diagnose_windowed_bootstrap(args, command[0], restricted_child)
             child = restricted_child(command, cwd=ROOT, timeout_seconds=1200, medium_integrity=True)
         except BaseException as error:
             print("R60_CHAIN_STANDARD_TOKEN_DIAGNOSTIC " + json.dumps({"source_sha": args.source_sha,
@@ -184,6 +288,8 @@ def main():
     parser.add_argument("--exe", type=Path)
     parser.add_argument("--gui-only", action="store_true")
     parser.add_argument("--standard-token", action="store_true")
+    parser.add_argument("--diagnose-windowed-bootstrap", action="store_true",
+                        help="Run two separate controlled Medium pythonw startup diagnostics before the single app launch")
     return run(parser.parse_args())
 
 
