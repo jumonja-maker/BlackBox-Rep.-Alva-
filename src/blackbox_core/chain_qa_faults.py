@@ -249,7 +249,110 @@ def observe_mid_cancel(output, executable, source_sha, *, trace_path):
     return proof
 
 
-def verify_io_critical_path(workflow, records):
+def _persisted_case_scope(artifact):
+    """Read the committed case independently of the production case reader."""
+    import hashlib
+    path = Path(artifact["value"]["_path"])
+    before = file_hash(path)
+    require(before == artifact["value"]["sha256"], "R60_SELECTED_CASE_ARTIFACT_HASH_MISMATCH")
+    with closing(sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=5)) as db:
+        db.execute("PRAGMA query_only=ON")
+        db.execute("PRAGMA trusted_schema=OFF")
+        db.setlimit(sqlite3.SQLITE_LIMIT_LENGTH, 34 * 1024**2)
+        deadline = time.monotonic() + 30
+        db.set_progress_handler(lambda: int(time.monotonic() >= deadline), 1000)
+        require(db.execute("PRAGMA integrity_check").fetchall() == [("ok",)], "R60_SELECTED_CASE_SQL_INTEGRITY")
+        rows = db.execute("SELECT case_id,schema,content_json,content_sha256 FROM investigation LIMIT 2").fetchall()
+        require(len(rows) == 1 and len(rows[0][2].encode("utf-8")) <= 32 * 1024**2,
+                "R60_SELECTED_CASE_DEFAULT_RECORD_BUDGET")
+        case_id, schema, raw, recorded = rows[0]
+        require(hashlib.sha256(raw.encode("ascii")).hexdigest() == recorded,
+                "R60_SELECTED_CASE_CONTENT_HASH_MISMATCH")
+        value = json.loads(raw)
+        require(value.get("schema") == schema == "blackbox.investigation-graph/1" and
+                value.get("case_id") == case_id == artifact["value"]["case_id"] and
+                db.execute("SELECT count(*) FROM nodes").fetchone()[0] == len(value["nodes"]),
+                "R60_SELECTED_CASE_SOURCE_IDENTITY_MISMATCH")
+    require(file_hash(path) == before, "R60_SELECTED_CASE_READBACK_CHANGED_SOURCE")
+    return value, {"case_id": case_id, "case_sha256": before, "content_sha256": recorded,
+                   "content_bytes": len(raw.encode("ascii")), "source_unchanged": True}
+
+
+def _verify_selected_source_views(workflow, rows, index, fixture_pid):
+    require(type(fixture_pid) is int and fixture_pid > 0, "R60_SELECTED_TRACE_FIXTURE_PID_REQUIRED")
+    declared = {node.node_id: node for node in workflow.nodes}
+    selected = {"pid": fixture_pid}
+    require(declared["recorded-trace"].parameters.get("selection") == selected and
+            index["value"].get("selection") == selected,
+            "R60_SELECTED_TRACE_SCOPE_NOT_PRESERVED_THROUGH_DECODE")
+    for node in workflow.nodes:
+        if node.tool_id == "load_source" and node.node_id != "recorded-trace":
+            require(node.parameters.get("selection", {}) == {}, "R60_TRACE_PID_LEAKED_INTO_OTHER_SOURCE_SCOPE")
+    trace = rows["recorded-trace"]["outputs"]["source"][0]
+    require(file_hash(trace["value"]["_path"]) == trace["value"]["sha256"],
+            "R60_SELECTED_VIEW_CHANGED_ORIGINAL_TRACE")
+    with closing(sqlite3.connect(Path(index["value"]["_path"]).resolve().as_uri() + "?mode=ro", uri=True)) as db:
+        db.execute("PRAGMA query_only=ON")
+        db.execute("PRAGMA trusted_schema=OFF")
+        summary = json.loads(db.execute("SELECT value FROM metadata WHERE key='summary'").fetchone()[0])
+        total, target_rows = db.execute("SELECT count(*),sum(CASE WHEN pid=? THEN 1 ELSE 0 END) FROM events",
+                                       (fixture_pid,)).fetchone()
+        require(total == summary["rows"] and target_rows > 0, "R60_SELECTED_VIEW_RAW_INDEX_OR_TARGET_ROWS_CHANGED")
+    case_proofs, combined = {}, None
+    for node_id in ("trace-critical-path", "investigation"):
+        case, proof = _persisted_case_scope(rows[node_id]["outputs"]["case"][0])
+        traces = [source for source in case["sources"] if source["source_type"] == "TRACE_INDEX"]
+        require(len(traces) == 1 and traces[0]["selection"] == selected and
+                traces[0]["index_sha256"] == index["value"]["sha256"],
+                "R60_PERSISTED_CASE_LOST_SELECTED_TRACE_SCOPE")
+        require(not any(edge.get("relation_type") == "BOUNDED_TIME_CORRELATION" for edge in case["edges"]) and
+                case["critical_path"]["end_to_end_established"] is False and
+                case["root_cause_proven"] is False, "R60_SELECTED_VIEW_PROMOTED_CROSS_SOURCE_CLOCK_OR_CAUSE")
+        proof.update(trace_selection=selected, cross_source_clock_alignment="NOT_ESTABLISHED",
+                     end_to_end_established=False, root_cause_proven=False)
+        case_proofs[node_id] = proof
+        if node_id == "investigation":
+            combined = case
+    sessions = []
+    for node_id in ("session-before", "session-after"):
+        artifact = rows[node_id]["outputs"]["source"][0]
+        require(artifact["value"].get("selection", {}) == {}, "R60_SESSION_SELECTION_OVERWRITTEN_BY_TRACE_PID")
+        saved = [entry for entry in artifact["value"]["files"] if Path(entry["_path"]).name == "session-v2.sqlite3"]
+        require(len(saved) == 1, "R60_SELECTED_VIEW_ACTUAL_SESSION_V2_SOURCE_REQUIRED")
+        database = saved[0]
+        require(file_hash(database["_path"]) == database["sha256"], "R60_SELECTED_VIEW_SESSION_HASH_CHANGED")
+        with closing(sqlite3.connect(Path(database["_path"]).resolve().as_uri() + "?mode=ro", uri=True)) as db:
+            db.execute("PRAGMA query_only=ON")
+            db.execute("PRAGMA trusted_schema=OFF")
+            target = db.execute("SELECT session_uuid,root_pid,root_creation_time FROM targets WHERE target_id=1").fetchone()
+            instance = db.execute("SELECT pid,creation_time FROM process_instances WHERE instance_id=1").fetchone()
+        require(target is not None and instance == target[1:] and file_hash(database["_path"]) == database["sha256"],
+                "R60_SELECTED_VIEW_SESSION_ROOT_IDENTITY_CHANGED")
+        if node_id == "session-before":
+            candidates = [source for source in combined["sources"] if source["source_type"] == "SESSION" and
+                          source.get("session_uuid") == target[0]]
+            require(len(candidates) == 1 and candidates[0]["selection"] == {},
+                    "R60_COMBINED_CASE_FILTERED_ITS_INDEPENDENT_SESSION")
+            source_id = candidates[0]["source_id"]
+            identities = [node.get("process_identity") for node in combined["nodes"]
+                          if node["source_identity"] == source_id and node["observation_type"] == "PROCESS"]
+            require(any(identity and identity.get("pid") == target[1] and identity.get("creation_time") == target[2]
+                        and identity.get("instance_id") == 1 and identity.get("exact") is False for identity in identities),
+                    "R60_COMBINED_CASE_REBOUND_SESSION_TO_TRACE_PROCESS")
+        sessions.append({"node_id": node_id, "session_uuid": target[0], "root_pid": target[1],
+            "root_creation_time": target[2], "identity_quality": "RECORDED_FLOAT_NOT_EXACT_FILETIME",
+            "selection": {}, "source_sha256": database["sha256"], "source_unchanged": True})
+    require(file_hash(index["value"]["_path"]) == index["value"]["sha256"],
+            "R60_SELECTED_VIEW_RAW_INDEX_MODIFIED")
+    return {"status": "PASS", "scope": "PER_SOURCE_RECORDED_VIEW_SELECTION_NOT_GLOBAL_PROCESS_REBINDING",
+        "trace_fixture_pid": fixture_pid, "original_trace_sha256": trace["value"]["sha256"],
+        "raw_index_sha256": index["value"]["sha256"], "raw_index_rows": total,
+        "target_header_rows": target_rows, "other_header_rows": total - target_rows,
+        "raw_index_rewritten_or_filtered": False, "case_readback": case_proofs, "session_roots": sessions,
+        "cross_source_clock_alignment": "NOT_ESTABLISHED", "root_cause": "UNKNOWN"}
+
+
+def verify_io_critical_path(workflow, records, *, fixture_pid=None):
     """Prove real receipts and passthrough dependencies, not sibling execution."""
     rows = {event["node_id"]: event["data"] for event in records
             if event["event"] == "node.result"}
@@ -330,8 +433,10 @@ def verify_io_critical_path(workflow, records):
         documents.append(document)
         exported_hashes[format] = output["value"]["sha256"]
     require(documents[0] == documents[1], "R60_Q15_JSON_HTML_SEMANTIC_MISMATCH")
+    view_scope = _verify_selected_source_views(workflow, rows, index, fixture_pid) if fixture_pid is not None else None
     return {"status": "PASS", "source_index_sha256": index["value"]["sha256"], "links": links,
             "json_html_semantic_readback": True, "export_sha256": exported_hashes,
+            "selected_source_views": view_scope,
             "scope": "ACTUAL_DECLARED_AND_EXECUTED_INDEX_PASSTHROUGH_CHAIN_NOT_CAUSAL_PROOF",
             "clock_alignment": "NOT_PROMOTED_BY_WORKFLOW"}
 

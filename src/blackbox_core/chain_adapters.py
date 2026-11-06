@@ -415,14 +415,24 @@ def _observe(runtime):
 
 
 def _decode(ctx, inputs, parameters):
+    if callable(getattr(ctx, "resource_not_entered", None)):
+        ctx.resource_not_entered("DECODER_OWNED_STAGING", "DECODER_PRECONDITIONS_NOT_DISPATCHED")
     from .decoder_service import decode_file
     require(inputs["trace"].kind == "TRACE", "WORKFLOW_DECODER_REQUIRES_SUPPORTED_TRACE_SOURCE")
+    selection = inputs["trace"].value.get("selection", {})
+    require(type(selection) is dict, "WORKFLOW_SOURCE_SELECTION_REQUIRED")
+    selection = dict(selection)
     path = _output(ctx, "trace-index").with_suffix(".sqlite3")
-    answer = decode_file(_path(inputs["trace"]), path, cancel=_budget(ctx),
-                         timeout=min(600, max(1, ctx.remaining_seconds())))
+    source_path, budget = _path(inputs["trace"]), _budget(ctx)
+    timeout = min(600, max(1, ctx.remaining_seconds()))
+    if callable(getattr(ctx, "resource_may_start", None)):
+        ctx.resource_may_start("DECODER_OWNED_STAGING")
+    answer = decode_file(source_path, path, cancel=budget, timeout=timeout)
     def outputs():
+        # Decode the complete file. The explicit saved-source view remains
+        # a downstream Investigation filter, never live target authority.
         artifact = _file("TRACE_INDEX", path, metadata={"trace_sha256": answer.get("input_sha256"),
-            "upstream_artifacts": _links((inputs["trace"],))},
+            "selection": selection, "upstream_artifacts": _links((inputs["trace"],))},
             sources=tuple(answer.get("run_receipt", {}).get("source", {}).get("sources", ())),
             coverage=answer.get("run_receipt", {}).get("coverage", {}),
             clocks=("TRACE_RECORDED:" + str(answer.get("input_sha256")),))

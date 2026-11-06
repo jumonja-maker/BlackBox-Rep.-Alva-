@@ -268,9 +268,12 @@ def saved_evidence_graph(evidence):
     def add(node_id, tool_id, parameters=None, **policy):
         nodes.append({"node_id": node_id, "tool_id": tool_id, "parameters": parameters or {},
                       "budget_seconds": 180, "allow_partial_inputs": True, **policy})
-    def source(node_id, kind, path):
+    def source(node_id, kind, path, *, selection=None):
         path = Path(path).resolve(strict=True)
-        add(node_id, "load_source", {"kind": kind, "path": str(path)})
+        parameters = {"kind": kind, "path": str(path)}
+        if selection is not None:
+            parameters["selection"] = dict(selection)
+        add(node_id, "load_source", parameters)
         if path.is_file():
             hashes[str(path)] = file_hash(path)
         else:
@@ -284,7 +287,7 @@ def saved_evidence_graph(evidence):
             target = prefix + "-" + format
             add(target, "export_report", {"format": format})
             connect(first, port, target, "case")
-    source("recorded-trace", "TRACE", sources["trace"])
+    source("recorded-trace", "TRACE", sources["trace"], selection={"pid": sources["fixture"]["pid"]})
     add("decoder", "decode_trace")
     connect("recorded-trace", "source", "decoder", "trace")
     previous = "decoder"
@@ -395,7 +398,7 @@ def native_live_graph(output, executable, source_sha, diagnostic_helper=None):
             {"node_id": "decoder", "tool_id": "decode_trace", "budget_seconds": 180,
              "allow_partial_inputs": True},
             {"node_id": "graph", "tool_id": "investigate", "budget_seconds": 120,
-             "allow_partial_inputs": True},
+             "allow_partial_inputs": True, "parameters": {"selection": {"pid": target.pid}}},
             {"node_id": "observe", "tool_id": "observe", "budget_seconds": 30,
              "parameters": {"duration_seconds": 3}},
             {"node_id": "report", "tool_id": "export_report", "allow_partial_inputs": True,
@@ -533,7 +536,9 @@ def run_embedded(output, evidence_root, source_sha, diagnostic_helper=None, *, s
         workflow, sources = saved_evidence_graph(evidence)
         store, snapshot, records, journal = run_graph(workflow, output / "runs")
         from .chain_qa_faults import run_actual_faults, verify_io_critical_path
-        proof["io_critical_path"] = verify_io_critical_path(workflow, records)
+        source_manifest = read_json(evidence / "sources.json")
+        proof["io_critical_path"] = verify_io_critical_path(workflow, records,
+                                                           fixture_pid=source_manifest["fixture"]["pid"])
         require(all(file_hash(Path(path)) == digest for path, digest in sources.items()),
                 "R60_ORIGINAL_SOURCES_CHANGED")
         executed = {}
@@ -549,7 +554,6 @@ def run_embedded(output, evidence_root, source_sha, diagnostic_helper=None, *, s
         proof.update(state=snapshot["state"], node_count=len(snapshot["nodes"]), journal=journal,
                      actual_invocation_counts=executed, source_hashes=list(sources.values()),
                      source_hash_count=len(sources), source_hashes_unchanged=True)
-        source_manifest = read_json(evidence / "sources.json")
         executable = Path(source_manifest["fixture_executable"])
         require(file_hash(executable) == source_manifest["fixture_executable_sha256"],
                 "R60_NATIVE_FIXTURE_BINARY_CHANGED")

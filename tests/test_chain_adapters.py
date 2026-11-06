@@ -143,6 +143,66 @@ class ChainAdapterOfflineTests(unittest.TestCase):
             self.assertNotIn("CONTRACT_FIXTURE_NOT_AUTHENTICATED", text)
         self.assertEqual(hashlib.sha256(self.trace.read_bytes()).hexdigest(), before)
 
+    def test_selected_trace_view_survives_real_decode_without_filtering_index_bytes(self):
+        from blackbox_core.decoder_index import read_index
+        from blackbox_core.investigation_v3 import load_investigation
+        rows = [{"schema_version": 1, "token": "TWO_PID_FORMAT_FIXTURE_NOT_AUTHENTICATED",
+            "pid": 42 if ordinal % 2 else 81, "tid": 43 if ordinal % 2 else 82,
+            "seq": (ordinal + 1) // 2, "source_ns": ordinal * 1000,
+            "source_clock": "UNALIGNED_FORMAT_FIXTURE", "kind": "user.marker", "client_dropped": 0,
+            "attributes": {"name": "fixture-" + str(ordinal)}} for ordinal in range(1, 7)]
+        self.trace.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+        before = hashlib.sha256(self.trace.read_bytes()).hexdigest()
+        requested = {"pid": 42, "start_ms": 0.0, "end_ms": 1.0}
+        source = self.call("load_source", parameters={"kind": "TRACE", "path": str(self.trace),
+                                                     "selection": deepcopy(requested)}).outputs["source"]
+        decoded = self.call("decode_trace", {"trace": source})
+        index = decoded.outputs["index"]
+        self.assertEqual(index.value["selection"], requested)
+        self.assertEqual(source.value["selection"], requested)
+        indexed = read_index(index.value["_path"])
+        self.assertFalse(indexed["has_more"])
+        self.assertEqual(indexed["summary"]["rows"], 6)
+        self.assertEqual({row["event"]["pid"] for row in indexed["rows"]}, {42, 81})
+        self.assertEqual(decoded.receipt["operation"], "decoder.decode")
+        index_before = hashlib.sha256(Path(index.value["_path"]).read_bytes()).hexdigest()
+        for operation, inputs in (("critical_path", {"case": index}),
+                                  ("investigate", {"evidence": (index,)})):
+            with self.subTest(operation=operation):
+                outcome = self.call(operation, inputs)
+                case = load_investigation(outcome.outputs["case"].value["_path"])
+                self.assertEqual(case["sources"][0]["selection"], requested)
+                self.assertEqual(case["sources"][0]["events_scanned"], 6)
+                self.assertEqual(case["sources"][0]["selected_events"], 3)
+                self.assertEqual({node["metadata"]["pid"] for node in case["nodes"]}, {42})
+                self.assertEqual({node["time_domain"] for node in case["nodes"]}, {"TRACE_RELATIVE:" + before})
+                self.assertTrue(all(node["verification_class"] == "UNVERIFIED_IMPORT" for node in case["nodes"]))
+                self.assertIsNone(case["target_identity"])
+                self.assertFalse(case["run_receipt"]["target"]["verified"])
+                self.assertFalse(case["root_cause_proven"])
+                self.assertEqual(case["root_cause"], "UNKNOWN")
+                self.assertFalse(any(edge["relation_type"] == "BOUNDED_TIME_CORRELATION" for edge in case["edges"]))
+        self.assertEqual(hashlib.sha256(self.trace.read_bytes()).hexdigest(), before)
+        self.assertEqual(hashlib.sha256(Path(index.value["_path"]).read_bytes()).hexdigest(), index_before)
+        self.assertEqual({row["event"]["pid"] for row in read_index(index.value["_path"])["rows"]}, {42, 81})
+
+    def test_malformed_trace_selection_cannot_dispatch_decoder(self):
+        selected = self.source()
+        malformed = Artifact("TRACE", {**selected.value, "selection": [42]},
+                             sources=selected.sources, clock_domains=selected.clock_domains,
+                             coverage=selected.coverage)
+        ctx = Context(self.root / "malformed-selection-boundary")
+        with patch.object(ctx, "resource_not_entered", create=True) as not_entered, \
+                patch.object(ctx, "resource_may_start", create=True) as may_start, \
+                patch("blackbox_core.decoder_service.decode_file") as decode:
+            outcome = self.catalog["decode_trace"].execute(ctx, {"trace": malformed}, {})
+        not_entered.assert_called_once_with("DECODER_OWNED_STAGING", "DECODER_PRECONDITIONS_NOT_DISPATCHED")
+        may_start.assert_not_called()
+        decode.assert_not_called()
+        self.assertFalse(outcome.cleanup["confirmed"], "a reservation fact must not manufacture file cleanup")
+        self.assertNotIn("index", outcome.outputs)
+        self.assertEqual(outcome.reason_code, "WORKFLOW_SOURCE_SELECTION_REQUIRED")
+
     def test_source_changed_after_selection_cannot_be_decoded_as_same_evidence(self):
         source = self.source()
         self.trace.write_text(self.trace.read_text() + "{}\n", encoding="utf-8")
