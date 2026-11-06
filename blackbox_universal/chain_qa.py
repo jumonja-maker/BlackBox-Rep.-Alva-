@@ -16,6 +16,51 @@ import traceback
 from unittest.mock import patch
 
 
+def _real_button_click(widget):
+    """Send a real pointer click to the style's interactive button area.
+
+    A blank checkbox can occupy an entire form row while Qt's hit rectangle
+    covers only its indicator. Widget-center clicks can therefore miss it.
+    Style coordinates are logical widget coordinates and retain DPI and RTL.
+    """
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QCheckBox, QStyle, QStyleOptionButton
+    from blackbox_core.chain_qa import require
+    require(widget.isEnabled() and widget.isVisible(), "R60_GUI_CONTROL_UNAVAILABLE_" + widget.objectName())
+    checkbox = isinstance(widget, QCheckBox)
+    position = widget.rect().center()
+    before = widget.checkState() if checkbox else None
+    if checkbox:
+        option = QStyleOptionButton()
+        option.initFrom(widget)
+        option.text, option.icon, option.iconSize = widget.text(), widget.icon(), widget.iconSize()
+        option.state |= (QStyle.StateFlag.State_NoChange if before == Qt.CheckState.PartiallyChecked else
+                         QStyle.StateFlag.State_On if widget.isChecked() else QStyle.StateFlag.State_Off)
+        indicator = widget.style().subElementRect(QStyle.SubElement.SE_CheckBoxIndicator, option, widget)
+        require(not indicator.isEmpty() and widget.rect().contains(indicator.center()),
+                "R60_GUI_CHECKBOX_INDICATOR_UNAVAILABLE_" + widget.objectName())
+        position = indicator.center()
+    fired, toggled = [], []
+    def received(*_):
+        fired.append(True)
+    def changed(*_):
+        toggled.append(True)
+    widget.clicked.connect(received)
+    if checkbox:
+        widget.toggled.connect(changed)
+    try:
+        QTest.mouseClick(widget, Qt.MouseButton.LeftButton, pos=position)
+    finally:
+        widget.clicked.disconnect(received)
+        if checkbox:
+            widget.toggled.disconnect(changed)
+    require(fired, "R60_REAL_QT_CLICK_NOT_DELIVERED_" + widget.objectName())
+    if checkbox:
+        require(widget.checkState() != before and (widget.isTristate() or toggled),
+                "R60_REAL_QT_CHECKBOX_NOT_CHANGED_" + widget.objectName())
+
+
 def run_chain_gui(app, window, output, evidence_root, source_sha):
     from PySide6.QtCore import QBuffer, QIODevice, QPoint, QPointF, Qt
     from PySide6.QtTest import QTest
@@ -68,16 +113,7 @@ def run_chain_gui(app, window, output, evidence_root, source_sha):
 
     def click(widget):
         visible(widget)
-        require(widget.isEnabled() and widget.isVisible(), "R60_GUI_CONTROL_UNAVAILABLE_" + widget.objectName())
-        fired = []
-        def received(*_):
-            fired.append(True)
-        widget.clicked.connect(received)
-        try:
-            QTest.mouseClick(widget, Qt.MouseButton.LeftButton)
-        finally:
-            widget.clicked.disconnect(received)
-        require(fired, "R60_REAL_QT_CLICK_NOT_DELIVERED_" + widget.objectName())
+        _real_button_click(widget)
 
     def combo(widget, value):
         index = widget.findData(value)
