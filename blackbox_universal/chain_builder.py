@@ -533,6 +533,8 @@ class WorkflowCanvas(QGraphicsView):
         self._space_down = False
         self._pan_origin = self._pan_scroll = None
         self._ignore_pan_release = False
+        self._navigation_rect = None
+        self._graph_identity = None
         self._updating_edges = self._edges_dirty = False
         self._edge_update_timer = QTimer(self)
         self._edge_update_timer.setSingleShot(True)
@@ -552,6 +554,10 @@ class WorkflowCanvas(QGraphicsView):
         return STATE_NAMES.get(state, (state, state))[1 if self.language == "RU" else 0]
 
     def set_graph(self, document, catalog, controls):
+        graph_identity = (document.get("workflow_id"), tuple(node["node_id"] for node in document["nodes"]))
+        if graph_identity != self._graph_identity:
+            self._navigation_rect = None
+            self._graph_identity = graph_identity
         selected = self.selected_node_ids()
         self.scene().blockSignals(True)
         self.scene().clear()
@@ -607,7 +613,10 @@ class WorkflowCanvas(QGraphicsView):
                 offset = max(65, abs(end.x() - start.x()) / 2)
                 path.cubicTo(start + QPointF(offset, 0), end - QPointF(offset, 0), end)
                 self.edge_items[edge["edge_id"]].setPath(path)
-            self.scene().setSceneRect(self.scene().itemsBoundingRect().adjusted(-100, -80, 100, 80))
+            bounds = self.scene().itemsBoundingRect().adjusted(-100, -80, 100, 80)
+            if self._navigation_rect is not None:
+                bounds = bounds.united(self._navigation_rect)
+            self.scene().setSceneRect(bounds)
         finally:
             self._updating_edges = False
             # A genuine additional move during bounds publication must receive
@@ -632,12 +641,36 @@ class WorkflowCanvas(QGraphicsView):
             item = item.parentItem()
         return None
 
+    def _prepare_pan_space(self):
+        """Give a fitted graph real view-only room to move in both axes.
+
+        Padding is allocated only on a navigation request, not in normal graph
+        geometry. It is bounded relative to the actual graph coordinate range;
+        it neither moves nodes nor enters their persisted definition.
+        """
+        center = self.mapToScene(self.viewport().rect().center())
+        visible = self.mapToScene(self.viewport().rect()).boundingRect()
+        bounds = self.scene().itemsBoundingRect().adjusted(-100, -80, 100, 80)
+        padded = bounds.united(visible).adjusted(-visible.width(), -visible.height(),
+                                               visible.width(), visible.height())
+        limit = bounds.adjusted(-1000000, -1000000, 1000000, 1000000)
+        self._navigation_rect = padded.intersected(limit)
+        self.scene().setSceneRect(bounds.united(self._navigation_rect))
+        self.centerOn(center)
+
+    def fit_graph(self):
+        self._navigation_rect = None
+        self.update_edges()
+        self.fitInView(self.scene().itemsBoundingRect().adjusted(-30, -30, 30, 30),
+                       Qt.AspectRatioMode.KeepAspectRatio)
+
     def mousePressEvent(self, event):
         self._ignore_pan_release = False
         if (event.button() == Qt.MouseButton.MiddleButton or
                 event.button() == Qt.MouseButton.LeftButton and self._space_down):
             self.pending_port = None
             self._drag_start = {}
+            self._prepare_pan_space()
             self._pan_origin = event.position().toPoint()
             self._pan_scroll = (self.horizontalScrollBar().value(), self.verticalScrollBar().value())
             self._ignore_pan_release = True
@@ -1431,7 +1464,7 @@ class ChainBuilderPanel(QWidget):
                 self.window.overview_tabs.setCurrentWidget(self)
 
     def fit_graph(self):
-        self.canvas.fitInView(self.canvas.scene().itemsBoundingRect().adjusted(-30, -30, 30, 30), Qt.AspectRatioMode.KeepAspectRatio)
+        self.canvas.fit_graph()
 
     def _busy(self, busy):
         self._run_active = bool(busy and self.bridge.worker is not None and

@@ -65,7 +65,7 @@ jobs:
               printf '%s\n' 'SOURCE_MEDIUM_DIAGNOSTIC: actual Standard medium-token source chain over full real Wave02 evidence. Full native/frozen/DPI/lifecycle acceptance: NOT_RUN. Complete candidate acceptance: NOT_ESTABLISHED.' >> "$GITHUB_STEP_SUMMARY"
             fi
             if [[ "$workspace_only" == true ]]; then
-              printf '%s\n' 'UI_ONLY_SOURCE_FROZEN: only four fresh-child workspace GUI cases per OS plus new-layout source/frozen RU-EN at four Qt scales. Previous full contracts/native/Standard/lifecycle acceptance: NOT_RUN. Complete candidate acceptance: NOT_ESTABLISHED.' >> "$GITHUB_STEP_SUMMARY"
+              printf '%s\n' 'UI_ONLY_SOURCE_FROZEN: five affected UI tests per OS (four fresh-child workspace cases plus one canvas scene/edge geometry regression), then new-layout source/frozen RU-EN at four Qt scales. Previous full contracts/native/Standard/lifecycle acceptance: NOT_RUN. Complete candidate acceptance: NOT_ESTABLISHED.' >> "$GITHUB_STEP_SUMMARY"
             elif [[ "$gui_only" == true ]]; then
               printf '%s\n' 'GUI_ONLY: source GUI over actual R20 ETL/index. Full native/source/frozen/Standard/DPI/lifecycle acceptance: NOT_RUN.' >> "$GITHUB_STEP_SUMMARY"
             fi
@@ -113,6 +113,9 @@ jobs:
       - name: R60 workspace-only four fresh-child GUI layout and navigation tests
         if: needs.scope.outputs.workspace_only == 'true'
         run: python -m unittest discover -s tests -p 'test_chain_workspace_gui.py' -v
+      - name: R60 workspace-only affected canvas scene and edge geometry regression
+        if: needs.scope.outputs.workspace_only == 'true'
+        run: python -m unittest discover -s tests -p 'test_chain_canvas_geometry.py' -v
       - name: R60 full contract, scheduler, recovery, profiles, adapters, reports and real Qt editor tests
         if: needs.scope.outputs.workspace_only != 'true'
         run: python -m unittest discover -s tests -p 'test_chain_*.py' -v
@@ -147,7 +150,7 @@ jobs:
           WORKSPACE_ONLY: ${{ needs.scope.outputs.workspace_only }}
         run: |
           if [[ "$WORKSPACE_ONLY" == true ]]; then
-            printf '%s\n' 'UI_ONLY workspace: four fresh-child GUI cases plus undefined-name lint. Previous full contracts/dashboard/Deep/native regressions/lifecycle: NOT_RUN. Complete candidate acceptance: NOT_ESTABLISHED.' >> "$GITHUB_STEP_SUMMARY"
+            printf '%s\n' 'UI_ONLY workspace: five affected UI tests (four fresh-child workspace cases plus one canvas scene/edge geometry regression) and undefined-name lint. Previous full contracts/dashboard/Deep/native regressions/lifecycle: NOT_RUN. Complete candidate acceptance: NOT_ESTABLISHED.' >> "$GITHUB_STEP_SUMMARY"
           fi
           printf 'R60 contracts: %s\nSource: %s\nRunner: %s\nRun: %s attempt %s\n' "$RESULT" "$SOURCE_SHA" "$RUNNER_OS" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" >> "$GITHUB_STEP_SUMMARY"
 
@@ -307,7 +310,7 @@ jobs:
         shell: pwsh
         run: |
           if ($env:BB_R60_WORKSPACE_ONLY -eq 'true') {
-            "R60 development scope: UI_ONLY_SOURCE_FROZEN`nWorkspace-only result: ${{ job.status }}`nScope: four new fresh-child workspace GUI cases per OS plus source/frozen real editor RU-EN at Qt scales 1/1.25/1.5/2`nPrevious full contracts/native/helper/Standard/package regression/lifecycle acceptance: NOT_RUN`nFixture preparation supplies actual saved input data; it is not a repeat claim for native acceptance.`nComplete candidate acceptance: NOT_ESTABLISHED`nSource: $env:BB_QA_SOURCE_SHA`nRun: $env:GITHUB_RUN_ID attempt $env:GITHUB_RUN_ATTEMPT`nArtifacts/cache/publication: none`nPhysical Windows 10/11 and Secure Desktop: NOT_TESTED" >> $env:GITHUB_STEP_SUMMARY
+            "R60 development scope: UI_ONLY_SOURCE_FROZEN`nWorkspace-only result: ${{ job.status }}`nScope: five affected UI tests per OS (four new fresh-child workspace cases plus one canvas scene/edge geometry regression) plus source/frozen real editor RU-EN at Qt scales 1/1.25/1.5/2`nPrevious full contracts/native/helper/Standard/package regression/lifecycle acceptance: NOT_RUN`nFixture preparation supplies actual saved input data; it is not a repeat claim for native acceptance.`nComplete candidate acceptance: NOT_ESTABLISHED`nSource: $env:BB_QA_SOURCE_SHA`nRun: $env:GITHUB_RUN_ID attempt $env:GITHUB_RUN_ATTEMPT`nArtifacts/cache/publication: none`nPhysical Windows 10/11 and Secure Desktop: NOT_TESTED" >> $env:GITHUB_STEP_SUMMARY
             $paths = @('r60-source/gui/result.json', 'r60-source-gui-1.25/gui/result.json', 'r60-source-gui-1.5/gui/result.json', 'r60-source-gui-2/gui/result.json', 'r60-frozen/gui/result.json', 'r60-frozen-gui-1.25/gui/result.json', 'r60-frozen-gui-1.5/gui/result.json', 'r60-frozen-gui-2/gui/result.json', 'r60-gui-diagnostic-data/wave02-native.json')
           } elseif ($env:BB_R60_MEDIUM_ONLY -eq 'true') {
             "R60 development scope: SOURCE_MEDIUM_DIAGNOSTIC`nStandard medium-token source diagnostic result: ${{ job.status }}`nScope: actual source engine/native-helper/editor chain over full real Wave02 evidence`nFull native/frozen/DPI/lifecycle acceptance: NOT_RUN`nComplete candidate acceptance: NOT_ESTABLISHED`nSource: $env:BB_QA_SOURCE_SHA`nRun: $env:GITHUB_RUN_ID attempt $env:GITHUB_RUN_ATTEMPT`nArtifacts/cache/publication: none`nPhysical Windows 10/11 and Secure Desktop: NOT_TESTED" >> $env:GITHUB_STEP_SUMMARY

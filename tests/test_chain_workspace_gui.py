@@ -27,7 +27,7 @@ def _run_workspace_child(case_name):
     from PySide6.QtWidgets import QApplication, QPushButton, QScrollArea, QWidget
     from blackbox_universal.action_grid import ActionGrid
     from blackbox_universal.theme import set_retro_theme
-    from blackbox_universal.window import UniversalWindow
+    from blackbox_universal.decoder_window import DecoderWindow
     from qt_test_support import close_and_drain, dispose_closed_fixture
 
     class WorkspaceChildTests(unittest.TestCase):
@@ -38,7 +38,7 @@ def _run_workspace_child(case_name):
 
         def setUp(self):
             self.temp = tempfile.TemporaryDirectory()
-            self.window = UniversalWindow(output_root=Path(self.temp.name), allow_update_check=False)
+            self.window = DecoderWindow(output_root=Path(self.temp.name), allow_update_check=False)
             self.window._timer.stop()
             self.window.showNormal()
             self.window.resize(1600, 1000)
@@ -51,6 +51,7 @@ def _run_workspace_child(case_name):
                     break
                 time.sleep(.005)
             self.assertTrue(self.panel.catalog)
+            self.assertEqual(self.window.stack.count(), 6)
 
         def tearDown(self):
             close_and_drain(self.window, self.app, timeout=15)
@@ -74,8 +75,17 @@ def _run_workspace_child(case_name):
             self.app.processEvents()
 
         def populate_graph(self):
-            for index in range(6):
-                self.panel.add_tool("process_select", [40 + index % 3 * 420, 40 + index // 3 * 400])
+            tools = ("load_source", "decode_trace", "waits", "investigate", "CHECKPOINT", "export_report")
+            for index, tool in enumerate(tools):
+                self.panel.add_tool(tool, [40 + index % 3 * 420, 40 + index // 3 * 400])
+                if tool == "load_source":
+                    kind = self.panel._fields["kind"]
+                    kind.setCurrentIndex(kind.findData("TRACE"))
+                    self.panel._fields["path"].setText(str(Path(self.temp.name) / "layout-only.etl"))
+                    present, pid = self.panel._fields["selection"].fields["pid"]
+                    present.setChecked(True)
+                    pid.setText("1234")
+                    self.panel.apply_parameters()
             self.app.processEvents()
 
         def test_six_column_toolbar_reflows_without_overlap_or_losing_click_handlers(self):
@@ -117,20 +127,33 @@ def _run_workspace_child(case_name):
                         self.window.resize(width, height)
                         self.window._set_language(language)
                         self.window.overview_tabs.setCurrentWidget(self.panel)
-                        self.app.processEvents()
-                        self.scroll_to_top()
-                        pane, canvas = self.visible_rect(self.panel), self.visible_rect(self.panel.canvas)
-                        ratio = canvas.height() / max(1, pane.height())
-                        measured = {"window": [width, height], "language": language,
-                            "visible_panel": list(pane.getRect()), "visible_canvas": list(canvas.getRect()),
-                            "canvas_height_fraction": ratio, "action_bar_height": self.panel.action_bar.height()}
-                        print("R60_COMPACT_WORKSPACE_GEOMETRY " + json.dumps(measured, sort_keys=True), flush=True)
-                        self.assertGreaterEqual(ratio, .55, measured)
-                        self.assertGreaterEqual(canvas.width(), 350, measured)
-                        self.assertLessEqual(self.panel.action_bar.height(), 90, measured)
-                        for button in (self.panel.open_button, self.panel.save_button, self.panel.validate_button,
-                                       self.panel.start_button, self.panel.cancel_button):
-                            self.assertEqual(self.visible_rect(button).size(), button.size(), button.objectName())
+                        self.panel.inspector_tabs.setCurrentIndex(0)
+                        for tool in ("load_source", "investigate"):
+                            selected = next(node for node in self.panel.document["nodes"] if node["tool_id"] == tool)
+                            self.panel.select_node(selected["node_id"])
+                            self.app.processEvents()
+                            self.scroll_to_top()
+                            pane, canvas = self.visible_rect(self.panel), self.visible_rect(self.panel.canvas)
+                            ratio = canvas.height() / max(1, pane.height())
+                            measured = {"window": [width, height], "language": language, "selected_tool": tool,
+                                "actual_window": [self.window.width(), self.window.height()],
+                                "visible_panel": list(pane.getRect()), "visible_canvas": list(canvas.getRect()),
+                                "canvas_size": [self.panel.canvas.width(), self.panel.canvas.height()],
+                                "canvas_height_fraction": ratio, "action_bar_height": self.panel.action_bar.height(),
+                                "controls": {control.objectName(): {"size": [control.width(), control.height()],
+                                    "visible_rect": list(self.visible_rect(control).getRect())}
+                                    for control in (self.panel.inspector_tabs, self.panel.apply_button,
+                                                    self.panel.delete_button, self.panel.connect_button)}}
+                            print("R60_COMPACT_WORKSPACE_GEOMETRY " + json.dumps(measured, sort_keys=True), flush=True)
+                            self.assertEqual([self.window.width(), self.window.height()], [width, height], measured)
+                            self.assertGreaterEqual(ratio, .55, measured)
+                            self.assertGreaterEqual(canvas.width(), 350, measured)
+                            self.assertLessEqual(self.panel.action_bar.height(), 90, measured)
+                            for control in (self.panel.open_button, self.panel.save_button, self.panel.validate_button,
+                                            self.panel.start_button, self.panel.cancel_button, self.panel.canvas,
+                                            self.panel.inspector_tabs, self.panel.apply_button,
+                                            self.panel.delete_button, self.panel.connect_button):
+                                self.assertEqual(self.visible_rect(control).size(), control.size(), measured)
                         self.assertIn("chainNavigationHint", self.panel.navigation_hint.objectName())
                         self.assertEqual(self.panel.inspector_tabs.count(), 4)
                         self.panel.inspector_tabs.setCurrentIndex(3)
@@ -142,30 +165,51 @@ def _run_workspace_child(case_name):
         def test_middle_and_space_panning_and_plain_wheel_preserve_saved_nodes_and_cursor_anchor(self):
             self.populate_graph()
             canvas = self.panel.canvas
-            canvas.resetTransform()
-            canvas.zoom(2)
-            canvas.centerOn(canvas.sceneRect().center())
             canvas.setFocus()
             self.app.processEvents()
             original = deepcopy(self.panel.document)
             positions = {key: item.pos() for key, item in canvas.items_by_id.items()}
-            point = canvas.viewport().rect().center()
-            for button, use_space in ((Qt.MouseButton.MiddleButton, False), (Qt.MouseButton.LeftButton, True)):
-                for bar, movement in ((canvas.horizontalScrollBar(), 40), (canvas.verticalScrollBar(), 25)):
-                    self.assertLessEqual(bar.minimum(), bar.value() - movement)
-                    self.assertLessEqual(bar.value() - movement, bar.maximum())
-                before = canvas.mapToScene(point)
-                if use_space:
-                    QTest.keyPress(canvas, Qt.Key.Key_Space)
-                QTest.mousePress(canvas.viewport(), button, pos=point)
-                QTest.mouseMove(canvas.viewport(), point + QPoint(40, 25), delay=30)
-                QTest.mouseRelease(canvas.viewport(), button, pos=point + QPoint(40, 25))
-                if use_space:
-                    QTest.keyRelease(canvas, Qt.Key.Key_Space)
+            for mode in ("fit", "zoomed"):
+                canvas.fit_graph()
+                self.assertIsNone(canvas._navigation_rect)
+                if mode == "zoomed":
+                    canvas.resetTransform()
+                    canvas.zoom(2)
+                    canvas.centerOn(canvas.sceneRect().center())
                 self.app.processEvents()
-                actual_delta = canvas.mapToScene(point) - before
-                self.assertAlmostEqual(actual_delta.x(), -40 / canvas.transform().m11(), delta=2)
-                self.assertAlmostEqual(actual_delta.y(), -25 / canvas.transform().m11(), delta=2)
+                for button, use_space in ((Qt.MouseButton.MiddleButton, False), (Qt.MouseButton.LeftButton, True)):
+                    with self.subTest(mode=mode, space=use_space):
+                        point = canvas.viewport().rect().center()
+                        if use_space:
+                            QTest.keyPress(canvas, Qt.Key.Key_Space)
+                        QTest.mousePress(canvas.viewport(), button, pos=point)
+                        try:
+                            # A navigation request supplies bounded view-only
+                            # space even when Fit left no scrollable overflow.
+                            self.assertIsNotNone(canvas._navigation_rect)
+                            self.app.processEvents()
+                            for bar, movement in ((canvas.horizontalScrollBar(), 40), (canvas.verticalScrollBar(), 25)):
+                                self.assertLessEqual(bar.minimum(), bar.value() - movement)
+                                self.assertLessEqual(bar.value() - movement, bar.maximum())
+                            before = canvas.mapToScene(point)
+                            QTest.mouseMove(canvas.viewport(), point + QPoint(40, 25), delay=30)
+                        finally:
+                            QTest.mouseRelease(canvas.viewport(), button, pos=point + QPoint(40, 25))
+                            if use_space:
+                                QTest.keyRelease(canvas, Qt.Key.Key_Space)
+                        self.app.processEvents()
+                        actual_delta = canvas.mapToScene(point) - before
+                        self.assertAlmostEqual(actual_delta.x(), -40 / canvas.transform().m11(), delta=2)
+                        self.assertAlmostEqual(actual_delta.y(), -25 / canvas.transform().m11(), delta=2)
+                        self.assertEqual(self.panel.document, original)
+                        self.assertEqual({key: item.pos() for key, item in canvas.items_by_id.items()}, positions)
+            canvas.fit_graph()
+            self.assertIsNone(canvas._navigation_rect)
+            # Allocate a real pan range again so wheel anchoring has no clamp
+            # ambiguity from a graph that fits the entire viewport.
+            point = canvas.viewport().rect().center()
+            QTest.mousePress(canvas.viewport(), Qt.MouseButton.MiddleButton, pos=point)
+            QTest.mouseRelease(canvas.viewport(), Qt.MouseButton.MiddleButton, pos=point)
             point = QPoint(canvas.viewport().width() // 3, canvas.viewport().height() // 3)
             QTest.mouseMove(canvas.viewport(), point)
             self.app.processEvents()

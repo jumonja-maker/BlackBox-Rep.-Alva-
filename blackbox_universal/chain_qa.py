@@ -261,9 +261,12 @@ def run_chain_gui(app, window, output, evidence_root, source_sha, *, failure_gua
         app.processEvents()
         controls = {"notice": panel.notice, "start": panel.start_button, "validate": panel.validate_button,
                     "open": panel.open_button, "save": panel.save_button,
-                    "canvas": panel.canvas, "inspector": panel.inspector_tabs}
+                    "canvas": panel.canvas, "inspector": panel.inspector_tabs,
+                    "apply": panel.apply_button, "delete": panel.delete_button,
+                    "connect": panel.connect_button}
         geometry = {name: workspace_geometry(widget) for name, widget in controls.items()}
-        require(all(geometry[name]["fully_visible"] for name in ("notice", "start", "validate", "open", "save")),
+        require(all(geometry[name]["fully_visible"] for name in
+                    ("notice", "start", "validate", "open", "save", "canvas", "inspector", "apply", "delete", "connect")),
                 "R60_GUI_WORKSPACE_HEADER_OR_TOOLBAR_CLIPPED:" + json.dumps(geometry, sort_keys=True))
         for name in ("canvas", "inspector"):
             rect = geometry[name]["visible_logical_rect"]
@@ -299,18 +302,28 @@ def run_chain_gui(app, window, output, evidence_root, source_sha, *, failure_gua
                                     ("space_left_pan", Qt.MouseButton.LeftButton, QPoint(-35, -25))):
             _assert_visible_hit_point(viewport, point)
             _assert_visible_hit_point(viewport, point + delta)
-            for bar, movement in ((canvas.horizontalScrollBar(), delta.x()),
-                                  (canvas.verticalScrollBar(), delta.y())):
-                require(bar.minimum() <= bar.value() - movement <= bar.maximum(),
-                        "R60_GUI_CANVAS_PAN_FIXTURE_HAS_NO_HEADROOM:" + name)
-            before = canvas.mapToScene(point)
             if name == "space_left_pan":
                 QTest.keyPress(canvas, Qt.Key.Key_Space)
+            pressed = False
             try:
                 QTest.mousePress(viewport, button, pos=point)
+                pressed = True
+                # The production view prepares navigation space on press,
+                # including when the graph currently fits the viewport.
+                for axis, bar, movement in (("x", canvas.horizontalScrollBar(), delta.x()),
+                                             ("y", canvas.verticalScrollBar(), delta.y())):
+                    require(bar.minimum() <= bar.value() - movement <= bar.maximum(),
+                            "R60_GUI_CANVAS_PAN_HAS_NO_HEADROOM:" + name + ":" + json.dumps({
+                                "axis": axis, "minimum": bar.minimum(), "value": bar.value(),
+                                "maximum": bar.maximum(), "requested_delta": movement,
+                                "visible_canvas_size": [viewport.width(), viewport.height()]}, sort_keys=True))
+                before = canvas.mapToScene(point)
                 QTest.mouseMove(viewport, point + delta, delay=30)
                 QTest.mouseRelease(viewport, button, pos=point + delta)
+                pressed = False
             finally:
+                if pressed:
+                    QTest.mouseRelease(viewport, button, pos=point)
                 if name == "space_left_pan":
                     QTest.keyRelease(canvas, Qt.Key.Key_Space)
             app.processEvents()
