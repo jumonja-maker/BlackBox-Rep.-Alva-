@@ -74,6 +74,38 @@ def _run_workspace_child(case_name):
                 ancestor = ancestor.parentWidget()
             self.app.processEvents()
 
+        def print_layout_census(self):
+            panel = self.panel
+            outer = self.window.stack.widget(self.window._page_ids["dashboard"])
+            components = (("outer_scroll", outer), ("outer_viewport", outer.viewport()),
+                ("outer_wrapper", outer.widget()), ("overview_tabs", self.window.overview_tabs),
+                ("overview_stack", panel.parentWidget()), ("panel", panel),
+                ("workspace", panel.workspace), ("palette_area", panel.palette.parentWidget()),
+                ("canvas_area", panel.canvas.parentWidget()), ("canvas", panel.canvas),
+                ("inspector_area", panel.inspector_tabs.parentWidget()), ("inspector_tabs", panel.inspector_tabs),
+                ("inspector_stack", panel.inspector_tabs.widget(0).parentWidget()),
+                ("parameter_scroll", panel.inspector_tabs.widget(0)), ("parameter_page", panel.parameter_page),
+                ("scope_scroll", panel.inspector_tabs.widget(3)), ("scope_page", panel.scope_page))
+            records = []
+            def dimensions(size):
+                return [size.width(), size.height()]
+            for name, widget in components:
+                policy, layout = widget.sizePolicy(), widget.layout()
+                records.append({"component": name, "class": type(widget).__name__,
+                    "size": dimensions(widget.size()), "minimum": dimensions(widget.minimumSize()),
+                    "minimum_hint": dimensions(widget.minimumSizeHint()), "size_hint": dimensions(widget.sizeHint()),
+                    "policy": [policy.horizontalPolicy().name, policy.verticalPolicy().name],
+                    "has_height_for_width": widget.hasHeightForWidth(),
+                    "height_for_actual_width": widget.heightForWidth(widget.width()),
+                    "layout": None if layout is None else {"class": type(layout).__name__,
+                        "minimum": dimensions(layout.minimumSize()), "size_hint": dimensions(layout.sizeHint()),
+                        "has_height_for_width": layout.hasHeightForWidth(),
+                        "minimum_height_for_actual_width": layout.minimumHeightForWidth(widget.width()),
+                        "height_for_actual_width": layout.heightForWidth(widget.width())}})
+            # A leading newline avoids joining this marker to unittest's
+            # in-progress test name. Values describe geometry, never inputs.
+            print("\nR60_WORKSPACE_LAYOUT_CENSUS " + json.dumps(records, sort_keys=True), flush=True)
+
         def populate_graph(self):
             tools = ("load_source", "decode_trace", "waits", "investigate", "CHECKPOINT", "export_report")
             for index, tool in enumerate(tools):
@@ -133,6 +165,8 @@ def _run_workspace_child(case_name):
                             self.panel.select_node(selected["node_id"])
                             self.app.processEvents()
                             self.scroll_to_top()
+                            if (width, height, language, tool) == (1600, 1000, "RU", "load_source"):
+                                self.print_layout_census()
                             pane, canvas = self.visible_rect(self.panel), self.visible_rect(self.panel.canvas)
                             ratio = canvas.height() / max(1, pane.height())
                             measured = {"window": [width, height], "language": language, "selected_tool": tool,
@@ -317,7 +351,7 @@ class CanvasWorkspaceTests(unittest.TestCase):
             transcript.seek(0)
             output = transcript.read(_MAX_CHILD_OUTPUT + 1).decode("utf-8", errors="replace")
         for line in output.splitlines():
-            if line.startswith(("R60_COMPACT_WORKSPACE_GEOMETRY ", "R60_WORKSPACE_CHILD_RESULT ")):
+            if line.startswith(("R60_COMPACT_WORKSPACE_GEOMETRY ", "R60_WORKSPACE_LAYOUT_CENSUS ", "R60_WORKSPACE_CHILD_RESULT ")):
                 print(line, flush=True)
         self.assertEqual(completed.returncode, 0, output[-12000:])
         markers = [line.partition("R60_WORKSPACE_CHILD_RESULT ")[2] for line in output.splitlines()

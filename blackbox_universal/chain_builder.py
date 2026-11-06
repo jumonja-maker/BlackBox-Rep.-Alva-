@@ -844,30 +844,57 @@ class OverviewWorkspaceTabs(QTabWidget):
         if event.type() in (QEvent.Type.FontChange, QEvent.Type.StyleChange):
             self.updateGeometry()
 
-    def _workspace_hint(self, *, minimum):
-        page = self.currentWidget()
-        if page is None:
-            return super().minimumSizeHint() if minimum else super().sizeHint()
-        content = (page.minimumSizeHint() if minimum else page.sizeHint()).expandedTo(page.minimumSize())
-        content = content.expandedTo(QSize(0, 0))
+    def _workspace_chrome(self, *, minimum=False):
         bar = self.tabBar()
         tabs = (bar.minimumSizeHint() if minimum else bar.sizeHint()) if not bar.isHidden() else QSize(0, 0)
-        if self.tabPosition() in (QTabWidget.TabPosition.West, QTabWidget.TabPosition.East):
-            content = QSize(content.width() + tabs.width(), max(content.height(), tabs.height()))
-        else:
-            content = QSize(max(content.width(), tabs.width()), content.height() + tabs.height())
         option = QStyleOptionTabWidgetFrame()
         option.initFrom(self)
         option.shape = bar.shape()
         option.lineWidth = self.style().pixelMetric(QStyle.PixelMetric.PM_DefaultFrameWidth, None, self)
         option.tabBarSize = tabs
+        return tabs, option
+
+    def _workspace_size(self, content, *, minimum=False):
+        tabs, option = self._workspace_chrome(minimum=minimum)
+        if self.tabPosition() in (QTabWidget.TabPosition.West, QTabWidget.TabPosition.East):
+            content = QSize(content.width() + tabs.width(), max(content.height(), tabs.height()))
+        else:
+            content = QSize(max(content.width(), tabs.width()), content.height() + tabs.height())
         return self.style().sizeFromContents(QStyle.ContentsType.CT_TabWidget, option, content, self)
+
+    def _workspace_hint(self, *, minimum):
+        page = self.currentWidget()
+        if page is None:
+            return super().minimumSizeHint() if minimum else super().sizeHint()
+        content = (page.minimumSizeHint() if minimum else page.sizeHint()).expandedTo(page.minimumSize())
+        return self._workspace_size(content.expandedTo(QSize(0, 0)), minimum=minimum)
 
     def sizeHint(self):
         return self._workspace_hint(minimum=False)
 
     def minimumSizeHint(self):
         return self._workspace_hint(minimum=True)
+
+    def hasHeightForWidth(self):
+        page = self.currentWidget()
+        return page is not None and page.hasHeightForWidth()
+
+    def heightForWidth(self, width):
+        page = self.currentWidget()
+        if page is None:
+            return -1
+        tabs, option = self._workspace_chrome()
+        frame = self.style().sizeFromContents(QStyle.ContentsType.CT_TabWidget, option, QSize(0, 0), self)
+        content_width = max(0, width - frame.width())
+        if self.tabPosition() in (QTabWidget.TabPosition.West, QTabWidget.TabPosition.East):
+            content_width = max(0, content_width - tabs.width())
+        # The inherited QTabWidget implementation asks QStackedLayout, whose
+        # height-for-width includes every hidden page and its aggregate minimum.
+        # Query the current workspace directly, including its own layout HFW.
+        height = page.heightForWidth(content_width)
+        if height < 0:
+            height = page.sizeHint().height()
+        return self._workspace_size(QSize(content_width, max(page.minimumHeight(), height, 0))).height()
 
 
 class ChainBuilderPanel(QWidget):
