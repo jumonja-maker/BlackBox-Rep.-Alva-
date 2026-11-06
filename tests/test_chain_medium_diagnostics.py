@@ -161,6 +161,58 @@ class MediumDiagnosticsTests(unittest.TestCase):
         self.assertEqual(launch.call_args.args[0][0], str(args.exe.resolve()))
         self.assertNotIn("-X", launch.call_args.args[0])
 
+    def test_failed_result_token_facts_require_current_pid_sha_and_launch_time(self):
+        precondition = {"schema": "blackbox.r60.standard-token-precondition/1", "status": "OBSERVED",
+            "pid": 12345, "source_sha": self.sha, "privilege": {"mode": "STANDARD", "windows": True},
+            "own_token": {"pid": 12345, "elevated": True, "elevation_type": 2},
+            "gate_conditions": {"privilege_standard": True, "raw_token_elevation_false": False},
+            "current_token_facts": {"schema": "blackbox.r60.current-token-facts/1", "pid": 12345,
+                "effective_administrators_member": False, "process_token": {
+                    "elevation_raw": 1, "elevated": True, "elevation_type": 2,
+                    "integrity": {"sid": "S-1-16-8192", "rid": 8192, "attributes": 32},
+                    "administrators_group": {"present": True, "attributes": 16, "enabled": False, "deny_only": True},
+                    "privileges": [{"name": "SeChangeNotifyPrivilege", "attributes": 3,
+                        "enabled": True, "enabled_by_default": True, "removed": False}]},
+                "cleanup": {"confirmed": True}}}
+        result = {"schema": "blackbox.r60.chain-native-qa/1", "pid": 12345,
+            "source_sha": self.sha, "frozen": False, "standard_token": True,
+            "started_monotonic_ns": time.monotonic_ns(), "status": "FAIL", "node_count": 36,
+            "reason": "CONTROLLED_PRIVATE_EXCEPTION_NOT_TRANSPORTED", "standard_token_precondition": precondition}
+        self.path.write_text(json.dumps(result), encoding="ascii")
+        observed = qa._medium_result_diagnostic(self.path, {"pid": 12345}, source_sha=self.sha,
+                                                frozen=False, started_ns=self.started)
+        self.assertEqual(observed["status"], "BOUND_CURRENT_CHILD_RESULT")
+        self.assertEqual(observed["result_status"], "FAIL")
+        self.assertTrue(observed["standard_token_precondition"]["own_token"]["elevated"])
+        self.assertFalse(observed["standard_token_precondition"]["current_token_facts"]["effective_administrators_member"])
+        self.assertNotIn("CONTROLLED_PRIVATE", json.dumps(observed))
+        wrong = qa._medium_result_diagnostic(self.path, {"pid": 54321}, source_sha=self.sha,
+                                             frozen=False, started_ns=self.started)
+        self.assertEqual(wrong["status"], "RESULT_READBACK_UNCONFIRMED")
+        stale = qa._medium_result_diagnostic(self.path, {"pid": 12345}, source_sha=self.sha,
+                                             frozen=False, started_ns=time.monotonic_ns() + 1)
+        self.assertEqual(stale["status"], "RESULT_READBACK_UNCONFIRMED")
+
+    def test_strict_standard_gate_keeps_actual_facts_when_raw_elevation_refuses_launch(self):
+        from blackbox_core.chain_qa import standard_live_graph
+        evidence = {}
+        own = {"pid": 12345, "elevated": True, "elevation_type": 2}
+        facts = {"schema": "blackbox.r60.current-token-facts/1", "effective_administrators_member": False}
+        with patch("blackbox_core.chain_qa_native.actual_token", return_value=own), \
+                patch("blackbox_core.chain_qa_native.actual_current_token_facts", return_value=facts), \
+                patch("blackbox_core.windows_research.privilege", return_value={"mode": "STANDARD", "windows": True}), \
+                patch("blackbox_core.chain_qa_native.OwnedWaveProbe") as target, \
+                patch("blackbox_core.deep_service.InspectorService") as service:
+            with self.assertRaisesRegex(AssertionError, "R60_CHAIN_ACTUAL_STANDARD_TOKEN_REQUIRED"):
+                standard_live_graph(self.root, self.path, self.sha, token_evidence=evidence)
+        self.assertEqual(evidence["status"], "OBSERVED")
+        self.assertEqual(evidence["own_token"], own)
+        self.assertEqual(evidence["current_token_facts"], facts)
+        self.assertTrue(evidence["gate_conditions"]["privilege_standard"])
+        self.assertFalse(evidence["gate_conditions"]["raw_token_elevation_false"])
+        target.assert_not_called()
+        service.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

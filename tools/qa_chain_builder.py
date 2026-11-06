@@ -5,6 +5,7 @@ import argparse
 import base64
 import json
 from pathlib import Path
+import re
 import subprocess
 import sys
 import time
@@ -81,6 +82,81 @@ def _medium_child_diagnostic(child, *, source_sha, frozen, guard_path, started_n
         "guard": _fresh_guard_failure(guard_path, pid=child.get("pid"), source_sha=source_sha,
             started_ns=started_ns, previous_stamp=previous_stamp),
         "scope": "ACTUAL_MEDIUM_CHILD_EXIT_AND_FRESH_PYTHON_METADATA_NOT_ROOT_CAUSE"}
+
+
+def _standard_token_precondition(value, pid):
+    """Project only typed scalar token facts, never arbitrary failure strings."""
+    def scalars(mapping, keys):
+        mapping = mapping if type(mapping) is dict else {}
+        return {key: item if item is None or type(item) is bool or
+                type(item) is int and 0 <= item <= 2**63 - 1 else None
+                for key in keys for item in (mapping.get(key),)}
+    value = value if type(value) is dict else {}
+    own = value.get("own_token", {})
+    mode = value.get("privilege", {})
+    mode = mode if type(mode) is dict else {}
+    result = {"status": value.get("status") if value.get("status") in ("COLLECTING", "OBSERVED") else "NOT_ESTABLISHED",
+        "own_token": scalars(own, ("pid", "elevated", "elevation_type")),
+        "privilege": {"mode": mode.get("mode") if mode.get("mode") in ("STANDARD", "ADMINISTRATOR") else None,
+                      **scalars(mode, ("windows",))},
+        "gate_conditions": scalars(value.get("gate_conditions"), ("privilege_standard", "raw_token_elevation_false"))}
+    facts = value.get("current_token_facts", {})
+    if (type(facts) is not dict or facts.get("schema") != "blackbox.r60.current-token-facts/1" or
+            facts.get("pid") != pid):
+        result["current_token_facts"] = {"status": "NOT_BOUND_OR_NOT_COLLECTED"}
+        return result
+    token = facts.get("process_token", {})
+    token = token if type(token) is dict else {}
+    integrity = token.get("integrity", {})
+    integrity = integrity if type(integrity) is dict else {}
+    sid = integrity.get("sid")
+    privileges = token.get("privileges")
+    projected = None
+    if type(privileges) is list and len(privileges) <= 256:
+        projected = []
+        for item in privileges:
+            if (type(item) is not dict or type(item.get("name")) is not str or
+                    re.fullmatch(r"Se[A-Za-z0-9]{1,64}Privilege", item["name"]) is None):
+                projected = None
+                break
+            projected.append({"name": item["name"], **scalars(item,
+                ("attributes", "enabled", "enabled_by_default", "removed"))})
+    result["current_token_facts"] = {"status": "OBSERVED_SCALAR_PROJECTION", "pid": pid,
+        **scalars(facts, ("effective_administrators_member",)),
+        "process_token": {**scalars(token, ("elevation_raw", "elevated", "elevation_type", "has_restrictions_raw")),
+            "integrity": {"sid": sid if type(sid) is str and re.fullmatch(r"S-1-16-[0-9]{1,10}", sid) else None,
+                          **scalars(integrity, ("rid", "attributes"))},
+            "administrators_group": scalars(token.get("administrators_group"), ("present", "attributes", "enabled", "deny_only")),
+            "privileges": projected, "is_token_restricted": scalars(token.get("is_token_restricted"), ("available", "value"))},
+        "cleanup": scalars(facts.get("cleanup"), ("confirmed",))}
+    return result
+
+
+def _medium_result_diagnostic(path, child, *, source_sha, frozen, started_ns):
+    try:
+        before = _guard_stamp(path)
+        if before is None:
+            return {"status": "RESULT_NOT_PRESENT_OR_UNREADABLE"}
+        value = read_json(path, maximum=4 * 1024**2)
+        started = value.get("started_monotonic_ns")
+        require(value.get("schema") == "blackbox.r60.chain-native-qa/1" and
+                value.get("pid") == child.get("pid") and value.get("source_sha") == source_sha and
+                value.get("frozen") is frozen and value.get("standard_token") is True and
+                type(started) is int and started_ns <= started <= time.monotonic_ns(),
+                "R60_MEDIUM_RESULT_NOT_BOUND_TO_CURRENT_CHILD")
+        precondition = value.get("standard_token_precondition", {})
+        require(type(precondition) is dict and (not precondition or
+                precondition.get("schema") == "blackbox.r60.standard-token-precondition/1" and
+                precondition.get("pid") == child["pid"] and precondition.get("source_sha") == source_sha),
+                "R60_MEDIUM_PRECONDITION_NOT_BOUND_TO_CURRENT_CHILD")
+        require(_guard_stamp(path) == before, "R60_MEDIUM_RESULT_CHANGED_DURING_READBACK")
+        return {"status": "BOUND_CURRENT_CHILD_RESULT", "pid": child["pid"], "source_sha": source_sha,
+            "result_status": value.get("status") if value.get("status") in ("PASS", "FAIL") else "UNKNOWN",
+            "node_count": value.get("node_count") if type(value.get("node_count")) is int else None,
+            "standard_token_precondition": _standard_token_precondition(precondition, child["pid"]),
+            "scope": "ACTUAL_FAILED_OR_SUCCESSFUL_MEDIUM_QA_PRECONDITION_FACTS_NOT_RELAXED_AUTHORIZATION"}
+    except Exception as error:
+        return {"status": "RESULT_READBACK_UNCONFIRMED", "error_type": type(error).__name__[:64]}
 
 
 def _diagnose_windowed_bootstrap(args, interpreter, launch):
@@ -244,6 +320,8 @@ def run(args):
         print("R60_CHAIN_STANDARD_TOKEN_DIAGNOSTIC " + json.dumps(_medium_child_diagnostic(child,
             source_sha=args.source_sha, frozen=bool(args.exe), guard_path=guard_path,
             started_ns=started_ns, previous_stamp=previous_stamp), sort_keys=True), flush=True)
+        print("R60_CHAIN_STANDARD_TOKEN_RESULT " + json.dumps(_medium_result_diagnostic(args.output / "result.json", child,
+            source_sha=args.source_sha, frozen=bool(args.exe), started_ns=started_ns), sort_keys=True), flush=True)
         require(child["exit_code"] == 0 and child["child_token_integrity"]["sid"] == "S-1-16-8192",
                 "R60_ACTUAL_CHAIN_MEDIUM_TOKEN_PROCESS_FAILED")
         print("R60_CHAIN_STANDARD_TOKEN_CHILD " + json.dumps(child, sort_keys=True), flush=True)

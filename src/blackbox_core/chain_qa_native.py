@@ -8,6 +8,7 @@ from __future__ import annotations
 import ctypes as C
 from ctypes import wintypes as W
 import json
+import os
 from pathlib import Path
 import queue
 import subprocess
@@ -194,6 +195,163 @@ def actual_token(pid):
         raise
     finally:
         _close_token_handles(kernel, (("token", token), ("process", process)), primary)
+
+
+def actual_current_token_facts():
+    """Independent read-only primary/effective token facts, never authority.
+
+    Mandatory integrity, TokenElevation, effective group membership and enabled
+    privileges answer different questions. In particular, Medium IL alone does
+    not establish that TokenElevation is zero. No account SID, native pointer,
+    token contents or existing object's ACL is published or changed here.
+    """
+    require_hosted_windows()
+    require(C.sizeof(C.c_void_p) == 8, "R60_TOKEN_FACTS_X64_REQUIRED")
+    with _TOKEN_HANDLES_LOCK:
+        require(not _PENDING_TOKEN_HANDLES, "R60_PRIOR_INDEPENDENT_TOKEN_QUERY_CLEANUP_UNCONFIRMED")
+    u32, i32, handle = C.c_uint32, C.c_int32, C.c_void_p
+
+    class SidAttributes(C.Structure):
+        _fields_ = [("sid", handle), ("attributes", u32)]
+
+    class Groups(C.Structure):
+        _fields_ = [("count", u32), ("entries", SidAttributes * 1)]
+
+    class Luid(C.Structure):
+        _fields_ = [("low", u32), ("high", i32)]
+
+    class Privilege(C.Structure):
+        _fields_ = [("luid", Luid), ("attributes", u32)]
+
+    class Privileges(C.Structure):
+        _fields_ = [("count", u32), ("entries", Privilege * 1)]
+
+    kernel = C.WinDLL("kernel32", use_last_error=True, winmode=0x800)
+    adv = C.WinDLL("advapi32", use_last_error=True, winmode=0x800)
+    kernel.GetCurrentProcess.argtypes, kernel.GetCurrentProcess.restype = [], handle
+    kernel.CloseHandle.argtypes, kernel.CloseHandle.restype = [handle], i32
+    adv.OpenProcessToken.argtypes, adv.OpenProcessToken.restype = [handle, u32, C.POINTER(handle)], i32
+    adv.GetTokenInformation.argtypes = [handle, C.c_int, handle, u32, C.POINTER(u32)]
+    adv.GetTokenInformation.restype = i32
+    adv.IsValidSid.argtypes, adv.IsValidSid.restype = [handle], i32
+    adv.GetLengthSid.argtypes, adv.GetLengthSid.restype = [handle], u32
+    adv.CheckTokenMembership.argtypes, adv.CheckTokenMembership.restype = [handle, handle, C.POINTER(i32)], i32
+    adv.LookupPrivilegeNameW.argtypes = [C.c_wchar_p, C.POINTER(Luid), C.c_wchar_p, C.POINTER(u32)]
+    adv.LookupPrivilegeNameW.restype = i32
+    restricted_api = getattr(adv, "IsTokenRestricted", None)
+    if restricted_api is not None:
+        restricted_api.argtypes, restricted_api.restype = [handle], i32
+    token, primary = handle(), None
+
+    def information(kind, minimum=4):
+        needed = u32()
+        C.set_last_error(0)
+        first = adv.GetTokenInformation(token, kind, None, 0, C.byref(needed))
+        require(not first and C.get_last_error() == 122 and minimum <= needed.value <= 65536,
+                "R60_TOKEN_FACTS_INFORMATION_SIZE:" + str(kind))
+        capacity = needed.value
+        buffer = C.create_string_buffer(capacity)
+        require(adv.GetTokenInformation(token, kind, buffer, capacity, C.byref(needed)) and
+                minimum <= needed.value <= capacity, "R60_TOKEN_FACTS_INFORMATION_QUERY:" + str(kind))
+        return buffer, needed.value
+
+    def scalar(kind):
+        buffer, used = information(kind)
+        require(used == 4, "R60_TOKEN_FACTS_SCALAR_SIZE:" + str(kind))
+        return u32.from_buffer(buffer).value
+
+    def sid_bytes(pointer, buffer, used):
+        start, end = C.addressof(buffer), C.addressof(buffer) + used
+        require(type(pointer) is int and start <= pointer <= end - 8, "R60_TOKEN_FACTS_SID_POINTER_BOUNDS")
+        revision = C.c_ubyte.from_address(pointer).value
+        count = C.c_ubyte.from_address(pointer + 1).value
+        size = 8 + count * 4
+        require(revision == 1 and count <= 15 and size <= end - pointer,
+                "R60_TOKEN_FACTS_SID_CONTENT_BOUNDS")
+        require(adv.IsValidSid(pointer) and adv.GetLengthSid(pointer) == size,
+                "R60_TOKEN_FACTS_SID_NATIVE_VALIDATION")
+        return C.string_at(pointer, size)
+
+    try:
+        require(adv.OpenProcessToken(kernel.GetCurrentProcess(), 8, C.byref(token)),
+                "R60_CURRENT_TOKEN_QUERY_OPEN")
+        elevation, elevation_type = scalar(20), scalar(18)
+        require(elevation in (0, 1) and elevation_type in (1, 2, 3), "R60_TOKEN_FACTS_ELEVATION_VALUE")
+        integrity_buffer, integrity_used = information(25, C.sizeof(SidAttributes))
+        integrity_label = SidAttributes.from_buffer(integrity_buffer)
+        integrity_sid = sid_bytes(integrity_label.sid, integrity_buffer, integrity_used)
+        require(integrity_sid[1] == 1 and integrity_sid[2:8] == b"\0\0\0\0\0\x10" and
+                integrity_label.attributes & 0x20, "R60_TOKEN_FACTS_INTEGRITY_SID_OR_ATTRIBUTES")
+        integrity_rid = int.from_bytes(integrity_sid[8:12], "little")
+        # S-1-5-32-544 is a fixed well-known group, never an account SID.
+        administrators_sid = b"\x01\x02\0\0\0\0\0\x05" + (32).to_bytes(4, "little") + (544).to_bytes(4, "little")
+        groups_buffer, groups_used = information(2)
+        group_count = u32.from_buffer(groups_buffer).value
+        require(group_count <= 1024 and Groups.entries.offset + group_count * C.sizeof(SidAttributes) <= groups_used,
+                "R60_TOKEN_FACTS_GROUP_ARRAY_BOUNDS")
+        administrators = []
+        for index in range(group_count):
+            group = SidAttributes.from_buffer(groups_buffer, Groups.entries.offset + index * C.sizeof(SidAttributes))
+            if sid_bytes(group.sid, groups_buffer, groups_used) == administrators_sid:
+                administrators.append(group.attributes)
+        require(len(administrators) <= 1, "R60_TOKEN_FACTS_AMBIGUOUS_ADMINISTRATORS_GROUP")
+        attributes = administrators[0] if administrators else None
+        privileges_buffer, privileges_used = information(3)
+        privilege_count = u32.from_buffer(privileges_buffer).value
+        require(privilege_count <= 256 and Privileges.entries.offset + privilege_count * C.sizeof(Privilege) <= privileges_used,
+                "R60_TOKEN_FACTS_PRIVILEGE_ARRAY_BOUNDS")
+        privileges = []
+        for index in range(privilege_count):
+            item = Privilege.from_buffer(privileges_buffer, Privileges.entries.offset + index * C.sizeof(Privilege))
+            length = u32()
+            C.set_last_error(0)
+            first = adv.LookupPrivilegeNameW(None, C.byref(item.luid), None, C.byref(length))
+            require(not first and C.get_last_error() == 122 and 0 < length.value <= 256,
+                    "R60_TOKEN_FACTS_PRIVILEGE_NAME_SIZE")
+            capacity = length.value + 1
+            text = C.create_unicode_buffer(capacity)
+            length.value = capacity
+            require(adv.LookupPrivilegeNameW(None, C.byref(item.luid), text, C.byref(length)) and
+                    0 < length.value < capacity, "R60_TOKEN_FACTS_PRIVILEGE_NAME_QUERY")
+            name = text.value
+            require(len(name) == length.value and all(character.isascii() and
+                    (character.isalnum() or character == "_") for character in name),
+                    "R60_TOKEN_FACTS_PRIVILEGE_NAME_FORMAT")
+            privileges.append({"name": name, "attributes": item.attributes,
+                "enabled": bool(item.attributes & 2), "enabled_by_default": bool(item.attributes & 1),
+                "removed": bool(item.attributes & 4)})
+        require(len({item["name"] for item in privileges}) == len(privileges),
+                "R60_TOKEN_FACTS_DUPLICATE_PRIVILEGE")
+        restricted = scalar(21)
+        require(restricted in (0, 1), "R60_TOKEN_FACTS_RESTRICTIONS_VALUE")
+        member = i32()
+        fixed_sid = C.create_string_buffer(administrators_sid)
+        require(adv.CheckTokenMembership(None, fixed_sid, C.byref(member)) and member.value in (0, 1),
+                "R60_TOKEN_FACTS_EFFECTIVE_ADMIN_MEMBERSHIP_QUERY")
+        return {"schema": "blackbox.r60.current-token-facts/1", "status": "OBSERVED", "pid": os.getpid(),
+            "source": "INDEPENDENT_CURRENT_PROCESS_TOKEN_QUERY_AND_EFFECTIVE_TOKEN_MEMBERSHIP",
+            "scope": "READ_ONLY_RAW_TOKEN_FACTS_NOT_AUTHORIZATION_OR_STANDARD_ACCOUNT_PROOF",
+            "process_token": {"elevation_raw": elevation, "elevated": elevation != 0, "elevation_type": elevation_type,
+                "integrity": {"sid": "S-1-16-" + str(integrity_rid), "rid": integrity_rid,
+                              "attributes": integrity_label.attributes},
+                "administrators_group": {"present": attributes is not None, "attributes": attributes,
+                    "enabled": bool(attributes is not None and attributes & 4),
+                    "deny_only": bool(attributes is not None and attributes & 0x10)},
+                "privileges": sorted(privileges, key=lambda item: item["name"]),
+                "has_restrictions_raw": restricted,
+                "has_restrictions_meaning": "TOKEN_HAS_EVER_BEEN_FILTERED_NOT_EFFECTIVE_ADMIN_STATUS",
+                "is_token_restricted": {"available": restricted_api is not None,
+                    "value": bool(restricted_api(token)) if restricted_api is not None else None,
+                    "meaning": "TOKEN_CONTAINS_RESTRICTING_SIDS"}},
+            "effective_administrators_member": member.value != 0,
+            "effective_membership_scope": "CURRENT_EFFECTIVE_THREAD_TOKEN_OR_PROCESS_TOKEN",
+            "cleanup": {"confirmed": True, "scope": "OWNED_QUERY_TOKEN_HANDLE_CLOSED_BEFORE_RETURN"}}
+    except BaseException as error:
+        primary = error
+        raise
+    finally:
+        # The current-process pseudohandle is borrowed and must never be closed.
+        _close_token_handles(kernel, (("current_query_token", token),), primary)
 
 
 def native_checkpoint_graph(output, executable, source_sha, diagnostic_helper=None):

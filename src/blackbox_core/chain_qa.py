@@ -590,18 +590,28 @@ def native_live_graph(output, executable, source_sha, diagnostic_helper=None):
     return proof
 
 
-def standard_live_graph(output, executable, source_sha, diagnostic_helper=None):
+def standard_live_graph(output, executable, source_sha, diagnostic_helper=None, *, token_evidence=None):
     """Actual chain adapters under the independently restricted medium token."""
     from .chain_adapters import ChainRuntime
-    from .chain_qa_native import actual_token, OwnedWaveProbe
+    from .chain_qa_native import actual_current_token_facts, actual_token, OwnedWaveProbe
     from .deep_service import InspectorService
     from .optional_jobs import OwnedProcess
     from .windows_research import privilege
     fixture = service = None
     proof, launches = {"status": "FAIL"}, []
     try:
+        evidence = token_evidence if token_evidence is not None else {}
+        evidence.update(schema="blackbox.r60.standard-token-precondition/1", status="COLLECTING",
+                        pid=os.getpid(), source_sha=source_sha)
         own_token = actual_token(os.getpid())
-        require(privilege() == {"mode": "STANDARD", "windows": True} and own_token["elevated"] is False,
+        evidence["own_token"] = own_token
+        own_privilege = privilege()
+        evidence["privilege"] = own_privilege
+        evidence["current_token_facts"] = actual_current_token_facts()
+        evidence["status"] = "OBSERVED"
+        evidence["gate_conditions"] = {"privilege_standard": own_privilege == {"mode": "STANDARD", "windows": True},
+                                       "raw_token_elevation_false": own_token["elevated"] is False}
+        require(own_privilege == {"mode": "STANDARD", "windows": True} and own_token["elevated"] is False,
                 "R60_CHAIN_ACTUAL_STANDARD_TOKEN_REQUIRED")
         fixture = OwnedWaveProbe(Path(executable), output / "target")
         service = InspectorService(output / "native-journal", helper_executable=diagnostic_helper)
@@ -653,6 +663,7 @@ def run_embedded(output, evidence_root, source_sha, diagnostic_helper=None, *, s
     output, evidence = Path(output).resolve(), Path(evidence_root).resolve(strict=True)
     output.mkdir(parents=True, exist_ok=False)
     proof = {"schema": "blackbox.r60.chain-native-qa/1", "status": "FAIL", "source_identity": identity,
+        "pid": os.getpid(), "started_monotonic_ns": time.monotonic_ns(),
         "source_sha": source_sha, "frozen": bool(getattr(sys, "frozen", False)),
         "standard_token": standard_token,
         "physical_windows_10_11": "NOT_TESTED", "physical_secure_desktop": "NOT_TESTED",
@@ -683,7 +694,14 @@ def run_embedded(output, evidence_root, source_sha, diagnostic_helper=None, *, s
         require(file_hash(executable) == source_manifest["fixture_executable_sha256"],
                 "R60_NATIVE_FIXTURE_BINARY_CHANGED")
         live_check = standard_live_graph if standard_token else native_live_graph
-        proof["live"] = live_check(output / "live", executable, source_sha, diagnostic_helper)
+        if standard_token:
+            # Keep the actual precondition facts reachable if its strict gate
+            # raises before standard_live_graph returns its successful proof.
+            proof["standard_token_precondition"] = {}
+            proof["live"] = live_check(output / "live", executable, source_sha, diagnostic_helper,
+                                      token_evidence=proof["standard_token_precondition"])
+        else:
+            proof["live"] = live_check(output / "live", executable, source_sha, diagnostic_helper)
         if not standard_token:
             from .chain_qa_native import native_checkpoint_graph
             proof["native_checkpoint"] = native_checkpoint_graph(output / "native-checkpoint", executable,
