@@ -44,12 +44,24 @@ if __name__ == "__main__" and "--research-worker" in sys.argv:
     from blackbox_core.research_worker import main as research_main
     raise SystemExit(research_main(worker_options.research_root))
 
-from PySide6.QtCore import QTimer
-from PySide6.QtWidgets import QApplication
+_CHAIN_QA_GUARD = None
+if __name__ == "__main__" and "--chain-e2e" in sys.argv:
+    from blackbox_core.chain_qa_guard import ChainQaFailureGuard
+    _CHAIN_QA_GUARD = ChainQaFailureGuard()
+    _CHAIN_QA_GUARD.install()
 
-from blackbox_universal.monitor import ReadOnlyProbe
-from blackbox_universal.theme import set_retro_theme, font_coverage
-from blackbox_universal.decoder_window import DecoderWindow as UniversalWindow
+try:
+    from PySide6.QtCore import QTimer
+    from PySide6.QtWidgets import QApplication
+
+    from blackbox_universal.monitor import ReadOnlyProbe
+    from blackbox_universal.theme import set_retro_theme, font_coverage
+    from blackbox_universal.decoder_window import DecoderWindow as UniversalWindow
+except Exception:
+    if _CHAIN_QA_GUARD is None:
+        raise
+    _CHAIN_QA_GUARD.record(*sys.exc_info())
+    raise SystemExit(1)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -116,10 +128,18 @@ def main(argv: list[str] | None = None) -> int:
         from blackbox_universal.chain_qa import run_chain_gui
         try:
             proof = run_chain_gui(app, window, options.chain_e2e / "gui", options.chain_evidence,
-                                  options.qa_commit_sha)
-            return 0 if proof.get("status") == "PASS" else 1
+                                  options.qa_commit_sha, failure_guard=_CHAIN_QA_GUARD)
         finally:
             window.close()
+            app.processEvents()
+        # A Qt callback can fail during the last close, after the harness has
+        # returned. Evaluate acceptance only after that real event boundary.
+        if _CHAIN_QA_GUARD is not None:
+            _CHAIN_QA_GUARD.apply(proof)
+            if _CHAIN_QA_GUARD.failed:
+                from blackbox_core.chain_qa import save
+                save(options.chain_e2e / "gui" / "result.json", proof)
+        return 0 if proof.get("status") == "PASS" else 1
     if options.wave02_e2e:
         from blackbox_universal.wave02_qa import run_wave02_e2e
         return run_wave02_e2e(app, window, options.wave02_e2e, options.wave02_evidence,
@@ -216,6 +236,13 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
+    if _CHAIN_QA_GUARD is not None:
+        try:
+            code = main()
+        except Exception:
+            _CHAIN_QA_GUARD.record(*sys.exc_info())
+            code = 1
+        raise SystemExit(_CHAIN_QA_GUARD.exit_code(code))
     if any(flag in sys.argv for flag in ("--smoke", "--research-e2e", "--deep-smoke", "--r10-e2e")):
         # A windowed PyInstaller failure otherwise opens a blocking error
         # dialog on the headless runner. QA must retain the real traceback and

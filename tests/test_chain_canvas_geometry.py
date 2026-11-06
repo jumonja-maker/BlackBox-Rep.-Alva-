@@ -155,6 +155,12 @@ class CanvasGeometryChildTests(unittest.TestCase):
         completed = subprocess.run([sys.executable, "-X", "faulthandler", str(Path(__file__).resolve()),
                                     "--exercise-canvas"], env=env, capture_output=True, text=True, timeout=30)
         self.assertEqual(completed.returncode, 0, (completed.stdout + completed.stderr)[-12000:])
+        geometry_lines = [line for line in completed.stdout.splitlines()
+                          if line.startswith(("R60_CANVAS_GEOMETRY_", "R60_CANVAS_HORIZONTAL_FIXTURE "))]
+        self.assertLessEqual(len(geometry_lines), 64)
+        for line in geometry_lines:
+            self.assertLessEqual(len(line), 2500)
+            print(line, flush=True)
         lines = [line.partition("R60_CANVAS_GEOMETRY_TEST ")[2] for line in completed.stdout.splitlines()
                  if line.startswith("R60_CANVAS_GEOMETRY_TEST ")]
         self.assertEqual(len(lines), 1)

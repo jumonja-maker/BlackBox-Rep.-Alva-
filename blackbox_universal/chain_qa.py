@@ -78,7 +78,7 @@ def _real_button_click(widget):
                 "R60_REAL_QT_CHECKBOX_NOT_CHANGED_" + widget.objectName())
 
 
-def run_chain_gui(app, window, output, evidence_root, source_sha):
+def run_chain_gui(app, window, output, evidence_root, source_sha, *, failure_guard=None):
     _gui_phase("ENTER")
     from PySide6.QtCore import QBuffer, QIODevice, QPoint, QPointF, Qt
     from PySide6.QtTest import QTest
@@ -440,23 +440,43 @@ def run_chain_gui(app, window, output, evidence_root, source_sha):
         proof["history_export_json_html"] = True
         proof["final_source_identity"] = background(lambda: source_proof(source_sha))
         proof["status"] = "PASS"
+        if failure_guard is not None:
+            failure_guard.apply(proof)
         _gui_phase("ACCEPTANCE_BODY_FINISHED")
     except BaseException as error:
         _gui_phase("PYTHON_EXCEPTION", error_type=type(error).__name__[:64])
         proof.update(status="FAIL", reason=str(error)[:2500], error=type(error).__name__)
         traceback.print_exc(limit=15)
     finally:
-        _gui_phase("FINALIZE_CANCEL_BEGIN")
-        panel.bridge.cancel()
-        idle(120)
-        _gui_phase("FINALIZE_WINDOW_CLOSE_BEGIN")
-        window.close()
-        _gui_phase("FINALIZE_WINDOW_CLOSE_RETURNED")
-        pump_until(lambda: not getattr(window.probe, "alive", False) and not panel.bridge.busy
-                   and not window.deep_inspector_panel.bridge.has_session, "R60_GUI_OWNERS_NOT_CLOSED", 120)
-        app.processEvents()
-        _gui_phase("FINALIZE_OWNERS_CLOSED_SAVE_RECEIPT_BEGIN")
+        # A latched callback error refuses PASS but never aborts a real owner
+        # drain or abandons the background reader used by the harness.
+        cleanup_errors = []
+        for stage, action in (
+            ("FINALIZE_CANCEL_BEGIN", panel.bridge.cancel),
+            ("FINALIZE_IDLE_BEGIN", lambda: idle(120)),
+            ("FINALIZE_WINDOW_CLOSE_BEGIN", window.close),
+            ("FINALIZE_OWNERS_DRAIN_BEGIN", lambda: pump_until(
+                lambda: not getattr(window.probe, "alive", False) and not panel.bridge.busy
+                    and not window.deep_inspector_panel.bridge.has_session,
+                "R60_GUI_OWNERS_NOT_CLOSED", 120)),
+            ("FINALIZE_EVENT_DRAIN_BEGIN", app.processEvents)):
+            _gui_phase(stage)
+            try:
+                action()
+            except BaseException as error:
+                cleanup_errors.append({"stage": stage, "error_type": type(error).__name__[:64]})
+        if cleanup_errors:
+            proof.update(status="FAIL", finalization_errors=cleanup_errors)
+            proof.setdefault("reason", "R60_GUI_FINALIZATION_FAILED")
+        if failure_guard is not None:
+            failure_guard.apply(proof)
+        _gui_phase("FINALIZE_SAVE_RECEIPT_BEGIN")
         background(lambda: save(output / "result.json", proof))
+        if failure_guard is not None and failure_guard.failed:
+            # The save's event pump can itself deliver a failing callback.
+            # All readers have now drained; publish the final FAIL directly.
+            failure_guard.apply(proof)
+            save(output / "result.json", proof)
         _gui_phase("FINALIZE_RECEIPT_SAVED")
         print("R60_CHAIN_GUI_RECEIPT " + json.dumps(proof, ensure_ascii=True, sort_keys=True), flush=True)
     return proof
