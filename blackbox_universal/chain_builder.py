@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 from uuid import uuid4
 
-from PySide6.QtCore import Qt, QPointF, QRectF, QMimeData, Signal, QTimer, QEvent
+from PySide6.QtCore import Qt, QPointF, QRectF, QSize, QMimeData, Signal, QTimer, QEvent
 from PySide6.QtGui import (QBrush, QColor, QDrag, QKeySequence, QPainter,
                           QPainterPath, QPen, QShortcut)
 from PySide6.QtWidgets import (
@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (
     QGraphicsPathItem, QGraphicsScene, QGraphicsView, QGridLayout, QHBoxLayout,
     QLabel, QLineEdit, QListWidget, QListWidgetItem, QPlainTextEdit, QPushButton,
     QScrollArea, QSpinBox, QSplitter, QTabWidget, QTableWidget, QTableWidgetItem,
-    QVBoxLayout, QWidget, QStackedWidget, QSizePolicy,
+    QVBoxLayout, QWidget, QStackedWidget, QSizePolicy, QStyle, QStyleOptionTabWidgetFrame,
 )
 
 from .action_grid import ActionGrid
@@ -811,6 +811,63 @@ class WorkflowCanvas(QGraphicsView):
             point = self.mapToScene(event.position().toPoint())
             self.tool_dropped.emit(tool, [point.x(), point.y()])
             event.acceptProposedAction()
+
+
+class OverviewWorkspaceTabs(QTabWidget):
+    """Let the outer Overview scroll area size its current workspace.
+
+    QTabWidget normally reserves the largest page's minimum, including hidden
+    pages. The long Observation form must remain scrollable when selected,
+    without imposing its height on the canvas in the other workspace.
+    """
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._watched_workspace = None
+        self.currentChanged.connect(self._workspace_changed)
+
+    def _workspace_changed(self, _index):
+        if self._watched_workspace is not None:
+            self._watched_workspace.removeEventFilter(self)
+        self._watched_workspace = self.currentWidget()
+        if self._watched_workspace is not None:
+            self._watched_workspace.installEventFilter(self)
+        self.updateGeometry()
+
+    def eventFilter(self, watched, event):
+        if (watched is self._watched_workspace and
+                event.type() in (QEvent.Type.LayoutRequest, QEvent.Type.FontChange, QEvent.Type.StyleChange)):
+            self.updateGeometry()
+        return super().eventFilter(watched, event)
+
+    def changeEvent(self, event):
+        super().changeEvent(event)
+        if event.type() in (QEvent.Type.FontChange, QEvent.Type.StyleChange):
+            self.updateGeometry()
+
+    def _workspace_hint(self, *, minimum):
+        page = self.currentWidget()
+        if page is None:
+            return super().minimumSizeHint() if minimum else super().sizeHint()
+        content = (page.minimumSizeHint() if minimum else page.sizeHint()).expandedTo(page.minimumSize())
+        content = content.expandedTo(QSize(0, 0))
+        bar = self.tabBar()
+        tabs = (bar.minimumSizeHint() if minimum else bar.sizeHint()) if not bar.isHidden() else QSize(0, 0)
+        if self.tabPosition() in (QTabWidget.TabPosition.West, QTabWidget.TabPosition.East):
+            content = QSize(content.width() + tabs.width(), max(content.height(), tabs.height()))
+        else:
+            content = QSize(max(content.width(), tabs.width()), content.height() + tabs.height())
+        option = QStyleOptionTabWidgetFrame()
+        option.initFrom(self)
+        option.shape = bar.shape()
+        option.lineWidth = self.style().pixelMetric(QStyle.PixelMetric.PM_DefaultFrameWidth, None, self)
+        option.tabBarSize = tabs
+        return self.style().sizeFromContents(QStyle.ContentsType.CT_TabWidget, option, content, self)
+
+    def sizeHint(self):
+        return self._workspace_hint(minimum=False)
+
+    def minimumSizeHint(self):
+        return self._workspace_hint(minimum=True)
 
 
 class ChainBuilderPanel(QWidget):

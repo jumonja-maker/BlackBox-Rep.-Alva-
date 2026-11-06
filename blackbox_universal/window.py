@@ -516,8 +516,8 @@ class UniversalWindow(QMainWindow):
         content.addWidget(notes)
         # Keep both embedding shells and all existing monitor/deep attributes.
         # Chain Builder is an internal Overview tab, never a seventh page.
-        from .chain_builder import ChainBuilderPanel
-        self.overview_tabs = QTabWidget()
+        from .chain_builder import ChainBuilderPanel, OverviewWorkspaceTabs
+        self.overview_tabs = OverviewWorkspaceTabs()
         self.overview_tabs.setObjectName("overviewWorkspaces")
         self.overview_tabs.addTab(page, "Observation / Investigation")
         self.chain_builder_panel = ChainBuilderPanel(self, self._chain_root)
@@ -525,6 +525,7 @@ class UniversalWindow(QMainWindow):
         self.overview_tabs.addTab(self.chain_builder_panel, "Chain Builder")
         wrapper, wrapper_layout = _page()
         wrapper_layout.setContentsMargins(0, 0, 0, 0)
+        wrapper_layout.setAlignment(Qt.AlignmentFlag(0))
         wrapper_layout.addWidget(self.overview_tabs, 1)
         return wrapper
 

@@ -161,6 +161,36 @@ def _run_workspace_child(case_name):
                         self.assertTrue(self.panel.budget_seconds.isVisible())
                         self.assertTrue(self.panel.override_tools.isVisible())
                         self.panel.inspector_tabs.setCurrentIndex(0)
+                        # Observation retains its long form and native outer
+                        # scroll range. Its hidden minimum must not make the
+                        # canvas page grow after returning to Chain Builder.
+                        observation = self.window.overview_tabs.widget(0)
+                        outer = self.window.stack.widget(self.window._page_ids["dashboard"])
+                        self.window.overview_tabs.setCurrentWidget(observation)
+                        self.app.processEvents()
+                        self.app.processEvents()
+                        observation_range = outer.verticalScrollBar().maximum()
+                        self.assertGreater(observation_range, 0)
+                        self.assertGreaterEqual(observation.height(), observation.minimumSizeHint().height())
+                        outer.ensureWidgetVisible(self.window.recent_messages)
+                        self.app.processEvents()
+                        recent_point = self.window.recent_messages.mapTo(
+                            outer.viewport(), self.window.recent_messages.rect().center())
+                        self.assertTrue(outer.viewport().rect().contains(recent_point))
+                        self.window.overview_tabs.setCurrentWidget(self.panel)
+                        self.app.processEvents()
+                        self.app.processEvents()
+                        self.scroll_to_top()
+                        measured_round_trip = {"window": [width, height], "language": language,
+                            "selected_tool": "observation_round_trip", "observation_scroll_max": observation_range,
+                            "chain_scroll_max": outer.verticalScrollBar().maximum(),
+                            "visible_canvas": list(self.visible_rect(self.panel.canvas).getRect()),
+                            "canvas_size": [self.panel.canvas.width(), self.panel.canvas.height()]}
+                        print("R60_COMPACT_WORKSPACE_GEOMETRY " + json.dumps(measured_round_trip, sort_keys=True), flush=True)
+                        self.assertEqual(outer.verticalScrollBar().maximum(), 0, measured_round_trip)
+                        for control in (self.panel.canvas, self.panel.apply_button, self.panel.delete_button,
+                                        self.panel.connect_button):
+                            self.assertEqual(self.visible_rect(control).size(), control.size(), measured_round_trip)
 
         def test_middle_and_space_panning_and_plain_wheel_preserve_saved_nodes_and_cursor_anchor(self):
             self.populate_graph()
