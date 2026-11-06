@@ -28,6 +28,7 @@ def _run_workspace_child(case_name):
     from blackbox_universal.action_grid import ActionGrid
     from blackbox_universal.theme import set_retro_theme
     from blackbox_universal.decoder_window import DecoderWindow
+    from blackbox_universal.chain_qa import _ensure_visible_hit_point
     from qt_test_support import close_and_drain, dispose_closed_fixture
 
     class WorkspaceChildTests(unittest.TestCase):
@@ -206,10 +207,28 @@ def _run_workspace_child(case_name):
                         observation_range = outer.verticalScrollBar().maximum()
                         self.assertGreater(observation_range, 0)
                         self.assertGreaterEqual(observation.height(), observation.minimumSizeHint().height())
-                        outer.ensureWidgetVisible(self.window.recent_messages)
-                        self.app.processEvents()
+                        before_point = self.window.recent_messages.mapTo(
+                            outer.viewport(), self.window.recent_messages.rect().center())
+                        print("\nR60_OBSERVATION_SCROLL_GEOMETRY " + json.dumps({
+                            "phase": "BEFORE_EXPLICIT_CENTER_SCROLL", "window": [width, height],
+                            "language": language, "point": [before_point.x(), before_point.y()],
+                            "viewport_rect": list(outer.viewport().rect().getRect()),
+                            "horizontal_scroll": [outer.horizontalScrollBar().value(), outer.horizontalScrollBar().maximum()],
+                            "vertical_scroll": [outer.verticalScrollBar().value(), outer.verticalScrollBar().maximum()]},
+                            sort_keys=True), flush=True)
+                        # QPlainTextEdit may expose a cursor rectangle to
+                        # ensureWidgetVisible. Request the exact center point
+                        # instead, and verify every real ancestor clip rect.
+                        _ensure_visible_hit_point(self.app, self.window.recent_messages)
                         recent_point = self.window.recent_messages.mapTo(
                             outer.viewport(), self.window.recent_messages.rect().center())
+                        print("R60_OBSERVATION_SCROLL_GEOMETRY " + json.dumps({
+                            "phase": "AFTER_EXPLICIT_CENTER_SCROLL", "window": [width, height],
+                            "language": language, "point": [recent_point.x(), recent_point.y()],
+                            "viewport_rect": list(outer.viewport().rect().getRect()),
+                            "horizontal_scroll": [outer.horizontalScrollBar().value(), outer.horizontalScrollBar().maximum()],
+                            "vertical_scroll": [outer.verticalScrollBar().value(), outer.verticalScrollBar().maximum()]},
+                            sort_keys=True), flush=True)
                         self.assertTrue(outer.viewport().rect().contains(recent_point))
                         self.window.overview_tabs.setCurrentWidget(self.panel)
                         self.app.processEvents()
@@ -351,7 +370,8 @@ class CanvasWorkspaceTests(unittest.TestCase):
             transcript.seek(0)
             output = transcript.read(_MAX_CHILD_OUTPUT + 1).decode("utf-8", errors="replace")
         for line in output.splitlines():
-            if line.startswith(("R60_COMPACT_WORKSPACE_GEOMETRY ", "R60_WORKSPACE_LAYOUT_CENSUS ", "R60_WORKSPACE_CHILD_RESULT ")):
+            if line.startswith(("R60_COMPACT_WORKSPACE_GEOMETRY ", "R60_WORKSPACE_LAYOUT_CENSUS ",
+                                "R60_WORKSPACE_CHILD_RESULT ", "R60_OBSERVATION_SCROLL_GEOMETRY ")):
                 print(line, flush=True)
         self.assertEqual(completed.returncode, 0, output[-12000:])
         markers = [line.partition("R60_WORKSPACE_CHILD_RESULT ")[2] for line in output.splitlines()
