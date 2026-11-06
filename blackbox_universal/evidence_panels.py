@@ -17,7 +17,7 @@ class EvidencePanel(QWidget):
   for b,en,ru,fn in ((self.load,'Load events' if events else 'Investigate selected interval','Показать события' if events else 'Расследовать выбранный интервал',self.refresh),
     (self.open,'Open recording…','Открыть запись…',self.choose)):
    self.label(b,en,ru);b.clicked.connect(fn);row.addWidget(b)
-  box.addLayout(row);filters=QGridLayout();self.question=QComboBox();self.sort=QComboBox();self.source=QComboBox();self.severity=QComboBox();self.target=QComboBox()
+  box.addLayout(row);filters=QGridLayout();self.question=QComboBox(self);self.sort=QComboBox(self);self.source=QComboBox(self);self.severity=QComboBox(self);self.target=QComboBox(self)
   for v in QUESTIONS:self.question.addItem(v,v)
   for v in SORTS:self.sort.addItem(v,v)
   for v in SOURCES:self.source.addItem(v,v)
@@ -25,9 +25,12 @@ class EvidencePanel(QWidget):
   self.target.addItem('ALL',0)
   for i,w in enumerate((self.source,self.severity,self.target) if events else (self.question,self.sort)):
    filters.addWidget(w,0,i);w.activated.connect(self.refresh)
-  self.start=QDoubleSpinBox();self.end=QDoubleSpinBox()
+  self.start=QDoubleSpinBox(self);self.end=QDoubleSpinBox(self)
   for w in (self.start,self.end):w.setRange(0,604800);w.setDecimals(3);w.setSuffix(' s');w.editingFinished.connect(self.refresh)
-  self.end.setValue(3600);self.search=QLineEdit();self.search.setMaxLength(256)
+  self.end.setValue(3600);self.search=QLineEdit(self);self.search.setMaxLength(256)
+  # Both modes retain the shared control API. Controls outside this mode's
+  # layout still need a Qt owner, and explicit hiding preserves their old UI.
+  for w in ((self.question,self.sort) if events else (self.source,self.severity,self.target,self.start,self.end,self.search)):w.hide()
   self.timer=QTimer(self);self.timer.setSingleShot(True);self.timer.setInterval(300);self.timer.timeout.connect(self.refresh);self.search.textChanged.connect(lambda:self.timer.start())
   if events:filters.addWidget(self.start,1,0);filters.addWidget(self.end,1,1);filters.addWidget(self.search,2,0,1,3)
   box.addLayout(filters);self.summaries=[]

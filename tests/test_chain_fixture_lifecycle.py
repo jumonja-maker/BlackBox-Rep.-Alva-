@@ -10,6 +10,8 @@ import subprocess
 import sys
 import unittest
 
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
 
 def exercise_fixture_lifecycle():
     from collections import Counter
@@ -171,6 +173,42 @@ def exercise_fixture_lifecycle():
 
 
 class FixtureLifecycleChildTests(unittest.TestCase):
+    def test_both_evidence_modes_own_all_controls_and_hide_only_unused_fields(self):
+        from types import SimpleNamespace
+        from PySide6.QtWidgets import QApplication, QVBoxLayout, QWidget
+        from blackbox_universal.evidence_panels import EvidencePanel
+        from qt_test_support import dispose_closed_fixture
+        app = QApplication.instance() or QApplication([])
+        host = QWidget()
+        host.language = "EN"
+        calls = []
+        host.probe = SimpleNamespace(session_folder=None, send=lambda *args, **kwargs: calls.append((args, kwargs)))
+        layout = QVBoxLayout(host)
+        panels = [EvidencePanel(host, events=events) for events in (False, True)]
+        for panel in panels:
+            layout.addWidget(panel)
+        host.show()
+        app.processEvents()
+        try:
+            fields = ("question", "sort", "source", "severity", "target", "start", "end", "search")
+            for panel in panels:
+                with self.subTest(events=panel.events):
+                    unused = {"question", "sort"} if panel.events else {
+                        "source", "severity", "target", "start", "end", "search"}
+                    for name in fields:
+                        control = getattr(panel, name)
+                        self.assertIs(control.parentWidget(), panel, name)
+                        self.assertFalse(control.isWindow(), name)
+                        if name in unused:
+                            self.assertTrue(control.isHidden(), name)
+                            self.assertFalse(control.isVisible(), name)
+                        else:
+                            self.assertTrue(control.isVisible(), name)
+            self.assertEqual(calls, [], "Ownership and visibility must not execute evidence queries")
+        finally:
+            host.close()
+            dispose_closed_fixture(host, app)
+
     def test_closed_large_qt_trees_are_destroyed_but_unconfirmed_owners_are_retained(self):
         env = dict(os.environ, QT_QPA_PLATFORM="offscreen")
         completed = subprocess.run([sys.executable, "-X", "faulthandler", str(Path(__file__).resolve()),
