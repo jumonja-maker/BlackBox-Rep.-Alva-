@@ -194,6 +194,8 @@ class MediumDiagnosticsTests(unittest.TestCase):
         self.assertEqual(stale["status"], "RESULT_READBACK_UNCONFIRMED")
 
     def test_strict_standard_gate_keeps_actual_facts_when_raw_elevation_refuses_launch(self):
+        # Retain the old raw-false observation as a diagnostic, but incomplete
+        # permission evidence must still fail the stronger scoped oracle.
         from blackbox_core.chain_qa import standard_live_graph
         evidence = {}
         own = {"pid": 12345, "elevated": True, "elevation_type": 2}
@@ -209,7 +211,8 @@ class MediumDiagnosticsTests(unittest.TestCase):
         self.assertEqual(evidence["own_token"], own)
         self.assertEqual(evidence["current_token_facts"], facts)
         self.assertTrue(evidence["gate_conditions"]["privilege_standard"])
-        self.assertFalse(evidence["gate_conditions"]["raw_token_elevation_false"])
+        self.assertFalse(evidence["legacy_raw_elevation_false_observation"])
+        self.assertFalse(evidence["permission_proof"]["confirmed"])
         target.assert_not_called()
         service.assert_not_called()
 

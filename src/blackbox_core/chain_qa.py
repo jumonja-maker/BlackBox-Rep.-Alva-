@@ -590,10 +590,77 @@ def native_live_graph(output, executable, source_sha, diagnostic_helper=None):
     return proof
 
 
+def restricted_medium_permission_proof(facts, expected_pid):
+    """Strict QA fixture rights; raw UAC metadata is preserved, not a grant."""
+    failures = []
+    def check(condition, code):
+        if not condition:
+            failures.append(code)
+    facts = facts if type(facts) is dict else {}
+    token = facts.get("process_token", {})
+    token = token if type(token) is dict else {}
+    identity = facts.get("process_identity", {})
+    identity = identity if type(identity) is dict else {}
+    group = token.get("administrators_group", {})
+    group = group if type(group) is dict else {}
+    integrity = token.get("integrity", {})
+    integrity = integrity if type(integrity) is dict else {}
+    lengths = facts.get("query_returned_bytes", {})
+    lengths = lengths if type(lengths) is dict else {}
+    cleanup = facts.get("cleanup", {})
+    cleanup = cleanup if type(cleanup) is dict else {}
+    raw, attributes = token.get("elevation_raw"), group.get("attributes")
+    check(facts.get("schema") in ("blackbox.r60.current-token-facts/1", "blackbox.r60.process-token-facts/1") and
+          facts.get("status") == "OBSERVED", "TOKEN_FACTS_NOT_OBSERVED")
+    check(type(expected_pid) is int and 0 < expected_pid <= 0xffffffff and
+          type(facts.get("pid")) is int and facts.get("pid") == expected_pid and
+          type(identity.get("pid")) is int and identity.get("pid") == expected_pid and type(identity.get("created_100ns")) is int and
+          0 < identity["created_100ns"] < 2**64 and
+          facts.get("identity_source") == "INDEPENDENT_GET_PROCESS_ID_AND_GET_PROCESS_TIMES",
+          "ACTUAL_PROCESS_IDENTITY_NOT_ESTABLISHED")
+    check(cleanup.get("confirmed") is True, "QUERY_CLEANUP_UNCONFIRMED")
+    check(integrity.get("sid") == "S-1-16-8192" and type(integrity.get("rid")) is int and integrity["rid"] == 8192,
+          "EXACT_MEDIUM_INTEGRITY_REQUIRED")
+    check(type(raw) is int and raw in (0, 1) and token.get("elevated") is bool(raw) and
+          type(token.get("elevation_type")) is int and token["elevation_type"] in (1, 2, 3),
+          "RAW_ELEVATION_METADATA_INVALID")
+    check(all(type(lengths.get(key)) is int and lengths[key] == 4 for key in ("20", "18")) and
+          type(lengths.get("21")) is int and lengths["21"] in (1, 4), "SCALAR_QUERY_BOUNDARIES_UNCONFIRMED")
+    check(group.get("present") is True and type(attributes) is int and 0 <= attributes <= 0xffffffff and attributes & 0x10 != 0 and
+          attributes & (4 | 2) == 0 and group.get("enabled") is False and group.get("deny_only") is True,
+          "ADMINISTRATORS_MUST_BE_DISABLED_DENY_ONLY")
+    check(facts.get("effective_administrators_member") is False, "EFFECTIVE_ADMINISTRATOR_MEMBERSHIP_PRESENT_OR_UNKNOWN")
+    expected_membership_scope = ("CURRENT_EFFECTIVE_THREAD_TOKEN_OR_PROCESS_TOKEN" if
+        facts.get("schema") == "blackbox.r60.current-token-facts/1" else
+        "REQUESTED_PROCESS_PRIMARY_TOKEN_DUPLICATED_FOR_MEMBERSHIP_QUERY")
+    check(facts.get("effective_membership_scope") == expected_membership_scope,
+          "ACTUAL_MEMBERSHIP_QUERY_SCOPE_UNCONFIRMED")
+    check(type(token.get("has_restrictions_raw")) is int and token["has_restrictions_raw"] == 1,
+          "ACTUAL_FILTERING_NOT_OBSERVED")
+    privileges = token.get("privileges")
+    valid_privileges = type(privileges) is list and len(privileges) == 1 and type(privileges[0]) is dict
+    if valid_privileges:
+        item = privileges[0]
+        flags = item.get("attributes")
+        valid_privileges = (item.get("name") == "SeChangeNotifyPrivilege" and type(flags) is int and
+            0 <= flags <= 0xffffffff and not flags & 4 and item.get("enabled") is bool(flags & 2) and
+            item.get("enabled_by_default") is bool(flags & 1) and item.get("removed") is False)
+    check(valid_privileges, "UNEXPECTED_PRESENT_PRIVILEGE_OR_QUERY_UNCERTAINTY")
+    return {"confirmed": not failures, "status": "CONFIRMED" if not failures else "NOT_ESTABLISHED",
+        "scope": "RESTRICTED_SAME_RUNNER_MEDIUM_NOT_UAC_FILTERED_OR_SEPARATE_STANDARD_ACCOUNT",
+        "pid": expected_pid, "process_identity": identity, "raw_token_elevation": raw,
+        "raw_elevation_type": token.get("elevation_type"), "failures": failures}
+
+
+# Retain only a rejected QA helper whose actual termination/close failed.
+# No subsequent QA helper may be launched while that owner is unresolved.
+_RETAINED_REJECTED_QA_HELPERS = []
+
+
 def standard_live_graph(output, executable, source_sha, diagnostic_helper=None, *, token_evidence=None):
     """Actual chain adapters under the independently restricted medium token."""
     from .chain_adapters import ChainRuntime
-    from .chain_qa_native import actual_current_token_facts, actual_token, OwnedWaveProbe
+    from .chain_qa_native import actual_current_token_facts, actual_process_token_facts, actual_token, OwnedWaveProbe
     from .deep_service import InspectorService
     from .optional_jobs import OwnedProcess
     from .windows_research import privilege
@@ -614,18 +681,62 @@ def standard_live_graph(output, executable, source_sha, diagnostic_helper=None, 
             diagnostic = getattr(error, "token_query_diagnostic", None)
             if type(diagnostic) is dict:
                 evidence["token_query_diagnostic"] = dict(diagnostic)
+            native_diagnostic = getattr(error, "native_call_diagnostic", None)
+            if type(native_diagnostic) is dict:
+                evidence["native_call_diagnostic"] = dict(native_diagnostic)
             raise
         evidence["status"] = "OBSERVED"
+        own_permission = restricted_medium_permission_proof(evidence["current_token_facts"], os.getpid())
+        evidence["permission_proof"] = own_permission
+        evidence["legacy_raw_elevation_false_observation"] = own_token["elevated"] is False
         evidence["gate_conditions"] = {"privilege_standard": own_privilege == {"mode": "STANDARD", "windows": True},
-                                       "raw_token_elevation_false": own_token["elevated"] is False}
-        require(own_privilege == {"mode": "STANDARD", "windows": True} and own_token["elevated"] is False,
+            "restricted_medium_permission_facts": own_permission["confirmed"]}
+        raw = evidence["current_token_facts"].get("process_token", {})
+        require(own_privilege == {"mode": "STANDARD", "windows": True} and own_permission["confirmed"] and
+                evidence["current_token_facts"].get("schema") == "blackbox.r60.current-token-facts/1" and
+                own_token.get("pid") == os.getpid() and own_token["elevated"] is raw.get("elevated") and
+                own_token["elevation_type"] == raw.get("elevation_type"),
                 "R60_CHAIN_ACTUAL_STANDARD_TOKEN_REQUIRED")
         fixture = OwnedWaveProbe(Path(executable), output / "target")
         service = InspectorService(output / "native-journal", helper_executable=diagnostic_helper)
         original_launch = service.broker.launch
+        evidence["helper_token_observations"] = launches
         def launch(arguments, *, elevated=False):
+            require(elevated is False and not _RETAINED_REJECTED_QA_HELPERS, "R60_STANDARD_QA_HELPER_SCOPE_OR_OWNER_UNCONFIRMED")
             owner = original_launch(arguments, elevated=elevated)
-            launches.append({"pid": owner.pid, "elevated": elevated, "token": actual_token(owner.pid)})
+            row = {"pid": owner.pid, "elevated": elevated}
+            launches.append(row)
+            try:
+                with owner._close_lock:
+                    require(not owner._handle_closed and owner.alive(), "R60_QA_HELPER_OWNER_NOT_LIVE")
+                    capability = owner._process_handle if owner.process is not None else owner.handle
+                    row["token_facts"] = actual_process_token_facts(owner.pid, process_handle=capability)
+                row["permission_proof"] = restricted_medium_permission_proof(row["token_facts"], owner.pid)
+                token = row["token_facts"]["process_token"]
+                row["token"] = {"pid": owner.pid, "elevated": token["elevated"], "elevation_type": token["elevation_type"],
+                                "source": "INDEPENDENT_QUERY_OF_EXACT_BROKER_OWNED_PROCESS"}
+                require(owner.pid != os.getpid() and row["permission_proof"]["confirmed"] and
+                        row["token_facts"].get("schema") == "blackbox.r60.process-token-facts/1",
+                        "R60_STANDARD_CHAIN_HELPER_PERMISSION_FACTS_REQUIRED")
+            except BaseException as primary:
+                row["query_error_type"] = type(primary).__name__[:64]
+                if type(getattr(primary, "token_query_diagnostic", None)) is dict:
+                    row["token_query_diagnostic"] = dict(primary.token_query_diagnostic)
+                if type(getattr(primary, "native_call_diagnostic", None)) is dict:
+                    row["native_call_diagnostic"] = dict(primary.native_call_diagnostic)
+                # The broker has created the process, but its caller has not
+                # received it yet. Close this exact unbound QA helper here.
+                try:
+                    owner.terminate()
+                    require(owner.wait_for_exit(timeout_ms=5000), "R60_REJECTED_QA_HELPER_EXIT_UNCONFIRMED")
+                    row["rejected_helper_cleanup"] = owner.close_handle()
+                    require(row["rejected_helper_cleanup"].get("confirmed") is True,
+                            "R60_REJECTED_QA_HELPER_HANDLE_CLOSE_UNCONFIRMED")
+                except BaseException as cleanup:
+                    _RETAINED_REJECTED_QA_HELPERS.append(owner)
+                    primary.cleanup_unconfirmed = primary.owner_retained = True
+                    primary.add_note("R60_REJECTED_QA_HELPER_CLEANUP_UNCONFIRMED:" + type(cleanup).__name__)
+                raise
             return owner
         service.broker.launch = launch
         runtime = ChainRuntime(inspector=service, output_root=output / "recordings")
@@ -644,14 +755,15 @@ def standard_live_graph(output, executable, source_sha, diagnostic_helper=None, 
                 snapshot.get("cleanup", {}).get("confirmed") is True,
                 "R60_STANDARD_CHAIN_OWNER_NOT_RELEASED")
         token = launches[0]["token"]
-        require(token["elevated"] is False and all(row["token"]["elevated"] is False for row in launches),
-                "R60_STANDARD_CHAIN_HELPER_ELEVATED")
+        require(all(row["permission_proof"]["confirmed"] for row in launches),
+                "R60_STANDARD_CHAIN_HELPER_PERMISSION_FACTS_REQUIRED")
         calls = actual_invocations(records, "snapshot")
         require(len(calls) == 1 and calls[0][1]["execution_started"] is True and
                 calls[0][1]["cleanup"]["confirmed"] is True, "R60_STANDARD_REAL_NATIVE_RECEIPT_REQUIRED")
         proof = {"status": "PASS", "source_sha": source_sha, "state": snapshot["state"],
                  "own_token": own_token, "helper_token": token, "helper_launches": launches,
-                 "journal": journal, "scope": "RESTRICTED_SAME_RUNNER_IDENTITY_STANDARD_MEDIUM_TOKEN"}
+                 "permission_proof": own_permission, "journal": journal,
+                 "scope": "RESTRICTED_SAME_RUNNER_MEDIUM_NOT_UAC_FILTERED_OR_SEPARATE_STANDARD_ACCOUNT"}
     finally:
         if service is not None:
             proof["helper_cleanup"] = service.close()
@@ -661,6 +773,8 @@ def standard_live_graph(output, executable, source_sha, diagnostic_helper=None, 
             if proof["status"] == "PASS":
                 require(proof["target_cleanup"]["status"] == "COMPLETED", "R60_STANDARD_TARGET_CLEANUP_UNCONFIRMED")
         require(not OwnedProcess.pending_cleanup(), "R60_STANDARD_PENDING_PROCESS_OWNER")
+        if proof["status"] == "PASS":
+            require(not _RETAINED_REJECTED_QA_HELPERS, "R60_REJECTED_QA_HELPER_OWNER_RETAINED")
     return proof
 
 

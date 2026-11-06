@@ -198,6 +198,11 @@ def actual_token(pid):
 
 
 def actual_current_token_facts():
+    """Read the real current primary token and current effective membership."""
+    return actual_process_token_facts(os.getpid())
+
+
+def actual_process_token_facts(pid, *, process_handle=None):
     """Independent read-only primary/effective token facts, never authority.
 
     Mandatory integrity, TokenElevation, effective group membership and enabled
@@ -206,6 +211,7 @@ def actual_current_token_facts():
     token contents or existing object's ACL is published or changed here.
     """
     require_hosted_windows()
+    require(type(pid) is int and 0 < pid <= 0xffffffff, "R60_TOKEN_FACTS_PROCESS_PID")
     require(C.sizeof(C.c_void_p) == 8, "R60_TOKEN_FACTS_X64_REQUIRED")
     with _TOKEN_HANDLES_LOCK:
         require(not _PENDING_TOKEN_HANDLES, "R60_PRIOR_INDEPENDENT_TOKEN_QUERY_CLEANUP_UNCONFIRMED")
@@ -226,9 +232,17 @@ def actual_current_token_facts():
     class Privileges(C.Structure):
         _fields_ = [("count", u32), ("entries", Privilege * 1)]
 
+    class FileTime(C.Structure):
+        _fields_ = [("low", u32), ("high", u32)]
+
     kernel = C.WinDLL("kernel32", use_last_error=True, winmode=0x800)
     adv = C.WinDLL("advapi32", use_last_error=True, winmode=0x800)
     kernel.GetCurrentProcess.argtypes, kernel.GetCurrentProcess.restype = [], handle
+    kernel.OpenProcess.argtypes, kernel.OpenProcess.restype = [u32, i32, u32], handle
+    kernel.GetProcessId.argtypes, kernel.GetProcessId.restype = [handle], u32
+    kernel.GetProcessTimes.argtypes = [handle, C.POINTER(FileTime), C.POINTER(FileTime),
+                                      C.POINTER(FileTime), C.POINTER(FileTime)]
+    kernel.GetProcessTimes.restype = i32
     kernel.CloseHandle.argtypes, kernel.CloseHandle.restype = [handle], i32
     adv.OpenProcessToken.argtypes, adv.OpenProcessToken.restype = [handle, u32, C.POINTER(handle)], i32
     adv.GetTokenInformation.argtypes = [handle, C.c_int, handle, u32, C.POINTER(u32)]
@@ -238,10 +252,22 @@ def actual_current_token_facts():
     adv.CheckTokenMembership.argtypes, adv.CheckTokenMembership.restype = [handle, handle, C.POINTER(i32)], i32
     adv.LookupPrivilegeNameW.argtypes = [C.c_wchar_p, C.POINTER(Luid), C.c_wchar_p, C.POINTER(u32)]
     adv.LookupPrivilegeNameW.restype = i32
+    adv.DuplicateToken.argtypes, adv.DuplicateToken.restype = [handle, C.c_int, C.POINTER(handle)], i32
     restricted_api = getattr(adv, "IsTokenRestricted", None)
     if restricted_api is not None:
         restricted_api.argtypes, restricted_api.restype = [handle], i32
-    token, primary = handle(), None
+    token, membership_token, primary = handle(), handle(), None
+    current = pid == os.getpid()
+    process, owned_process = None, None
+    query_returned_bytes = {}
+
+    def checked_native(valid, reason, *, api, returned, error):
+        if not valid:
+            failure = AssertionError(reason + ":api=" + api + ":return=" + str(int(bool(returned))) +
+                                     ":error=" + str(error))
+            failure.native_call_diagnostic = {"api": api, "return_bool": bool(returned),
+                                              "get_last_error": error}
+            raise failure
 
     def checked_query(valid, reason, *, kind, stage, returned, error, needed, capacity):
         if not valid:
@@ -279,9 +305,11 @@ def actual_current_token_facts():
         C.set_last_error(0)
         returned = adv.GetTokenInformation(token, kind, C.byref(value), C.sizeof(value), C.byref(needed))
         error = C.get_last_error()
-        checked_query(returned and needed.value == C.sizeof(value),
+        accepted_sizes = (1, 4) if kind == 21 else (4,)
+        checked_query(returned and needed.value in accepted_sizes,
             "R60_TOKEN_FACTS_SCALAR_QUERY", kind=kind, stage="SCALAR", returned=returned,
             error=error, needed=needed.value, capacity=C.sizeof(value))
+        query_returned_bytes[str(kind)] = needed.value
         return value.value
 
     def sid_bytes(pointer, buffer, used):
@@ -297,8 +325,37 @@ def actual_current_token_facts():
         return C.string_at(pointer, size)
 
     try:
-        require(adv.OpenProcessToken(kernel.GetCurrentProcess(), 8, C.byref(token)),
-                "R60_CURRENT_TOKEN_QUERY_OPEN")
+        if process_handle is not None:
+            require(isinstance(process_handle, (int, C.c_void_p)) and not isinstance(process_handle, bool)
+                    and bool(process_handle), "R60_TOKEN_FACTS_BORROWED_PROCESS_HANDLE")
+            process = process_handle
+        elif current:
+            process = kernel.GetCurrentProcess()
+        else:
+            C.set_last_error(0)
+            process = owned_process = kernel.OpenProcess(0x1000, False, pid)
+            error = C.get_last_error()
+            checked_native(bool(process), "R60_TOKEN_FACTS_PROCESS_QUERY_OPEN", api="OpenProcess",
+                           returned=process, error=error)
+        C.set_last_error(0)
+        observed_pid = kernel.GetProcessId(process)
+        error = C.get_last_error()
+        checked_native(observed_pid == pid, "R60_TOKEN_FACTS_PROCESS_HANDLE_PID_MISMATCH:" + str(observed_pid),
+                       api="GetProcessId", returned=observed_pid, error=error)
+        created, exited, kernel_time, user_time = (FileTime() for _ in range(4))
+        C.set_last_error(0)
+        returned = kernel.GetProcessTimes(process, C.byref(created), C.byref(exited),
+                    C.byref(kernel_time), C.byref(user_time))
+        error = C.get_last_error()
+        checked_native(returned, "R60_TOKEN_FACTS_PROCESS_CREATION_QUERY", api="GetProcessTimes",
+                       returned=returned, error=error)
+        created_100ns = (created.high << 32) | created.low
+        require(created_100ns > 0, "R60_TOKEN_FACTS_PROCESS_CREATION_VALUE")
+        C.set_last_error(0)
+        returned = adv.OpenProcessToken(process, 8 if current else 10, C.byref(token))
+        error = C.get_last_error()
+        checked_native(returned, "R60_CURRENT_TOKEN_QUERY_OPEN" if current else "R60_PROCESS_TOKEN_QUERY_OPEN",
+                       api="OpenProcessToken", returned=returned, error=error)
         elevation, elevation_type = scalar(20), scalar(18)
         require(elevation in (0, 1) and elevation_type in (1, 2, 3), "R60_TOKEN_FACTS_ELEVATION_VALUE")
         integrity_buffer, integrity_used = information(25, C.sizeof(SidAttributes))
@@ -350,10 +407,26 @@ def actual_current_token_facts():
         require(restricted in (0, 1), "R60_TOKEN_FACTS_RESTRICTIONS_VALUE")
         member = i32()
         fixed_sid = C.create_string_buffer(administrators_sid)
-        require(adv.CheckTokenMembership(None, fixed_sid, C.byref(member)) and member.value in (0, 1),
-                "R60_TOKEN_FACTS_EFFECTIVE_ADMIN_MEMBERSHIP_QUERY")
-        return {"schema": "blackbox.r60.current-token-facts/1", "status": "OBSERVED", "pid": os.getpid(),
-            "source": "INDEPENDENT_CURRENT_PROCESS_TOKEN_QUERY_AND_EFFECTIVE_TOKEN_MEMBERSHIP",
+        if not current:
+            # CheckTokenMembership requires an impersonation token for a supplied
+            # handle. SecurityIdentification suffices for this read-only query;
+            # the duplicate is never installed, inherited or used for an action.
+            C.set_last_error(0)
+            returned = adv.DuplicateToken(token, 1, C.byref(membership_token))
+            error = C.get_last_error()
+            checked_native(returned, "R60_TOKEN_FACTS_MEMBERSHIP_DUPLICATE_QUERY", api="DuplicateToken",
+                           returned=returned, error=error)
+        C.set_last_error(0)
+        returned = adv.CheckTokenMembership(None if current else membership_token, fixed_sid, C.byref(member))
+        error = C.get_last_error()
+        checked_native(returned and member.value in (0, 1), "R60_TOKEN_FACTS_EFFECTIVE_ADMIN_MEMBERSHIP_QUERY",
+                       api="CheckTokenMembership", returned=returned, error=error)
+        return {"schema": "blackbox.r60.current-token-facts/1" if current else "blackbox.r60.process-token-facts/1",
+            "status": "OBSERVED", "pid": pid, "process_identity": {"pid": pid, "created_100ns": created_100ns},
+            "identity_source": "INDEPENDENT_GET_PROCESS_ID_AND_GET_PROCESS_TIMES",
+            "query_returned_bytes": query_returned_bytes,
+            "source": "INDEPENDENT_CURRENT_PROCESS_TOKEN_QUERY_AND_EFFECTIVE_TOKEN_MEMBERSHIP" if current else
+                      "INDEPENDENT_REQUESTED_PROCESS_PRIMARY_TOKEN_QUERY_AND_DUPLICATED_MEMBERSHIP",
             "scope": "READ_ONLY_RAW_TOKEN_FACTS_NOT_AUTHORIZATION_OR_STANDARD_ACCOUNT_PROOF",
             "process_token": {"elevation_raw": elevation, "elevated": elevation != 0, "elevation_type": elevation_type,
                 "integrity": {"sid": "S-1-16-" + str(integrity_rid), "rid": integrity_rid,
@@ -368,14 +441,18 @@ def actual_current_token_facts():
                     "value": bool(restricted_api(token)) if restricted_api is not None else None,
                     "meaning": "TOKEN_CONTAINS_RESTRICTING_SIDS"}},
             "effective_administrators_member": member.value != 0,
-            "effective_membership_scope": "CURRENT_EFFECTIVE_THREAD_TOKEN_OR_PROCESS_TOKEN",
-            "cleanup": {"confirmed": True, "scope": "OWNED_QUERY_TOKEN_HANDLE_CLOSED_BEFORE_RETURN"}}
+            "effective_membership_scope": "CURRENT_EFFECTIVE_THREAD_TOKEN_OR_PROCESS_TOKEN" if current else
+                                          "REQUESTED_PROCESS_PRIMARY_TOKEN_DUPLICATED_FOR_MEMBERSHIP_QUERY",
+            "cleanup": {"confirmed": True, "scope": "OWNED_QUERY_HANDLES_CLOSED_BORROWED_PROCESS_HANDLE_UNCHANGED"}}
     except BaseException as error:
         primary = error
         raise
     finally:
-        # The current-process pseudohandle is borrowed and must never be closed.
-        _close_token_handles(kernel, (("current_query_token", token),), primary)
+        # Both the current-process pseudohandle and a caller's exact process
+        # handle are borrowed; neither may be closed by this independent query.
+        _close_token_handles(kernel, (("membership_impersonation_token", membership_token),
+            ("current_query_token" if current else "process_query_token", token),
+            ("process_query_handle", owned_process)), primary)
 
 
 def native_checkpoint_graph(output, executable, source_sha, diagnostic_helper=None):

@@ -99,7 +99,9 @@ def _standard_token_precondition(value, pid):
         "own_token": scalars(own, ("pid", "elevated", "elevation_type")),
         "privilege": {"mode": mode.get("mode") if mode.get("mode") in ("STANDARD", "ADMINISTRATOR") else None,
                       **scalars(mode, ("windows",))},
-        "gate_conditions": scalars(value.get("gate_conditions"), ("privilege_standard", "raw_token_elevation_false"))}
+        **scalars(value, ("legacy_raw_elevation_false_observation",)),
+        "gate_conditions": scalars(value.get("gate_conditions"),
+            ("privilege_standard", "restricted_medium_permission_facts"))}
     error_type = value.get("token_query_error_type")
     result["token_query_error_type"] = (error_type if type(error_type) is str and
         re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,63}", error_type) else None)
@@ -108,8 +110,20 @@ def _standard_token_precondition(value, pid):
         result["token_query_diagnostic"] = {**scalars(diagnostic,
             ("information_class", "return_bool", "get_last_error", "returned_bytes", "capacity")),
             "stage": diagnostic.get("stage") if diagnostic.get("stage") in ("SCALAR", "SIZE", "QUERY") else None}
+    native_diagnostic = value.get("native_call_diagnostic")
+    if type(native_diagnostic) is dict:
+        result["native_call_diagnostic"] = {**scalars(native_diagnostic, ("return_bool", "get_last_error")),
+            "api": native_diagnostic.get("api") if native_diagnostic.get("api") in
+                ("OpenProcess", "GetProcessId", "GetProcessTimes", "OpenProcessToken", "DuplicateToken", "CheckTokenMembership") else None}
+    permission = value.get("permission_proof", {})
+    permission = permission if type(permission) is dict else {}
+    failures = permission.get("failures")
+    result["permission_proof"] = {**scalars(permission, ("confirmed",)), "failures": failures if
+        type(failures) is list and len(failures) <= 32 and all(type(code) is str and
+            re.fullmatch(r"[A-Z0-9_]{1,96}", code) for code in failures) else None}
     facts = value.get("current_token_facts", {})
-    if (type(facts) is not dict or facts.get("schema") != "blackbox.r60.current-token-facts/1" or
+    if (type(facts) is not dict or facts.get("schema") not in
+            ("blackbox.r60.current-token-facts/1", "blackbox.r60.process-token-facts/1") or
             facts.get("pid") != pid):
         result["current_token_facts"] = {"status": "NOT_BOUND_OR_NOT_COLLECTED"}
         return result
@@ -130,6 +144,8 @@ def _standard_token_precondition(value, pid):
             projected.append({"name": item["name"], **scalars(item,
                 ("attributes", "enabled", "enabled_by_default", "removed"))})
     result["current_token_facts"] = {"status": "OBSERVED_SCALAR_PROJECTION", "pid": pid,
+        "process_identity": scalars(facts.get("process_identity"), ("pid", "created_100ns")),
+        "query_returned_bytes": scalars(facts.get("query_returned_bytes"), ("20", "18", "21")),
         **scalars(facts, ("effective_administrators_member",)),
         "process_token": {**scalars(token, ("elevation_raw", "elevated", "elevation_type", "has_restrictions_raw")),
             "integrity": {"sid": sid if type(sid) is str and re.fullmatch(r"S-1-16-[0-9]{1,10}", sid) else None,
@@ -137,6 +153,27 @@ def _standard_token_precondition(value, pid):
             "administrators_group": scalars(token.get("administrators_group"), ("present", "attributes", "enabled", "deny_only")),
             "privileges": projected, "is_token_restricted": scalars(token.get("is_token_restricted"), ("available", "value"))},
         "cleanup": scalars(facts.get("cleanup"), ("confirmed",))}
+    helpers = value.get("helper_token_observations")
+    if type(helpers) is list and len(helpers) <= 16:
+        result["helper_token_observations"] = []
+        for row in helpers:
+            if type(row) is not dict or type(row.get("pid")) is not int:
+                result["helper_token_observations"].append({"status": "INVALID_HELPER_OBSERVATION"})
+                continue
+            projected = _standard_token_precondition({"status": "OBSERVED",
+                "current_token_facts": row.get("token_facts"), "token_query_error_type": row.get("query_error_type"),
+                "token_query_diagnostic": row.get("token_query_diagnostic"),
+                "native_call_diagnostic": row.get("native_call_diagnostic"),
+                "permission_proof": row.get("permission_proof")}, row["pid"])
+            cleanup = row.get("rejected_helper_cleanup")
+            cleanup = cleanup if type(cleanup) is dict else {}
+            result["helper_token_observations"].append({"pid": row["pid"], **scalars(row, ("elevated",)),
+                "token_facts": projected["current_token_facts"],
+                "token_query_diagnostic": projected.get("token_query_diagnostic"),
+                "native_call_diagnostic": projected.get("native_call_diagnostic"),
+                "permission_proof": projected.get("permission_proof"),
+                "rejected_helper_cleanup": scalars(cleanup, ("confirmed", "owner_retained", "winerror")),
+                "query_error_type": projected.get("token_query_error_type")})
     return result
 
 
@@ -349,7 +386,18 @@ def run(args):
         print("R60_CHAIN_NATIVE_RECEIPT " + json.dumps({**result,
             "result_sha256": file_hash(args.output / "result.json")}, sort_keys=True), flush=True)
     if args.standard_token:
-        require(result.get("standard_token") is True and result["live"]["own_token"]["elevated"] is False,
+        from blackbox_core.chain_qa import restricted_medium_permission_proof
+        precondition = result.get("standard_token_precondition", {})
+        live = result.get("live", {})
+        helpers = live.get("helper_launches", [])
+        require(result.get("standard_token") is True and
+                live.get("scope") == "RESTRICTED_SAME_RUNNER_MEDIUM_NOT_UAC_FILTERED_OR_SEPARATE_STANDARD_ACCOUNT" and
+                restricted_medium_permission_proof(precondition.get("current_token_facts"), child["pid"])["confirmed"] and
+                helpers and all(type(row) is dict and row.get("elevated") is False and
+                    row.get("pid") != child["pid"] and type(row.get("token_facts")) is dict and
+                    row["token_facts"].get("schema") == "blackbox.r60.process-token-facts/1" and
+                    restricted_medium_permission_proof(row.get("token_facts"), row.get("pid"))["confirmed"]
+                    for row in helpers),
                 "R60_STANDARD_CHAIN_TOKEN_PROOF_MISSING")
     gui = read_json(args.output / "gui" / "result.json")
     require(gui.get("status") == "PASS", "R60_ACTUAL_EDITOR_QA_INCOMPLETE")
