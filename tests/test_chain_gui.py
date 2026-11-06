@@ -497,6 +497,7 @@ class RuntimeExecutionGuardTests(unittest.TestCase):
         self.parent = QWidget()
         self.parent.language = "EN"
         self.bridge = GuardBridge()
+        self.bridge.setParent(self.parent)
         self.panel = OverviewInspectorPanel(self.parent, bridge=self.bridge)
         self.live = True
 
@@ -504,10 +505,9 @@ class RuntimeExecutionGuardTests(unittest.TestCase):
         from qt_test_support import dispose_closed_fixture
         self.panel.investigation_graph_panel.shutdown()
         self.assertFalse(self.panel.investigation_graph_panel.bridge.busy)
+        self.bridge.shutdown()
         self.parent.close()
         dispose_closed_fixture(self.parent, self.app)
-        self.bridge.shutdown()
-        dispose_closed_fixture(self.bridge, self.app)
 
     def test_cancellation_inside_action_consent_modal_prevents_native_submit(self):
         def confirm(*_):

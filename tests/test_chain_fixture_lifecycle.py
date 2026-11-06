@@ -12,6 +12,7 @@ import unittest
 
 
 def exercise_fixture_lifecycle():
+    from collections import Counter
     from copy import deepcopy
     import gc
     import tempfile
@@ -36,6 +37,29 @@ def exercise_fixture_lifecycle():
     def check(condition, reason):
         if not condition:
             raise AssertionError(reason)
+
+    def widget_census(stage):
+        """Bounded native widget observations, without deleting any orphan."""
+        classes, groups = Counter(), Counter()
+        for widget in app.allWidgets():
+            cls = widget.metaObject().className()
+            classes[cls] += 1
+            parents = []
+            parent = widget.parentWidget()
+            for _ in range(3):
+                if parent is None:
+                    break
+                parents.append({"class": parent.metaObject().className(), "name": parent.objectName()[:48]})
+                parent = parent.parentWidget()
+            text = getattr(widget, "text", None)
+            text = text()[:48] if callable(text) else ""
+            row = {"class": cls, "name": widget.objectName()[:64], "text_prefix": text,
+                   "parents": parents, "visible": widget.isVisible(), "is_window": widget.isWindow()}
+            groups[json.dumps(row, ensure_ascii=True, sort_keys=True)] += 1
+        rows = [{**json.loads(row), "count": count} for row, count in groups.most_common(100)]
+        print("R60_QT_WIDGET_CENSUS " + json.dumps({"stage": stage, "classes": dict(classes),
+            "native_widget_count": sum(classes.values()), "distinct_groups": len(groups), "rows": rows},
+            ensure_ascii=True, sort_keys=True), flush=True)
 
     def idle(window):
         deadline = time.monotonic() + 15
@@ -69,6 +93,7 @@ def exercise_fixture_lifecycle():
             window = None
             gc.collect()
             baseline = len(app.allWidgets())
+            widget_census("AFTER_WARMUP_DISPOSE")
             cycles = []
             for cycle in range(4):
                 set_retro_theme(app)
@@ -99,6 +124,8 @@ def exercise_fixture_lifecycle():
                 app.processEvents()
                 gc.collect()
                 after = len(app.allWidgets())
+                if after != baseline:
+                    widget_census("AFTER_LARGE_SCENE_DISPOSE_" + str(cycle))
                 check(after == baseline, "LIFECYCLE_NATIVE_WIDGET_COUNT_ACCUMULATED:" + str((baseline, after)))
                 check(all(ref() is None or not isValid(ref()) for ref in roots), "LIFECYCLE_WEAKREF_RETAINED_NATIVE_TREE")
                 cycles.append({"cycle": cycle, "baseline_widgets": baseline, "live_widgets": live_count,
@@ -148,6 +175,9 @@ class FixtureLifecycleChildTests(unittest.TestCase):
         env = dict(os.environ, QT_QPA_PLATFORM="offscreen")
         completed = subprocess.run([sys.executable, "-X", "faulthandler", str(Path(__file__).resolve()),
                                     "--exercise-lifecycle"], env=env, capture_output=True, text=True, timeout=60)
+        for line in completed.stdout.splitlines():
+            if line.startswith("R60_QT_WIDGET_CENSUS "):
+                print(line, flush=True)
         self.assertEqual(completed.returncode, 0, (completed.stdout + completed.stderr)[-12000:])
         markers = [line.partition("R60_QT_FIXTURE_LIFECYCLE ")[2] for line in completed.stdout.splitlines()
                    if line.startswith("R60_QT_FIXTURE_LIFECYCLE ")]

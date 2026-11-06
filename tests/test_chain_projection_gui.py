@@ -39,17 +39,16 @@ class OmittedProjectionGuiTests(unittest.TestCase):
         self.window._investigation_root = Path(self.temp.name)
         self.window.probe = SimpleNamespace(session_folder=None)
         self.deep, self.reader = DeepPanelDouble(self.window), ReaderDouble()
+        self.deep.bridge.setParent(self.deep)
+        self.reader.setParent(self.window)
         self.panel = InvestigationGraphPanel(self.window, self.deep, bridge=self.reader)
 
     def tearDown(self):
         from qt_test_support import dispose_closed_fixture
-        native_bridge = self.deep.bridge  # These provided doubles are unparented QObjects.
         self.panel.shutdown()
         self.assertFalse(self.panel.bridge.busy)
         self.window.close()
         dispose_closed_fixture(self.window, self.app)
-        dispose_closed_fixture(self.reader, self.app)
-        dispose_closed_fixture(native_bridge, self.app)
         self.temp.cleanup()
 
     def test_omitted_views_show_unknown_counts_in_both_languages_without_reanalysis(self):
