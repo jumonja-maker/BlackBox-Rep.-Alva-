@@ -57,9 +57,12 @@ def verify_engine_history(records, trace_sha256):
     invocations = actual_invocations(records, "workflow.load_source")
     require(len(invocations) == ITERATIONS, "R60_ENDURANCE_ALL_ACTUAL_INVOCATIONS_REQUIRED")
     starts = [context["started_monotonic_ns"] for context, _receipt in invocations]
+    intervals_ns = [second - first for first, second in zip(starts, starts[1:])]
     span = (starts[-1] - starts[0]) / 10**9
     require(span >= REQUESTED_SECONDS and all(second > first for first, second in zip(starts, starts[1:])),
             "R60_ENDURANCE_PERSISTED_INVOCATION_SPAN_TOO_SHORT")
+    require(all(interval >= INTERVAL_SECONDS * 1_000_000_000 for interval in intervals_ns),
+            "R60_ENDURANCE_PERSISTED_INVOCATION_CADENCE_TOO_SHORT")
     require(all(receipt["status"] == "COMPLETED" and receipt["execution_started"] is True and
                 receipt["cleanup"]["confirmed"] is True for _context, receipt in invocations),
             "R60_ENDURANCE_REAL_RECEIPT_OR_CLEANUP_FAILED")
@@ -80,6 +83,10 @@ def verify_engine_history(records, trace_sha256):
     return {"requested_seconds": REQUESTED_SECONDS, "actual_invocations": len(invocations),
             "persisted_first_context_monotonic_ns": starts[0], "persisted_last_context_monotonic_ns": starts[-1],
             "persisted_invocation_span_seconds": span, "source_sha256": trace_sha256,
+            "requested_interval_seconds": INTERVAL_SECONDS,
+            "persisted_minimum_interval_seconds": min(intervals_ns) / 10**9,
+            "persisted_maximum_interval_seconds": max(intervals_ns) / 10**9,
+            "all_actual_intervals_at_least_requested": True,
             "intent_result_binding_verified": True, "all_actual_cleanup_acknowledgements": True,
             "scope": "ACTUAL_EXISTING_FILE_ADAPTER_CALLS_NOT_COLLECTOR_OR_JOB_UPTIME"}
 

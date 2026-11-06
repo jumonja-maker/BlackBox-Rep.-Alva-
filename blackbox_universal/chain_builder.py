@@ -499,7 +499,9 @@ class WorkflowNodeItem(QGraphicsObject):
 
     def itemChange(self, change, value):
         if change == QGraphicsItem.GraphicsItemChange.ItemPositionHasChanged:
-            self.canvas.update_edges()
+            # Scene bounds can lazily deliver more position notifications.
+            # Do not query them recursively from Qt's position-change stack.
+            self.canvas.request_edge_update()
         return super().itemChange(change, value)
 
     def port_position(self, side, name):
@@ -528,6 +530,11 @@ class WorkflowCanvas(QGraphicsView):
         self.edges, self.language, self.pending_port = [], "EN", None
         self.editable = True
         self._drag_start = {}
+        self._updating_edges = self._edges_dirty = False
+        self._edge_update_timer = QTimer(self)
+        self._edge_update_timer.setSingleShot(True)
+        self._edge_update_timer.setInterval(0)
+        self._edge_update_timer.timeout.connect(self.update_edges)
         self.scene().selectionChanged.connect(self._selected)
 
     def tool_name(self, tool):
@@ -570,21 +577,40 @@ class WorkflowCanvas(QGraphicsView):
         self.scene().blockSignals(False)
         self.update_edges()
 
+    def request_edge_update(self):
+        """Coalesce geometry changes until Qt finishes the current input event."""
+        self._edges_dirty = True
+        if not self._updating_edges and not self._edge_update_timer.isActive():
+            self._edge_update_timer.start()
+
     def update_edges(self):
-        for edge in self.edges:
-            first, second = self.items_by_id.get(edge["source_node"]), self.items_by_id.get(edge["target_node"])
-            if first is None or second is None or edge["edge_id"] not in self.edge_items:
-                continue
-            try:
-                start = first.port_position("outputs", edge["source_port"])
-                end = second.port_position("inputs", edge["target_port"])
-            except ValueError:
-                continue
-            path = QPainterPath(start)
-            offset = max(65, abs(end.x() - start.x()) / 2)
-            path.cubicTo(start + QPointF(offset, 0), end - QPointF(offset, 0), end)
-            self.edge_items[edge["edge_id"]].setPath(path)
-        self.scene().setSceneRect(self.scene().itemsBoundingRect().adjusted(-100, -80, 100, 80))
+        if self._updating_edges:
+            self._edges_dirty = True
+            return
+        # set_graph also calls this explicitly after replacing all items.
+        self._edge_update_timer.stop()
+        self._updating_edges, self._edges_dirty = True, False
+        try:
+            for edge in self.edges:
+                first, second = self.items_by_id.get(edge["source_node"]), self.items_by_id.get(edge["target_node"])
+                if first is None or second is None or edge["edge_id"] not in self.edge_items:
+                    continue
+                try:
+                    start = first.port_position("outputs", edge["source_port"])
+                    end = second.port_position("inputs", edge["target_port"])
+                except ValueError:
+                    continue
+                path = QPainterPath(start)
+                offset = max(65, abs(end.x() - start.x()) / 2)
+                path.cubicTo(start + QPointF(offset, 0), end - QPointF(offset, 0), end)
+                self.edge_items[edge["edge_id"]].setPath(path)
+            self.scene().setSceneRect(self.scene().itemsBoundingRect().adjusted(-100, -80, 100, 80))
+        finally:
+            self._updating_edges = False
+            # A genuine additional move during bounds publication must receive
+            # another update; the guard must not leave its paths stale.
+            if self._edges_dirty:
+                self._edge_update_timer.start()
 
     def selected_node_ids(self):
         return [item.node_id for item in self.scene().selectedItems() if isinstance(item, WorkflowNodeItem)]

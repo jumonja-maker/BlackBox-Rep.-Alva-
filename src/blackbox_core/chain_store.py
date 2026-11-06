@@ -17,6 +17,7 @@ import json
 import math
 import os
 from pathlib import Path
+import re
 import sqlite3
 import threading
 import time
@@ -438,7 +439,78 @@ class WorkflowRunStore:
         elif event == "run.cleanup":
             require(type(data.get("cleanup")) is dict, "WORKFLOW_RUNTIME_CLEANUP_INVALID")
 
+    def _journal_advanced(self, sequence, digest, deadline):
+        """Observe a committed append after our prefix, without adopting it."""
+        require(time.monotonic() < deadline, "WORKFLOW_HISTORY_READ_DEADLINE")
+        path = safe_path(self.folder / "journal" / "deep-inspection.sqlite3")
+        require(path.stat().st_size <= MAX_JOURNAL_BYTES, "WORKFLOW_HISTORY_STORAGE_BUDGET")
+        with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=.5)) as db:
+            db.execute("PRAGMA query_only=ON")
+            db.execute("PRAGMA trusted_schema=OFF")
+            db.setlimit(sqlite3.SQLITE_LIMIT_LENGTH, MAX_RESULT_BYTES + 65536)
+            db.set_progress_handler(lambda: int(time.monotonic() >= deadline), 1000)
+            db.execute("BEGIN")
+            latest = db.execute("SELECT sequence FROM actions ORDER BY sequence DESC LIMIT 1").fetchone()
+            if latest is None:
+                return False
+            require(type(latest[0]) is int and 1 <= latest[0] <= MAX_EVENTS, "WORKFLOW_HISTORY_EVENT_BUDGET")
+            if latest[0] <= sequence:
+                return False
+            old = db.execute("SELECT record_sha256 FROM actions WHERE sequence=?", (sequence,)).fetchone()
+            return (sequence == 0 and old is None) or old == (digest,)
+
+    def _other_history_writer_live(self, deadline):
+        """Check only a local history lease; this never grants native rights."""
+        import psutil
+        require(time.monotonic() < deadline, "WORKFLOW_HISTORY_READ_DEADLINE")
+        path = safe_path(self.folder / ".writer.json")
+        try:
+            owner, stamp = _read(path, limit=4096)
+        except FileNotFoundError:
+            return False
+        require(owner.get("schema") == "blackbox.workflow-writer/1" and owner.get("run_id") == self.run_id
+                and type(owner.get("pid")) is int and owner["pid"] > 0
+                and type(owner.get("process_created")) in (int, float)
+                and math.isfinite(owner["process_created"]) and owner["process_created"] > 0,
+                "WORKFLOW_WRITER_LOCK_INVALID")
+        identifier(owner.get("owner_nonce"), "WORKFLOW_WRITER_LOCK_INVALID")
+        # acquire_writer can verify an older facade after obtaining a NEW claim.
+        # That own claim is not evidence that an old orphan is an in-flight write.
+        if self._writer_nonce is not None and owner["owner_nonce"] == self._writer_nonce:
+            return False
+        try:
+            live = psutil.Process(owner["pid"]).create_time() == owner["process_created"]
+        except psutil.NoSuchProcess:
+            live = False
+        except (psutil.AccessDenied, OSError) as error:
+            raise WorkflowError("WORKFLOW_WRITER_OWNERSHIP_UNCONFIRMED") from error
+        try:
+            after, after_stamp = _read(path, limit=4096)
+        except FileNotFoundError:
+            return False  # The fresh committed tail is checked again by the caller.
+        require(after == owner and after_stamp == stamp, "WORKFLOW_HISTORY_BUSY")
+        require(time.monotonic() < deadline, "WORKFLOW_HISTORY_READ_DEADLINE")
+        return live
+
+    def _foreign_event_record(self, path, sequence, digest, deadline):
+        """Separate a racing publisher from a stable unbound immutable record."""
+        if self._journal_advanced(sequence, digest, deadline):
+            raise WorkflowError("WORKFLOW_HISTORY_BUSY")
+        next_name = str(sequence + 1) + ".json"
+        candidate = path.name == next_name or re.fullmatch(re.escape(next_name) + r"\.[0-9a-f]{32}\.tmp", path.name)
+        if candidate and self._other_history_writer_live(deadline):
+            raise WorkflowError("WORKFLOW_HISTORY_BUSY")
+        if self._journal_advanced(sequence, digest, deadline) or not path.exists():
+            raise WorkflowError("WORKFLOW_HISTORY_BUSY")
+        raise WorkflowError("WORKFLOW_EVENT_ORPHAN_OR_FOREIGN_RECORD")
+
     def read_events(self):
+        # The counters below belong to this facade. A concurrent read must not
+        # overwrite a newer append's sequence/budget after its SQL snapshot.
+        with self._lock:
+            return self._read_events_locked()
+
+    def _read_events_locked(self):
         self._check_identity()
         path = safe_path(self.folder / "journal" / "deep-inspection.sqlite3")
         require(path.is_file() and path.stat().st_size <= MAX_JOURNAL_BYTES, "WORKFLOW_HISTORY_STORAGE_BUDGET")
@@ -499,8 +571,11 @@ class WorkflowRunStore:
             with os.scandir(directory) as entries:
                 for count, entry in enumerate(entries, 1):
                     require(time.monotonic() < deadline, "WORKFLOW_HISTORY_READ_DEADLINE")
-                    require(count <= MAX_EVENTS and safe_path(Path(entry.path)).is_file() and entry.name in event_records,
-                            "WORKFLOW_EVENT_ORPHAN_OR_FOREIGN_RECORD")
+                    require(count <= MAX_EVENTS, "WORKFLOW_HISTORY_EVENT_BUDGET")
+                    entry_path = safe_path(Path(entry.path))
+                    if entry.name not in event_records:
+                        self._foreign_event_record(entry_path, len(records), previous, deadline)
+                    require(entry_path.is_file(), "WORKFLOW_EVENT_RECORD_MISSING")
                     observed.add(entry.name)
             require(observed == event_records, "WORKFLOW_EVENT_RECORD_MISSING")
         else:
