@@ -5,9 +5,12 @@ Windows token, helper, native capture, or physical-machine acceptance.
 """
 from copy import deepcopy
 from datetime import datetime, timezone
+import faulthandler
 import json
 from pathlib import Path
 import tempfile
+import sys
+import traceback
 import threading
 import time
 import unittest
@@ -63,11 +66,84 @@ def node_records(snapshot):
     return {record["node_id"]: record for record in snapshot["nodes"]}
 
 
+_RETAINED_FIXTURE_OWNERS = []  # Failure-only workspaces, never claimed cleaned.
+
+
+def driver_diagnostics(engine, thread, boundary):
+    """Non-blocking observations: timeout diagnostics must not wait on a lock/FS."""
+    from blackbox_core import chain_engine
+    packet = {"boundary": boundary, "run_id": engine.store.run_id, "driver_alive": thread.is_alive(),
+        "driver_ident": thread.ident, "driver_name": thread.name,
+        "scope": "TEST_TIMEOUT_OBSERVATIONS_NOT_RESOURCE_RELEASE_PROOF",
+        "state": engine._state, "driving": engine._driving,
+        "writer_claim_in_memory": engine.store._writer_nonce is not None,
+        "writer_pins_in_memory": engine.store._writer_pins,
+        "event_count_in_memory": engine.store._event_count,
+        "retained_worker_registry": engine.store.run_id in chain_engine._RETAINED_WORKERS}
+    acquired = engine._lock.acquire(blocking=False)
+    packet["engine_lock_available"] = acquired
+    try:
+        packet["node_observation"] = "LOCKED_SNAPSHOT" if acquired else "UNSYNCHRONIZED_IN_MEMORY_ONLY"
+        packet["nodes"] = [{key: engine._records.get(node.node_id, {}).get(key) for key in
+            ("node_id", "state", "node_run_id", "component_status", "reason_code", "execution_started")}
+            for node in engine.definition.nodes]
+    finally:
+        if acquired:
+            engine._lock.release()
+    acquired = chain_engine._LEASE_LOCK.acquire(blocking=False)
+    packet["lease_lock_available"] = acquired
+    if acquired:
+        try:
+            packet["lease_count"] = len(chain_engine._LEASES)
+            packet["leases_truncated"] = len(chain_engine._LEASES) > 64
+            packet["leases"] = [{"resource": key, **{name: value.get(name) for name in
+                ("run_id", "invocation", "active", "status")}}
+                for key, value in list(chain_engine._LEASES.items())[:64]]
+        finally:
+            chain_engine._LEASE_LOCK.release()
+    observed_threads = threading.enumerate()
+    packet["thread_count"] = len(observed_threads)
+    packet["threads"] = [{"name": item.name, "ident": item.ident, "alive": item.is_alive()}
+                         for item in observed_threads[:64]]
+    frame = sys._current_frames().get(thread.ident)
+    stack, cursor = [], frame
+    while cursor is not None and len(stack) < 32:
+        stack.append({"file": Path(cursor.f_code.co_filename).name,
+                      "function": cursor.f_code.co_name, "line": cursor.f_lineno})
+        cursor = cursor.f_back
+    packet["observed_driver_stack"] = stack
+    print("R60_TEST_THREAD_TIMEOUT " + json.dumps(packet, sort_keys=True), file=sys.stderr, flush=True)
+    try:
+        faulthandler.dump_traceback(file=sys.stderr, all_threads=True)
+    except (OSError, ValueError, RuntimeError) as error:
+        print("R60_TEST_THREAD_TRACE_FALLBACK " + type(error).__name__, file=sys.stderr, flush=True)
+        if frame is not None:
+            traceback.print_stack(frame, file=sys.stderr)
+    return packet
+
+
 class EngineTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(self.temporary.cleanup)
+        self._fixture_drivers, self._fixture_cleanup = [], {}
+        self._retain_fixture_directory = False
+        self.addCleanup(self._cleanup_fixture_directory)
         self.root = Path(self.temporary.name)
+
+    def _cleanup_fixture_directory(self):
+        from blackbox_core import chain_engine
+        owners = [(engine, thread) for engine, thread in self._fixture_drivers if
+                  thread.is_alive() or engine.store.run_id in chain_engine._RETAINED_WORKERS]
+        if self._retain_fixture_directory or owners:
+            # TemporaryDirectory's finalizer must not remove a still-owned
+            # workspace later at GC/interpreter shutdown after cleanup failed.
+            self.temporary._finalizer.detach()
+            _RETAINED_FIXTURE_OWNERS.append((self.temporary, tuple(self._fixture_drivers)))
+            print("R60_TEST_WORKSPACE_RETAINED " + json.dumps({"folder": str(self.root),
+                "live_or_unconfirmed_owners": len(owners), "cleanup_confirmed": False}),
+                file=sys.stderr, flush=True)
+            return
+        self.temporary.cleanup()
 
     def engine(self, definition, catalog, *, runtime=None):
         store = WorkflowRunStore.create(self.root / "runs", definition)
@@ -80,12 +156,26 @@ class EngineTests(unittest.TestCase):
                 result.append(engine.run())
             except BaseException as error:
                 errors.append(error)
-        thread = threading.Thread(target=work, daemon=True)
+        thread = threading.Thread(target=work, name="qa-chain-driver-" + engine.store.run_id[:8], daemon=True)
+        self._fixture_drivers.append((engine, thread))
         thread.start()
-        def cleanup():
+        cleaned = False
+        def cleanup(*, assert_drained=True):
+            nonlocal cleaned
+            if cleaned:
+                return not self._retain_fixture_directory
+            cleaned = True
             engine.request_cancel()
             thread.join(timeout=5)
-            self.assertFalse(thread.is_alive(), "fixture engine worker was not drained")
+            from blackbox_core import chain_engine
+            retained = thread.is_alive() or engine.store.run_id in chain_engine._RETAINED_WORKERS
+            if retained:
+                self._retain_fixture_directory = True
+                driver_diagnostics(engine, thread, "FIXTURE_CANCEL_DRAIN_TIMEOUT")
+            if assert_drained:
+                self.assertFalse(retained, "fixture driver/resource owner was not drained; workspace retained")
+            return not retained
+        self._fixture_cleanup[thread] = cleanup
         self.addCleanup(cleanup)
         return thread, result, errors
 
@@ -188,18 +278,51 @@ class EngineTests(unittest.TestCase):
                 engine, _store = self.engine(definition, {
                     "read": adapter("read", execute),
                     "effect": adapter("effect", execute, read_only=False)})
+                driver_started = time.monotonic()
+                fixture_deadline = driver_started + definition.budget["seconds"]
                 thread, results, errors = self.run_thread(engine)
                 try:
-                    self.assertTrue(entered.wait(3), "first declared invocation did not start")
-                    self.assertFalse(second_entered.wait(.15), "effect overlapped the read-only branch")
+                    try:
+                        self.assertTrue(entered.wait(3), "first declared invocation did not start")
+                        self.assertFalse(second_entered.wait(.15), "effect overlapped the read-only branch")
+                    finally:
+                        release.set()
+                    thread.join(timeout=5)
+                    if thread.is_alive():
+                        # Five seconds is an observation checkpoint, not the
+                        # contract for publishing a whole durable workflow.
+                        driver_diagnostics(engine, thread, "EFFECT_READ_ORDER_FIVE_SECOND_CHECKPOINT:" + first)
+                        remaining = max(0, fixture_deadline - time.monotonic())
+                        thread.join(timeout=remaining)
+                    if thread.is_alive():
+                        driver_diagnostics(engine, thread, "EFFECT_READ_ORDER_DECLARED_BUDGET_EXHAUSTED:" + first)
+                        engine.request_cancel()
+                        thread.join(timeout=5)  # The existing fixture cleanup grace.
+                    self.assertFalse(thread.is_alive(), "fixture driver exceeded its declared workflow budget and cleanup grace")
+                    self.assertEqual(errors, [])
+                    self.assertEqual(overlaps, [])
+                    self.assertEqual(calls, [first, second])
+                    self.assertEqual(results[0]["state"], "COMPLETED")
+                    self.assertTrue(results[0]["cleanup"]["confirmed"])
+                    self.assertTrue(results[0]["cleanup"]["worker_exit_confirmed"])
+                    from blackbox_core import chain_engine
+                    acquired = chain_engine._LEASE_LOCK.acquire(blocking=False)
+                    self.assertTrue(acquired, "finished fixture must allow its actual lease state to be inspected")
+                    try:
+                        self.assertFalse(any(owner["run_id"] == engine.store.run_id
+                            for owner in chain_engine._LEASES.values()), "completed fixture left a resource lease")
+                    finally:
+                        if acquired:
+                            chain_engine._LEASE_LOCK.release()
                 finally:
                     release.set()
-                thread.join(timeout=5)
-                self.assertFalse(thread.is_alive())
-                self.assertEqual(errors, [])
-                self.assertEqual(overlaps, [])
-                self.assertEqual(calls, [first, second])
-                self.assertEqual(results[0]["state"], "COMPLETED")
+                    # Drain this order before rebinding the next order's closure
+                    # cells. Preserve the primary assertion if cleanup is late.
+                    if thread.is_alive():
+                        self._fixture_cleanup[thread](assert_drained=False)
+            if self._retain_fixture_directory:
+                break  # Never run another order over a still-live fixture owner.
+
 
     def test_cancel_reopened_checkpoint_runs_cleanup_without_forward_dispatch(self):
         calls, finalized = [], []

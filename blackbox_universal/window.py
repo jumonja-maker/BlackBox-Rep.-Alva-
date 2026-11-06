@@ -525,7 +525,7 @@ class UniversalWindow(QMainWindow):
         self.overview_tabs.addTab(self.chain_builder_panel, "Chain Builder")
         wrapper, wrapper_layout = _page()
         wrapper_layout.setContentsMargins(0, 0, 0, 0)
-        wrapper_layout.addWidget(self.overview_tabs)
+        wrapper_layout.addWidget(self.overview_tabs, 1)
         return wrapper
 
     def _build_processes(self) -> QWidget:

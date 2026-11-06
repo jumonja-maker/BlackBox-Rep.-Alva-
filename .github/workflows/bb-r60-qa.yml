@@ -121,7 +121,7 @@ jobs:
   native:
     needs: [scope, contracts]
     if: >-
-      always() && needs.scope.result == 'success' && needs.scope.outputs.native == 'true' &&
+      always() && !cancelled() && needs.scope.result == 'success' && needs.scope.outputs.native == 'true' &&
       (needs.scope.outputs.contracts != 'true' || needs.contracts.result == 'success')
     name: ${{ needs.scope.outputs.gui_only == 'true' && 'R60 diagnostic source GUI / real Wave02 data only' || 'R60 actual Windows source / frozen / RU-EN DPI / native' }}
     runs-on: windows-latest
