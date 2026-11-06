@@ -50,17 +50,32 @@ def exercise_canvas():
 
     def assert_geometry():
         for edge in document["edges"]:
-            path = canvas.edge_items[edge["edge_id"]].path()
+            edge_item = canvas.edge_items[edge["edge_id"]]
+            path = edge_item.path()
             expected = (canvas.items_by_id[edge["source_node"]].port_position("outputs", edge["source_port"]),
                         canvas.items_by_id[edge["target_node"]].port_position("inputs", edge["target_port"]))
             for actual, target in zip((path.pointAtPercent(0), path.pointAtPercent(1)), expected):
-                check(abs(actual.x() - target.x()) < .001 and abs(actual.y() - target.y()) < .001, "STALE_EDGE_PORT")
-            check(canvas.sceneRect().contains(path.boundingRect()), "EDGE_OUTSIDE_SCENE_RECT")
+                check(abs(actual.x() - target.x()) < .001 and abs(actual.y() - target.y()) < .001,
+                      "STALE_EDGE_PORT:" + edge["edge_id"])
+            # A horizontal curve has an empty mathematical QRectF (height 0).
+            # Qt contains(emptyRect) is false even when its painted stroke is
+            # wholly visible. Check the actual item bounds, including its pen.
+            painted = edge_item.sceneBoundingRect()
+            check(not painted.isEmpty() and canvas.sceneRect().contains(painted),
+                  "EDGE_PAINTED_BOUNDS_OUTSIDE_SCENE_RECT:" + json.dumps({"edge_id": edge["edge_id"],
+                      "path_rect": list(path.boundingRect().getRect()), "painted_rect": list(painted.getRect()),
+                      "scene_rect": list(canvas.sceneRect().getRect())}, sort_keys=True))
         for item in canvas.items_by_id.values():
             check(canvas.sceneRect().contains(item.mapRectToScene(item.boundingRect())), "NODE_OUTSIDE_SCENE_RECT")
 
     try:
         settled()
+        flat = canvas.edge_items["b"]
+        check(flat.path().boundingRect().height() == 0 and flat.path().boundingRect().isEmpty(),
+              "HORIZONTAL_PATH_FIXTURE_NOT_FLAT")
+        check(not flat.sceneBoundingRect().isEmpty() and canvas.sceneRect().contains(flat.sceneBoundingRect()),
+              "HORIZONTAL_PAINTED_STROKE_NOT_CONTAINED")
+        assert_geometry()
         first = canvas.items_by_id["n0"]
         canvas.resetTransform()
         canvas.centerOn(first)
@@ -108,7 +123,8 @@ def exercise_canvas():
         assert_geometry()
         print("R60_CANVAS_GEOMETRY_TEST " + json.dumps({"status": "PASS", "nodes": 6, "edges": 3,
             "actual_pointer_drag": True, "multi_node_keyboard": True, "bounds_reentry_followup": True,
-            "edge_endpoints_current": True, "scene_contains_nodes_and_paths": True}), flush=True)
+            "flat_path_painted_bounds": True, "edge_endpoints_current": True,
+            "scene_contains_nodes_and_paths": True}), flush=True)
     finally:
         canvas.close()
         canvas.deleteLater()
