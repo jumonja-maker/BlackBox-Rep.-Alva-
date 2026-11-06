@@ -8,7 +8,7 @@ from __future__ import annotations
 from collections import deque
 from concurrent.futures import Future
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 import queue
 import threading
@@ -91,6 +91,7 @@ _LEASES = {}  # exact run owner, active invocation, retained state; never persis
 _RETAINED_WORKERS = {}
 _PAUSED_OWNERS = {}  # original live executors only; never reconstructed authority
 _MAX_PAUSED_OWNERS = 64
+_RESERVATION_PROOF_ORIGIN = object()
 
 
 def _same_executor(first, second):
@@ -126,6 +127,8 @@ class ExecutionContext:
     runtime: object
     _engine: object
     component_dispatch_started: bool = False
+    _resource_cleanup: dict = field(default_factory=dict, repr=False)
+    _resource_cleanup_uncertain: bool = False
 
     def remaining_seconds(self):
         return max(0, self.deadline - time.monotonic())
@@ -145,6 +148,22 @@ class ExecutionContext:
     def running(self):
         self.check()
         self.emit("RUNNING")
+
+    def resource_not_entered(self, resource, reason):
+        """Record one declared reservation whose native path cannot be entered.
+
+        This private execution fact is neither a file cleanup acknowledgement
+        nor authority accepted from an adapter result or saved JSON record.
+        """
+        node = next((value for value in self._engine.definition.nodes if value.node_id == self.node_id), None)
+        if node is None or resource not in self._engine._resource_keys(node):
+            return
+        require(type(reason) is str and 0 < len(reason) <= 128, "WORKFLOW_RESOURCE_RESERVATION_REASON")
+        self._resource_cleanup[resource] = {"origin": _RESERVATION_PROOF_ORIGIN,
+            "run_id": self.run_id, "invocation": self.node_run_id, "reason_code": reason}
+
+    def resource_may_start(self, resource):
+        self._resource_cleanup.pop(resource, None)
 
 
 def _state(status):
@@ -428,13 +447,27 @@ class WorkflowEngine:
                                "active": True, "status": "RUNNING"}
         return True
 
-    def _finish_lease(self, node, invocation, cleanup):
+    def _reservation_acknowledgements(self, node, ctx, cleanup):
+        if ctx._resource_cleanup_uncertain or any(cleanup.get(key) for key in
+                ("cleanup_required", "cleanup_unconfirmed", "owner_retained", "offline_owner_retained", "publication_unconfirmed")):
+            return {}
+        result = {}
+        for key in self._resource_keys(node):
+            proof = ctx._resource_cleanup.get(key)
+            if (type(proof) is dict and proof.get("origin") is _RESERVATION_PROOF_ORIGIN
+                    and proof.get("run_id") == self.store.run_id and proof.get("invocation") == ctx.node_run_id):
+                result[key] = {"confirmed": True, "scope": "DECLARED_RESERVATION_NOT_ENTERED",
+                    "reason_code": proof["reason_code"], "node_run_id": ctx.node_run_id,
+                    "file_or_sqlite_cleanup_claimed": False}
+        return result
+
+    def _finish_lease(self, node, invocation, cleanup, reservations=None):
         with _LEASE_LOCK:
             for key in self._resource_keys(node):
                 owner = _LEASES.get(key)
                 if not owner or owner["run_id"] != self.store.run_id or owner["invocation"] != invocation:
                     continue
-                if cleanup.get("confirmed") is True:
+                if cleanup.get("confirmed") is True or key in (reservations or {}):
                     del _LEASES[key]
                 else:
                     known = _known_owner(cleanup)
@@ -534,16 +567,18 @@ class WorkflowEngine:
         if status == "COMPLETED" and reported_coverage.get("completeness") in ("PARTIAL", "INCOMPLETE_EVIDENCE"):
             status = "PARTIAL"
         known = _known_owner(cleanup)
+        reservations = self._reservation_acknowledgements(node, ctx, cleanup)
         unknown_cleanup = (cleanup.get("confirmed") is not True and not
             (cleanup.get("status") == "RETAINED" and known))
-        if unknown_cleanup and self._resource_keys(node):
+        if unknown_cleanup and set(self._resource_keys(node)) - set(reservations):
             status = "RECOVERY_UNCONFIRMED"
         record = {"node_id": node.node_id, "node_run_id": ctx.node_run_id, "iteration": ctx.iteration,
             "state": status, "component_status": result.status, "execution_started": result.execution_started,
             "run_receipt": receipt, "run_context": result.context,
             "tool_descriptor": result.descriptor or (self.catalog[node.tool_id].descriptor.to_dict()
                 if node.kind in ("TOOL", "REPEAT") else None),
-            "outputs": outputs, "cleanup": cleanup,
+            "outputs": outputs, "cleanup": cleanup, "resource_reservations": reservations,
+            "component_failure_details": getattr(ctx, "_failure_details", {}),
             "reason_code": ";".join(errors) if errors else result.reason_code,
             "started_monotonic_ns": self._records[node.node_id].get("started_monotonic_ns", time.monotonic_ns()),
             "ended_monotonic_ns": time.monotonic_ns(), "partial_inputs": partial}
@@ -565,7 +600,7 @@ class WorkflowEngine:
             if status == "COMPLETED" and ctx.iteration + 1 < node.repeat_count:
                 row["state"] = "QUEUED"
                 self._not_before[node.node_id] = time.monotonic() + node.repeat_interval_seconds
-            self._finish_lease(node, ctx.node_run_id, cleanup)
+            self._finish_lease(node, ctx.node_run_id, cleanup, reservations)
             # Synchronous observers may request pause after a durable result.
             # GUI transport coalesces these snapshots to one pending wake;
             # dropping this boundary here could execute another iteration.
@@ -573,9 +608,18 @@ class WorkflowEngine:
 
     def _exception(self, node, ctx, error):
         receipt = getattr(error, "run_receipt", None)
+        # Only measured, bounded component counters cross this failure channel.
+        # Preserve the original receipt/context; no raw inputs or exception
+        # dictionaries are copied into a shareable diagnostic record.
+        ctx._failure_details = {key: value for key in
+            ("actual_result_bytes", "reserved_result_bytes", "result_byte_limit",
+             "critical_path_bytes", "retained_graph_bytes")
+            if type(value := getattr(error, key, None)) is int and 0 <= value <= 2**63 - 1}
         cleanup = (receipt or {}).get("cleanup") or {"confirmed": False, "status": "NOT_COLLECTED"}
         uncertain = any(getattr(error, flag, False) for flag in
-            ("cleanup_required", "cleanup_unconfirmed", "owner_retained", "offline_owner_retained"))
+            ("cleanup_required", "cleanup_unconfirmed", "owner_retained", "offline_owner_retained", "publication_unconfirmed"))
+        if uncertain:
+            ctx._resource_cleanup_uncertain = True
         if uncertain:
             cleanup = {**cleanup, "confirmed": False, "status": "RECOVERY_UNCONFIRMED", "owner_retained": True}
         elif not ctx.component_dispatch_started:

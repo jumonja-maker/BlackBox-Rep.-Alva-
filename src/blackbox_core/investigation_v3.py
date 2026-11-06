@@ -6,6 +6,8 @@ Native experiments remain explicit steps through BB-DEEP-001.
 from __future__ import annotations
 
 from copy import deepcopy
+import json
+from pathlib import Path
 from .investigation_graph_contracts import InvestigationError, canonical_json, stable_id, use_budget
 
 
@@ -48,41 +50,157 @@ def _create_investigation(sources, *, target_identity=None, selection=None, scen
     normalized = normalize_sources(sources, selection=selected, budget=budget)
     case = build_graph(normalized, target_identity=target_identity, scenario=scenario,
                        app_identity=app_identity, budget=budget)
-    case["critical_path"] = path(case, budget=budget)
-    from .delay_investigation import analyze_delay
-    case["delay_investigation"] = analyze_delay(case, budget=budget)
-    case["hypotheses"] = hypotheses(case, budget=budget)
-    case["actions"] = advisor(case, target_identity=target_identity, budget=budget)
+    # Each independent projection consumes the same validated base graph.
+    # Passing previously derived displays to another algorithm only duplicates
+    # metadata in its input budget; it supplies no additional recorded facts.
     grouped = group([case], budget=budget)
-    case["issues"] = grouped["groups"] + grouped["candidates"]
+    critical = path(case, budget=budget)
+    from .crash_investigation import project_crash_evidence
+    crash = project_crash_evidence(case, budget=budget)
+    from .delay_investigation import analyze_delay
+    delay = analyze_delay({**case, "critical_path": critical}, budget=budget)
+    generated = hypotheses(case, budget=budget)
+    actions = advisor({**case, "hypotheses": generated}, target_identity=target_identity, budget=budget)
+    case.update(critical_path=critical, delay_investigation=delay, hypotheses=generated,
+                actions=actions, issues=grouped["groups"] + grouped["candidates"], crash_investigation=crash)
     case["coverage"]["issue_groups"] = len(grouped["groups"])
     case["coverage"]["candidate_issues"] = len(grouped["candidates"])
-    from .crash_investigation import project_crash_evidence
-    case["crash_investigation"] = project_crash_evidence(case, budget=budget)
+    case["coverage"]["issue_analysis_status"] = "COMPUTED"
     revalidate_sources(normalized, budget=budget)
     from .deep_tool_contracts import attach_evidence_run_receipt
     native_sources = [source for source in case["sources"] if source.get("native_resources_started")]
     native_cleanup = all(source.get("native_resource_cleanup", {}).get("confirmed") is True and
                          source.get("native_resource_cleanup", {}).get("offline_owner_retained") is False
                          for source in native_sources)
-    case = attach_evidence_run_receipt(context, {**case, "status": "COMPLETED"},
-        sources=case["sources"], source_revalidated=True, execution_started=True,
-        coverage={"completeness": case["coverage"]["evidence_completeness"],
-                  "display_graph_complete": case["coverage"]["display_graph_complete"],
-                  "scope": "SOURCE_BOUND_ANALYSIS_NOT_ORIGINAL_CAPTURE_COMPLETENESS"},
-        cleanup={"status": "CONFIRMED" if native_cleanup else "NOT_COLLECTED", "confirmed": native_cleanup,
-                 "scope": "NORMALIZATION_SOURCE_READ_HANDLES_AND_OFFLINE_UNWIND" if native_sources else
-                          "NORMALIZATION_SOURCE_READ_HANDLES",
-                 "native_resources_started": bool(native_sources)})
-    case.pop("status")  # Keep the existing case schema; status lives in its receipt.
+    def attach_receipt(value):
+        partial = value["coverage"].get("analysis_projection_completeness") == "PARTIAL"
+        result = attach_evidence_run_receipt(context, {**value, "status": "COMPLETED"},
+            sources=value["sources"], source_revalidated=True, execution_started=True,
+            coverage={"completeness": "INCOMPLETE_EVIDENCE" if partial else value["coverage"]["evidence_completeness"],
+                      "source_evidence_completeness": value["coverage"]["evidence_completeness"],
+                      "analysis_projection_completeness": "PARTIAL" if partial else "COMPLETE",
+                      "display_graph_complete": value["coverage"]["display_graph_complete"],
+                      "scope": "SOURCE_BOUND_ANALYSIS_NOT_ORIGINAL_CAPTURE_COMPLETENESS"},
+            cleanup={"status": "CONFIRMED" if native_cleanup else "NOT_COLLECTED", "confirmed": native_cleanup,
+                     "scope": "NORMALIZATION_SOURCE_READ_HANDLES_AND_OFFLINE_UNWIND" if native_sources else
+                              "NORMALIZATION_SOURCE_READ_HANDLES",
+                     "native_resources_started": bool(native_sources)})
+        result.pop("status")  # The actual operation status lives in its receipt.
+        return result
+
+    # These paths remain private and are never removed to disguise an oversized
+    # result. The aggregate limit includes required receipts and navigation.
+    case["_source_paths"] = dict(normalized.get("_source_paths", {}))
+    case = attach_receipt(case)
+    # Reserve the bounded private publication receipt before publication starts.
+    # Its path dominates its size; the remaining fixed schema is below 512 bytes.
+    publication_reserve = (len(canonical_json(str(Path(index_path).absolute())).encode("ascii")) + 512
+                           if index_path is not None else 0)
+    _bound_case_projections(case, budget, reserved_bytes=publication_reserve + 128)
+    # Nothing has been published yet: this replaces only an in-process draft
+    # receipt, preserving the same actual run context and completed execution.
+    case = attach_receipt(case)
     if index_path is not None:
         from .investigation_graph_store import save_investigation
         receipt = save_investigation(case, index_path, budget=budget,
                                     before_publish=lambda: revalidate_sources(normalized, budget=budget))
         case["_index_receipt"] = receipt
-    # Navigation paths are session-private and excluded by every store/export.
-    case["_source_paths"] = dict(normalized.get("_source_paths", {}))
     return budget.result(case)
+
+
+def _case_bytes(value, budget):
+    """Count exact canonical bytes without allocating another complete graph."""
+    encoder = json.JSONEncoder(sort_keys=True, ensure_ascii=True, allow_nan=False, separators=(",", ":"))
+    size = 0
+    for ordinal, part in enumerate(encoder.iterencode(value)):
+        if ordinal % 128 == 0:
+            budget.check()
+        size += len(part)  # ensure_ascii makes character and UTF-8 byte counts equal.
+    budget.check()
+    return size
+
+
+def _bound_case_projections(case, budget, *, reserved_bytes=0, refreshed=()):
+    """Keep source facts intact when derived displays exceed the aggregate cap.
+
+    Whole optional models are omitted with measured coverage. No displayed
+    graph node, recorded source, evidence count or uncertainty is rewritten to
+    fit. The critical-path result remains available to its existing standalone
+    report/export path. Required metadata plus graph/CP that cannot fit fails.
+    """
+    coverage = case["coverage"]
+    names = {"issues", "actions", "hypotheses", "crash_investigation", "delay_investigation", "critical_path"}
+    previous = coverage.get("omitted_models", [])
+    if (type(previous) is not list or len(previous) > len(names) or any(
+            type(row) is not dict or set(row) != {"model", "reason", "computed_bytes"} or
+            type(row.get("model")) is not str or row["model"] not in names or
+            row.get("reason") != "AGGREGATE_CASE_RESULT_BYTE_BUDGET" or
+            type(row.get("computed_bytes")) is not int or not 0 <= row["computed_bytes"] <= 64 * 1024**2
+            for row in previous) or len({row["model"] for row in previous}) != len(previous) or
+            any(row["model"] in case and row["model"] not in refreshed for row in previous)):
+        raise InvestigationError("INVALID_ANALYSIS_MODEL_OMISSIONS")
+    issue_omitted = any(row["model"] == "issues" for row in previous)
+    if (issue_omitted and (coverage.get("issue_analysis_status") != "NOT_INCLUDED_BYTE_BUDGET" or
+                          "issue_groups" in coverage or "candidate_issues" in coverage) or
+            not issue_omitted and coverage.get("issue_analysis_status") == "NOT_INCLUDED_BYTE_BUDGET"):
+        raise InvestigationError("INVALID_ANALYSIS_MODEL_OMISSIONS")
+    omitted = [dict(row) for row in previous if row["model"] not in refreshed]
+    coverage["omitted_models"] = omitted
+    coverage["analysis_projection_completeness"] = "PARTIAL" if omitted else "COMPLETE"
+    refreshed_limits = {"ANALYSIS_MODEL_NOT_INCLUDED:" + model + ":AGGREGATE_CASE_RESULT_BYTE_BUDGET"
+                        for model in refreshed}
+    case["limitations"] = [row for row in case.get("limitations", []) if row not in refreshed_limits]
+    # Preserve CP; delay references its segments, so dropping only optional
+    # delay is safe. Advice derives from hypotheses and is dropped first.
+    optional = ("issues", "actions", "hypotheses", "crash_investigation", "delay_investigation")
+    size = _case_bytes(case, budget)
+    for model in optional:
+        if size + reserved_bytes <= budget.max_result_bytes:
+            return case
+        if model not in case or model == "hypotheses" and case.get("actions"):
+            continue  # Never retain advice after removing its supporting model.
+        value = case[model]
+        model_bytes = _case_bytes(value, budget)
+        old_coverage, old_limits = dict(coverage), list(case["limitations"])
+        old_coverage["omitted_models"] = [dict(row) for row in omitted]
+        metadata_bytes = _case_bytes(old_coverage, budget) + _case_bytes(old_limits, budget)
+        omitted.append({"model": model, "reason": "AGGREGATE_CASE_RESULT_BYTE_BUDGET", "computed_bytes": model_bytes})
+        coverage["analysis_projection_completeness"] = "PARTIAL"
+        case["limitations"].append("ANALYSIS_MODEL_NOT_INCLUDED:" + model + ":AGGREGATE_CASE_RESULT_BYTE_BUDGET")
+        if model == "issues":
+            coverage.pop("issue_groups", None)
+            coverage.pop("candidate_issues", None)
+            coverage["issue_analysis_status"] = "NOT_INCLUDED_BYTE_BUDGET"
+        # All other fields retain identical objects. Account for this field's
+        # colon/comma exactly instead of serializing a large graph per model.
+        reduced = (size - model_bytes - len(canonical_json(model)) - 2 +
+                   _case_bytes(coverage, budget) + _case_bytes(case["limitations"], budget) - metadata_bytes)
+        if reduced >= size:
+            # An empty or small computed model costs less than its omission
+            # marker. Keep it; declaring it absent would save no memory.
+            omitted.pop()
+            coverage.clear()
+            coverage.update(old_coverage)
+            coverage["omitted_models"] = omitted
+            case["limitations"] = old_limits
+            continue
+        case.pop(model)
+        size = reduced
+    if size + reserved_bytes > budget.max_result_bytes:
+        error = InvestigationError("INVESTIGATION_RESULT_BYTE_BUDGET")
+        error.actual_result_bytes = size
+        error.reserved_result_bytes = reserved_bytes
+        error.result_byte_limit = budget.max_result_bytes
+        try:
+            error.critical_path_bytes = _case_bytes(case.get("critical_path", {}), budget)
+            # This includes required run/navigation records and omission
+            # metadata, but excludes all six derived model payloads.
+            error.retained_graph_bytes = _case_bytes({key: value for key, value in case.items()
+                                                      if key not in names}, budget)
+        except (InterruptedError, TimeoutError):
+            pass  # Diagnostic measurement cannot replace the primary failure.
+        raise error
+    return case
 
 
 def build_evidence_graph(sources, **kwargs):
@@ -161,8 +279,13 @@ def load_investigation(path, *, budget=None, cancel_event=None):
     # Recompute this display projection from the validated source-linked graph;
     # an imported cached interpretation never overrides current node/loss rules.
     from .critical_path import analyze_critical_path
+    # Remove the old derived displays before recomputing. Their presence must
+    # not make the same bounded source graph impossible to reopen.
+    case.pop("delay_investigation", None)
+    case.pop("critical_path", None)
     case["critical_path"] = analyze_critical_path(case, budget=budget)
     case["delay_investigation"] = analyze_delay(case, budget=budget)
+    _bound_case_projections(case, budget, refreshed=("critical_path", "delay_investigation"))
     return budget.result(case)
 
 

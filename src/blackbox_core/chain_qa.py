@@ -225,7 +225,8 @@ def run_graph(workflow, output, *, runtime=None, allow_partial=True, run_id=None
     summary = {key: snapshot.get(key) for key in
         ("run_id", "workflow_id", "definition_sha256", "state", "errors", "cleanup", "elapsed_seconds")}
     summary["nodes"] = [{key: row.get(key) for key in
-        ("node_id", "state", "component_status", "execution_started", "reason_code", "cleanup")}
+        ("node_id", "state", "component_status", "execution_started", "reason_code", "cleanup",
+         "resource_reservations", "component_failure_details")}
         for row in snapshot["nodes"]]
     for observed, row in zip(summary["nodes"], snapshot["nodes"]):
         receipt = row.get("run_receipt")

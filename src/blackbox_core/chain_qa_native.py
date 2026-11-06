@@ -199,6 +199,7 @@ def actual_token(pid):
 def native_checkpoint_graph(output, executable, source_sha, diagnostic_helper=None):
     """Actual same-helper debug attach/checkpoint/restore/detach acceptance."""
     from copy import deepcopy
+    from uuid import uuid4
     from .chain_qa import definition, independent_journal, actual_invocations, link, source_proof
     from .chain_adapters import ChainRuntime, build_catalog
     from .chain_engine import WorkflowEngine
@@ -214,7 +215,10 @@ def native_checkpoint_graph(output, executable, source_sha, diagnostic_helper=No
              "source_sha": source_sha, "source_identity": identity_proof,
              "physical_windows_10_11": "NOT_TESTED", "physical_secure_desktop": "NOT_TESTED"}
     approvals, launches, close_proofs = [], [], []
+    owned_run_id = uuid4().hex
     helper_identity = None
+    lease_deadline = None
+    scope_confirmation = None
     primary = None
     kernel = C.WinDLL("kernel32", use_last_error=True, winmode=0x800)
     kernel.GetHandleInformation.argtypes = [W.HANDLE, C.POINTER(W.DWORD)]
@@ -253,6 +257,28 @@ def native_checkpoint_graph(output, executable, source_sha, diagnostic_helper=No
                 channel.close = lambda: observed_close("pipe", close, channel.handle)
             return answer
         service._start_session = checked_start
+        # Initial session/target authorization is independent of each action's
+        # fresh approval. The adapter deliberately never opens UAC or grants an
+        # administrative target scope implicitly.
+        opened = service.start_admin_session_owned(owner_run_id=owned_run_id, confirmed=True)
+        require(opened.get("status") == "COMPLETED" and
+                type(opened.get("native_context_ownership")) is dict,
+                "R60_CHECKPOINT_EXPLICIT_ADMINISTRATIVE_LEASE_REQUIRED")
+        session = service.session_status(refresh=True)
+        helper_identity = session["helper_identity"]
+        lease_deadline = session["session_deadline_monotonic"]
+        token = actual_token(helper_identity["pid"])
+        require(token["elevated"] is True and len(launches) == 1 and launches[0]["elevated"] is True,
+                "R60_CHECKPOINT_REAL_SCOPED_RUNAS_REQUIRED")
+        target_identity = capture_identity_checked(fixture.process.pid, owner_run_id=owned_run_id)
+        require(target_identity.created_100ns == fixture.ready["created_100ns"],
+                "R60_CHECKPOINT_EXACT_SCOPE_TARGET_REQUIRED")
+        bound = service.bind_target_owned(target_identity, ["debug.attach", "debug.detach"],
+            owner_run_id=owned_run_id, expected_context=opened["native_context_ownership"], confirmed=True)
+        require(bound.get("status") == "COMPLETED" and type(bound.get("native_context_ownership")) is dict,
+                "R60_CHECKPOINT_EXPLICIT_TARGET_DEBUG_SCOPE_REQUIRED")
+        scope_confirmation = {"target": target_identity.to_dict(), "operations": ["debug.attach", "debug.detach"],
+                              "confirmed_monotonic_ns": time.monotonic_ns(), "helper_token": token}
         def approve(operation, parameters, target, ctx):
             require(operation in ("debug.attach", "debug.detach") and
                     target["pid"] == fixture.ready["pid"] and
@@ -261,13 +287,15 @@ def native_checkpoint_graph(output, executable, source_sha, diagnostic_helper=No
             ctx.check()
             require(capture_identity_checked(target["pid"], owner_run_id=ctx.run_id).to_dict() == target,
                     "R60_CHECKPOINT_TARGET_IDENTITY_CHANGED")
-            if operation == "debug.detach":
-                require(service.session_status()["helper_identity"] == helper_identity and len(launches) == 1,
-                        "R60_CHECKPOINT_HELPER_REPLACED_BEFORE_FRESH_DETACH")
+            live = service.session_status()
+            require(ctx.run_id == owned_run_id and live["helper_identity"] == helper_identity and len(launches) == 1
+                    and abs(live["session_deadline_monotonic"] - lease_deadline) < .001,
+                    "R60_CHECKPOINT_HELPER_REPLACED_OR_LEASE_RENEWED_BEFORE_ACTION")
             approvals.append({"operation": operation, "node_run_id": ctx.node_run_id,
                 "target": target, "fresh_monotonic_ns": time.monotonic_ns()})
             return True
-        runtime = ChainRuntime(inspector=service, authorize=approve)
+        runtime = ChainRuntime(inspector=service, authorize=approve, owned_session_run_id=owned_run_id,
+                               native_context_ref=bound["native_context_ownership"])
         workflow = definition([
             {"node_id": "target", "tool_id": "process_select", "budget_seconds": 10,
              "parameters": {"pid": fixture.process.pid}},
@@ -279,7 +307,7 @@ def native_checkpoint_graph(output, executable, source_sha, diagnostic_helper=No
                 link("target", "process", "detach", "process"),
                 link("checkpoint", "continue", "detach", "when")],
             identity="native-checkpoint", seconds=180, allow_effectful=True)
-        store = WorkflowRunStore.create(output / "runs", workflow)
+        store = WorkflowRunStore.create(output / "runs", workflow, run_id=owned_run_id)
         engine = WorkflowEngine(workflow, catalog=build_catalog(runtime), store=store, runtime=runtime)
         paused = engine.run()
         require(paused["state"] == "WAITING_FOR_HUMAN" and len(approvals) == len(launches) == 1,
@@ -290,8 +318,8 @@ def native_checkpoint_graph(output, executable, source_sha, diagnostic_helper=No
                 preserved["run_receipt"]["cleanup"]["status"] == "RETAINED" and
                 preserved["run_receipt"]["cleanup"]["confirmed"] is False,
                 "R60_CHECKPOINT_ACTUAL_ATTACHED_OWNER_REQUIRED")
-        helper_identity = service.session_status()["helper_identity"]
-        require(helper_identity is not None and service._native_owner_matches(store.run_id, runtime.native_context_ref),
+        require(service.session_status()["helper_identity"] == helper_identity and
+                service._native_owner_matches(store.run_id, runtime.native_context_ref),
                 "R60_CHECKPOINT_ACTUAL_SAME_OWNER_REFERENCE_REQUIRED")
         new_runtime = ChainRuntime(inspector=service, authorize=approve,
             owned_session_run_id=runtime.owned_session_run_id, native_context_ref=deepcopy(runtime.native_context_ref))
@@ -312,12 +340,19 @@ def native_checkpoint_graph(output, executable, source_sha, diagnostic_helper=No
         require(len(attached) == len(detached) == 1 and detached[0][1]["execution_started"] is True,
                 "R60_CHECKPOINT_ACTUAL_ACTION_RECEIPTS_NOT_PRESERVED")
         closes = [row for row in service.journal.timeline() if row.get("source") == "DIAGNOSTIC_SESSION_CLEANUP"]
-        require(len(closes) == 1 and closes[0]["status"] == "COMPLETED" and
-                closes[0]["data"]["debug_cleanup"]["native_owner_cleanup"]["confirmed"] is True and
-                closes[0]["data"]["debug_cleanup"]["native_owner_cleanup"]["worker_exit_confirmed"] is True,
+        require(len(closes) == 1 and closes[0]["status"] == "COMPLETED",
+                "R60_CHECKPOINT_NATIVE_OWNER_CLOSE_NOT_ACKNOWLEDGED")
+        terminal = closes[0]["data"].get("expiry_cleanup", {})
+        require(terminal.get("confirmed") is True and terminal.get("session_nonce_verified") is True and
+                terminal.get("helper_identity") == helper_identity,
+                "R60_CHECKPOINT_AUTHENTICATED_HELPER_CLOSE_REQUIRED")
+        debug_ack = terminal.get("data", {}).get("cleanup", {}).get("data", {}).get(
+            "debug_cleanup", {}).get("native_owner_cleanup", {})
+        require(debug_ack.get("confirmed") is True and debug_ack.get("worker_exit_confirmed") is True,
                 "R60_CHECKPOINT_NATIVE_DEBUG_WORKER_CLOSE_NOT_ACKNOWLEDGED")
         proof.update(status="PASS", graph_state=complete["state"], journal=journal, approvals=approvals,
             launches=launches, same_helper_identity=helper_identity, original_live_executor_reused=True,
+            initial_session_scope_confirmation=scope_confirmation, unchanged_lease_deadline=lease_deadline,
             attach_replay_count=0, attach_receipt_unchanged=True, helper_debug_worker_exit_acknowledged=True,
             product_handle_close_observations=close_proofs, cleanup=complete["cleanup"])
     except BaseException as error:

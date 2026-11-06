@@ -565,6 +565,9 @@ class EngineTests(unittest.TestCase):
             original.append(deepcopy(receipt))
             error = ValueError("EXPLICIT_FIXTURE_SOURCE_LIMIT")
             error.run_receipt = receipt
+            error.actual_result_bytes = 2048
+            error.result_byte_limit = 1024
+            error.reserved_result_bytes = "untrusted string is not a measured counter"
             raise error
         engine, store = self.engine(workflow([{"node_id": "read", "tool_id": "read"}]),
             {"read": adapter("read", execute)})
@@ -574,9 +577,11 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(row["reason_code"], "EXPLICIT_FIXTURE_SOURCE_LIMIT")
         self.assertEqual(row["run_receipt"], original[0])
         self.assertEqual(row["component_status"], "OPERATION_FAILED")
+        self.assertEqual(row["component_failure_details"], {"actual_result_bytes": 2048, "result_byte_limit": 1024})
         persisted = [event["data"] for event in store.read_events() if event.get("event") == "node.result"]
         self.assertEqual(persisted[0]["reason_code"], row["reason_code"])
         self.assertEqual(persisted[0]["run_receipt"], original[0])
+        self.assertEqual(persisted[0]["component_failure_details"], row["component_failure_details"])
 
 
 if __name__ == "__main__":

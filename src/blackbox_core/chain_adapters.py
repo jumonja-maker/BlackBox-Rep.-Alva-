@@ -285,7 +285,17 @@ def _source_specs(artifacts):
 def _make_case(ctx, artifacts, parameters=None):
     from .investigation_v3 import create_investigation
     path = _output(ctx, "investigation").with_suffix(".sqlite3")
-    case = create_investigation(_source_specs(artifacts), selection=(parameters or {}).get("selection"),
+    specs = _source_specs(artifacts)
+    # The existing normalization path starts saved DbgHelp only for a dump
+    # supplied with a local image. Pure recorded-data graph failures therefore
+    # do not retain a native reservation that was never entered. File/SQLite
+    # cleanup stays exactly as reported by the component's original receipt.
+    if any(spec["source_type"] == "DUMP_METADATA" and spec.get("image_path") for spec in specs):
+        if callable(getattr(ctx, "resource_may_start", None)):
+            ctx.resource_may_start("OFFLINE_DBGHELP_OWNER")
+    elif callable(getattr(ctx, "resource_not_entered", None)):
+        ctx.resource_not_entered("OFFLINE_DBGHELP_OWNER", "ACTUAL_SOURCE_SPECS_HAVE_NO_NATIVE_UNWIND_PATH")
+    case = create_investigation(specs, selection=(parameters or {}).get("selection"),
         scenario=(parameters or {}).get("scenario"), budget=_budget(ctx), index_path=path)
     try:
         return case, _case_artifact(ctx, case, path, upstream=artifacts)
