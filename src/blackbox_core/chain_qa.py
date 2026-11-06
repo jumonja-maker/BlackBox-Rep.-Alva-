@@ -100,7 +100,8 @@ def independent_journal(folder):
             "R60_RUN_MARKER_SCHEMA_OR_IDENTITY")
     paths = list(folder.rglob("deep-inspection.sqlite3"))
     path = folder / "journal" / "deep-inspection.sqlite3"
-    require(len(paths) == 1 and paths[0] == path and not path.is_symlink(),
+    require(len(paths) == 1 and paths[0] == path and not path.is_symlink() and
+            path.stat().st_size <= 128 * 1024 * 1024,
             "R60_ONE_EXISTING_EVIDENCE_JOURNAL_REQUIRED")
     run_definition = read_json(folder / "definition.bbchain.json", maximum=1024**2)
     definition_raw = json.dumps(run_definition, sort_keys=True, ensure_ascii=True,
@@ -108,7 +109,9 @@ def independent_journal(folder):
     require(hashlib.sha256(definition_raw).hexdigest() == marker["definition_sha256"],
             "R60_PERSISTED_DEFINITION_FINGERPRINT_MISMATCH")
     before = file_hash(path)
-    records, previous, count = [], "0" * 64, 0
+    records, previous, count, metadata_bytes, event_records = [], "0" * 64, 0, 0, set()
+    event_keys = {"event_record_schema", "event_record_path", "event_record_sha256",
+                  "event_record_size_bytes", "event_record_file_identity", "event_record_sequence"}
     with closing(sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=5)) as db:
         db.execute("PRAGMA query_only=ON")
         db.execute("PRAGMA trusted_schema=OFF")
@@ -129,6 +132,7 @@ def independent_journal(folder):
                     "R60_JOURNAL_HASHCHAIN_OR_SEQUENCE")
             record = json.loads(raw)
             require(type(record) is dict, "R60_JOURNAL_RECORD_SHAPE")
+            metadata_bytes += len(raw.encode("utf-8"))
             if record.get("event") == "node.result":
                 reference = record.get("data", {})
                 node_run_id = reference.get("node_run_id")
@@ -160,8 +164,61 @@ def independent_journal(folder):
                         node.get("state") == reference.get("state"),
                         "R60_NODE_RESULT_SIDECAR_EVENT_BINDING")
                 record = {**record, "data": node}
+                metadata_bytes += stat.st_size
+            elif isinstance(record.get("data"), dict) and any(key in record["data"] for key in event_keys):
+                reference = record["data"]
+                require(set(reference) == event_keys and
+                        reference.get("event_record_schema") == "blackbox.workflow-event/1" and
+                        type(reference.get("event_record_sequence")) is int and
+                        reference["event_record_sequence"] == sequence and
+                        reference.get("event_record_path") == ".events/" + str(sequence) + ".json",
+                        "R60_EVENT_RECORD_SIDECAR_BINDING")
+                directory = folder / ".events"
+                sidecar = directory / (str(sequence) + ".json")
+                require(not directory.is_symlink() and not sidecar.is_symlink(),
+                        "R60_EVENT_RECORD_SIDECAR_SYMLINK")
+                stat = sidecar.stat()
+                identity = {"device": stat.st_dev, "inode": stat.st_ino,
+                            "size": stat.st_size, "mtime_ns": stat.st_mtime_ns}
+                require(0 < stat.st_size <= 512 * 1024 and
+                        reference.get("event_record_size_bytes") == stat.st_size and
+                        reference.get("event_record_file_identity") == identity and
+                        reference.get("event_record_sha256") == file_hash(sidecar),
+                        "R60_EVENT_RECORD_SIDECAR_IDENTITY_OR_HASH")
+                envelope = read_json(sidecar, maximum=512 * 1024)
+                require(set(envelope) == {"schema", "run_id", "definition_sha256", "event", "node_id", "sequence", "data"}
+                        and envelope.get("schema") == "blackbox.workflow-event/1"
+                        and envelope.get("run_id") == marker["run_id"]
+                        and envelope.get("definition_sha256") == marker["definition_sha256"]
+                        and envelope.get("event") == record.get("event")
+                        and envelope.get("node_id") == record.get("node_id")
+                        and type(envelope.get("sequence")) is int and envelope["sequence"] == sequence
+                        and type(envelope.get("data")) is dict,
+                        "R60_EVENT_RECORD_SIDECAR_ENVELOPE")
+                after = sidecar.stat()
+                require(reference["event_record_sha256"] == file_hash(sidecar) and
+                        identity == {"device": after.st_dev, "inode": after.st_ino,
+                                     "size": after.st_size, "mtime_ns": after.st_mtime_ns},
+                        "R60_EVENT_RECORD_SIDECAR_CHANGED_DURING_READBACK")
+                record = {**record, "data": envelope["data"]}
+                metadata_bytes += stat.st_size
+                event_records.add(sidecar.name)
+            require(metadata_bytes <= 64 * 1024 * 1024, "R60_JOURNAL_FULL_METADATA_BUDGET")
             records.append(record)
             previous = digest
+    directory = folder / ".events"
+    if directory.exists():
+        require(directory.is_dir() and not directory.is_symlink(), "R60_EVENT_RECORD_DIRECTORY_INVALID")
+        observed = set()
+        with os.scandir(directory) as entries:
+            for number, entry in enumerate(entries, 1):
+                require(time.monotonic() < deadline, "R60_JOURNAL_READ_DEADLINE")
+                require(number <= 100000 and entry.is_file() and not entry.is_symlink() and entry.name in event_records,
+                        "R60_EVENT_RECORD_ORPHAN_OR_FOREIGN")
+                observed.add(entry.name)
+        require(observed == event_records, "R60_EVENT_RECORD_MISSING")
+    else:
+        require(not event_records, "R60_EVENT_RECORD_MISSING")
     require(file_hash(path) == before and count > 0, "R60_JOURNAL_CHANGED_DURING_READBACK")
     return records, {"sqlite_integrity": "ok", "hashchain_verified": True, "event_count": count,
                      "sha256": before, "source_unchanged": True,

@@ -398,9 +398,26 @@ def _observe(runtime):
         folder = Path(packet["folder"])
         stopped, snapshot = packet.get("stop_result", {}), packet.get("snapshot", {})
         persisted = context(folder)
-        confirmed = (stopped.get("cleanup_required") is False and not stopped.get("errors") and
-            snapshot.get("active") is False and
-            persisted.get("capture_health", {}).get("recording_resources_closed") is True)
+        capture_health = persisted.get("capture_health")
+        capture_health = capture_health if type(capture_health) is dict else {}
+        # ResearchSession returns the ReadOnlyProbe snapshot contract. The GUI
+        # adds an `active` convenience key, but headless recording owners do
+        # not. Require the authoritative field in both paths; a stale GUI key
+        # may veto cleanup, never substitute for the recorder's final snapshot.
+        stopped_errors = stopped.get("errors")
+        def observed_boolean(value):
+            return value if type(value) is bool else None
+        finalization = {
+            "stop_cleanup_required": observed_boolean(stopped.get("cleanup_required")),
+            "stop_errors_count": len(stopped_errors) if type(stopped_errors) is list else None,
+            "observation_active_at_export": observed_boolean(snapshot.get("observation_active_at_export")),
+            "gui_active": observed_boolean(snapshot.get("active")),
+            "persisted_recording_resources_closed": observed_boolean(capture_health.get("recording_resources_closed")),
+        }
+        confirmed = (stopped.get("cleanup_required") is False and type(stopped_errors) is list and
+            not stopped_errors and snapshot.get("observation_active_at_export") is False and
+            ("active" not in snapshot or snapshot["active"] is False) and
+            capture_health.get("recording_resources_closed") is True)
         status = packet.get("execution_status") or stopped.get("state", "FINALIZATION_UNCONFIRMED")
         if not confirmed:
             status = "RECOVERY_UNCONFIRMED"
@@ -409,7 +426,8 @@ def _observe(runtime):
                 "recording_state": status})
         return NodeOutcome(status, {"session": artifact}, cleanup={"status": "CONFIRMED" if confirmed else
             "RECOVERY_UNCONFIRMED", "confirmed": confirmed, "owner_retained": not confirmed,
-            "scope": "EXISTING_RESEARCH_RECORDING_OWNER_FINALIZATION", "stop_result": stopped},
+            "scope": "EXISTING_RESEARCH_RECORDING_OWNER_FINALIZATION", "stop_result": stopped,
+            "recording_finalization": finalization},
             execution_started=packet.get("start_result") is not None, reason_code=packet.get("reason_code"))
     return execute
 

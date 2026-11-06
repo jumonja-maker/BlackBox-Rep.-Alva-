@@ -615,6 +615,10 @@ class WorkflowEngine:
             ("actual_result_bytes", "reserved_result_bytes", "result_byte_limit",
              "critical_path_bytes", "retained_graph_bytes")
             if type(value := getattr(error, key, None)) is int and 0 <= value <= 2**63 - 1}
+        stage = getattr(error, "analysis_stage", None)
+        if type(stage) is str and stage in {"NORMALIZE_SOURCES", "BUILD_GRAPH", "GROUP_ISSUES", "CRITICAL_PATH",
+                                          "CRASH", "DELAY", "HYPOTHESES", "ACTIONS", "FINAL_CASE"}:
+            ctx._failure_details["analysis_stage"] = stage
         cleanup = (receipt or {}).get("cleanup") or {"confirmed": False, "status": "NOT_COLLECTED"}
         uncertain = any(getattr(error, flag, False) for flag in
             ("cleanup_required", "cleanup_unconfirmed", "owner_retained", "offline_owner_retained", "publication_unconfirmed"))

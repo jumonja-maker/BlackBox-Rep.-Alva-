@@ -3,6 +3,8 @@
 The journal is change detection, not authenticated provenance. Immutable private
 result sidecars retain file fingerprints losslessly: EvidenceJournal's ordinary
 metadata redactor deliberately replaces payload fields including ``bytes``.
+Non-node events that exceed the journal's shallower metadata contract use the
+same bounded immutable storage, including the actual nested cleanup evidence.
 Opening a run is passive and never creates a database or claims native rights.
 """
 from __future__ import annotations
@@ -29,6 +31,7 @@ from .owned_unlink import file_identity, remove_entry
 from .session_v2 import safe_path
 
 RESULT_SCHEMA = "blackbox.workflow-node-result/1"
+EVENT_RECORD_SCHEMA = "blackbox.workflow-event/1"
 MAX_RESULT_BYTES = 512 * 1024
 MAX_JOURNAL_BYTES = 128 * 1024 * 1024
 MAX_EVENTS = 100000
@@ -39,6 +42,8 @@ _TRANSIENT = frozenset(("expected_context", "native_context_ref", "owner_token",
                         "execution_guard", "native_owner_ref", "native_context_ownership", "consent_token"))
 _RESULT_KEYS = ("node_id", "node_run_id", "iteration", "state", "component_status",
                 "execution_started", "started_monotonic_ns", "ended_monotonic_ns")
+_EVENT_BINDING_KEYS = frozenset(("event_record_schema", "event_record_path", "event_record_sha256",
+                               "event_record_size_bytes", "event_record_file_identity", "event_record_sequence"))
 
 
 def _strict_json(raw, *, limit=MAX_RESULT_BYTES):
@@ -144,6 +149,7 @@ class WorkflowRunStore:
         folder = safe_path(root / run_id)
         folder.mkdir(mode=0o700)
         (folder / ".results").mkdir(mode=0o700)
+        (folder / ".events").mkdir(mode=0o700)
         save_definition(definition, folder / "definition.bbchain.json")
         marker = {"schema": RUN_SCHEMA, "run_id": run_id, "workflow_id": definition.workflow_id,
                   "definition_sha256": definition.fingerprint, "definition_file": "definition.bbchain.json",
@@ -299,9 +305,15 @@ class WorkflowRunStore:
                 if node_id is not None:
                     require(value.get("node_id", node_id) == node_id, "WORKFLOW_EVENT_NODE_MISMATCH")
                     value.setdefault("node_id", node_id)
+                require(event == "node.result" or not any(key in value for key in _EVENT_BINDING_KEYS),
+                        "WORKFLOW_EVENT_RESERVED_STORAGE_FIELDS")
                 self._validate_event_data(event, node_id, value)
                 metadata_bytes = 0
                 require(self._event_count < MAX_EVENTS, "WORKFLOW_HISTORY_EVENT_BUDGET")
+                record = {"event": event, "run_id": self.run_id,
+                          "definition_sha256": self.definition.fingerprint, "data": value}
+                if node_id is not None:
+                    record["node_id"] = node_id
                 if event == "node.result":
                     require(node_id is not None and value.get("node_id") == node_id, "WORKFLOW_RESULT_NODE_MISMATCH")
                     identifier(value.get("node_run_id"))
@@ -321,15 +333,36 @@ class WorkflowRunStore:
                     value.update(result_path=path.relative_to(self.folder).as_posix(),
                                  result_sha256=stamp["sha256"], result_size_bytes=stamp["bytes"],
                                  result_file_identity=stamp["file_identity"])
-                else:
-                    # Other events are deliberately shallow journal metadata.
-                    # Reject silent redactor truncation, but allow its explicit
-                    # secret replacement as already applied above.
-                    require(journal_metadata(value) == value, "WORKFLOW_EVENT_WOULD_LOSE_METADATA")
-                record = {"event": event, "run_id": self.run_id,
-                          "definition_sha256": self.definition.fingerprint, "data": value}
-                if node_id is not None:
-                    record["node_id"] = node_id
+                elif journal_metadata(record) != record:
+                    # Compare the WHOLE journal record: its wrapper consumes
+                    # depth too. Preserve actual nested ACKs, numeric byte
+                    # counts and already-redacted fields without asking the
+                    # ordinary journal redactor to silently rewrite them.
+                    sequence = self._event_count + 1
+                    envelope = {"schema": EVENT_RECORD_SCHEMA, "run_id": self.run_id,
+                        "definition_sha256": self.definition.fingerprint, "event": event,
+                        "node_id": node_id, "sequence": sequence, "data": value}
+                    _record(envelope, redact=False)
+                    metadata_bytes = len(canonical(envelope).encode("utf-8"))
+                    require(metadata_bytes <= MAX_RESULT_BYTES, "WORKFLOW_RECORD_BYTE_BUDGET")
+                    require(self._history_metadata_bytes + metadata_bytes + 4096 <= MAX_HISTORY_METADATA_BYTES,
+                            "WORKFLOW_HISTORY_METADATA_BUDGET")
+                    directory = safe_path(self.folder / ".events")
+                    directory.mkdir(mode=0o700, exist_ok=True)
+                    # Sequence is checked under the writer claim. A failed
+                    # publication leaves an immutable orphan and refuses an
+                    # uncertain replay at the same sequence, rather than
+                    # generating unlimited differently named retry records.
+                    path = directory / (str(sequence) + ".json")
+                    atomic_json(path, envelope, exclusive=True, max_bytes=MAX_RESULT_BYTES)
+                    verified, stamp = _read(path)
+                    require(verified == envelope, "WORKFLOW_EVENT_READBACK_FAILED")
+                    value = {"event_record_schema": EVENT_RECORD_SCHEMA,
+                        "event_record_path": path.relative_to(self.folder).as_posix(),
+                        "event_record_sha256": stamp["sha256"], "event_record_size_bytes": stamp["bytes"],
+                        "event_record_file_identity": stamp["file_identity"], "event_record_sequence": sequence}
+                record["data"] = value
+                require(journal_metadata(record) == record, "WORKFLOW_EVENT_WOULD_LOSE_METADATA")
                 # The fixed headroom includes EvidenceJournal's own operation,
                 # UTC, monotonic and provenance fields. It is conservative.
                 metadata_bytes += len(canonical(record).encode("utf-8")) + 1024
@@ -359,6 +392,25 @@ class WorkflowRunStore:
         require(all(value.get(key) == data.get(key) for key in _RESULT_KEYS if key in data) and
                 value.get("node_id") == node_id, "WORKFLOW_RESULT_METADATA_MISMATCH")
         return value
+
+    def _hydrate_event(self, data, event, node_id, sequence):
+        require(set(data) == _EVENT_BINDING_KEYS and data.get("event_record_schema") == EVENT_RECORD_SCHEMA and
+                type(data.get("event_record_sequence")) is int and data["event_record_sequence"] == sequence,
+                "WORKFLOW_EVENT_BINDING_INVALID")
+        expected = ".events/" + str(sequence) + ".json"
+        require(data.get("event_record_path") == expected, "WORKFLOW_EVENT_PATH_INVALID")
+        envelope, stamp = _read(self.folder / expected)
+        require(stamp["sha256"] == data.get("event_record_sha256") and
+                stamp["bytes"] == data.get("event_record_size_bytes") and
+                stamp["file_identity"] == data.get("event_record_file_identity"),
+                "WORKFLOW_EVENT_BINDING_CHANGED")
+        require(set(envelope) == {"schema", "run_id", "definition_sha256", "event", "node_id", "sequence", "data"}
+                and envelope.get("schema") == EVENT_RECORD_SCHEMA and envelope.get("run_id") == self.run_id
+                and envelope.get("definition_sha256") == self.definition.fingerprint and envelope.get("event") == event
+                and envelope.get("node_id") == node_id and type(envelope.get("sequence")) is int
+                and envelope["sequence"] == sequence and type(envelope.get("data")) is dict,
+                "WORKFLOW_EVENT_ENVELOPE_INVALID")
+        return envelope["data"]
 
     def _validate_event_data(self, event, node_id, data):
         indexed = {node.node_id: node for node in self.definition.nodes}
@@ -390,7 +442,7 @@ class WorkflowRunStore:
         self._check_identity()
         path = safe_path(self.folder / "journal" / "deep-inspection.sqlite3")
         require(path.is_file() and path.stat().st_size <= MAX_JOURNAL_BYTES, "WORKFLOW_HISTORY_STORAGE_BUDGET")
-        records, previous, metadata_bytes, results = [], "0" * 64, 0, set()
+        records, previous, metadata_bytes, results, event_records = [], "0" * 64, 0, set(), set()
         deadline = time.monotonic() + 30
         with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=5)) as db:
             db.execute("PRAGMA query_only=ON")
@@ -423,21 +475,36 @@ class WorkflowRunStore:
                         event.get("definition_sha256") == self.definition.fingerprint and type(event.get("event")) is str and
                         event["event"] in _EVENTS and
                         type(event.get("data")) is dict, "WORKFLOW_HISTORY_RECORD_INVALID")
-                require(event["event"] not in ("run.state", "node.state") or
-                        type(event["data"].get("state")) is str and event["data"]["state"] in STATES,
-                        "WORKFLOW_HISTORY_STATE_INVALID")
                 if event["event"] == "node.result":
                     event["journal_binding"] = deepcopy(event["data"])
                     event["data"] = self._hydrate_result(event["data"], event.get("node_id"))
                     metadata_bytes += event["journal_binding"]["result_size_bytes"]
                     require(event["data"]["node_run_id"] not in results, "WORKFLOW_HISTORY_DUPLICATE_RESULT")
                     results.add(event["data"]["node_run_id"])
+                elif any(key in event["data"] for key in _EVENT_BINDING_KEYS):
+                    event["journal_binding"] = deepcopy(event["data"])
+                    event["data"] = self._hydrate_event(event["data"], event["event"], event.get("node_id"), sequence)
+                    metadata_bytes += event["journal_binding"]["event_record_size_bytes"]
+                    event_records.add(str(sequence) + ".json")
                 self._validate_event_data(event["event"], event.get("node_id"), event["data"])
                 require(event["event"] != "run.created" or count == 1, "WORKFLOW_HISTORY_DUPLICATE_CREATED")
                 require(metadata_bytes <= MAX_HISTORY_METADATA_BYTES, "WORKFLOW_HISTORY_METADATA_BUDGET")
                 event["sequence"], event["record_sha256"] = sequence, digest
                 records.append(event)
                 previous = digest
+        directory = safe_path(self.folder / ".events")
+        if directory.exists():
+            require(directory.is_dir(), "WORKFLOW_EVENT_STORAGE_INVALID")
+            observed = set()
+            with os.scandir(directory) as entries:
+                for count, entry in enumerate(entries, 1):
+                    require(time.monotonic() < deadline, "WORKFLOW_HISTORY_READ_DEADLINE")
+                    require(count <= MAX_EVENTS and safe_path(Path(entry.path)).is_file() and entry.name in event_records,
+                            "WORKFLOW_EVENT_ORPHAN_OR_FOREIGN_RECORD")
+                    observed.add(entry.name)
+            require(observed == event_records, "WORKFLOW_EVENT_RECORD_MISSING")
+        else:
+            require(not event_records, "WORKFLOW_EVENT_RECORD_MISSING")
         require(bool(records) and records[0]["event"] == "run.created", "WORKFLOW_HISTORY_CREATED_MISSING")
         self._event_count, self._history_metadata_bytes = len(records), metadata_bytes
         return records

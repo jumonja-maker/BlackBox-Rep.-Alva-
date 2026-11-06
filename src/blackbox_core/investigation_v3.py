@@ -47,65 +47,74 @@ def _create_investigation(sources, *, target_identity=None, selection=None, scen
     selected = _context(selection, "SELECTION")
     scenario = _context(scenario, "SCENARIO")
     app_identity = _context(app_identity, "APPLICATION_IDENTITY")
-    normalized = normalize_sources(sources, selection=selected, budget=budget)
-    case = build_graph(normalized, target_identity=target_identity, scenario=scenario,
-                       app_identity=app_identity, budget=budget)
+    with budget.stage("NORMALIZE_SOURCES"):
+        normalized = normalize_sources(sources, selection=selected, budget=budget)
+    with budget.stage("BUILD_GRAPH"):
+        case = build_graph(normalized, target_identity=target_identity, scenario=scenario,
+                           app_identity=app_identity, budget=budget)
     # Each independent projection consumes the same validated base graph.
     # Passing previously derived displays to another algorithm only duplicates
     # metadata in its input budget; it supplies no additional recorded facts.
-    grouped = group([case], budget=budget)
-    critical = path(case, budget=budget)
+    with budget.stage("GROUP_ISSUES"):
+        grouped = group([case], budget=budget)
+    with budget.stage("CRITICAL_PATH"):
+        critical = path(case, budget=budget)
     from .crash_investigation import project_crash_evidence
-    crash = project_crash_evidence(case, budget=budget)
+    with budget.stage("CRASH"):
+        crash = project_crash_evidence(case, budget=budget)
     from .delay_investigation import analyze_delay
-    delay = analyze_delay({**case, "critical_path": critical}, budget=budget)
-    generated = hypotheses(case, budget=budget)
-    actions = advisor({**case, "hypotheses": generated}, target_identity=target_identity, budget=budget)
-    case.update(critical_path=critical, delay_investigation=delay, hypotheses=generated,
-                actions=actions, issues=grouped["groups"] + grouped["candidates"], crash_investigation=crash)
-    case["coverage"]["issue_groups"] = len(grouped["groups"])
-    case["coverage"]["candidate_issues"] = len(grouped["candidates"])
-    case["coverage"]["issue_analysis_status"] = "COMPUTED"
-    revalidate_sources(normalized, budget=budget)
-    from .deep_tool_contracts import attach_evidence_run_receipt
-    native_sources = [source for source in case["sources"] if source.get("native_resources_started")]
-    native_cleanup = all(source.get("native_resource_cleanup", {}).get("confirmed") is True and
-                         source.get("native_resource_cleanup", {}).get("offline_owner_retained") is False
-                         for source in native_sources)
-    def attach_receipt(value):
-        partial = value["coverage"].get("analysis_projection_completeness") == "PARTIAL"
-        result = attach_evidence_run_receipt(context, {**value, "status": "COMPLETED"},
-            sources=value["sources"], source_revalidated=True, execution_started=True,
-            coverage={"completeness": "INCOMPLETE_EVIDENCE" if partial else value["coverage"]["evidence_completeness"],
-                      "source_evidence_completeness": value["coverage"]["evidence_completeness"],
-                      "analysis_projection_completeness": "PARTIAL" if partial else "COMPLETE",
-                      "display_graph_complete": value["coverage"]["display_graph_complete"],
-                      "scope": "SOURCE_BOUND_ANALYSIS_NOT_ORIGINAL_CAPTURE_COMPLETENESS"},
-            cleanup={"status": "CONFIRMED" if native_cleanup else "NOT_COLLECTED", "confirmed": native_cleanup,
-                     "scope": "NORMALIZATION_SOURCE_READ_HANDLES_AND_OFFLINE_UNWIND" if native_sources else
-                              "NORMALIZATION_SOURCE_READ_HANDLES",
-                     "native_resources_started": bool(native_sources)})
-        result.pop("status")  # The actual operation status lives in its receipt.
-        return result
+    with budget.stage("DELAY"):
+        delay = analyze_delay({**case, "critical_path": critical}, budget=budget)
+    with budget.stage("HYPOTHESES"):
+        generated = hypotheses(case, budget=budget)
+    with budget.stage("ACTIONS"):
+        actions = advisor({**case, "hypotheses": generated}, target_identity=target_identity, budget=budget)
+    with budget.stage("FINAL_CASE"):
+        case.update(critical_path=critical, delay_investigation=delay, hypotheses=generated,
+                    actions=actions, issues=grouped["groups"] + grouped["candidates"], crash_investigation=crash)
+        case["coverage"]["issue_groups"] = len(grouped["groups"])
+        case["coverage"]["candidate_issues"] = len(grouped["candidates"])
+        case["coverage"]["issue_analysis_status"] = "COMPUTED"
+        revalidate_sources(normalized, budget=budget)
+        from .deep_tool_contracts import attach_evidence_run_receipt
+        native_sources = [source for source in case["sources"] if source.get("native_resources_started")]
+        native_cleanup = all(source.get("native_resource_cleanup", {}).get("confirmed") is True and
+                             source.get("native_resource_cleanup", {}).get("offline_owner_retained") is False
+                             for source in native_sources)
+        def attach_receipt(value):
+            partial = value["coverage"].get("analysis_projection_completeness") == "PARTIAL"
+            result = attach_evidence_run_receipt(context, {**value, "status": "COMPLETED"},
+                sources=value["sources"], source_revalidated=True, execution_started=True,
+                coverage={"completeness": "INCOMPLETE_EVIDENCE" if partial else value["coverage"]["evidence_completeness"],
+                          "source_evidence_completeness": value["coverage"]["evidence_completeness"],
+                          "analysis_projection_completeness": "PARTIAL" if partial else "COMPLETE",
+                          "display_graph_complete": value["coverage"]["display_graph_complete"],
+                          "scope": "SOURCE_BOUND_ANALYSIS_NOT_ORIGINAL_CAPTURE_COMPLETENESS"},
+                cleanup={"status": "CONFIRMED" if native_cleanup else "NOT_COLLECTED", "confirmed": native_cleanup,
+                         "scope": "NORMALIZATION_SOURCE_READ_HANDLES_AND_OFFLINE_UNWIND" if native_sources else
+                                  "NORMALIZATION_SOURCE_READ_HANDLES",
+                         "native_resources_started": bool(native_sources)})
+            result.pop("status")  # The actual operation status lives in its receipt.
+            return result
 
-    # These paths remain private and are never removed to disguise an oversized
-    # result. The aggregate limit includes required receipts and navigation.
-    case["_source_paths"] = dict(normalized.get("_source_paths", {}))
-    case = attach_receipt(case)
-    # Reserve the bounded private publication receipt before publication starts.
-    # Its path dominates its size; the remaining fixed schema is below 512 bytes.
-    publication_reserve = (len(canonical_json(str(Path(index_path).absolute())).encode("ascii")) + 512
-                           if index_path is not None else 0)
-    _bound_case_projections(case, budget, reserved_bytes=publication_reserve + 128)
-    # Nothing has been published yet: this replaces only an in-process draft
-    # receipt, preserving the same actual run context and completed execution.
-    case = attach_receipt(case)
-    if index_path is not None:
-        from .investigation_graph_store import save_investigation
-        receipt = save_investigation(case, index_path, budget=budget,
-                                    before_publish=lambda: revalidate_sources(normalized, budget=budget))
-        case["_index_receipt"] = receipt
-    return budget.result(case)
+        # These paths remain private and are never removed to disguise an oversized
+        # result. The aggregate limit includes required receipts and navigation.
+        case["_source_paths"] = dict(normalized.get("_source_paths", {}))
+        case = attach_receipt(case)
+        # Reserve the bounded private publication receipt before publication starts.
+        # Its path dominates its size; the remaining fixed schema is below 512 bytes.
+        publication_reserve = (len(canonical_json(str(Path(index_path).absolute())).encode("ascii")) + 512
+                               if index_path is not None else 0)
+        _bound_case_projections(case, budget, reserved_bytes=publication_reserve + 128)
+        # Nothing has been published yet: this replaces only an in-process draft
+        # receipt, preserving the same actual run context and completed execution.
+        case = attach_receipt(case)
+        if index_path is not None:
+            from .investigation_graph_store import save_investigation
+            receipt = save_investigation(case, index_path, budget=budget,
+                                        before_publish=lambda: revalidate_sources(normalized, budget=budget))
+            case["_index_receipt"] = receipt
+        return budget.result(case)
 
 
 def _case_bytes(value, budget):

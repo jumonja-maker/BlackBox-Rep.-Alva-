@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from contextlib import contextmanager
+from contextvars import ContextVar
 import hashlib
 import json
 import math
@@ -17,6 +19,11 @@ OBSERVATION_TYPES = frozenset({"PROCESS", "THREAD", "MODULE", "FUNCTION", "STACK
 HYPOTHESIS_STATUSES = frozenset({"CANDIDATE", "SUPPORTED_BY_OBSERVATION",
     "SUPPORTED_BY_CONTROLLED_EXPERIMENT", "CONTRADICTED", "INCONCLUSIVE", "USER_CONFIRMED"})
 SOURCE_TYPES = frozenset({"SESSION", "TRACE_INDEX", "DEEP_JOURNAL", "INVESTIGATION_V2", "EVENTS_JSONL", "DUMP_METADATA"})
+
+
+ANALYSIS_STAGES = frozenset({"NORMALIZE_SOURCES", "BUILD_GRAPH", "GROUP_ISSUES", "CRITICAL_PATH",
+                             "CRASH", "DELAY", "HYPOTHESES", "ACTIONS", "FINAL_CASE"})
+_ANALYSIS_STAGE = ContextVar("blackbox_investigation_analysis_stage", default=None)
 
 
 class InvestigationError(ValueError):
@@ -70,10 +77,33 @@ class InvestigationBudget:
         self.check()
         return False
 
+    @contextmanager
+    def stage(self, name):
+        """Attribute the failing call without sharing or persisting stage state."""
+        if type(name) is not str or name not in ANALYSIS_STAGES:
+            raise InvestigationError("INVALID_INVESTIGATION_ANALYSIS_STAGE")
+        token = _ANALYSIS_STAGE.set(name)
+        try:
+            yield
+        except Exception as error:
+            previous = getattr(error, "analysis_stage", None)
+            if type(previous) is not str or previous not in ANALYSIS_STAGES:
+                error.analysis_stage = name
+            raise  # Preserve the original exception, primary reason and traceback.
+        finally:
+            _ANALYSIS_STAGE.reset(token)
+
     def result(self, value):
         self.check()
-        if len(canonical_json(value).encode("ascii")) > self.max_result_bytes:
-            raise InvestigationError("INVESTIGATION_RESULT_BYTE_BUDGET")
+        actual_size = len(canonical_json(value).encode("ascii"))
+        if actual_size > self.max_result_bytes:
+            error = InvestigationError("INVESTIGATION_RESULT_BYTE_BUDGET")
+            error.actual_result_bytes = actual_size
+            error.result_byte_limit = self.max_result_bytes
+            stage = _ANALYSIS_STAGE.get()
+            if stage in ANALYSIS_STAGES:
+                error.analysis_stage = stage
+            raise error
         return value
 
 
