@@ -10,7 +10,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtTest import QSignalSpy, QTest
 from PySide6.QtWidgets import QApplication, QCheckBox, QPushButton, QScrollArea, QVBoxLayout, QWidget
 
-from blackbox_universal.chain_qa import _real_button_click
+from blackbox_universal.chain_qa import _assert_visible_hit_point, _ensure_visible_hit_point, _real_button_click
 
 
 class AcceptanceMouseGeometryTests(unittest.TestCase):
@@ -91,6 +91,42 @@ class AcceptanceMouseGeometryTests(unittest.TestCase):
         self.app.processEvents()
         _real_button_click(button)
         self.assertEqual(clicked.count(), 1)
+
+    def test_nested_scroll_hit_point_settles_again_after_outer_viewport_resize(self):
+        outer = QScrollArea()
+        outer.setFixedSize(620, 230)
+        outer_content = QWidget()
+        outer_content.resize(1300, 900)
+        inner = QScrollArea(outer_content)
+        inner.setGeometry(650, 500, 500, 230)
+        inner_content = QWidget()
+        inner_content.resize(900, 600)
+        button = QPushButton("Nested explicit action", inner_content)
+        button.setObjectName("nestedScrollAction")
+        button.setGeometry(700, 400, 160, 42)
+        inner.setWidget(inner_content)
+        outer.setWidget(outer_content)
+        self.layout.addWidget(outer)
+        self.window.show()
+        self.app.processEvents()
+        clicked = QSignalSpy(button.clicked)
+        with self.assertRaisesRegex(AssertionError, "R60_GUI_POINTER_OUTSIDE_VISIBLE_ANCESTOR"):
+            _real_button_click(button)
+        self.assertEqual(clicked.count(), 0)
+        _ensure_visible_hit_point(self.app, button)
+        _assert_visible_hit_point(button, button.rect().center())
+        _real_button_click(button)
+        self.assertEqual(clicked.count(), 1)
+        self.assertGreater(inner.horizontalScrollBar().value(), 0)
+        self.assertGreater(inner.verticalScrollBar().value(), 0)
+        self.assertGreater(outer.horizontalScrollBar().value(), 0)
+        self.assertGreater(outer.verticalScrollBar().value(), 0)
+        outer.setFixedSize(420, 130)
+        self.app.processEvents()
+        _ensure_visible_hit_point(self.app, button)
+        _assert_visible_hit_point(button, button.rect().center())
+        _real_button_click(button)
+        self.assertEqual(clicked.count(), 2)
 
 
 if __name__ == "__main__":

@@ -40,6 +40,50 @@ def _assert_visible_hit_point(widget, position):
         ancestor = ancestor.parentWidget()
 
 
+def _ensure_visible_hit_point(app, widget, point=None):
+    """Settle actual nested scroll geometry, retaining the final strict guard."""
+    from PySide6.QtWidgets import QScrollArea
+    # A point provider is useful when a scrollbar/layout change moves the
+    # style's indicator or an item inside a viewport. No input values change.
+    locate = point if callable(point) else lambda: point if point is not None else widget.rect().center()
+    failure = None
+    for _ in range(4):
+        ancestor = widget.parentWidget()
+        while ancestor is not None:
+            if isinstance(ancestor, QScrollArea) and ancestor.widget() is not None:
+                local = widget.mapTo(ancestor.widget(), locate())
+                ancestor.ensureVisible(local.x(), local.y(), 24, 24)
+                # Inner scrolling or outer scrollbar appearance can relayout
+                # a nested viewport. Re-map the next point after real events.
+                app.processEvents()
+            ancestor = ancestor.parentWidget()
+        app.processEvents()
+        try:
+            position = locate()
+            _assert_visible_hit_point(widget, position)
+            return position
+        except AssertionError as error:
+            failure = error
+    raise failure
+
+
+def _button_hit_point(widget):
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QCheckBox, QStyle, QStyleOptionButton
+    from blackbox_core.chain_qa import require
+    if not isinstance(widget, QCheckBox):
+        return widget.rect().center()
+    option = QStyleOptionButton()
+    option.initFrom(widget)
+    option.text, option.icon, option.iconSize = widget.text(), widget.icon(), widget.iconSize()
+    option.state |= (QStyle.StateFlag.State_NoChange if widget.checkState() == Qt.CheckState.PartiallyChecked else
+                     QStyle.StateFlag.State_On if widget.isChecked() else QStyle.StateFlag.State_Off)
+    indicator = widget.style().subElementRect(QStyle.SubElement.SE_CheckBoxIndicator, option, widget)
+    require(not indicator.isEmpty() and widget.rect().contains(indicator.center()),
+            "R60_GUI_CHECKBOX_INDICATOR_UNAVAILABLE_" + widget.objectName())
+    return indicator.center()
+
+
 def _real_button_click(widget):
     """Send a real pointer click to the style's interactive button area.
 
@@ -49,7 +93,7 @@ def _real_button_click(widget):
     """
     from PySide6.QtCore import Qt
     from PySide6.QtTest import QTest
-    from PySide6.QtWidgets import QCheckBox, QStyle, QStyleOptionButton
+    from PySide6.QtWidgets import QCheckBox
     from blackbox_core.chain_qa import require
     control = {"object_name": widget.objectName()[:128], "class": type(widget).__name__[:64],
                "rect": list(widget.rect().getRect()), "geometry": list(widget.geometry().getRect()),
@@ -57,18 +101,8 @@ def _real_button_click(widget):
     _gui_phase("CLICK_BEGIN", **control)
     require(widget.isEnabled() and widget.isVisible(), "R60_GUI_CONTROL_UNAVAILABLE_" + widget.objectName())
     checkbox = isinstance(widget, QCheckBox)
-    position = widget.rect().center()
+    position = _button_hit_point(widget)
     before = widget.checkState() if checkbox else None
-    if checkbox:
-        option = QStyleOptionButton()
-        option.initFrom(widget)
-        option.text, option.icon, option.iconSize = widget.text(), widget.icon(), widget.iconSize()
-        option.state |= (QStyle.StateFlag.State_NoChange if before == Qt.CheckState.PartiallyChecked else
-                         QStyle.StateFlag.State_On if widget.isChecked() else QStyle.StateFlag.State_Off)
-        indicator = widget.style().subElementRect(QStyle.SubElement.SE_CheckBoxIndicator, option, widget)
-        require(not indicator.isEmpty() and widget.rect().contains(indicator.center()),
-                "R60_GUI_CHECKBOX_INDICATOR_UNAVAILABLE_" + widget.objectName())
-        position = indicator.center()
     _gui_phase("CLICK_HIT_POINT", object_name=control["object_name"],
                position=[position.x(), position.y()], checkbox=checkbox)
     _assert_visible_hit_point(widget, position)
@@ -141,17 +175,12 @@ def run_chain_gui(app, window, output, evidence_root, source_sha, *, failure_gua
         pump_until(lambda: not panel.bridge.busy, "R60_EDITOR_WORKER_TIMEOUT", seconds)
 
     def visible(widget):
-        ancestor = widget.parentWidget()
-        while ancestor is not None:
-            if isinstance(ancestor, QScrollArea):
-                ancestor.ensureWidgetVisible(widget)
-            ancestor = ancestor.parentWidget()
-        app.processEvents()
+        _ensure_visible_hit_point(app, widget)
 
     def click(widget):
         _gui_phase("CLICK_ENSURE_VISIBLE_BEGIN", object_name=widget.objectName()[:128],
                    class_name=type(widget).__name__[:64])
-        visible(widget)
+        _ensure_visible_hit_point(app, widget, lambda: _button_hit_point(widget))
         _real_button_click(widget)
 
     def type_value(widget, value):
@@ -184,8 +213,8 @@ def run_chain_gui(app, window, output, evidence_root, source_sha, *, failure_gua
                      if panel.palette.item(i).data(Qt.ItemDataRole.UserRole) == tool), None)
         require(item is not None, "R60_EDITOR_TOOL_MISSING_" + tool)
         panel.palette.scrollToItem(item)
-        visible(panel.palette)
-        point = panel.palette.visualItemRect(item).center()
+        point = _ensure_visible_hit_point(app, panel.palette.viewport(),
+                                        lambda: panel.palette.visualItemRect(item).center())
         _assert_visible_hit_point(panel.palette.viewport(), point)
         QTest.mouseClick(panel.palette.viewport(), Qt.MouseButton.LeftButton,
                          pos=point)
@@ -411,7 +440,11 @@ def run_chain_gui(app, window, output, evidence_root, source_sha, *, failure_gua
         panel.canvas.resetTransform()
         panel.canvas.centerOn(item)
         app.processEvents()
-        point = panel.canvas.mapFromScene(item.scenePos() + QPointF(90, 18))
+        def drag_origin():
+            return panel.canvas.mapFromScene(item.scenePos() + QPointF(90, 18))
+        _ensure_visible_hit_point(app, panel.canvas.viewport(), drag_origin)
+        _ensure_visible_hit_point(app, panel.canvas.viewport(), lambda: drag_origin() + QPoint(35, 20))
+        point = drag_origin()
         _assert_visible_hit_point(panel.canvas.viewport(), point)
         _assert_visible_hit_point(panel.canvas.viewport(), point + QPoint(35, 20))
         before = item.pos()
