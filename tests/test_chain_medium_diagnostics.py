@@ -213,6 +213,29 @@ class MediumDiagnosticsTests(unittest.TestCase):
         target.assert_not_called()
         service.assert_not_called()
 
+    def test_native_query_failure_counters_survive_before_strict_gate_and_safe_projection(self):
+        from blackbox_core.chain_qa import standard_live_graph
+        evidence = {}
+        failure = AssertionError("CONTROLLED_QUERY_FAILURE_WITH_NUMERIC_BOUNDARY_FACTS")
+        failure.token_query_diagnostic = {"information_class": 20, "stage": "SCALAR", "return_bool": False,
+            "get_last_error": 12345, "returned_bytes": 0, "capacity": 4,
+            "exception_value": "CONTROLLED_PRIVATE_VALUE_NOT_FOR_LOGS"}
+        with patch("blackbox_core.chain_qa_native.actual_token", return_value={"elevated": True, "elevation_type": 1}), \
+                patch("blackbox_core.chain_qa_native.actual_current_token_facts", side_effect=failure), \
+                patch("blackbox_core.windows_research.privilege", return_value={"mode": "STANDARD", "windows": True}), \
+                patch("blackbox_core.chain_qa_native.OwnedWaveProbe") as target:
+            with self.assertRaises(AssertionError) as caught:
+                standard_live_graph(self.root, self.path, self.sha, token_evidence=evidence)
+        self.assertIs(caught.exception, failure)
+        self.assertEqual(evidence["status"], "COLLECTING")
+        projected = qa._standard_token_precondition(evidence, evidence["pid"])
+        self.assertEqual(projected["token_query_error_type"], "AssertionError")
+        self.assertEqual(projected["token_query_diagnostic"]["get_last_error"], 12345)
+        self.assertEqual(projected["token_query_diagnostic"]["capacity"], 4)
+        self.assertEqual(projected["current_token_facts"]["status"], "NOT_BOUND_OR_NOT_COLLECTED")
+        self.assertNotIn("CONTROLLED_PRIVATE", json.dumps(projected))
+        target.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

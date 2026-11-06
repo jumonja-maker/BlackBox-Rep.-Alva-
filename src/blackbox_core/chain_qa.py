@@ -607,7 +607,14 @@ def standard_live_graph(output, executable, source_sha, diagnostic_helper=None, 
         evidence["own_token"] = own_token
         own_privilege = privilege()
         evidence["privilege"] = own_privilege
-        evidence["current_token_facts"] = actual_current_token_facts()
+        try:
+            evidence["current_token_facts"] = actual_current_token_facts()
+        except BaseException as error:
+            evidence["token_query_error_type"] = type(error).__name__[:64]
+            diagnostic = getattr(error, "token_query_diagnostic", None)
+            if type(diagnostic) is dict:
+                evidence["token_query_diagnostic"] = dict(diagnostic)
+            raise
         evidence["status"] = "OBSERVED"
         evidence["gate_conditions"] = {"privilege_standard": own_privilege == {"mode": "STANDARD", "windows": True},
                                        "raw_token_elevation_false": own_token["elevated"] is False}

@@ -100,6 +100,14 @@ def _standard_token_precondition(value, pid):
         "privilege": {"mode": mode.get("mode") if mode.get("mode") in ("STANDARD", "ADMINISTRATOR") else None,
                       **scalars(mode, ("windows",))},
         "gate_conditions": scalars(value.get("gate_conditions"), ("privilege_standard", "raw_token_elevation_false"))}
+    error_type = value.get("token_query_error_type")
+    result["token_query_error_type"] = (error_type if type(error_type) is str and
+        re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,63}", error_type) else None)
+    diagnostic = value.get("token_query_diagnostic")
+    if type(diagnostic) is dict:
+        result["token_query_diagnostic"] = {**scalars(diagnostic,
+            ("information_class", "return_bool", "get_last_error", "returned_bytes", "capacity")),
+            "stage": diagnostic.get("stage") if diagnostic.get("stage") in ("SCALAR", "SIZE", "QUERY") else None}
     facts = value.get("current_token_facts", {})
     if (type(facts) is not dict or facts.get("schema") != "blackbox.r60.current-token-facts/1" or
             facts.get("pid") != pid):

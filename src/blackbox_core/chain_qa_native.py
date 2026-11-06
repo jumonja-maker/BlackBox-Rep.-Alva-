@@ -243,22 +243,46 @@ def actual_current_token_facts():
         restricted_api.argtypes, restricted_api.restype = [handle], i32
     token, primary = handle(), None
 
+    def checked_query(valid, reason, *, kind, stage, returned, error, needed, capacity):
+        if not valid:
+            failure = AssertionError(reason + ":" + str(kind) + ":stage=" + stage +
+                ":return=" + str(int(bool(returned))) + ":error=" + str(error) +
+                ":needed=" + str(needed) + ":capacity=" + str(capacity))
+            failure.token_query_diagnostic = {"information_class": kind, "stage": stage,
+                "return_bool": bool(returned), "get_last_error": error,
+                "returned_bytes": needed, "capacity": capacity}
+            raise failure
+
     def information(kind, minimum=4):
         needed = u32()
         C.set_last_error(0)
         first = adv.GetTokenInformation(token, kind, None, 0, C.byref(needed))
-        require(not first and C.get_last_error() == 122 and minimum <= needed.value <= 65536,
-                "R60_TOKEN_FACTS_INFORMATION_SIZE:" + str(kind))
+        error = C.get_last_error()
+        checked_query(not first and error == 122 and minimum <= needed.value <= 65536,
+            "R60_TOKEN_FACTS_INFORMATION_SIZE", kind=kind, stage="SIZE", returned=first,
+            error=error, needed=needed.value, capacity=0)
         capacity = needed.value
         buffer = C.create_string_buffer(capacity)
-        require(adv.GetTokenInformation(token, kind, buffer, capacity, C.byref(needed)) and
-                minimum <= needed.value <= capacity, "R60_TOKEN_FACTS_INFORMATION_QUERY:" + str(kind))
+        C.set_last_error(0)
+        returned = adv.GetTokenInformation(token, kind, buffer, capacity, C.byref(needed))
+        error = C.get_last_error()
+        checked_query(returned and minimum <= needed.value <= capacity,
+            "R60_TOKEN_FACTS_INFORMATION_QUERY", kind=kind, stage="QUERY", returned=returned,
+            error=error, needed=needed.value, capacity=capacity)
         return buffer, needed.value
 
     def scalar(kind):
-        buffer, used = information(kind)
-        require(used == 4, "R60_TOKEN_FACTS_SCALAR_SIZE:" + str(kind))
-        return u32.from_buffer(buffer).value
+        # Fixed DWORD classes use the same direct four-byte boundary as the
+        # existing independent actual_token query. Variable-size buffer probing
+        # is unnecessary here and its result cannot stand in for this read.
+        value, needed = u32(), u32()
+        C.set_last_error(0)
+        returned = adv.GetTokenInformation(token, kind, C.byref(value), C.sizeof(value), C.byref(needed))
+        error = C.get_last_error()
+        checked_query(returned and needed.value == C.sizeof(value),
+            "R60_TOKEN_FACTS_SCALAR_QUERY", kind=kind, stage="SCALAR", returned=returned,
+            error=error, needed=needed.value, capacity=C.sizeof(value))
+        return value.value
 
     def sid_bytes(pointer, buffer, used):
         start, end = C.addressof(buffer), C.addressof(buffer) + used

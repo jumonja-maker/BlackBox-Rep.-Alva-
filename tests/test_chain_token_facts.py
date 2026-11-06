@@ -15,6 +15,7 @@ class CurrentTokenFactsTests(unittest.TestCase):
         self.kernel.CloseHandle.return_value = True
         self.last_error = 0
         self.malformed = None
+        self.query_failure = None
         self.elevation = 1
         self.stack = ExitStack()
         self.addCleanup(self.stack.close)
@@ -50,13 +51,20 @@ class CurrentTokenFactsTests(unittest.TestCase):
     def information(self, _token, kind, buffer, _capacity, returned):
         sizes = {20: 4, 18: 4, 21: 4, 25: 32, 2: 48, 3: 16}
         C.cast(returned, C.POINTER(C.c_uint32)).contents.value = sizes[kind]
+        stage = "SIZE" if buffer is None else "SCALAR" if kind in (20, 18, 21) else "QUERY"
+        if self.query_failure == (kind, stage):
+            C.cast(returned, C.POINTER(C.c_uint32)).contents.value = 7
+            self.last_error = 5
+            return False
         if buffer is None:
             self.last_error = 122
             return False
-        address = C.addressof(buffer)
         if kind in (20, 18, 21):
-            C.c_uint32.from_buffer(buffer).value = {20: self.elevation, 18: 2, 21: 1}[kind]
-        elif kind == 25:
+            self.assertEqual(_capacity, 4)
+            C.cast(buffer, C.POINTER(C.c_uint32)).contents.value = {20: self.elevation, 18: 2, 21: 1}[kind]
+            return True
+        address = C.addressof(buffer)
+        if kind == 25:
             C.c_void_p.from_buffer(buffer).value = 1 if self.malformed == "sid_pointer" else address + 16
             C.c_uint32.from_buffer(buffer, 8).value = 0x60
             sid = b"\x01\x01\0\0\0\0\0\x10" + (8192).to_bytes(4, "little")
@@ -96,10 +104,27 @@ class CurrentTokenFactsTests(unittest.TestCase):
         self.assertEqual(token["has_restrictions_raw"], 1)
         self.assertFalse(token["is_token_restricted"]["value"])
         self.assertTrue(facts["cleanup"]["confirmed"])
-        self.assertNotIn("777", json.dumps(facts))
+        self.assertNotIn('"handle":', json.dumps(facts))
+        self.assertNotIn('"token_handle":', json.dumps(facts))
         self.assertNotIn("S-1-5-21-", json.dumps(facts))
         self.assertEqual(self.kernel.CloseHandle.call_count, 1)
         self.assertEqual(self.kernel.CloseHandle.call_args.args[0].value, 777)
+        scalar_calls = [call for call in self.adv.GetTokenInformation.call_args_list if call.args[1] in (20, 18, 21)]
+        self.assertEqual(len(scalar_calls), 3)
+        self.assertTrue(all(call.args[2] is not None and call.args[3] == 4 for call in scalar_calls))
+
+    def test_actual_query_return_error_length_and_capacity_survive_each_failed_stage(self):
+        for kind, stage, capacity in ((20, "SCALAR", 4), (25, "SIZE", 0), (25, "QUERY", 32)):
+            with self.subTest(kind=kind, stage=stage):
+                self.query_failure = (kind, stage)
+                self.kernel.CloseHandle.reset_mock()
+                with self.assertRaises(AssertionError) as caught:
+                    native.actual_current_token_facts()
+                self.assertEqual(caught.exception.token_query_diagnostic, {
+                    "information_class": kind, "stage": stage, "return_bool": False,
+                    "get_last_error": 5, "returned_bytes": 7, "capacity": capacity})
+                self.assertIn(":return=0:error=5:needed=7:capacity=" + str(capacity), str(caught.exception))
+                self.kernel.CloseHandle.assert_called_once()
 
     def test_malformed_native_sid_and_group_ranges_fail_before_unsafe_read(self):
         for malformed, reason in (("sid_pointer", "SID_POINTER_BOUNDS"), ("group_array", "GROUP_ARRAY_BOUNDS")):
