@@ -31,6 +31,7 @@ PR_FILES = {
     "docs/RELEASE_v0.6.0.md": "added",
     "pyproject.toml": "modified",
     "tests/test_release_v060_authorization.py": "added",
+    "tests/test_review_release_20261028.py": "modified",
     "tools/publish_v060_after_ci.py": "added",
     "tools/release_gate.py": "modified",
 }
