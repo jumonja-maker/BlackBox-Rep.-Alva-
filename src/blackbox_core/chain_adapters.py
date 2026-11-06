@@ -528,7 +528,12 @@ def _export_report(ctx, inputs, parameters):
     source = inputs["case"]
     format_name = parameters.get("format", "json")
     path = _output(ctx, "report").with_suffix("." + format_name)
-    if source.kind == "COMPARISON" and source.value.get("mode") == "RESEARCH_SESSION":
+    plain_analysis = source.kind == "REPORT" and not source.value.get("_case_path")
+    if plain_analysis:
+        from .chain_reports import export_analysis_report
+        answer = export_analysis_report(source, path, format=format_name, cancel=ctx.cancel,
+                                        deadline=ctx.deadline, owner_run_id=ctx.run_id)
+    elif source.kind == "COMPARISON" and source.value.get("mode") == "RESEARCH_SESSION":
         from .casebook import export_comparison
         answer = export_comparison(source.value["_before_path"], source.value["_after_path"], path,
                                    format=format_name, cancel=ctx.cancel.is_set)
@@ -547,7 +552,13 @@ def _export_report(ctx, inputs, parameters):
             "readback_verified": answer.get("readback_verified"), "upstream_artifacts": _links((source,))},
             sources=source.sources, coverage=source.coverage, clocks=source.clock_domains)
         return {"report": artifact}
-    return _materialize_result(answer, outputs)
+    outcome = _materialize_result(answer, outputs)
+    if plain_analysis:
+        # The enclosing workflow wrapper records this actual publication. The
+        # saved analysis status remains unchanged inside the exported document.
+        outcome.execution_started = True
+        outcome.cleanup = dict(answer["cleanup"])
+    return outcome
 
 
 def _snapshot_journal(ctx, owner, answer):

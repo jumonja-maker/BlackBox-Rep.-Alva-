@@ -194,3 +194,165 @@ def actual_token(pid):
         raise
     finally:
         _close_token_handles(kernel, (("token", token), ("process", process)), primary)
+
+
+def native_checkpoint_graph(output, executable, source_sha, diagnostic_helper=None):
+    """Actual same-helper debug attach/checkpoint/restore/detach acceptance."""
+    from copy import deepcopy
+    from .chain_qa import definition, independent_journal, actual_invocations, link, source_proof
+    from .chain_adapters import ChainRuntime, build_catalog
+    from .chain_engine import WorkflowEngine
+    from .chain_store import WorkflowRunStore
+    from .deep_native import capture_identity_checked
+    from .deep_service import InspectorService
+    require_hosted_windows()
+    identity_proof = source_proof(source_sha)
+    output = Path(output).resolve()
+    output.mkdir(parents=True, exist_ok=False)
+    fixture = service = engine = None
+    proof = {"schema": "blackbox.r60.native-checkpoint-qa/1", "status": "FAIL",
+             "source_sha": source_sha, "source_identity": identity_proof,
+             "physical_windows_10_11": "NOT_TESTED", "physical_secure_desktop": "NOT_TESTED"}
+    approvals, launches, close_proofs = [], [], []
+    helper_identity = None
+    primary = None
+    kernel = C.WinDLL("kernel32", use_last_error=True, winmode=0x800)
+    kernel.GetHandleInformation.argtypes = [W.HANDLE, C.POINTER(W.DWORD)]
+    kernel.GetHandleInformation.restype = W.BOOL
+    def observed_close(label, original, capability):
+        flags = W.DWORD()
+        require(capability is not None and kernel.GetHandleInformation(capability, C.byref(flags)),
+                "R60_CHECKPOINT_OWNED_HANDLE_NOT_OBSERVED_OPEN")
+        answer = original()
+        C.set_last_error(0)
+        closed = not kernel.GetHandleInformation(capability, C.byref(flags)) and C.get_last_error() == 6
+        require(closed, "R60_CHECKPOINT_PRODUCT_CLOSE_ACK_NOT_OBSERVED")
+        close_proofs.append({"resource": label, "opened_before": True, "invalid_handle_after": True,
+                             "post_close_winerror": 6})
+        return answer
+    try:
+        fixture = OwnedWaveProbe(Path(executable), output / "target")
+        service = InspectorService(output / "native-journal", helper_executable=diagnostic_helper)
+        launch = service.broker.launch
+        def counted_launch(arguments, *, elevated=False):
+            owner = launch(arguments, elevated=elevated)
+            launches.append({"pid": owner.pid, "elevated": elevated})
+            close = owner.close_handle
+            def checked_close():
+                capability = owner.handle if owner.handle is not None else int(owner.process._handle)
+                return observed_close("helper_process", close, capability)
+            owner.close_handle = checked_close
+            return owner
+        service.broker.launch = counted_launch
+        start = service._start_session
+        def checked_start(*args, **kwargs):
+            answer = start(*args, **kwargs)
+            if answer.get("status") == "COMPLETED":
+                channel = service._channel
+                close = channel.close
+                channel.close = lambda: observed_close("pipe", close, channel.handle)
+            return answer
+        service._start_session = checked_start
+        def approve(operation, parameters, target, ctx):
+            require(operation in ("debug.attach", "debug.detach") and
+                    target["pid"] == fixture.ready["pid"] and
+                    target["created_100ns"] == fixture.ready["created_100ns"],
+                    "R60_CHECKPOINT_FRESH_CONSENT_WRONG_SCOPE")
+            ctx.check()
+            require(capture_identity_checked(target["pid"], owner_run_id=ctx.run_id).to_dict() == target,
+                    "R60_CHECKPOINT_TARGET_IDENTITY_CHANGED")
+            if operation == "debug.detach":
+                require(service.session_status()["helper_identity"] == helper_identity and len(launches) == 1,
+                        "R60_CHECKPOINT_HELPER_REPLACED_BEFORE_FRESH_DETACH")
+            approvals.append({"operation": operation, "node_run_id": ctx.node_run_id,
+                "target": target, "fresh_monotonic_ns": time.monotonic_ns()})
+            return True
+        runtime = ChainRuntime(inspector=service, authorize=approve)
+        workflow = definition([
+            {"node_id": "target", "tool_id": "process_select", "budget_seconds": 10,
+             "parameters": {"pid": fixture.process.pid}},
+            {"node_id": "attach", "tool_id": "deep.debug.attach", "budget_seconds": 30},
+            {"node_id": "checkpoint", "kind": "CHECKPOINT", "budget_seconds": 1},
+            {"node_id": "detach", "tool_id": "deep.debug.detach", "budget_seconds": 30}], [
+                link("target", "process", "attach", "process"),
+                link("attach", "receipt", "checkpoint", "after"),
+                link("target", "process", "detach", "process"),
+                link("checkpoint", "continue", "detach", "when")],
+            identity="native-checkpoint", seconds=180, allow_effectful=True)
+        store = WorkflowRunStore.create(output / "runs", workflow)
+        engine = WorkflowEngine(workflow, catalog=build_catalog(runtime), store=store, runtime=runtime)
+        paused = engine.run()
+        require(paused["state"] == "WAITING_FOR_HUMAN" and len(approvals) == len(launches) == 1,
+                "R60_CHECKPOINT_REAL_ATTACH_DID_NOT_PAUSE")
+        preserved = deepcopy(next(row for row in paused["nodes"] if row["node_id"] == "attach"))
+        require(preserved["run_receipt"]["operation"] == "debug.attach" and
+                preserved["run_receipt"]["execution_started"] is True and
+                preserved["run_receipt"]["cleanup"]["status"] == "RETAINED" and
+                preserved["run_receipt"]["cleanup"]["confirmed"] is False,
+                "R60_CHECKPOINT_ACTUAL_ATTACHED_OWNER_REQUIRED")
+        helper_identity = service.session_status()["helper_identity"]
+        require(helper_identity is not None and service._native_owner_matches(store.run_id, runtime.native_context_ref),
+                "R60_CHECKPOINT_ACTUAL_SAME_OWNER_REFERENCE_REQUIRED")
+        new_runtime = ChainRuntime(inspector=service, authorize=approve,
+            owned_session_run_id=runtime.owned_session_run_id, native_context_ref=deepcopy(runtime.native_context_ref))
+        restored = WorkflowEngine.restore(WorkflowRunStore.open(store.folder),
+                                         catalog=build_catalog(new_runtime), runtime=new_runtime)
+        require(restored is engine and restored.runtime is runtime,
+                "R60_CHECKPOINT_DID_NOT_REUSE_ORIGINAL_LIVE_EXECUTOR")
+        complete = restored.resume()
+        require(complete["state"] == "COMPLETED" and complete["cleanup"]["confirmed"] is True and
+                [row["operation"] for row in approvals] == ["debug.attach", "debug.detach"] and len(launches) == 1 and
+                next(row for row in complete["nodes"] if row["node_id"] == "attach") == preserved,
+                "R60_CHECKPOINT_RESUME_REPLAYED_OR_LOST_ACTUAL_ACTION")
+        require(service.helper is None and service._channel is None and runtime.native_context_ref is None and
+                {row["resource"] for row in close_proofs} == {"pipe", "helper_process"},
+                "R60_CHECKPOINT_ACTUAL_PRODUCT_OWNER_NOT_CLOSED")
+        records, journal = independent_journal(store.folder)
+        attached, detached = actual_invocations(records, "debug.attach"), actual_invocations(records, "debug.detach")
+        require(len(attached) == len(detached) == 1 and detached[0][1]["execution_started"] is True,
+                "R60_CHECKPOINT_ACTUAL_ACTION_RECEIPTS_NOT_PRESERVED")
+        closes = [row for row in service.journal.timeline() if row.get("source") == "DIAGNOSTIC_SESSION_CLEANUP"]
+        require(len(closes) == 1 and closes[0]["status"] == "COMPLETED" and
+                closes[0]["data"]["debug_cleanup"]["native_owner_cleanup"]["confirmed"] is True and
+                closes[0]["data"]["debug_cleanup"]["native_owner_cleanup"]["worker_exit_confirmed"] is True,
+                "R60_CHECKPOINT_NATIVE_DEBUG_WORKER_CLOSE_NOT_ACKNOWLEDGED")
+        proof.update(status="PASS", graph_state=complete["state"], journal=journal, approvals=approvals,
+            launches=launches, same_helper_identity=helper_identity, original_live_executor_reused=True,
+            attach_replay_count=0, attach_receipt_unchanged=True, helper_debug_worker_exit_acknowledged=True,
+            product_handle_close_observations=close_proofs, cleanup=complete["cleanup"])
+    except BaseException as error:
+        primary = error
+        proof.update(status="FAIL", error=type(error).__name__, reason=str(error)[:1200])
+        raise
+    finally:
+        cleanup_errors = []
+        if engine is not None and engine.snapshot()["cleanup"].get("confirmed") is not True:
+            try:
+                engine.request_cancel()
+                engine.resume()
+            except BaseException as error:
+                cleanup_errors.append("WORKFLOW:" + str(error)[:180])
+        if service is not None:
+            try:
+                answer = service.close()
+                require(answer.get("status") == "COMPLETED" and service.helper is None and service._channel is None,
+                        "R60_CHECKPOINT_PRODUCT_CLEANUP_UNCONFIRMED")
+            except BaseException as error:
+                cleanup_errors.append("PRODUCT_OWNER:" + str(error)[:180])
+        if fixture is not None:
+            try:
+                cleanup = fixture.close(kill=proof["status"] != "PASS")
+                require(cleanup.get("status") == "COMPLETED", "R60_CHECKPOINT_TARGET_CLEANUP_UNCONFIRMED")
+                proof["target_cleanup"] = cleanup
+            except BaseException as error:
+                cleanup_errors.append("TARGET_OWNER:" + str(error)[:180])
+        if cleanup_errors:
+            proof.update(status="FAIL", cleanup_errors=cleanup_errors)
+        save(output / "result.json", proof)
+        print("R60_NATIVE_CHECKPOINT_OUTCOME " + json.dumps(proof, sort_keys=True, ensure_ascii=True), flush=True)
+        if cleanup_errors:
+            if primary is not None:
+                primary.add_note("R60_CHECKPOINT_CLEANUP_UNCONFIRMED: " + ";".join(cleanup_errors))
+            else:
+                raise AssertionError("R60_CHECKPOINT_CLEANUP_UNCONFIRMED: " + ";".join(cleanup_errors))
+    return proof

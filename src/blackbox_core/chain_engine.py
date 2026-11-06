@@ -89,6 +89,29 @@ class _Workers:
 _LEASE_LOCK = threading.RLock()
 _LEASES = {}  # exact run owner, active invocation, retained state; never persisted authority
 _RETAINED_WORKERS = {}
+_PAUSED_OWNERS = {}  # original live executors only; never reconstructed authority
+_MAX_PAUSED_OWNERS = 64
+
+
+def _same_executor(first, second):
+    if first is second:
+        return True
+    return (callable(first) and callable(second) and
+            getattr(first, "__self__", None) is not None and
+            getattr(first, "__self__", None) is getattr(second, "__self__", None) and
+            getattr(first, "__func__", None) is getattr(second, "__func__", None))
+
+
+def _same_runtime_owner(first, second):
+    if first is second:
+        return True
+    if first is None or second is None:
+        return False
+    if not any(getattr(first, key, None) is not None for key in
+               ("inspector", "native_call", "session_finalize", "finish_run")):
+        return False
+    return all(_same_executor(getattr(first, key, None), getattr(second, key, None))
+               for key in ("inspector", "native_call", "session_finalize", "finish_run"))
 
 
 @dataclass
@@ -185,6 +208,27 @@ class WorkflowEngine:
             # This is the same still-live runtime capability, not adoption of
             # an owner reconstructed from a saved reference. Opening stays passive.
             return owner
+        with _LEASE_LOCK:
+            paused = _PAUSED_OWNERS.get(store.run_id)
+            if paused is not None:
+                owner, expected_leases = paused
+                require(Path(owner.store.folder) == Path(store.folder) and
+                        owner.definition.fingerprint == store.definition.fingerprint,
+                        "WORKFLOW_LIVE_OWNER_HISTORY_MISMATCH")
+                actual = {key: dict(value) for key, value in _LEASES.items()
+                          if value["run_id"] == store.run_id}
+                require(actual == expected_leases and not owner._driving,
+                        "WORKFLOW_PAUSED_NATIVE_OWNER_CHANGED")
+                require(_same_runtime_owner(owner.runtime, runtime), "WORKFLOW_LIVE_OWNER_RUNTIME_MISMATCH")
+                require(all(node.tool_id in catalog and
+                        catalog[node.tool_id].to_dict() == owner.catalog[node.tool_id].to_dict()
+                        for node in owner.definition.nodes if node.kind in ("TOOL", "REPEAT")),
+                        "WORKFLOW_LIVE_OWNER_CATALOG_MISMATCH")
+                # Reuse the original service/callback capabilities already in
+                # this process. A receipt or copied runtime reference cannot
+                # enter this registry. Explicit resume still revalidates sources
+                # and every R10 action obtains fresh consent and native checks.
+                return owner
         engine = cls(store.definition, catalog=catalog, store=store, runtime=runtime)
         saved = store.load_state()
         engine._state = saved.get("state", "QUEUED")
@@ -239,6 +283,38 @@ class WorkflowEngine:
 
     def request_pause(self):
         self._pause.set()
+
+    def _retain_paused_owner(self):
+        with _LEASE_LOCK:
+            leases = {key: dict(value) for key, value in _LEASES.items()
+                      if value["run_id"] == self.store.run_id}
+            if not any(not value["active"] and value["status"] == "RETAINED" for value in leases.values()):
+                return
+            require(all(not value["active"] for value in leases.values()), "WORKFLOW_PAUSED_OWNER_STILL_ACTIVE")
+            require(self.store.run_id in _PAUSED_OWNERS or len(_PAUSED_OWNERS) < _MAX_PAUSED_OWNERS,
+                    "WORKFLOW_PAUSED_OWNER_BUDGET")
+            _PAUSED_OWNERS[self.store.run_id] = (self, leases)
+
+    def _forget_paused_owner(self):
+        with _LEASE_LOCK:
+            previous = _PAUSED_OWNERS.get(self.store.run_id)
+            if previous is not None and previous[0] is self:
+                del _PAUSED_OWNERS[self.store.run_id]
+
+    def _refresh_paused_owner(self):
+        with _LEASE_LOCK:
+            previous = _PAUSED_OWNERS.get(self.store.run_id)
+            if previous is None or previous[0] is not self:
+                return
+            leases = {key: dict(value) for key, value in _LEASES.items()
+                      if value["run_id"] == self.store.run_id}
+            if not leases and self._cleanup.get("confirmed") is True:
+                del _PAUSED_OWNERS[self.store.run_id]
+            else:
+                # A failed resume/cleanup must keep the same live executor
+                # reachable for cleanup-only cancellation, even after all its
+                # worker invocations returned. This does not grant a retry.
+                _PAUSED_OWNERS[self.store.run_id] = (self, leases)
 
     def snapshot(self):
         with self._lock:
@@ -510,7 +586,10 @@ class WorkflowEngine:
             receipt=receipt, context=getattr(error, "run_context", None),
             descriptor=getattr(error, "tool_descriptor", None), cleanup=cleanup,
             execution_started=(receipt or {}).get("execution_started") if ctx.component_dispatch_started else False,
-            reason_code=getattr(error, "code", type(error).__name__))
+            # Existing components also raise ValueError subclasses carrying
+            # an actual receipt but no .code. Keep their bounded primary reason
+            # instead of replacing the only failure evidence with a class name.
+            reason_code=str(getattr(error, "code", None) or str(error) or type(error).__name__)[:256])
 
     def _control(self, node, inputs, partial, deadline):
         if node.kind == "CHECKPOINT":
@@ -860,6 +939,7 @@ class WorkflowEngine:
                 self._cleanup = {"confirmed": False, "status": "RETAINED_AT_CHECKPOINT",
                     "scope": "PAUSED_RUN_REQUIRES_EXPLICIT_RESUME_OR_CANCEL"}
                 self._run_state("WAITING_FOR_HUMAN")
+                self._retain_paused_owner()
                 return self._return_snapshot()
             for node in self.definition.nodes:
                 if self._records[node.node_id]["state"] == "QUEUED":
@@ -934,3 +1014,4 @@ class WorkflowEngine:
                         returned.update(self.snapshot())
             with self._lock:
                 self._driving = False
+            self._refresh_paused_owner()

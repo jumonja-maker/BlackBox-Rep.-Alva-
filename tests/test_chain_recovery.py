@@ -7,6 +7,8 @@ from pathlib import Path
 import sqlite3
 import tempfile
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from blackbox_core.chain_contracts import PortSpec, WorkflowDefinition, WorkflowError
 from blackbox_core.chain_engine import WorkflowEngine
@@ -19,6 +21,79 @@ class RecoveryTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
+
+    def paused_owner_fixture(self):
+        """A live in-process owner fixture, never a Windows acceptance claim."""
+        calls, finalized = [], []
+        service = object()
+        def execute(ctx, inputs, parameters):
+            calls.append(ctx.node_id)
+            answer = outcome(ctx)
+            retained = {"confirmed": False, "status": "RETAINED",
+                "scope": "IN_PROCESS_OWNER_FIXTURE", "evidence": {"ownership_known": True}}
+            answer.cleanup = deepcopy(retained)
+            answer.receipt["cleanup"] = deepcopy(retained)
+            return answer
+        def finish(ctx):
+            finalized.append(ctx.run_id)
+            return {"status": "COMPLETED", "cleanup": {"confirmed": True,
+                "status": "CONFIRMED", "scope": "CHAIN_OWNED_NATIVE_CONTEXT",
+                "evidence": {"fixture": "NO_NATIVE_EFFECTS_OR_OS_ACCEPTANCE"}}}
+        definition = workflow([{"node_id": "owned", "tool_id": "owned"},
+            {"node_id": "checkpoint", "kind": "CHECKPOINT", "budget_seconds": 1},
+            {"node_id": "after", "tool_id": "consume"}], [
+                edge("owned", "checkpoint", port="receipt", target="after"),
+                edge("owned", "after"), edge("checkpoint", "after", port="continue", target="when")])
+        resource = ("EXISTING_DEEP_INSPECTOR_OWNER",)
+        catalog = {"owned": adapter("owned", execute, resources=resource),
+            "consume": adapter("consume", execute, resources=resource, inputs={"input": PortSpec(("REPORT",))})}
+        runtime = SimpleNamespace(inspector=service, finish_run=finish)
+        store = WorkflowRunStore.create(self.root / "runs", definition)
+        engine = WorkflowEngine(definition, catalog=catalog, store=store, runtime=runtime)
+        paused = engine.run()
+        self.assertEqual(paused["state"], "WAITING_FOR_HUMAN")
+        def close_fixture_owner():
+            if engine.snapshot()["cleanup"].get("confirmed") is not True:
+                engine.request_cancel()
+                engine.resume()
+        self.addCleanup(close_fixture_owner)
+        return engine, store, runtime, catalog, calls, finalized, paused
+
+    def test_original_live_paused_executor_resumes_without_replaying_retained_action(self):
+        engine, store, runtime, catalog, calls, finalized, paused = self.paused_owner_fixture()
+        previous = deepcopy(node_records(paused)["owned"])
+        same_executor = SimpleNamespace(inspector=runtime.inspector, finish_run=runtime.finish_run)
+        restored = WorkflowEngine.restore(WorkflowRunStore.open(store.folder), catalog=catalog, runtime=same_executor)
+        self.assertIs(restored, engine)
+        complete = restored.resume()
+        self.assertEqual(complete["state"], "COMPLETED")
+        self.assertEqual(calls, ["owned", "after"])
+        self.assertEqual(finalized, [store.run_id])
+        self.assertEqual(node_records(complete)["owned"], previous)
+        self.assertTrue(complete["cleanup"]["confirmed"])
+        self.assertFalse(previous["run_receipt"]["cleanup"]["confirmed"])
+
+    def test_foreign_runtime_cannot_adopt_original_paused_executor(self):
+        engine, store, runtime, catalog, calls, _finalized, _paused = self.paused_owner_fixture()
+        foreign = SimpleNamespace(inspector=object(), finish_run=runtime.finish_run,
+                                  native_context_ref={"owner_run_id": store.run_id, "context_id": "copied-reference"})
+        with self.assertRaisesRegex(ValueError, "WORKFLOW_LIVE_OWNER_RUNTIME_MISMATCH"):
+            WorkflowEngine.restore(WorkflowRunStore.open(store.folder), catalog=catalog, runtime=foreign)
+        self.assertEqual(calls, ["owned"])
+        self.assertEqual(engine.snapshot()["state"], "WAITING_FOR_HUMAN")
+
+    def test_saved_retained_receipt_without_original_live_registry_stays_unknown(self):
+        from blackbox_core import chain_engine
+        _engine, store, runtime, catalog, calls, _finalized, _paused = self.paused_owner_fixture()
+        copied = SimpleNamespace(inspector=runtime.inspector, finish_run=runtime.finish_run,
+                                 native_context_ref={"owner_run_id": store.run_id, "context_id": "copied-reference"})
+        # Simulate the absence of process-local capabilities after restart.
+        # Keep the original fixture owner alive for its explicit cleanup later.
+        with patch.object(chain_engine, "_PAUSED_OWNERS", {}):
+            restored = WorkflowEngine.restore(WorkflowRunStore.open(store.folder), catalog=catalog, runtime=copied)
+            self.assertEqual(restored.snapshot()["state"], "RECOVERY_UNCONFIRMED")
+            self.assertEqual(restored.resume()["state"], "RECOVERY_UNCONFIRMED")
+        self.assertEqual(calls, ["owned"])
 
     def test_unfinished_effectful_intent_is_uncertain_and_never_automatically_repeated(self):
         calls = []

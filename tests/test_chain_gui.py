@@ -258,6 +258,74 @@ class ChainEditorTests(unittest.TestCase):
         self.assertTrue(self.panel._fields["_allow_partial"].isChecked())
         self.assertIn("частич", self.panel._fields["_allow_partial"].toolTip())
 
+    def test_loaded_thirty_two_flat_predicates_edit_without_losing_hidden_children(self):
+        node = self.add("CONDITION")
+        condition = {"all": [{"field": "coverage.row_count", "op": "GE", "value": index}
+                              for index in range(32)]}
+        node["parameters"] = {"condition": deepcopy(condition)}
+        self.panel.select_node(node["node_id"])
+        editor = self.panel._fields["condition"]
+        self.assertFalse(editor.read_only)
+        self.assertEqual(len(editor.rows), 32)
+        editor.rows[0]["raw"].setText("-1")
+        editor.rows[-1]["raw"].setText("64")
+        editor.add_button.click()
+        self.assertEqual(len(editor.rows), 32)
+        condition["all"][0]["value"] = -1
+        condition["all"][-1]["value"] = 64
+        self.assertEqual(editor.value(), condition)
+        self.window._set_language("RU")
+        self.assertEqual(self.panel._fields["condition"].value(), condition)
+        self.panel.apply_button.click()
+        self.assertEqual(node["parameters"], {"condition": condition})
+
+    def test_loaded_nested_predicate_is_explicitly_read_only_and_preserved_on_apply(self):
+        node = self.add("CONDITION")
+        condition = {"all": [{"status": "COMPLETED"},
+                              {"any": [{"has_evidence": True}, {"sufficient": False},
+                                       {"field": "cleanup.confirmed", "op": "EQ", "value": True}]}]}
+        node["parameters"] = {"condition": deepcopy(condition)}
+        self.panel.select_node(node["node_id"])
+        editor = self.panel._fields["condition"]
+        self.assertTrue(editor.read_only)
+        self.assertFalse(editor.combination.isEnabled())
+        self.assertFalse(editor.add_button.isEnabled())
+        self.assertTrue(editor.preview.isReadOnly())
+        self.assertIn('"any"', editor.preview.toPlainText())
+        self.assertIn("read-only", editor.note.text())
+        editor.add_clause()
+        editor.combination.setCurrentIndex(editor.combination.findData("single"))
+        self.assertEqual(editor.rows, [])
+        self.assertEqual(editor.value(), condition)
+        changed_copy = editor.value()
+        changed_copy["all"].clear()
+        self.assertEqual(editor.value(), condition)
+        self.panel._fields["_title"].setText("Preserved nested rule")
+        self.panel.apply_button.click()
+        self.assertEqual(node["title"], "Preserved nested rule")
+        self.assertEqual(node["parameters"], {"condition": condition})
+        self.window._set_language("RU")
+        editor = self.panel._fields["condition"]
+        self.assertTrue(editor.read_only)
+        self.assertIn("только для просмотра", editor.note.text())
+        self.panel.apply_button.click()
+        self.assertEqual(node["parameters"], {"condition": condition})
+        self.window._set_language("EN")
+        self.assertEqual(self.panel._fields["condition"].value(), condition)
+
+    def test_omitted_predicate_value_stays_null_when_another_clause_is_edited(self):
+        node = self.add("CONDITION")
+        node["parameters"] = {"condition": {"all": [{"field": "value.metric", "op": "EQ"},
+                                                    {"status": "COMPLETED"}]}}
+        self.panel.select_node(node["node_id"])
+        editor = self.panel._fields["condition"]
+        self.assertEqual(editor.rows[0]["type"].currentData(), "null")
+        editor.rows[1]["raw"].setText("PARTIAL")
+        self.panel.apply_button.click()
+        self.assertEqual(node["parameters"]["condition"], {"all": [
+            {"field": "value.metric", "op": "EQ", "value": None},
+            {"field": "status", "op": "EQ", "value": "PARTIAL"}]})
+
     def test_applying_wait_options_preserves_missing_filter_instead_of_implicit_zero(self):
         node = self.add("waits")
         optional = self.panel._fields["end_ms"]

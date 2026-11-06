@@ -558,6 +558,26 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(calls, [])
         self.assertNotEqual(result["state"], "COMPLETED")
 
+    def test_component_exception_keeps_primary_reason_and_original_receipt(self):
+        original = []
+        def execute(ctx, inputs, params):
+            receipt = outcome(ctx, status="OPERATION_FAILED").receipt
+            original.append(deepcopy(receipt))
+            error = ValueError("EXPLICIT_FIXTURE_SOURCE_LIMIT")
+            error.run_receipt = receipt
+            raise error
+        engine, store = self.engine(workflow([{"node_id": "read", "tool_id": "read"}]),
+            {"read": adapter("read", execute)})
+        snapshot = engine.run()
+        row = node_records(snapshot)["read"]
+        self.assertEqual(row["state"], "FAILED")
+        self.assertEqual(row["reason_code"], "EXPLICIT_FIXTURE_SOURCE_LIMIT")
+        self.assertEqual(row["run_receipt"], original[0])
+        self.assertEqual(row["component_status"], "OPERATION_FAILED")
+        persisted = [event["data"] for event in store.read_events() if event.get("event") == "node.result"]
+        self.assertEqual(persisted[0]["reason_code"], row["reason_code"])
+        self.assertEqual(persisted[0]["run_receipt"], original[0])
+
 
 if __name__ == "__main__":
     unittest.main()

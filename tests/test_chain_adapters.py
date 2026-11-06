@@ -5,6 +5,7 @@ claim Windows/UAC acceptance; that belongs to the hosted native R60 harness.
 """
 from copy import deepcopy
 import hashlib
+from html.parser import HTMLParser
 import json
 from pathlib import Path
 import tempfile
@@ -18,6 +19,29 @@ from blackbox_core.chain_adapters import ChainRuntime, build_catalog
 from blackbox_core.chain_contracts import Artifact
 from blackbox_core.deep_contracts import ActionRequest, DEEP_ACTIONS, ProcessIdentity
 from blackbox_core.deep_tool_contracts import attach_run_receipt, begin_run, describe_tool
+
+
+class AnalysisHTML(HTMLParser):
+    """Independent parser; does not call the product's export readback code."""
+    def __init__(self):
+        super().__init__(convert_charrefs=False)
+        self.active, self.parts, self.documents = False, [], []
+
+    def handle_starttag(self, tag, attrs):
+        values = dict(attrs)
+        if tag == "script" and values.get("id") == "blackbox-analysis-data":
+            if self.active or self.documents or values.get("type") != "application/json":
+                raise AssertionError("INVALID_ANALYSIS_HTML_METADATA")
+            self.active = True
+
+    def handle_data(self, value):
+        if self.active:
+            self.parts.append(value)
+
+    def handle_endtag(self, tag):
+        if self.active and tag == "script":
+            self.documents.append(json.loads("".join(self.parts)))
+            self.active = False
 
 
 class Context:
@@ -142,6 +166,97 @@ class ChainAdapterOfflineTests(unittest.TestCase):
         report = json.loads(Path(path.outputs["report"].value["_path"]).read_text())
         self.assertFalse(report["end_to_end_established"])
         self.assertTrue(path.outputs["case"].value["case_id"])
+
+    def test_actual_jsonl_analysis_reports_export_both_formats_with_same_semantics_and_bound_sources(self):
+        trace_before = hashlib.sha256(self.trace.read_bytes()).hexdigest()
+        index = self.call("decode_trace", {"trace": self.source()}).outputs["index"]
+        index_path = Path(index.value["_path"])
+        index_before = hashlib.sha256(index_path.read_bytes()).hexdigest()
+        for tool, expected in (("waits", "NO_SCHEDULER_EVENTS"), ("file_io", "NO_FILE_IO_EVENTS"),
+                               ("disk_io", "NO_DISK_REQUEST_EVENTS")):
+            with self.subTest(tool=tool):
+                analyzed = self.call(tool, {"index": index})
+                source = analyzed.outputs["report"]
+                report_path = Path(source.value["_path"])
+                report_before = hashlib.sha256(report_path.read_bytes()).hexdigest()
+                original = json.loads(report_path.read_text(encoding="utf-8"))
+                documents = {}
+                self.assertNotIn("_case_path", source.value)
+                for format_name in ("json", "html"):
+                    exported = self.call("export_report", {"case": source}, {"format": format_name})
+                    self.assertEqual(exported.status, "COMPLETED")
+                    self.assertEqual(exported.receipt["operation"], "workflow.export_report")
+                    self.assertTrue(exported.receipt["execution_started"])
+                    self.assertTrue(exported.receipt["cleanup"]["confirmed"])
+                    reference = exported.outputs["report"]
+                    self.assertTrue(reference.value["readback_verified"])
+                    text = Path(reference.value["_path"]).read_text(encoding="utf-8")
+                    if format_name == "json":
+                        document = json.loads(text)
+                    else:
+                        reader = AnalysisHTML()
+                        reader.feed(text)
+                        reader.close()
+                        self.assertFalse(reader.active)
+                        self.assertEqual(len(reader.documents), 1)
+                        document = reader.documents[0]
+                    documents[format_name] = document
+                    self.assertEqual(document["schema"], "blackbox.analysis-report/1")
+                    self.assertEqual(document["analysis"], original)
+                    self.assertEqual(document["analysis_status"], expected)
+                    self.assertEqual(document["analysis"]["status"], expected)
+                    self.assertEqual(document["root_cause"], "UNKNOWN")
+                    self.assertEqual(document["source_trust"], "UNVERIFIED_IMPORT")
+                    self.assertEqual(document["verification"]["source_report_sha256"], report_before)
+                    self.assertEqual(document["verification"]["source_index_sha256"], index_before)
+                    self.assertEqual(document["verification"]["source_index_artifact_id"], index.artifact_id)
+                    self.assertNotIn(str(self.root), text)
+                self.assertEqual(documents["json"], documents["html"])
+                self.assertEqual(hashlib.sha256(report_path.read_bytes()).hexdigest(), report_before)
+        self.assertEqual(hashlib.sha256(index_path.read_bytes()).hexdigest(), index_before)
+        self.assertEqual(hashlib.sha256(self.trace.read_bytes()).hexdigest(), trace_before)
+
+    def test_saved_analysis_export_refuses_existing_destination_and_cancel_after_real_stage_prepare(self):
+        from blackbox_core.chain_reports import export_analysis_report
+        from blackbox_core.export_recovery import ExportTransaction
+        index = self.call("decode_trace", {"trace": self.source()}).outputs["index"]
+        report = self.call("waits", {"index": index}).outputs["report"]
+        source_path, index_path = Path(report.value["_path"]), Path(index.value["_path"])
+        before = {path: hashlib.sha256(path.read_bytes()).hexdigest() for path in (self.trace, source_path, index_path)}
+        destination = self.root / "existing-analysis.json"
+        destination.write_bytes(b"existing owner document")
+        with self.assertRaises(FileExistsError):
+            export_analysis_report(report, destination)
+        self.assertEqual(destination.read_bytes(), b"existing owner document")
+        cancelled = threading.Event()
+        original_prepare = ExportTransaction.prepare
+        prepared = []
+        def cancel_after_prepare(transaction, files):
+            original_prepare(transaction, files)
+            prepared.append(transaction.stage)
+            cancelled.set()
+        target = self.root / "cancelled-analysis.html"
+        with patch.object(ExportTransaction, "prepare", cancel_after_prepare), \
+                self.assertRaises(InterruptedError):
+            export_analysis_report(report, target, format="html", cancel=cancelled)
+        self.assertEqual(len(prepared), 1, "the actual saved analysis must reach real staged publication")
+        self.assertFalse(target.exists())
+        self.assertFalse(list(self.root.glob(".bb-export-*")))
+        self.assertEqual({path: hashlib.sha256(path.read_bytes()).hexdigest() for path in before}, before)
+
+    def test_saved_analysis_export_rejects_unbound_index_locator_before_publication(self):
+        from blackbox_core.chain_io import verify_artifact
+        from blackbox_core.chain_reports import export_analysis_report
+        index = self.call("decode_trace", {"trace": self.source()}).outputs["index"]
+        report = self.call("file_io", {"index": index}).outputs["report"]
+        unbound = Artifact("REPORT", {**report.value, "_index_path": str(self.root / "different-index.sqlite3")},
+                           sources=report.sources, coverage=report.coverage, clock_domains=report.clock_domains)
+        destination = self.root / "unbound-analysis.json"
+        with self.assertRaisesRegex(ValueError, "WORKFLOW_UNBOUND_PRIVATE_SOURCE_LOCATOR"):
+            verify_artifact(unbound)
+        with self.assertRaisesRegex(ValueError, "WORKFLOW_UNBOUND_PRIVATE_SOURCE_LOCATOR"):
+            export_analysis_report(unbound, destination)
+        self.assertFalse(destination.exists())
 
     def test_comparison_reuses_actual_saved_case_analysis_and_existing_export(self):
         index = self.call("decode_trace", {"trace": self.source()}).outputs["index"]

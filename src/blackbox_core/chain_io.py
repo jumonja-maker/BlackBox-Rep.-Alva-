@@ -90,63 +90,97 @@ def make_process_artifact(identity):
         coverage={"evidence_completeness": "IDENTITY_ONLY_NOT_DIAGNOSTIC_COVERAGE"})
 
 
-def verify_artifact(artifact, *, cancel=None, deadline=None, owner_run_id=None, _seen=None, _depth=0):
-    """Revalidate every declared byte source; no origin/authentication promotion."""
+def verify_artifact(artifact, *, cancel=None, deadline=None, owner_run_id=None):
+    """Rehash a complete bounded lineage, then bind its private source locators.
+
+    Adapters flatten immutable dependencies into siblings. A locator in one
+    such reference can name a file proved by another sibling; validating each
+    reference in isolation would reject that valid representation. No locator
+    becomes usable until every declared dependency has passed its byte or
+    process-instance check. This establishes consistency, never authentication.
+    """
+    seen, expanded, active = {}, set(), set()
+    verified_paths, locators = set(), set()
+    visits = 0
+
+    def visit(reference, depth):
+        nonlocal visits
+        check_cancel(cancel, deadline)
+        require(depth <= 16, "WORKFLOW_ARTIFACT_LINEAGE_DEPTH")
+        visits += 1
+        require(visits <= 4096, "WORKFLOW_ARTIFACT_LINEAGE_BUDGET")
+        if not isinstance(reference, Artifact):
+            reference = Artifact.from_dict(reference)
+        key, value = reference.artifact_id, reference.value
+        raw = reference.to_dict()
+        # A full reference and the same reference flattened by _links retain
+        # identical evidence fields. Dependency placement alone is not a new
+        # byte identity, clock, coverage statement or source declaration.
+        identity = {**raw, "value": {name: row for name, row in value.items()
+                                     if name != "upstream_artifacts"}}
+        identity = canonical(identity)
+        previous = seen.get(key)
+        require(previous is None or previous == identity, "WORKFLOW_ARTIFACT_ID_CONTRADICTION")
+        require(key not in active, "WORKFLOW_ARTIFACT_LINEAGE_CYCLE")
+        representation = hashlib.sha256(canonical(raw).encode()).digest()
+        if representation in expanded:
+            return
+        require(len(seen) < 4096 or previous is not None, "WORKFLOW_ARTIFACT_LINEAGE_BUDGET")
+        seen[key] = identity
+        active.add(key)
+        try:
+            if previous is None:
+                if reference.kind == "PROCESS":
+                    expected = ProcessIdentity.from_dict(value.get("identity"))
+                    if os.name != "nt":
+                        raise WorkflowError("WORKFLOW_NATIVE_FILETIME_REQUIRES_WINDOWS")
+                    from .deep_native import capture_identity_checked
+                    actual = ProcessIdentity.from_dict(capture_identity_checked(expected.pid, owner_run_id=owner_run_id))
+                    require(actual == expected, "WORKFLOW_PROCESS_INSTANCE_CHANGED")
+                elif value.get("_path"):
+                    path = safe_path(Path(value["_path"]))
+                    if reference.kind == "SESSION" and "files" in value:
+                        require(path.is_dir() and type(value["files"]) is list and 0 < len(value["files"]) <= 16,
+                                "WORKFLOW_SESSION_SOURCE_REQUIRED")
+                        for row in value["files"]:
+                            require(Path(row["_path"]).parent == path, "WORKFLOW_SESSION_SOURCE_PATH_MISMATCH")
+                            actual = _verify_file(row, cancel=cancel, deadline=deadline)
+                            wal = Path(row["_path"] + "-wal")
+                            require(not wal.exists() or wal.stat().st_size == 0, "WORKFLOW_SESSION_STILL_WRITING")
+                            verified_paths.add(actual["_path"])
+                        require(hashlib.sha256(canonical(value["files"]).encode()).hexdigest() == value.get("sha256"),
+                                "WORKFLOW_SESSION_FINGERPRINT_CHANGED")
+                    else:
+                        _verify_file(value, cancel=cancel, deadline=deadline)
+                    verified_paths.add(str(path))
+                elif reference.kind not in ("EVIDENCE_SET", "RECEIPT", "BOOLEAN", "PROCESS_SET"):
+                    raise WorkflowError("WORKFLOW_ARTIFACT_HAS_NO_VERIFIABLE_SOURCE")
+                auxiliary = value.get("auxiliary_files", [])
+                require(type(auxiliary) is list and len(auxiliary) <= 64, "WORKFLOW_AUXILIARY_SOURCE_BUDGET")
+                for row in auxiliary:
+                    actual = _verify_file(row, cancel=cancel, deadline=deadline)
+                    verified_paths.add(actual["_path"])
+                for name in ("_before_path", "_after_path", "_case_path", "_session_path", "_index_path"):
+                    if value.get(name):
+                        require(type(value[name]) is str, "WORKFLOW_UNBOUND_PRIVATE_SOURCE_LOCATOR")
+                        locators.add(str(safe_path(Path(value[name]))))
+            upstream = value.get("upstream_artifacts", [])
+            members = value.get("items", []) if reference.kind == "EVIDENCE_SET" else []
+            require(type(upstream) is list and len(upstream) <= 1024 and type(members) is list and len(members) <= 256,
+                    "WORKFLOW_ARTIFACT_LINEAGE_BUDGET")
+            # A flat reference may be encountered first. A later full version
+            # still has to expand and verify every additional dependency.
+            for row in [*upstream, *members]:
+                visit(row, depth + 1)
+            expanded.add(representation)
+        finally:
+            active.remove(key)
+
     if not isinstance(artifact, Artifact):
         artifact = Artifact.from_dict(artifact)
-    require(_depth <= 16, "WORKFLOW_ARTIFACT_LINEAGE_DEPTH")
-    seen = {} if _seen is None else _seen
-    raw = canonical(artifact.to_dict())
-    if artifact.artifact_id in seen:
-        require(seen[artifact.artifact_id] == raw, "WORKFLOW_ARTIFACT_ID_CONTRADICTION")
-        return {"status": "VERIFIED_REFERENCE_ALREADY_CHECKED", "artifact_id": artifact.artifact_id}
-    require(len(seen) < 4096, "WORKFLOW_ARTIFACT_LINEAGE_BUDGET")
-    seen[artifact.artifact_id] = raw
+    visit(artifact, 0)
     check_cancel(cancel, deadline)
-    value = artifact.value
-    if artifact.kind == "PROCESS":
-        expected = ProcessIdentity.from_dict(value.get("identity"))
-        if os.name != "nt":
-            raise WorkflowError("WORKFLOW_NATIVE_FILETIME_REQUIRES_WINDOWS")
-        from .deep_native import capture_identity_checked
-        actual = ProcessIdentity.from_dict(capture_identity_checked(expected.pid, owner_run_id=owner_run_id))
-        require(actual == expected, "WORKFLOW_PROCESS_INSTANCE_CHANGED")
-    elif value.get("_path"):
-        path = safe_path(Path(value["_path"]))
-        if artifact.kind == "SESSION" and "files" in value:
-            require(path.is_dir() and type(value["files"]) is list and 0 < len(value["files"]) <= 16,
-                    "WORKFLOW_SESSION_SOURCE_REQUIRED")
-            for row in value["files"]:
-                require(Path(row["_path"]).parent == path, "WORKFLOW_SESSION_SOURCE_PATH_MISMATCH")
-                _verify_file(row, cancel=cancel, deadline=deadline)
-                wal = Path(row["_path"] + "-wal")
-                require(not wal.exists() or wal.stat().st_size == 0, "WORKFLOW_SESSION_STILL_WRITING")
-            require(hashlib.sha256(canonical(value["files"]).encode()).hexdigest() == value.get("sha256"),
-                    "WORKFLOW_SESSION_FINGERPRINT_CHANGED")
-        else:
-            _verify_file(value, cancel=cancel, deadline=deadline)
-    elif artifact.kind not in ("EVIDENCE_SET", "RECEIPT", "BOOLEAN", "PROCESS_SET"):
-        raise WorkflowError("WORKFLOW_ARTIFACT_HAS_NO_VERIFIABLE_SOURCE")
-    auxiliary = value.get("auxiliary_files", [])
-    require(type(auxiliary) is list and len(auxiliary) <= 64, "WORKFLOW_AUXILIARY_SOURCE_BUDGET")
-    for row in auxiliary:
-        _verify_file(row, cancel=cancel, deadline=deadline)
-    upstream = value.get("upstream_artifacts", [])
-    members = value.get("items", []) if artifact.kind == "EVIDENCE_SET" else []
-    require(type(upstream) is list and len(upstream) <= 1024 and type(members) is list and len(members) <= 256,
-            "WORKFLOW_ARTIFACT_LINEAGE_BUDGET")
-    paths = {str(safe_path(Path(row["_path"]))) for row in auxiliary}
-    if value.get("_path"):
-        paths.add(str(safe_path(Path(value["_path"]))))
-    for row in [*upstream, *members]:
-        source = Artifact.from_dict(row)
-        verify_artifact(source, cancel=cancel, deadline=deadline, owner_run_id=owner_run_id,
-                        _seen=seen, _depth=_depth + 1)
-        if source.value.get("_path"):
-            paths.add(str(safe_path(Path(source.value["_path"]))))
-    for key in ("_before_path", "_after_path", "_case_path", "_session_path"):
-        if value.get(key):
-            require(str(safe_path(Path(value[key]))) in paths, "WORKFLOW_UNBOUND_PRIVATE_SOURCE_LOCATOR")
+    require(locators <= verified_paths, "WORKFLOW_UNBOUND_PRIVATE_SOURCE_LOCATOR")
     return {"status": "VERIFIED_BYTE_OR_INSTANCE_CONSISTENCY", "artifact_id": artifact.artifact_id,
             "producer_authentication": "NOT_ESTABLISHED"}
 

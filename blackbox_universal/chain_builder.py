@@ -254,6 +254,8 @@ class OptionalParameterEditor(QWidget):
 
 class ConditionParameterEditor(QWidget):
     """Typed bounded predicates over actual receipt/artifact metadata."""
+    MAX_CLAUSES = 32
+
     def __init__(self, condition, parent=None, *, language="EN"):
         super().__init__(parent)
         self.language, self.rows = language, []
@@ -272,23 +274,57 @@ class ConditionParameterEditor(QWidget):
         combination = "all" if "all" in original else "any" if "any" in original else "single"
         self.combination.setCurrentIndex(self.combination.findData(combination))
         clauses = original.get(combination, [original]) if combination != "single" else [original]
-        for clause in clauses[:8]:
-            self.add_clause(clause)
-        self.add_button = QPushButton("Добавить условие (до 8)" if language == "RU" else "Add condition (up to 8)")
+        # The runtime supports nested boolean expressions. The flat form must
+        # never turn one of those into its default status predicate on edit.
+        # Keep advanced/invalid loaded expressions intact for validation rather
+        # than silently dropping children or repairing their meaning.
+        self.read_only = (not isinstance(clauses, list) or not 0 < len(clauses) <= self.MAX_CLAUSES
+                          or combination != "single" and set(original) != {combination}
+                          or any(not self._flat_predicate(clause) for clause in clauses))
+        if not self.read_only:
+            for clause in clauses:
+                self.add_clause(clause)
+        self.add_button = QPushButton("Добавить условие (до 32)" if language == "RU" else "Add condition (up to 32)")
         self.add_button.clicked.connect(lambda: self.add_clause())
         self.layout.addWidget(self.add_button)
-        self.note = QLabel("Отсутствующие данные дают UNKNOWN. Выполняется только подтверждённая ветвь." if language == "RU" else
-                           "Missing data stays UNKNOWN. Only the established branch becomes active.")
+        if self.read_only:
+            self.combination.setEnabled(False)
+            self.add_button.setEnabled(False)
+            self.preview = QPlainTextEdit()
+            self.preview.setReadOnly(True)
+            self.preview.setPlainText(json.dumps(self.original, ensure_ascii=False, indent=2))
+            self.preview.setMaximumHeight(240)
+            self.layout.addWidget(self.preview)
+            note = ("Сложное условие доступно только для просмотра. Оно сохраняется целиком без изменений; "
+                    "другие параметры узла можно редактировать." if language == "RU" else
+                    "This advanced condition is read-only. It is preserved in full without changes; "
+                    "other node parameters remain editable.")
+        else:
+            note = ("Отсутствующие данные дают UNKNOWN. Выполняется только подтверждённая ветвь." if language == "RU" else
+                    "Missing data stays UNKNOWN. Only the established branch becomes active.")
+        self.note = QLabel(note)
         self.note.setWordWrap(True)
         self.layout.addWidget(self.note)
         self._loading = False
 
+    @staticmethod
+    def _flat_predicate(condition):
+        if not isinstance(condition, dict):
+            return False
+        if set(condition) == {"status"}:
+            return type(condition["status"]) is str
+        if set(condition) in ({"has_evidence"}, {"sufficient"}):
+            return type(next(iter(condition.values()))) is bool
+        return (type(condition.get("field")) is str and set(condition) <= {"field", "op", "value"}
+                and condition.get("op", "EQ") in ("EQ", "NE", "GT", "GE", "LT", "LE", "EXISTS")
+                and type(condition.get("value")) in (str, bool, int, float, type(None)))
+
     def _changed(self, *_):
-        if not self._loading:
+        if not self._loading and not getattr(self, "read_only", False):
             self.touched = True
 
     def add_clause(self, condition=None):
-        if len(self.rows) >= 8:
+        if getattr(self, "read_only", False) or len(self.rows) >= self.MAX_CLAUSES:
             return
         condition = condition if isinstance(condition, dict) else {"status": "COMPLETED"}
         area = QWidget(self)
@@ -307,7 +343,8 @@ class ConditionParameterEditor(QWidget):
         for key in ("EQ", "NE", "GT", "GE", "LT", "LE", "EXISTS"):
             operator.addItem(key, key)
         operator.setCurrentIndex(max(0, operator.findData(condition.get("op", "EQ"))))
-        expected = condition.get("value", condition.get("status", condition.get("has_evidence", condition.get("sufficient", "COMPLETED"))))
+        expected = (condition.get("value") if "field" in condition else
+                    condition.get("status", condition.get("has_evidence", condition.get("sufficient", "COMPLETED"))))
         kind = "boolean" if type(expected) is bool else "integer" if type(expected) is int else "number" if type(expected) is float else "null" if expected is None else "string"
         value_type = QComboBox()
         for name, labels in (("string", ("Text", "Текст")), ("integer", ("Integer", "Целое число")),
@@ -356,6 +393,8 @@ class ConditionParameterEditor(QWidget):
             for row in self.rows]}
 
     def restore_draft(self, draft):
+        if self.read_only:
+            return
         self._loading = True
         while len(self.rows) < len(draft["rows"]):
             self.add_clause()
@@ -370,7 +409,7 @@ class ConditionParameterEditor(QWidget):
         self.touched = draft["touched"]
 
     def value(self):
-        if not self.touched:
+        if self.read_only or not self.touched:
             return deepcopy(self.original)
         clauses = []
         for row in self.rows:

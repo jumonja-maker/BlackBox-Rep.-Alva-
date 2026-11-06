@@ -227,6 +227,11 @@ def run_graph(workflow, output, *, runtime=None, allow_partial=True, run_id=None
     summary["nodes"] = [{key: row.get(key) for key in
         ("node_id", "state", "component_status", "execution_started", "reason_code", "cleanup")}
         for row in snapshot["nodes"]]
+    for observed, row in zip(summary["nodes"], snapshot["nodes"]):
+        receipt = row.get("run_receipt")
+        if type(receipt) is dict:
+            observed["component_receipt"] = {key: receipt.get(key) for key in
+                ("run_id", "operation", "status", "execution_started", "limitations", "cleanup")}
     print("R60_GRAPH_OUTCOME " + json.dumps(summary, sort_keys=True, ensure_ascii=True), flush=True)
     save(Path(store.folder) / "qa-outcome.json", summary)
     allowed = ("COMPLETED", "PARTIAL") if allow_partial else ("COMPLETED",)
@@ -549,6 +554,10 @@ def run_embedded(output, evidence_root, source_sha, diagnostic_helper=None, *, s
                 "R60_NATIVE_FIXTURE_BINARY_CHANGED")
         live_check = standard_live_graph if standard_token else native_live_graph
         proof["live"] = live_check(output / "live", executable, source_sha, diagnostic_helper)
+        if not standard_token:
+            from .chain_qa_native import native_checkpoint_graph
+            proof["native_checkpoint"] = native_checkpoint_graph(output / "native-checkpoint", executable,
+                                                                  source_sha, diagnostic_helper)
         proof["actual_negative_chains"] = run_actual_faults(output / "actual-negative-chains", executable,
             source_sha, trace_path=Path(source_manifest["trace"]), diagnostic_helper=diagnostic_helper)
         proof["final_source_identity"] = source_proof(source_sha)
