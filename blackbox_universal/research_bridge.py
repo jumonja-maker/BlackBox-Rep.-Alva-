@@ -25,6 +25,8 @@ class WindowCaptureProxy:
 class ResearchBridge(QObject):
     updated=Signal()
     result_ready=Signal(str,object,str)
+    # Additive exact-id correlation for R60; existing consumers keep their API.
+    command_result=Signal(str,str,object,str)
     terminated=Signal()
 
     def __init__(self,parent=None,output_root=None):
@@ -115,6 +117,7 @@ class ResearchBridge(QObject):
                     if op in ("attach","start") and not packet.get("error"):
                         self.last_error=None
                     else:self.last_error=packet.get("error") or self.last_error
+                    self.command_result.emit(str(packet.get("id", "")),op,packet.get("result"),packet.get("error") or "")
                     self.result_ready.emit(op,packet.get("result"),packet.get("error") or "")
                 elif packet.get("type")=="error":self.last_error=packet.get("error")
             except (ValueError,KeyError,TypeError):self.last_error="INVALID_RESEARCH_PROTOCOL"

@@ -45,21 +45,21 @@ def _bounded_input(value, budget):
         if type(item) is dict:
             if len(item) > 512 or any(type(k) is not str or len(k) > 512 for k in item):
                 raise InvestigationError("ISSUE_INPUT_FIELDS_BUDGET")
-            size += 2 + len(item)
+            size += 2 + max(0, len(item) - 1)
             for key, child in item.items():
                 size += len(json.dumps(key, ensure_ascii=True)) + 1
                 pending.append((child, depth + 1))
         elif type(item) in (list, tuple):
             if len(item) > 250_000:
                 raise InvestigationError("ISSUE_INPUT_ARRAY_BUDGET")
-            size += 2 + len(item)
+            size += 2 + max(0, len(item) - 1)
             pending.extend((child, depth + 1) for child in item)
         elif type(item) is str:
             if len(item) > 32768 or "\0" in item:
                 raise InvestigationError("ISSUE_INPUT_STRING_BUDGET")
             size += len(json.dumps(item, ensure_ascii=True))
         elif item is None or type(item) is bool:
-            size += 5
+            size += len("null" if item is None else "true" if item else "false")
         elif (type(item) is int and -(2**63) <= item <= 2**64 - 1 or
               type(item) is float and finite_number(item)):
             size += len(str(item))

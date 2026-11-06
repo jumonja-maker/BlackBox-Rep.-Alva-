@@ -28,7 +28,7 @@ from PySide6.QtWidgets import (
     QAbstractItemView, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QSpinBox, QFileDialog, QFrame,
     QGridLayout, QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit,
     QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QPushButton,
-    QScrollArea, QStackedWidget, QTableWidget, QTableWidgetItem,
+    QScrollArea, QStackedWidget, QTabWidget, QTableWidget, QTableWidgetItem,
     QVBoxLayout, QWidget,
 )
 
@@ -148,6 +148,9 @@ class UniversalWindow(QMainWindow):
             Path(QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppLocalDataLocation) or tempfile.gettempdir()) /
             "BLACKBOX-Investigations")
         self._graph_close_pending = False
+        self._chain_close_complete = False
+        self._chain_root = (Path(output_root) / "workflows" if output_root is not None else
+                            self._investigation_root.parent / "BLACKBOX-Workflows")
         self._thread_detail_worker: ThreadDetailWorker | None = None
         self._thread_detail_payload = None
         self._thread_detail_state = "default"
@@ -511,7 +514,20 @@ class UniversalWindow(QMainWindow):
         self.recent_messages.setMaximumHeight(138)
         notes.content.addWidget(self.recent_messages)
         content.addWidget(notes)
-        return page
+        # Keep both embedding shells and all existing monitor/deep attributes.
+        # Chain Builder is an internal Overview tab, never a seventh page.
+        from .chain_builder import ChainBuilderPanel, OverviewWorkspaceTabs
+        self.overview_tabs = OverviewWorkspaceTabs()
+        self.overview_tabs.setObjectName("overviewWorkspaces")
+        self.overview_tabs.addTab(page, "Observation / Investigation")
+        self.chain_builder_panel = ChainBuilderPanel(self, self._chain_root)
+        self.chain_builder_panel.bridge.closed.connect(self._chain_closed)
+        self.overview_tabs.addTab(self.chain_builder_panel, "Chain Builder")
+        wrapper, wrapper_layout = _page()
+        wrapper_layout.setContentsMargins(0, 0, 0, 0)
+        wrapper_layout.setAlignment(Qt.AlignmentFlag(0))
+        wrapper_layout.addWidget(self.overview_tabs, 1)
+        return wrapper
 
     def _build_processes(self) -> QWidget:
         page, content = _page()
@@ -829,7 +845,26 @@ class UniversalWindow(QMainWindow):
         self.library_panel.open_requested.connect(self._open_library_recording)
         content.insertWidget(1,self.library_toggle)
         content.insertWidget(2,self.library_panel)
+        from .chain_builder import ChainHistoryPanel
+        self.chain_history_panel = ChainHistoryPanel(self, self.chain_builder_panel)
+        self.chain_history_panel.hide()
+        self.chain_history_toggle = _button("DIAGNOSTIC CHAIN HISTORY")
+        self.chain_history_toggle.setObjectName("chainHistoryToggle")
+        self.chain_history_toggle.setCheckable(True)
+        self.chain_history_toggle.toggled.connect(self.chain_history_panel.setVisible)
+        self.chain_history_toggle.toggled.connect(self._chain_history_visible)
+        content.insertWidget(1, self.chain_history_toggle)
+        content.insertWidget(2, self.chain_history_panel)
         return page
+
+    def _chain_history_visible(self, visible):
+        if visible:
+            self.chain_builder_panel.bridge.submit("history", root=str(self._chain_root))
+
+    def _chain_closed(self):
+        self._chain_close_complete = True
+        if self._pending_close:
+            QTimer.singleShot(0, self.close)
 
     def _build_settings(self) -> QWidget:
         page, content = _page()
@@ -1019,6 +1054,13 @@ class UniversalWindow(QMainWindow):
             self.deep_inspector_panel.retranslate()
             self.deep_inspector_toggle.setText("ГЛУБОКОЕ ИССЛЕДОВАНИЕ" if language == "RU" else "DEEP INSPECTION")
             self._refresh_admin_controls()
+        if hasattr(self, "chain_builder_panel"):
+            self.chain_builder_panel.retranslate()
+            self.overview_tabs.setTabText(0, "Наблюдение / Расследование" if language == "RU" else "Observation / Investigation")
+            self.overview_tabs.setTabText(1, "Конструктор цепочек" if language == "RU" else "Chain Builder")
+        if hasattr(self, "chain_history_panel"):
+            self.chain_history_panel.retranslate()
+            self.chain_history_toggle.setText("ИСТОРИЯ ДИАГНОСТИЧЕСКИХ ЦЕПОЧЕК" if language == "RU" else "DIAGNOSTIC CHAIN HISTORY")
         if self.stack.currentIndex() == self._page_ids["reports"]:
             self._update_report_preview()
 
@@ -2576,7 +2618,40 @@ class UniversalWindow(QMainWindow):
                    "The original session deadline is not extended. Safe target recovery remains unconfirmed.")
         QMessageBox.warning(self, "BLACK.BOX — RECOVERY_UNCONFIRMED", message)
 
+    def _chain_can_close_independent_deep(self):
+        """Passive workflow work must not postpone another diagnostic owner.
+
+        Active/unknown workflow operations and live runtime references retain
+        the existing chain-first drain. Saved history never supplies authority
+        to close a shared helper before its current workflow has finished.
+        """
+        chain = self.chain_builder_panel.bridge
+        worker = chain.worker
+        passive = worker is None or (getattr(worker, "operation", None) in {
+            "catalog", "history", "open", "open_run", "export", "validate", "connect",
+            "save", "save_profile", "open_profile"} and getattr(worker, "engine", None) is None)
+        runtime_idle = all(getattr(chain, key, None) is None for key in
+            ("_native", "_finalizing", "_owned_session_run_id", "_observe_owner", "_selection", "_paused_run"))
+        pending = any(getattr(chain, key, None) for key in
+            ("_requests", "_native_contexts", "_paused_runs", "_research", "_observe_cleanup_unknown"))
+        return passive and runtime_idle and not pending
+
     def closeEvent(self, event) -> None:
+        if hasattr(self, "chain_builder_panel") and not self._chain_close_complete:
+            self._pending_close = True
+            # The catalog/history workers do not own Deep Inspection. Request
+            # its independent cleanup immediately, while still awaiting both
+            # real closed signals. A chain using the shared helper must drain
+            # and release its exact runtime context before this shutdown path.
+            if (self._chain_can_close_independent_deep() and hasattr(self, "deep_inspector_panel")
+                    and not self._deep_close_complete and self.deep_inspector_panel.bridge.has_session
+                    and not (hasattr(self, "investigation_graph_panel")
+                             and self.investigation_graph_panel.bridge.busy)):
+                self._timer.stop()
+                self.deep_inspector_panel.shutdown()
+            self.chain_builder_panel.bridge.shutdown()
+            event.ignore()
+            return
         if hasattr(self, "investigation_graph_panel") and self.investigation_graph_panel.bridge.busy:
             self._graph_close_pending = True
             self.investigation_graph_panel.cancel_for_window_close()

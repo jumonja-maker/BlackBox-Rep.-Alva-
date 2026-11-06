@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import hashlib
 import math
+from copy import deepcopy
 from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal
@@ -318,9 +319,20 @@ class OverviewInspectorPanel(QWidget):
         else:
             panel.open_case_context()
 
-    def request_investigation_action(self, operation, parameters=None, *, tag=""):
+    def request_investigation_action(self, operation, parameters=None, *, tag="", execution_guard=None,
+                                     native_owner_run_id=None, expected_context=None, expected_target=None):
         """Use the original consent/UAC/identity path for a manually chosen step."""
-        return self._request(operation, parameters, tag=tag)
+        return self._request(operation, parameters, tag=tag, execution_guard=execution_guard,
+                             native_owner_run_id=native_owner_run_id, expected_context=expected_context,
+                             expected_target=expected_target)
+
+    def release_investigation_guard(self, tag):
+        """Forget a completed workflow attempt; never leave a late UAC retry."""
+        if self._pending_retry and self._pending_retry.get("tag") == tag:
+            self._pending_retry = None
+        if self._last_request and self._last_request.get("tag") == tag:
+            self._last_request = None
+            self.elevate_button.hide()
 
     def request_investigation_elevation(self):
         """Keep the exact-target scope explanation and real UAC in its original owner."""
@@ -641,7 +653,17 @@ class OverviewInspectorPanel(QWidget):
             "CANCELLED · Выбранный процесс изменился во время выбора или подтверждения действия. Проверьте новую цель и начните действие заново."))
         return False
 
-    def _request(self, operation, parameters=None, *, tag=""):
+    @staticmethod
+    def _execution_allowed(guard):
+        if guard is None:
+            return True
+        try:
+            return guard() is True
+        except Exception:
+            return False
+
+    def _request(self, operation, parameters=None, *, tag="", execution_guard=None,
+                 native_owner_run_id=None, expected_context=None, expected_target=None):
         interaction = self._interaction_token()
         try:
             if not self._interaction_current(interaction):
@@ -651,28 +673,39 @@ class OverviewInspectorPanel(QWidget):
             parameters = parameters or {}
             from blackbox_core.deep_contracts import DEEP_ACTIONS
             spec = DEEP_ACTIONS[operation]
-            confirmed = not spec.confirmation_required or self._confirm(operation, parameters)
+            confirmed = not spec.confirmation_required or (self._confirm(operation, parameters, expected_target)
+                if expected_target is not None else self._confirm(operation, parameters))
             if not confirmed:
                 return False
             if not self._interaction_current(interaction):
                 return False
+            if not self._execution_allowed(execution_guard):
+                return False
+            owned = ({"native_owner_run_id": native_owner_run_id, "expected_context": deepcopy(expected_context),
+                      "expected_target": deepcopy(expected_target)}
+                     if native_owner_run_id is not None else {})
             accepted = self.bridge.submit(operation, parameters, confirmed=confirmed,
-                                          tag=tag, timeout_seconds=spec.timeout_seconds)
+                                          tag=tag, timeout_seconds=spec.timeout_seconds, **owned)
             if accepted:
                 self._request_section = self.section.currentData()
                 self._last_request = {"operation": operation, "parameters": dict(parameters), "tag": tag,
                                       "confirmed": confirmed, "timeout_seconds": spec.timeout_seconds,
                                       "interaction": interaction}
+                if execution_guard is not None:
+                    self._last_request["execution_guard"] = execution_guard
+                self._last_request.update(owned)
                 self.elevate_button.hide()
             return accepted
         except (ValueError, TypeError, KeyError) as exc:
             self.status_label.setText(self.tr2("Check the selected address, identity and input values: ", "Проверьте выбранный адрес, идентичность и значения: ") + str(exc))
             return False
 
-    def _confirm(self, operation, parameters):
+    def _confirm(self, operation, parameters, expected_target=None):
         en, ru = ACTION_LABELS.get(operation, (operation, operation))
         target = self.bridge.target
         identity = f"{self._target_name} · PID {target[0]}" if target else "—"
+        if expected_target is not None:
+            identity += f"\nCreation FILETIME: {expected_target.get('created_100ns', '—')}"
         risk = self.tr2(
             "This diagnostic action may pause or change the application. Recovery is attempted and verified where possible; a complete rollback cannot be guaranteed.",
             "Диагностическое действие может приостановить или изменить программу. Восстановление выполняется и проверяется там, где это возможно; полный откат не гарантируется.")
@@ -704,6 +737,8 @@ class OverviewInspectorPanel(QWidget):
         interaction = self._interaction_token()
         request = self._last_request
         if not request or self.bridge.busy:
+            return
+        if not self._execution_allowed(request.get("execution_guard")):
             return
         if (request.get("interaction") != interaction or not self._interaction_current(interaction)):
             return
@@ -745,9 +780,15 @@ class OverviewInspectorPanel(QWidget):
         if dialog.clickedButton() is grant:
             if not self._interaction_current(interaction):
                 return
+            if not self._execution_allowed(request.get("execution_guard")):
+                return
             self._pending_retry = dict(request)
             dispatch = self.bridge.authorize_target if authorize_only else self.bridge.elevate
-            if not dispatch(operations):
+            owned = ({"native_owner_run_id": request["native_owner_run_id"],
+                      "expected_context": deepcopy(request.get("expected_context")),
+                      "expected_target": deepcopy(request.get("expected_target")), "tag": request.get("tag", "")}
+                     if request.get("native_owner_run_id") is not None else {})
+            if not dispatch(operations, **owned):
                 self._pending_retry = None
 
     def _dump(self):
@@ -968,6 +1009,11 @@ class OverviewInspectorPanel(QWidget):
         if (result.get("generation", self.bridge.generation) != self.bridge.generation
                 and result.get("request_kind") not in ("close", "clear_target")):
             return
+        reference = result.get("native_context_ownership")
+        if isinstance(reference, dict):
+            for request in (self._last_request, self._pending_retry):
+                if request and request.get("native_owner_run_id") == reference.get("owner_run_id"):
+                    request["expected_context"] = deepcopy(reference)
         if result.get("request_kind") in ("start_admin", "end_admin", "clear_target"):
             self._render_operation_status(result)
             self._refresh_controls()
@@ -1035,9 +1081,16 @@ class OverviewInspectorPanel(QWidget):
             if self._last_result.get("status") == "COMPLETED":
                 if not self._interaction_current(request.get("interaction")):
                     return
+                if not self._execution_allowed(request.get("execution_guard")):
+                    self.release_investigation_guard(request.get("tag", ""))
+                    return
+                owned = ({"native_owner_run_id": request["native_owner_run_id"],
+                          "expected_context": deepcopy(request.get("expected_context")),
+                          "expected_target": deepcopy(request.get("expected_target"))}
+                         if request.get("native_owner_run_id") is not None else {})
                 self.bridge.submit(request["operation"], request["parameters"],
                                    confirmed=request["confirmed"], tag=request["tag"],
-                                   timeout_seconds=request["timeout_seconds"])
+                                   timeout_seconds=request["timeout_seconds"], **owned)
                 return
         result = self._last_result or {}
         if result.get("operation") == "trace_evidence" and isinstance(result.get("data"), dict):

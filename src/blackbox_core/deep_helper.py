@@ -93,14 +93,34 @@ class DiagnosticActionEngine:
         self.controller_pid = controller_pid
 
     def execute(self, request: ActionRequest, *, cancel_event=None, file_handle=None) -> dict:
+        from .deep_native import ProcessInspector, QUERY_CLEANUP_OPERATIONS
         self._execution_identity_verified = False
         self._execution_attempted = False
-        response = self._execute(request, cancel_event=cancel_event, file_handle=file_handle)
+        if isinstance(self.inspector, ProcessInspector) and request.operation in QUERY_CLEANUP_OPERATIONS:
+            with self.inspector.query_cleanup_scope(request.operation) as cleanup:
+                try:
+                    response = self._execute(request, cancel_event=cancel_event, file_handle=file_handle)
+                except Exception as exc:
+                    if not cleanup.evidence()["retained"]:
+                        raise
+                    response = result(request.operation, getattr(exc, "status", "OPERATION_FAILED"),
+                                      error=str(exc)[:1000], winerror=getattr(exc, "winerror", None))
+            response = cleanup.attach(response)
+        else:
+            response = self._execute(request, cancel_event=cancel_event, file_handle=file_handle)
+        retained = response.get("native_retained_resources")
+        if isinstance(retained, dict):
+            response["native_query_cleanup"] = {"status": "RETAINED" if response.get("status") == "COMPLETED"
+                                               else "RECOVERY_UNCONFIRMED", "confirmed": False,
+                "ownership_known": True, "scope": "TARGET_BOUND_DEBUG_CONTEXT",
+                "operation": request.operation, "target": self.target.to_dict(),
+                "resources": retained}
         if response.get("status") == "RECOVERY_UNCONFIRMED" and response.get("data", {}).get("owner_retained"):
             self.retained_cleanup = response
         if self._execution_identity_verified and self._execution_attempted:
             response["diagnostic_execution"] = {"source": "DIAGNOSTIC_HELPER", "source_verified": True,
-                                                  "target_verified": response.get("status") != "PROCESS_CHANGED",
+                                                  "target_verified": response.get("data", {}).get(
+                                                      "reported_operation_status", response.get("status")) != "PROCESS_CHANGED",
                                                   "target": self.target.to_dict()}
         return response
 
@@ -227,6 +247,7 @@ class DiagnosticActionEngine:
                           data={"debug_cleanup": cleanup, "errors": errors,
                                 "owner_retained": True, "retry_cleanup_required": True},
                           limitations=["Cleanup is retryable only within the original helper lease; unverified held debug context must not be silently resumed."])
+        inspected = None
         try:
             inspected = self.inspector.close()
             if isinstance(inspected, dict) and inspected.get("status") not in ("COMPLETED", "AVAILABLE", "OK"):
@@ -238,8 +259,31 @@ class DiagnosticActionEngine:
                               "owner_retained": True, "retry_cleanup_required": True})
         except Exception as exc:
             errors.append({"error": str(exc)[:1000]})
-        return result("session.close", "RECOVERY_UNCONFIRMED" if errors else "COMPLETED",
-                      data={"debug_cleanup": cleanup, "errors": errors},
+        inspector_ack = (isinstance(inspected, dict)
+                         and inspected.get("data", {}).get("cleanup", {}).get("confirmed") is True)
+        debug_ack = (self.debug is None or isinstance(cleanup, dict)
+                     and cleanup.get("native_owner_cleanup", {}).get("confirmed") is True)
+        confirmed = bool(not errors and inspector_ack and debug_ack)
+        if not confirmed:
+            # A successful operation status is not a native release boundary.
+            # Keep this exact engine reachable for explicit cleanup retry.
+            if not inspector_ack or not debug_ack:
+                errors.append({"error": "NATIVE_CLEANUP_ACKNOWLEDGEMENT_NOT_VERIFIED",
+                               "inspector_acknowledged": inspector_ack,
+                               "debug_owner_acknowledged": debug_ack})
+            answer = result("session.close", "RECOVERY_UNCONFIRMED", retains_service=True,
+                data={"debug_cleanup": cleanup, "inspector_cleanup": inspected, "errors": errors,
+                      "owner_retained": True, "retry_cleanup_required": True,
+                      "cleanup": {"confirmed": False, "status": "RECOVERY_UNCONFIRMED",
+                                  "scope": "OWNED_DIAGNOSTIC_TARGET_CONTEXT"}},
+                limitations=["The original owner remains available until its resource release is acknowledged."])
+            self.retained_cleanup = answer
+            return answer
+        self.retained_cleanup = None
+        return result("session.close", "COMPLETED",
+                      data={"debug_cleanup": cleanup, "inspector_cleanup": inspected, "errors": errors,
+                            "cleanup": {"confirmed": True, "status": "CONFIRMED",
+                                "scope": "OWNED_DIAGNOSTIC_TARGET_CONTEXT"}},
                       limitations=["Cleanup covers only actions owned by this diagnostic session."])
 
 
@@ -255,7 +299,9 @@ def _close_after_cancel(engine, active, active_cancel):
                       data={"owner_retained": True, "retry_cleanup_required": True,
                             "operation_cancellation_pending": True},
                       limitations=["The active native owner is retained only within the original helper lease; retry cleanup after cancellation is acknowledged."])
-    return engine.close() if engine is not None else result("session.close", "COMPLETED", data={})
+    return engine.close() if engine is not None else result("session.close", "COMPLETED",
+        data={"cleanup": {"confirmed": True, "status": "CONFIRMED",
+                           "scope": "NO_DIAGNOSTIC_TARGET_CONTEXT_CREATED"}})
 
 
 def _operation_scope(operations):
@@ -355,7 +401,8 @@ class ManagedDiagnosticContext:
             cleanup = _close_after_cancel(self.engine, active, active_cancel)
         except Exception as exc:
             cleanup = result("session.close", "RECOVERY_UNCONFIRMED", error=str(exc)[:1000])
-        if cleanup.get("status") != "COMPLETED":
+        if (cleanup.get("status") != "COMPLETED"
+                or cleanup.get("data", {}).get("cleanup", {}).get("confirmed") is not True):
             return self._retained("target.release", cleanup)
         self.engine = None
         self.cleanup_required = False
@@ -526,6 +573,12 @@ def run_helper(pipe_name: str, nonce: str, parent: ProcessIdentity) -> int:
                 granted = False
                 response.setdefault("limitations", []).append("Post-operation helper token authority could not be observed.")
             response["permission_level"] = "ADMINISTRATOR" if granted else "STANDARD"
+            cleanup = response.get("native_query_cleanup")
+            if isinstance(cleanup, dict):
+                # Added only at the actual helper boundary, after reply work and
+                # native finally blocks; the GUI checks this request attribution.
+                cleanup.update(request_id=identifier, operation=req.operation, target=req.target.to_dict(),
+                               helper_identity=own, session_nonce=nonce)
             try:
                 bounded_json(response)
             except (ValueError, TypeError):

@@ -70,6 +70,11 @@ class InspectorService:
         self._cleanup_unconfirmed = False
         self._expiry_cleanup = None
         self._pending_close_context = None
+        self._native_context_generation = 0
+        self._native_context_owner = None
+        self._native_dispatch_owner = None
+        self._closed_native_cleanup = None
+        self._native_readonly_context = True
 
     @property
     def helper_pid(self):
@@ -186,10 +191,192 @@ class InspectorService:
     def capabilities(self, identity: ProcessIdentity) -> dict:
         return self.capability_manager.inspect(identity)
 
+    def _native_context_changed(self):
+        self._native_context_generation += 1
+        if self._native_dispatch_owner is None:
+            self._native_context_owner = None
+
+    def _native_context_identity(self):
+        return {"generation": self._native_context_generation,
+                "helper_identity": (self._helper_identity.to_dict()
+                                    if self.helper is not None and self._helper_identity else None),
+                "target": self._target.to_dict() if self._target else None,
+                "operations": sorted(self._scope)}
+
+    def _native_owner_matches(self, owner_run_id, expected_context):
+        owner = self._native_context_owner
+        return bool(isinstance(expected_context, dict) and owner is not None
+                    and owner.get("owner_run_id") == owner_run_id and owner == expected_context
+                    and all(owner.get(k) == v for k, v in self._native_context_identity().items()))
+
+    @staticmethod
+    def _native_owner_conflict(operation):
+        return result(operation, "CONFIRMATION_REQUIRED", data={"execution_started": False},
+                      error="NATIVE_CONTEXT_OWNERSHIP_CONFLICT",
+                      next_action="REVIEW_EXISTING_DIAGNOSTIC_OWNER_BEFORE_CHAIN_ACTION")
+
+    def _owned_native_call(self, operation, owner_run_id, expected_context, callback, *, mode, request=None):
+        """Ownership metadata never supplies action consent or native authority."""
+        if not isinstance(owner_run_id, str) or not owner_run_id or len(owner_run_id) > 128:
+            raise ValueError("INVALID_NATIVE_CONTEXT_OWNER")
+        with self._lock:
+            previous = self._native_context_owner
+            owned = self._native_owner_matches(owner_run_id, expected_context)
+            if (previous is not None or expected_context is not None) and not owned:
+                return self._native_owner_conflict(operation)
+            if owned and previous.get("cleanup_only"):
+                answer = self._native_owner_conflict(operation)
+                answer["next_action"] = "RELEASE_CLOSED_NATIVE_CONTEXT_BEFORE_NEW_ACTION"
+                return answer
+            initial_generation = self._native_context_generation
+            fresh = self.helper is None and not self._owner_retained and not self._cleanup_unconfirmed
+            if not owned and not fresh:
+                healthy = (self.helper is not None and self._helper_liveness() is True
+                           and time.monotonic() < self._expires
+                           and not self._owner_retained and not self._cleanup_unconfirmed)
+                borrow = (mode == "execute" and healthy and request is not None
+                          and DEEP_ACTIONS[request.operation].mode in ("OBSERVE", "INSPECT")
+                          and not DEEP_ACTIONS[request.operation].confirmation_required
+                          and self._target == request.target and request.operation in self._scope)
+                bind_empty = (mode == "bind" and healthy and self._admin_session_managed
+                              and self._target is None and not self._scope)
+                if not borrow and not bind_empty:
+                    return self._native_owner_conflict(operation)
+            else:
+                borrow, bind_empty = False, False
+            dispatch_owner = self._native_dispatch_owner
+            self._native_dispatch_owner = owner_run_id
+            try:
+                try:
+                    answer = callback()
+                except BaseException as exc:
+                    # A native selector can fail after it created a helper or
+                    # bound a target. Preserve that real owner for cleanup; the
+                    # exception must not make it appear foreign or absent.
+                    created_after_failure = (self.helper is not None and self._helper_identity is not None
+                        and (fresh or owned or bind_empty and self._target is not None))
+                    if not created_after_failure or borrow:
+                        raise
+                    answer = result(operation, "RECOVERY_UNCONFIRMED",
+                        error="NATIVE_CONTEXT_CALL_FAILED: " + type(exc).__name__ + ": " + str(exc)[:1000],
+                        data={"execution_started": None, "owner_retained": True,
+                              "retry_cleanup_required": True, "primary_error_type": type(exc).__name__},
+                        limitations=["The native call may have started; only explicit cleanup is safe to retry."])
+                    self._owner_retained = self._cleanup_unconfirmed = True
+                # Only the actual fresh helper or newly bound empty context can
+                # create ownership. Equal PID/scope never adopts a legacy owner.
+                created = (self.helper is not None and self._helper_identity is not None
+                           and (fresh or owned or bind_empty and answer.get("status") == "COMPLETED"))
+                if created and not borrow:
+                    self._native_context_owner = {**self._native_context_identity(),
+                        "owner_run_id": owner_run_id,
+                        "context_id": previous["context_id"] if owned else uuid4().hex,
+                        "owns_session": previous["owns_session"] if owned else fresh}
+                    answer["native_context_ownership"] = deepcopy(self._native_context_owner)
+                else:
+                    answer["native_context_ownership"] = None
+                    if owned and self.helper is None:
+                        # A closed context can still require a durable cleanup
+                        # acknowledgement. This reference permits release only;
+                        # it can never authorize a fresh helper or native action.
+                        self._native_context_owner = {**previous, **self._native_context_identity(),
+                            "cleanup_only": True,
+                            "closed_context": previous.get("closed_context") or {
+                                key: previous[key] for key in ("helper_identity", "target", "operations")}}
+                        answer["native_context_ownership"] = deepcopy(self._native_context_owner)
+                    elif fresh and request is not None and not borrow:
+                        closed = self._closed_native_cleanup
+                        read_only = (DEEP_ACTIONS[request.operation].mode in ("OBSERVE", "INSPECT")
+                                     and not DEEP_ACTIONS[request.operation].confirmation_required)
+                        if (read_only and isinstance(closed, dict) and closed.get("confirmed") is True
+                                and closed.get("dispatch_owner_run_id") == owner_run_id
+                                and closed.get("closed_generation", 0) > initial_generation
+                                and self.helper is None and self._channel is None and self._recovery_stream is None):
+                            self._native_context_owner = {**self._native_context_identity(),
+                                "owner_run_id": owner_run_id, "context_id": uuid4().hex,
+                                "owns_session": True, "cleanup_only": True,
+                                "closed_context": deepcopy(closed["closed_context"])}
+                            answer["native_context_ownership"] = deepcopy(self._native_context_owner)
+                return answer
+            finally:
+                self._native_dispatch_owner = dispatch_owner
+
+    def execute_owned(self, request, *, owner_run_id, expected_context=None, cancel_event=None):
+        request = request if isinstance(request, ActionRequest) else ActionRequest.from_dict(request)
+        return self._owned_native_call(request.operation, owner_run_id, expected_context,
+            lambda: self.execute(request, cancel_event=cancel_event), mode="execute", request=request)
+
+    def start_admin_session_owned(self, *, owner_run_id, expected_context=None, confirmed=False,
+                                  cancel_event=None, session_seconds=MAX_SESSION_SECONDS):
+        return self._owned_native_call("session.elevate", owner_run_id, expected_context,
+            lambda: self.start_admin_session(confirmed=confirmed, cancel_event=cancel_event,
+                                            session_seconds=session_seconds), mode="start")
+
+    def bind_target_owned(self, target, operations, *, owner_run_id, expected_context=None,
+                           confirmed=False, cancel_event=None):
+        return self._owned_native_call("target.bind", owner_run_id, expected_context,
+            lambda: self.bind_target(target, operations, confirmed=confirmed, cancel_event=cancel_event), mode="bind")
+
+    def release_native_context(self, owner_run_id, *, expected_context):
+        """Release exactly a chain-created context through the existing R10 path."""
+        with self._lock:
+            if not self._native_owner_matches(owner_run_id, expected_context):
+                return self._native_owner_conflict("target.release")
+            closed_context = deepcopy(self._native_context_owner)
+            dispatch_owner = self._native_dispatch_owner
+            self._native_dispatch_owner = owner_run_id
+            try:
+                answer = self.end_admin_session() if closed_context["owns_session"] else self.clear_target()
+                data = answer.get("data", {})
+                terminal = data.get("expiry_cleanup")
+                # Require the real engine's checked cleanup, not COMPLETED or
+                # absence of a helper. Managed terminal ACKs remain authenticated.
+                engine = (terminal.get("data", {}).get("cleanup", {}) if isinstance(terminal, dict)
+                          else data.get("cleanup", {}))
+                proof = data.get("cleanup") if isinstance(data.get("cleanup"), dict) else {}
+                if proof.get("confirmed") is not True:
+                    proof = engine.get("data", {}).get("cleanup", {}) if isinstance(engine, dict) else {}
+                released = (answer.get("status") == "COMPLETED" and proof.get("confirmed") is True
+                            and self._target is None and not self._scope
+                            and (not closed_context["owns_session"] or self.helper is None)
+                            and (not isinstance(terminal, dict) or terminal.get("confirmed") is True))
+                if closed_context.get("cleanup_only"):
+                    closed = self._closed_native_cleanup
+                    released = bool(released and isinstance(closed, dict) and closed.get("confirmed") is True
+                        and closed.get("closed_context") == closed_context.get("closed_context")
+                        and closed.get("journal_recorded") is True)
+                answer["native_context_release"] = closed_context
+                answer["cleanup"] = {"confirmed": released,
+                    "status": "CONFIRMED" if released else "RECOVERY_UNCONFIRMED",
+                    "scope": "CHAIN_OWNED_NATIVE_CONTEXT", "evidence": deepcopy(data)}
+                if released:
+                    self._native_context_owner = None
+                    answer["native_context_ownership"] = None
+                else:
+                    answer["status"] = "RECOVERY_UNCONFIRMED"
+                    answer.setdefault("error", "NATIVE_CONTEXT_CLEANUP_ACK_NOT_VERIFIED")
+                    # This serialized release may have closed the helper but
+                    # failed to commit its acknowledgement. Retain a refreshed
+                    # reference for an explicit cleanup/journal retry, never a
+                    # reference to a different helper or target.
+                    current = self._native_context_identity()
+                    if (current["target"] in (None, closed_context["target"])
+                            and current["helper_identity"] in (None, closed_context["helper_identity"])):
+                        self._native_context_owner = {**closed_context, **current}
+                        if self.helper is None:
+                            self._native_context_owner.update(cleanup_only=True,
+                                closed_context=closed_context.get("closed_context") or {
+                                    key: closed_context[key] for key in ("helper_identity", "target", "operations")})
+                        answer["native_context_ownership"] = deepcopy(self._native_context_owner)
+                return answer
+            finally:
+                self._native_dispatch_owner = dispatch_owner
+
     def _start_session(self, target: ProcessIdentity | None, operations: list[str], *, elevated: bool,
                        cancel_event=None, admin_lease: bool = False, session_seconds=MAX_SESSION_SECONDS) -> dict:
         self._expiry_cleanup = None
         self._pending_close_context = None
+        self._closed_native_cleanup = None
         if os.name != "nt":
             return result("session.open", "UNSUPPORTED_PLATFORM", next_action="USE_WINDOWS_10_OR_11_X64")
         parent = self.identity(os.getpid())
@@ -250,18 +437,44 @@ class InspectorService:
             self._elevated_verified = permission == "ADMINISTRATOR"
             self._admin_state = "ACTIVE" if elevated else "INACTIVE"
             self._interventions_started = False
+            self._native_readonly_context = True
             self._owner_retained = False
             self._cleanup_unconfirmed = False
             self._expiry_cleanup = None
+            self._native_context_changed()
             return result("session.open", "COMPLETED", data=self.session_status(), permission_level=permission)
-        except BaseException:
-            self._discard_helper(force=True)
+        except BaseException as primary:
+            try:
+                self._discard_helper(force=True)
+            except BaseException as cleanup_error:
+                # Keep the actual startup/handshake failure and the remaining
+                # cleanup owner. A failed finally must not replace its cause.
+                primary.cleanup_unconfirmed = primary.owner_retained = True
+                primary.owner = self
+                primary.add_note("DIAGNOSTIC_STARTUP_CLEANUP_UNCONFIRMED: " + str(cleanup_error)[:400])
             raise
 
     def _discard_helper(self, *, force: bool, cleanup_confirmed: bool = False) -> None:
+        try:
+            self._discard_helper_resources(force=force, cleanup_confirmed=cleanup_confirmed)
+        except BaseException as primary:
+            self._owner_retained = self._cleanup_unconfirmed = True
+            self._elevated_verified = False
+            self._admin_state = "CLEANUP_REQUIRED"
+            primary.cleanup_unconfirmed = primary.owner_retained = True
+            primary.owner = self
+            raise
+
+    def _discard_helper_resources(self, *, force: bool, cleanup_confirmed: bool = False) -> None:
         errors = []
+        original_helper = self.helper
+        original_context = {"helper_identity": self._helper_identity.to_dict() if self._helper_identity else None,
+                            "target": self._target.to_dict() if self._target else None,
+                            "operations": sorted(self._scope)}
+        readonly = self._native_readonly_context is True and not self._interventions_started
+        pipe_ack, helper_ack = None, None
         if self._channel is not None:
-            self._channel.close()
+            pipe_ack = self._channel.close()
             self._channel = None
         if self.helper is not None:
             try:
@@ -288,8 +501,9 @@ class InspectorService:
                 # subsequent observation of process exit resolves that race;
                 # channel, handle and journal failures are not swallowed here.
                 errors.clear()
-                self.helper.close_handle()
+                helper_ack = self.helper.close_handle()
                 self.helper = None
+                self._native_context_changed()
         if self._recovery_stream is not None:
             self._recovery_stream.close()
             self._recovery_stream = None
@@ -300,6 +514,18 @@ class InspectorService:
         self._helper_identity = None
         self._helper_token_authority = None
         self._session_nonce = None
+        if (original_helper is not None and original_context["helper_identity"] is not None and readonly
+                and isinstance(pipe_ack, dict) and pipe_ack.get("confirmed") is True
+                and isinstance(helper_ack, dict) and helper_ack.get("confirmed") is True
+                and self.helper is None and self._channel is None and self._recovery_stream is None):
+            self._closed_native_cleanup = {"confirmed": True,
+                "status": "CONFIRMED", "scope": "READ_ONLY_HELPER_AND_GUI_OWNED_CAPABILITIES",
+                "source": "OBSERVED_PROCESS_EXIT_AND_CHECKED_GUI_CAPABILITY_RELEASE",
+                "helper_exit_observed": True, "pipe": deepcopy(pipe_ack),
+                "helper_process_handle": deepcopy(helper_ack), "recovery_stream_closed": True,
+                "intervention_dispatch_observed": False, "operation_execution": "NOT_ESTABLISHED",
+                "closed_context": original_context, "closed_generation": self._native_context_generation,
+                "dispatch_owner_run_id": self._native_dispatch_owner, "journal_recorded": False}
         self._session_catalog = frozenset()
         self._admin_session_managed = False
         if errors:
@@ -321,10 +547,14 @@ class InspectorService:
         if not isinstance(cleanup, dict) or not isinstance(cleanup.get("data"), dict):
             raise ValueError("INVALID_TERMINAL_LEASE_CLEANUP_RESULT")
         data = cleanup["data"]
+        engine_cleanup = data.get("cleanup")
+        native_ack = (engine_cleanup.get("data", {}).get("cleanup", {})
+                      if isinstance(engine_cleanup, dict) else {})
         confirmed = bool(cleanup.get("status") == "COMPLETED" and message.get("context_released") is True
                          and data.get("target") is None and data.get("operations") == []
                          and not data.get("owner_retained")
-                         and isinstance(data.get("cleanup"), dict) and data["cleanup"].get("status") == "COMPLETED")
+                         and isinstance(engine_cleanup, dict) and engine_cleanup.get("status") == "COMPLETED"
+                         and isinstance(native_ack, dict) and native_ack.get("confirmed") is True)
         if cleanup.get("status") == "COMPLETED" and not confirmed:
             raise PermissionError("TERMINAL_LEASE_CONTEXT_RELEASE_NOT_VERIFIED")
         proof = {**cleanup, "confirmed": confirmed, "source": "AUTHENTICATED_HELPER_TERMINAL_ACK",
@@ -335,6 +565,7 @@ class InspectorService:
         self._pending_close_context = None
         self._elevated_verified = False
         if confirmed:
+            self._native_context_changed()
             self._target, self._scope = None, frozenset()
             self._interventions_started = self._owner_retained = self._cleanup_unconfirmed = False
             self._admin_state = "EXPIRED" if time.monotonic() >= self._expires else "INACTIVE"
@@ -515,6 +746,8 @@ class InspectorService:
                         raise PermissionError("ADMINISTRATIVE_TARGET_BIND_ACKNOWLEDGEMENT_MISMATCH")
                     self._target, self._scope = target, frozenset(scope)
                     self._interventions_started = False
+                    self._native_readonly_context = True
+                    self._native_context_changed()
                 elif answer.get("status") == "RECOVERY_UNCONFIRMED":
                     answer = self._retained_result("target.bind", "PREVIOUS_CONTEXT_CLEANUP_UNCONFIRMED", cleanup=answer)
                 else:
@@ -525,6 +758,8 @@ class InspectorService:
                         # the new process exited/changed before context creation.
                         self._target, self._scope = None, frozenset()
                         self._interventions_started = False
+                        self._native_readonly_context = True
+                        self._native_context_changed()
                 if answer.get("error") == "ELEVATED_TOKEN_NOT_GRANTED":
                     self._elevated_verified = False
                     self._admin_state = "FAILED"
@@ -557,6 +792,7 @@ class InspectorService:
                     self._owner_retained = self._cleanup_unconfirmed = False
                     self._interventions_started = False
                     self._admin_state = "ACTIVE"
+                    self._native_context_changed()
                 else:
                     answer = self._retained_result("target.release", "PREVIOUS_CONTEXT_CLEANUP_UNCONFIRMED", cleanup=answer)
             except Exception as exc:
@@ -873,6 +1109,7 @@ class InspectorService:
             execution_target_verified = False
             execution_helper_pid = None
             execution_reply_verified = False
+            execution_cleanup = None
             try:
                 validate_operation_parameters(request.operation, request.parameters, allow_output=True)
                 check_deadline(operation_deadline, cancel_event)
@@ -930,6 +1167,8 @@ class InspectorService:
                         self._active_request_id = identifier
                         if spec.mode == "INTERVENE" or request.operation in ("thread_stacks", "profile.etw"):
                             self._interventions_started = True
+                        if spec.confirmation_required:
+                            self._native_readonly_context = False
                         deadline = operation_deadline + 2
                         try:
                             intervention_dispatch_attempted = spec.mode == "INTERVENE" or request.operation == "thread_stacks"
@@ -963,6 +1202,16 @@ class InspectorService:
                     elif answer.get("status") in ("CONFIRMATION_REQUIRED", "PROCESS_CHANGED", "ACCESS_DENIED",
                                                   "ADMIN_REQUIRED", "SESSION_EXPIRED"):
                         execution_started = False
+                    cleanup = answer.get("native_query_cleanup")
+                    if (isinstance(cleanup, dict) and cleanup.get("request_id") == identifier
+                            and cleanup.get("operation") == request.operation
+                            and cleanup.get("target") == request.target.to_dict()
+                            and self._helper_identity is not None
+                            and cleanup.get("helper_identity") == self._helper_identity.to_dict()
+                            and self._session_nonce
+                            and hmac.compare_digest(str(cleanup.get("session_nonce", "")), self._session_nonce)):
+                        execution_cleanup = {k: deepcopy(v) for k, v in cleanup.items() if k != "session_nonce"}
+                        execution_cleanup["session_nonce_verified"] = True
                 if self._admin_session_managed and answer.get("error") == "ELEVATED_TOKEN_NOT_GRANTED":
                     self._elevated_verified = False
                     self._admin_state = "FAILED"
@@ -1014,12 +1263,20 @@ class InspectorService:
             finally:
                 if dump_stream is not None:
                     dump_stream.close()
+            # The transport nonce is not diagnostic evidence or saved authority.
+            if isinstance(answer.get("native_query_cleanup"), dict):
+                answer["native_query_cleanup"] = {k: v for k, v in answer["native_query_cleanup"].items()
+                                                    if k != "session_nonce"}
             answer.update(operation=request.operation, operation_id=identifier)
+            if (self._native_dispatch_owner is None and execution_started is not False
+                    and (spec.mode == "INTERVENE" or request.operation == "thread_stacks")):
+                self._native_context_changed()
             answer.setdefault("permission_level", operation_permission)
             answer.setdefault("limitations", [])
             receipt_arguments = dict(execution_started=execution_started, source=execution_source,
                                      source_verified=execution_source_verified,
-                                     target_verified=execution_target_verified, helper_pid=execution_helper_pid)
+                                     target_verified=execution_target_verified, helper_pid=execution_helper_pid,
+                                     cleanup=execution_cleanup)
             answer = attach_run_receipt(run_context, answer, **receipt_arguments)
             # Imported trace payloads and live memory are not ordinary metadata.
             journal_answer = dict(answer)
@@ -1111,6 +1368,29 @@ class InspectorService:
     def end_admin_session(self) -> dict:
         with self._lock:
             if self.helper is None:
+                closed = self._closed_native_cleanup
+                if (isinstance(closed, dict) and closed.get("confirmed") is True
+                        and self._native_readonly_context is True and not self._interventions_started
+                        and self._channel is None and self._recovery_stream is None
+                        and self._target is None and not self._scope
+                        and closed.get("closed_generation") == self._native_context_generation):
+                    answer = result("session.close", "COMPLETED", data={"active": False,
+                        "cleanup": deepcopy(closed)}, limitations=[
+                            "Observed resource release does not establish whether any lost query executed."])
+                    try:
+                        self.journal.append({**answer, "operation_id": uuid4().hex,
+                            "source": "READ_ONLY_NATIVE_OWNER_CLEANUP_ACKNOWLEDGEMENT"})
+                    except Exception as exc:
+                        self._cleanup_unconfirmed = True
+                        self._admin_state = "CLEANUP_REQUIRED"
+                        return result("session.close", "RECOVERY_UNCONFIRMED",
+                            error="CLEANUP_JOURNAL_FAILED: " + str(exc)[:1000],
+                            data={"active": False, "cleanup_required": True})
+                    closed["journal_recorded"] = True
+                    answer["data"]["cleanup"] = deepcopy(closed)
+                    self._cleanup_unconfirmed = self._owner_retained = False
+                    self._admin_state = "INACTIVE"
+                    return answer
                 if self._cleanup_unconfirmed:
                     if self._expiry_cleanup and self._expiry_cleanup.get("confirmed"):
                         # An explicit retry may repair the durable cleanup
@@ -1193,6 +1473,15 @@ class InspectorService:
                               if self.helper is not None else
                               result("session.close", "RECOVERY_UNCONFIRMED", error=str(exc)[:2000]))
                 if self.helper is None:
+                    closed = self._closed_native_cleanup
+                    if isinstance(closed, dict) and closed.get("confirmed") is True:
+                        # OS exit and checked closures resolve ownership only.
+                        # The interrupted query's own receipt is immutable.
+                        answer.setdefault("data", {})["cleanup"] = deepcopy(closed)
+                        answer["data"]["reported_cleanup_status_before_os_boundary"] = answer.get("status")
+                        answer["status"] = "COMPLETED"
+                        answer.setdefault("limitations", []).append(
+                            "This cleanup confirms resource release only; a lost query result remains unknown.")
                     self._interventions_started = False
                     self._cleanup_unconfirmed = answer.get("status") != "COMPLETED"
                     self._admin_state = "CLEANUP_REQUIRED" if self._cleanup_unconfirmed else "INACTIVE"
@@ -1202,6 +1491,10 @@ class InspectorService:
             try:
                 self.journal.append({**answer, "operation_id": uuid4().hex, "source": "DIAGNOSTIC_SESSION_CLEANUP",
                                      "target": closing_target, "permission_level": closing_permission})
+                if (self.helper is None and isinstance(self._closed_native_cleanup, dict)
+                        and answer.get("data", {}).get("cleanup", {}).get("confirmed") is True):
+                    self._closed_native_cleanup["journal_recorded"] = True
+                    answer["data"]["cleanup"] = deepcopy(self._closed_native_cleanup)
                 if terminal and terminal.get("confirmed") and self.helper is None:
                     terminal["journal_recorded"] = True
                     self._owner_retained = self._cleanup_unconfirmed = False

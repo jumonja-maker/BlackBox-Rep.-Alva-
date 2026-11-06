@@ -26,6 +26,117 @@ MAX_DUMP_BYTES = 512 * 1024 * 1024
 MAX_MAPPING_NAME_QUERIES = 256
 MAX_MAPPING_NAME_BYTES = 256 * 1024
 _DBGHELP_LOCK = threading.Lock()
+_QUERY_CLEANUP = threading.local()
+_IDENTITY_OWNERS_LOCK = threading.RLock()
+_IDENTITY_OWNERS = []
+_IDENTITY_OPENING = 0
+_MAX_IDENTITY_OWNERS = 1024
+QUERY_CLEANUP_OPERATIONS = frozenset({"processes", "modules", "threads", "handles", "memory_map",
+    "memory_read", "wait_chains", "network", "disk", "snapshot", "capabilities"})
+
+
+class _QueryCleanup:
+    """Observed resource boundaries, separate from the query's own outcome.
+
+    The helper serializes an inspector's queries. Thread-local scopes also cover
+    identity/access preflight and nested snapshot calls without changing native
+    APIs or making a failed finally block replace the primary exception.
+    """
+    def __init__(self, inspector, operation):
+        self.inspector, self.operation = inspector, operation
+        self.resources, self.parent = [], None
+
+    def __enter__(self):
+        self.parent = getattr(_QUERY_CLEANUP, "current", None)
+        _QUERY_CLEANUP.current = self
+        return self
+
+    def __exit__(self, *exc):
+        _QUERY_CLEANUP.current = self.parent
+
+    def register(self, resource):
+        self.resources.append(resource)
+        if self.parent is not None and self.parent.inspector is self.inspector:
+            self.parent.register(resource)
+
+    def evidence(self):
+        retained = [r for r in self.resources if not r["closed"]]
+        return {"status": "RECOVERY_UNCONFIRMED" if retained else "CONFIRMED",
+            "confirmed": not retained, "ownership_known": True,
+            "scope": "BLACKBOX_OWNED_NATIVE_QUERY_RESOURCES", "operation": self.operation,
+            "target": self.inspector.identity.to_dict(), "opened": len(self.resources),
+            "closed": sum(r["closed"] for r in self.resources), "retained": len(retained),
+            "resource_kinds": sorted({r["kind"] for r in self.resources}),
+            "failures": [{"kind": r["kind"], "winerror": r.get("winerror"),
+                          "reason": r.get("reason", "CLOSE_NOT_ACKNOWLEDGED")} for r in retained]}
+
+    def attach(self, answer):
+        proof = self.evidence()
+        # A query-process owner has a separate checked Job/leader boundary.
+        if answer.get("status") == "RECOVERY_UNCONFIRMED" or answer.get("data", {}).get("owner_retained"):
+            proof.update(status="RECOVERY_UNCONFIRMED", confirmed=False)
+        answer["native_query_cleanup"] = proof
+        if proof["retained"]:
+            answer.setdefault("data", {}).update(owner_retained=True, retry_cleanup_required=True,
+                reported_operation_status=answer.get("status"),
+                reported_operation_reason=answer.get("reason", answer.get("error")))
+            answer["status"] = "RECOVERY_UNCONFIRMED"
+        return answer
+
+
+def _track_handle(kernel, handle, kind):
+    scope = getattr(_QUERY_CLEANUP, "current", None)
+    if scope is not None:
+        resource = {"kernel": kernel, "handle": handle, "kind": kind, "closed": False}
+        scope.inspector._owned_native_handles.append(resource)
+        scope.register(resource)
+
+
+def _close_native_resource(resource):
+    if resource.get("retry_close_allowed") is False:
+        # ERROR_INVALID_HANDLE cannot prove that this numeric slot still names
+        # our original object; a later retry could close a reused foreign slot.
+        return False
+    try:
+        closed = bool(resource["release"]() if "release" in resource else
+                      resource["kernel"].close(resource["handle"]))
+        error = None if closed else getattr(C, "get_last_error", lambda: None)()
+    except Exception as exc:
+        closed, error = False, getattr(exc, "winerror", None)
+        resource["reason"] = type(exc).__name__ + ": " + str(exc)[:160]
+    resource.update(closed=closed, winerror=error)
+    if not closed and error == 6:
+        resource.update(retry_close_allowed=False, reason="NATIVE_HANDLE_OWNERSHIP_LOST")
+    return closed
+
+
+def _checked_close(kernel, handle):
+    scope = getattr(_QUERY_CLEANUP, "current", None)
+    resource = next((r for r in reversed(scope.inspector._owned_native_handles)
+        if r.get("kernel") is kernel and r.get("handle") is handle), None) if scope is not None else None
+    if resource is None:
+        # Legacy callers outside an operation ledger retain their existing API.
+        return _close_native_resource({"kernel": kernel, "handle": handle})
+    closed = _close_native_resource(resource)
+    if closed:
+        scope.inspector._owned_native_handles.remove(resource)
+    return closed
+
+
+def _wct_cleanup_observer(event, release):
+    scope = getattr(_QUERY_CLEANUP, "current", None)
+    if scope is None:
+        return
+    if event == "OPENED":
+        resource = {"kind": "WCT_SESSION_CALLBACK_BOUNDARY", "closed": False, "release": release}
+        scope.inspector._owned_native_handles.append(resource)
+        scope.register(resource)
+    elif event == "CLOSED_CALLBACKS_DRAINED":
+        resource = next((r for r in reversed(scope.resources)
+            if r.get("release") is release and not r["closed"]), None)
+        if resource is not None:
+            resource["closed"] = True
+            scope.inspector._owned_native_handles.remove(resource)
 
 
 class NativeError(Exception):
@@ -88,12 +199,119 @@ def capture_identity(pid):
     handle = kernel.open_process(0x1000 | 0x100000, False, pid)
     if not handle:
         raise _os_error("OPEN_PROCESS_IDENTITY_FAILED")
+    _track_handle(kernel, handle, "IDENTITY_PROCESS_HANDLE")
     try:
         if kernel.wait(handle, 0) != 258:
             raise NativeError("PROCESS_CHANGED", "PROCESS_ALREADY_EXITED")
         return _identity(kernel, handle, pid)
     finally:
-        kernel.close(handle)
+        _checked_close(kernel, handle)
+
+
+class _IdentityQueryOwner:
+    """One checked identity capability; never a saved process authorization."""
+    def __init__(self, kernel, handle, pid, run_id):
+        self.run_id, self.pid = run_id, pid
+        self.identity = None
+        self._resource = {"kernel": kernel, "handle": handle, "kind": "IDENTITY_PROCESS_HANDLE", "closed": False}
+        self._lock = threading.RLock()
+
+    def close(self):
+        with self._lock:
+            if not self._resource["closed"]:
+                try:
+                    _close_native_resource(self._resource)
+                except BaseException as failure:
+                    self._resource.update(closed=False, reason=type(failure).__name__ + ": " + str(failure)[:160])
+            confirmed = self._resource["closed"] is True
+            self.cleanup_evidence = {"confirmed": confirmed,
+                "status": "CONFIRMED" if confirmed else "RECOVERY_UNCONFIRMED",
+                "scope": "NATIVE_IDENTITY_QUERY_HANDLES_CLOSED", "owner_retained": not confirmed,
+                "pid": self.pid, "identity": self.identity.to_dict() if self.identity else None,
+                "retained": 0 if confirmed else 1, "winerror": self._resource.get("winerror"),
+                "reason": None if confirmed else self._resource.get("reason", "IDENTITY_HANDLE_CLOSE_NOT_ACKNOWLEDGED")}
+            if confirmed:
+                with _IDENTITY_OWNERS_LOCK:
+                    if self in _IDENTITY_OWNERS:
+                        _IDENTITY_OWNERS.remove(self)
+            return dict(self.cleanup_evidence)
+
+
+def _identity_cleanup_failure(primary, owner):
+    primary.cleanup_unconfirmed = primary.owner_retained = True
+    primary.owner = owner
+    with _IDENTITY_OWNERS_LOCK:
+        if owner not in _IDENTITY_OWNERS:
+            _IDENTITY_OWNERS.append(owner)
+    return primary
+
+
+@contextmanager
+def _identity_query_slot(owner_run_id):
+    global _IDENTITY_OPENING
+    with _IDENTITY_OWNERS_LOCK:
+        previous = next((owner for owner in _IDENTITY_OWNERS if owner.run_id == owner_run_id), None)
+        if previous is not None:
+            raise _identity_cleanup_failure(NativeError("RECOVERY_UNCONFIRMED", "PREVIOUS_IDENTITY_QUERY_CLOSE_UNCONFIRMED"), previous)
+        if len(_IDENTITY_OWNERS) + _IDENTITY_OPENING >= _MAX_IDENTITY_OWNERS:
+            raise NativeError("LIMIT_REACHED", "IDENTITY_QUERY_OWNER_BUDGET_EXCEEDED")
+        _IDENTITY_OPENING += 1
+    try:
+        yield
+    finally:
+        with _IDENTITY_OWNERS_LOCK:
+            _IDENTITY_OPENING -= 1
+
+
+def capture_identity_checked(pid, *, owner_run_id=None):
+    """Return an exact identity only after the owned query handle really closes.
+
+    Legacy capture_identity keeps its existing API. New workflow identity reads
+    use this explicit boundary and retain a failed capability for scoped cleanup.
+    """
+    _windows()
+    _integer(pid, "pid", 1, 0xFFFFFFFF)
+    if owner_run_id is not None and (type(owner_run_id) is not str or not owner_run_id or len(owner_run_id) > 128):
+        raise ValueError("INVALID_IDENTITY_QUERY_OWNER")
+    with _identity_query_slot(owner_run_id):
+        kernel = W.Kernel()
+        handle = kernel.open_process(0x1000 | 0x100000, False, pid)
+        if not handle:
+            raise _os_error("OPEN_PROCESS_IDENTITY_FAILED")
+        owner = _IdentityQueryOwner(kernel, handle, pid, owner_run_id)
+        primary, observed = None, None
+        try:
+            if kernel.wait(handle, 0) != 258:
+                raise NativeError("PROCESS_CHANGED", "PROCESS_ALREADY_EXITED")
+            observed = owner.identity = _identity(kernel, handle, pid)
+        except BaseException as failure:
+            primary = failure
+        acknowledgement = owner.close()
+        if acknowledgement["confirmed"] is not True:
+            if primary is None:
+                primary = NativeError("RECOVERY_UNCONFIRMED", "IDENTITY_QUERY_HANDLE_CLOSE_UNCONFIRMED",
+                                      acknowledgement.get("winerror"))
+            else:
+                primary.add_note("IDENTITY_QUERY_HANDLE_CLOSE_UNCONFIRMED")
+            raise _identity_cleanup_failure(primary, owner)
+        if primary is not None:
+            raise primary
+        return observed
+
+
+def cleanup_identity_queries(owner_run_id):
+    """Retry only this live run's identity capabilities; never another owner."""
+    if type(owner_run_id) is not str or not owner_run_id or len(owner_run_id) > 128:
+        raise ValueError("INVALID_IDENTITY_QUERY_OWNER")
+    with _IDENTITY_OWNERS_LOCK:
+        owners = tuple(owner for owner in _IDENTITY_OWNERS if owner.run_id == owner_run_id)
+    evidence = [owner.close() for owner in owners]
+    confirmed = all(row["confirmed"] is True for row in evidence)
+    return {"confirmed": confirmed, "status": "CONFIRMED" if confirmed else "RECOVERY_UNCONFIRMED",
+            "scope": "RUN_OWNED_NATIVE_IDENTITY_QUERIES" if owners else "NO_OWNED_IDENTITY_HANDLES",
+            "owner_retained": not confirmed,
+            "attempted": len(evidence), "retained": sum(row["confirmed"] is not True for row in evidence),
+            "evidence": evidence}
 
 
 def verify_identity(identity):
@@ -114,6 +332,7 @@ def token_state():
     token = W.HANDLE()
     if not open_token(kernel.current_process(), 8, C.byref(token)):
         raise _os_error("OPEN_CURRENT_TOKEN_FAILED")
+    _track_handle(kernel, token, "CURRENT_TOKEN_HANDLE")
     try:
         elevated, elevation_type, needed = W.U32(), W.U32(), W.U32()
         if not get_info(token, 20, C.byref(elevated), 4, C.byref(needed)):
@@ -123,7 +342,7 @@ def token_state():
         return {"elevated": bool(elevated.value), "elevation_type": elevation_type.value,
                 "source": "WIN32_TOKEN_ELEVATION"}
     finally:
-        kernel.close(token)
+        _checked_close(kernel, token)
 
 
 _RIGHTS = {"processes": 0x1000, "modules": 0x410, "threads": 0x1000,
@@ -143,20 +362,22 @@ def probe_access(identity, operation):
         query = kernel.open_process(0x1000, False, expected.pid)
         protection = None
         if query:
+            _track_handle(kernel, query, "ACCESS_PROBE_QUERY_HANDLE")
             try:
                 level = W.U32()
                 if kernel.process_information(query, 7, C.byref(level), C.sizeof(level)):
                     protection = level.value
             finally:
-                kernel.close(query)
+                _checked_close(kernel, query)
         rights = _RIGHTS.get(operation, 0x1000)
         handle = kernel.open_process(rights, False, expected.pid)
         if handle:
+            _track_handle(kernel, handle, "ACCESS_PROBE_OPERATION_HANDLE")
             try:
                 if _times(kernel.process_times, handle)[0] != expected.created_100ns:
                     raise NativeError("PROCESS_CHANGED", "PROCESS_INSTANCE_CHANGED")
             finally:
-                kernel.close(handle)
+                _checked_close(kernel, handle)
             return {"status": "AVAILABLE", "source": "WIN32_ACCESS_PROBE",
                     "identity": observed.to_dict(), "process_access_mask": rights,
                     "protection_level": protection,
@@ -181,6 +402,10 @@ class ProcessInspector:
         self.identity = ProcessIdentity.from_dict(identity)
         self.closed = False
         self._owned_query_processes = []
+        self._owned_native_handles = []
+
+    def query_cleanup_scope(self, operation):
+        return _QueryCleanup(self, operation)
 
     @contextmanager
     def _open(self, rights):
@@ -191,12 +416,13 @@ class ProcessInspector:
         handle = kernel.open_process(rights | 0x1000 | 0x100000, False, self.identity.pid)
         if not handle:
             raise _os_error("OPEN_PROCESS_FOR_INSPECTION_FAILED")
+        _track_handle(kernel, handle, "QUERY_PROCESS_HANDLE")
         try:
             self._verify_handle(kernel, handle)
             yield kernel, handle
             self._verify_handle(kernel, handle)
         finally:
-            kernel.close(handle)
+            _checked_close(kernel, handle)
 
     def _verify_handle(self, kernel, handle):
         if kernel.wait(handle, 0) != 258:
@@ -209,6 +435,12 @@ class ProcessInspector:
     def close(self):
         from .optional_jobs import OwnedProcessCleanupUnconfirmed
         failures = []
+        for resource in tuple(self._owned_native_handles):
+            if _close_native_resource(resource):
+                self._owned_native_handles.remove(resource)
+            else:
+                failures.append({"kind": resource["kind"], "winerror": resource.get("winerror"),
+                                 "reason": resource.get("reason", "CLOSE_NOT_ACKNOWLEDGED")})
         for owner in tuple(self._owned_query_processes):
             try:
                 owner.close(kill=True)
@@ -221,9 +453,18 @@ class ProcessInspector:
                 "data": {"owner_retained": True, "retry_cleanup_required": True,
                          "query_cleanup": failures}, "owned_suspensions": 0}
         self.closed = True
-        return {"status": "COMPLETED", "source": "INSPECTOR_CLEANUP", "owned_suspensions": 0}
+        return {"status": "COMPLETED", "source": "INSPECTOR_CLEANUP", "owned_suspensions": 0,
+                "data": {"cleanup": {"confirmed": True, "status": "CONFIRMED",
+                    "scope": "INSPECTOR_OWNED_QUERY_RESOURCES", "retained": 0}}}
 
     def execute(self, operation, parameters=None, *, deadline=None, cancel_event=None):
+        if operation not in QUERY_CLEANUP_OPERATIONS:
+            return self._execute(operation, parameters, deadline=deadline, cancel_event=cancel_event)
+        with self.query_cleanup_scope(operation) as cleanup:
+            answer = self._execute(operation, parameters, deadline=deadline, cancel_event=cancel_event)
+        return cleanup.attach(answer)
+
+    def _execute(self, operation, parameters=None, *, deadline=None, cancel_event=None):
         from .optional_jobs import OwnedProcessCleanupUnconfirmed
         started = time.monotonic_ns()
         parameters = dict(parameters or {})
@@ -476,6 +717,7 @@ class ProcessInspector:
             snapshot = kernel.snapshot(0x8 | 0x10, self.identity.pid)
             if snapshot == W.INVALID_HANDLE:
                 raise _os_error("MODULE_SNAPSHOT_FAILED")
+            _track_handle(kernel, snapshot, "MODULE_TOOLHELP_SNAPSHOT")
             try:
                 entry = W.MODULEENTRY32W()
                 entry.size = C.sizeof(entry)
@@ -520,7 +762,7 @@ class ProcessInspector:
                 if not ok and C.get_last_error() not in (0, 18):
                     more = True
             finally:
-                kernel.close(snapshot)
+                _checked_close(kernel, snapshot)
         return {"rows": rows, "truncated": more, "_source": "WIN32_TOOLHELP_LOADED_MODULES",
                 "_status": "INCOMPLETE_EVIDENCE" if more or hashing and any(
                     r["file_identity_status"] != "LOADED_PE_CODEVIEW_AND_LAYOUT_MATCH" for r in rows) else "COMPLETED",
@@ -531,6 +773,7 @@ class ProcessInspector:
         snapshot = kernel.snapshot(0x4, 0)
         if snapshot == W.INVALID_HANDLE:
             raise _os_error("THREAD_SNAPSHOT_FAILED")
+        _track_handle(kernel, snapshot, "THREAD_TOOLHELP_SNAPSHOT")
         rows, more = [], False
         try:
             entry = W.THREADENTRY32()
@@ -548,6 +791,7 @@ class ProcessInspector:
                            "base_priority": int(entry.base_priority), "created_100ns": None}
                     thread = kernel.open_thread(0x800, False, entry.tid)
                     if thread:
+                        _track_handle(kernel, thread, "THREAD_INVENTORY_HANDLE")
                         try:
                             if kernel.thread_pid(thread) != self.identity.pid:
                                 raise NativeError("PROCESS_CHANGED", "THREAD_OWNER_CHANGED")
@@ -557,7 +801,7 @@ class ProcessInspector:
                         except NativeError as error:
                             row.update(status=error.status, reason=error.reason)
                         finally:
-                            kernel.close(thread)
+                            _checked_close(kernel, thread)
                     else:
                         row.update(status="INCOMPLETE_EVIDENCE", winerror=C.get_last_error())
                     rows.append(row)
@@ -567,7 +811,7 @@ class ProcessInspector:
                     # system-wide enumeration complete for this process.
                     more = True
         finally:
-            kernel.close(snapshot)
+            _checked_close(kernel, snapshot)
         return rows, more
 
     def _threads(self, params, deadline, cancel):
@@ -630,18 +874,21 @@ class ProcessInspector:
                 if not h:
                     rows.append({"tid": thread["tid"], "status": "INCOMPLETE_EVIDENCE", "winerror": C.get_last_error()})
                     continue
+                _track_handle(kernel, h, "WAIT_CHAIN_THREAD_HANDLE")
                 try:
                     if (kernel.wait(h, 0) != 258 or kernel.thread_pid(h) != self.identity.pid or
                             _times(kernel.thread_times, h)[0] != thread["created_100ns"]):
                         raise NativeError("PROCESS_CHANGED", "THREAD_INSTANCE_CHANGED")
-                    result = wait_chain(thread["tid"], timeout_s=min(.25, max(.01, (deadline or time.monotonic() + .25) - time.monotonic())))
+                    result = wait_chain(thread["tid"],
+                        timeout_s=min(.25, max(.01, (deadline or time.monotonic() + .25) - time.monotonic())),
+                        cleanup_observer=_wct_cleanup_observer)
                     if kernel.wait(h, 0) != 258:
                         raise NativeError("PROCESS_CHANGED", "THREAD_EXITED_DURING_WAIT_CHAIN")
                     result["created_100ns"] = thread["created_100ns"]
                     result["thread_owner_pid"] = self.identity.pid
                     rows.append(result)
                 finally:
-                    kernel.close(h)
+                    _checked_close(kernel, h)
         unknown_omissions = selected is None and not inventory_complete
         complete = not unknown_omissions and len(threads) <= limit and all(r.get("status") == "OK" for r in rows)
         limitations = ["SUPPORTED_WCT_SYNCHRONIZATION_ONLY",

@@ -24,6 +24,12 @@ _LOCAL = frozenset({"timeline", "compare", "trace_evidence", "dump_inspect",
                     "dump_read_memory", "symbols_verify"})
 _EVIDENCE_OPERATIONS = frozenset({"decoder.decode", "investigation.create", "investigation.export",
                                 "research.compare", "research.export_comparison"})
+# Descriptive receipt labels only. This list adds no ActionRequest operation,
+# Helper command, permission or authority to repeat a saved workflow action.
+_WORKFLOW_OPERATIONS = frozenset("workflow." + name for name in (
+    "load_source", "process_select", "observe", "decode_trace", "load_graph", "investigate",
+    "critical_path", "waits", "file_io", "disk_io", "crash", "incident", "compare", "export_report",
+    "session_finalize")) | frozenset("workflow.deep." + name for name in DEEP_ACTIONS)
 
 
 @dataclass(frozen=True)
@@ -159,7 +165,9 @@ class RunReceipt:
 
     def to_dict(self) -> dict[str, Any]:
         return journal_metadata(dict(self.__dict__, contract_version=CONTRACT_VERSION,
-                                     status_adapter=("EVIDENCE_LEGACY_STATUS_IDENTITY_V1" if
+                                     status_adapter=("WORKFLOW_LEGACY_STATUS_IDENTITY_V1" if
+                                         self.operation in _WORKFLOW_OPERATIONS else
+                                         "EVIDENCE_LEGACY_STATUS_IDENTITY_V1" if
                                          self.operation in _EVIDENCE_OPERATIONS else "DEEP_LEGACY_STATUS_IDENTITY_V1"),
                                      result_references=list(self.result_references),
                                      limitations=list(self.limitations),

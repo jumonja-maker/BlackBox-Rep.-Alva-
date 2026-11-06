@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import threading
 
 
 class ElevationCancelled(OSError):
@@ -17,8 +18,28 @@ class HelperProcess:
     def __init__(self, *, process=None, handle=None, pid=None):
         self.process, self.handle = process, handle
         self.pid = process.pid if process is not None else pid
+        self._process_handle = getattr(process, "_handle", None) if process is not None else None
+        self._close_lock = threading.RLock()
+        self._handle_closed = False
+        self._close_retry_allowed = True
+        self.cleanup_evidence = {"confirmed": False, "status": "NOT_CLOSED",
+                                 "scope": "DIAGNOSTIC_HELPER_PROCESS_HANDLE"}
+
+    def _handle_failure(self, code, reason):
+        if code == 6:
+            # Do not retry a numeric slot that may already have been reused.
+            self._close_retry_allowed = False
+        self.cleanup_evidence = {"confirmed": False, "status": "RECOVERY_UNCONFIRMED",
+            "scope": "DIAGNOSTIC_HELPER_PROCESS_HANDLE", "winerror": code, "reason": reason,
+            "owner_retained": True, "retry_allowed": self._close_retry_allowed}
+        error = OSError(code or 0, reason)
+        error.cleanup_unconfirmed = error.owner_retained = True
+        error.owner = self
+        return error
 
     def alive(self) -> bool:
+        if not self._close_retry_allowed:
+            raise self._handle_failure(self.cleanup_evidence.get("winerror"), "HELPER_HANDLE_OWNERSHIP_LOST")
         if self.process is not None:
             return self.process.poll() is None
         return not self.wait_for_exit(timeout_ms=0)
@@ -27,6 +48,8 @@ class HelperProcess:
         """Observe this held process handle; failed waits are never death proof."""
         if type(timeout_ms) is not int or not 0 <= timeout_ms <= 5000:
             raise ValueError("INVALID_HELPER_EXIT_WAIT")
+        if not self._close_retry_allowed:
+            raise self._handle_failure(self.cleanup_evidence.get("winerror"), "HELPER_HANDLE_OWNERSHIP_LOST")
         if self.process is not None:
             try:
                 self.process.wait(timeout=timeout_ms / 1000)
@@ -74,13 +97,65 @@ class HelperProcess:
             if not self.wait_for_exit(timeout_ms=5000):
                 raise OSError("HELPER_TERMINATION_UNCONFIRMED")
 
-    def close_handle(self) -> None:
-        if self.handle is not None:
-            kernel = C.WinDLL("kernel32", use_last_error=True, winmode=0x800)
-            kernel.CloseHandle.argtypes = [W.HANDLE]
-            kernel.CloseHandle.restype = W.BOOL
-            kernel.CloseHandle(self.handle)
-            self.handle = None
+    def close_handle(self) -> dict:
+        """Consume this exact process capability only after its real close ACK.
+
+        Popen owns a subprocess.Handle wrapper on Windows. Closing its numeric
+        value behind that wrapper leaves a later destructor free to close a
+        reused foreign slot, so use the wrapper's own checked Close operation.
+        """
+        with self._close_lock:
+            if self._handle_closed:
+                return dict(self.cleanup_evidence)
+            if not self._close_retry_allowed:
+                raise self._handle_failure(self.cleanup_evidence.get("winerror"), "HELPER_HANDLE_OWNERSHIP_LOST")
+            if self.process is not None:
+                handle = self._process_handle
+                if handle is None or getattr(self.process, "_handle", None) is not handle:
+                    raise self._handle_failure(None, "HELPER_POPEN_HANDLE_OWNERSHIP_NOT_VERIFIED")
+                if getattr(handle, "closed", None) is not False or not callable(getattr(handle, "Close", None)):
+                    self._close_retry_allowed = False
+                    raise self._handle_failure(None, "HELPER_POPEN_HANDLE_ALREADY_CLOSED_OR_UNVERIFIED")
+                # Popen must retain the observed return code before its native
+                # handle closes; its own destructor/poll must not query a stale
+                # process handle after successful cleanup.
+                if self.process.returncode is None and self.process.poll() is None:
+                    raise self._handle_failure(None, "HELPER_EXIT_NOT_OBSERVED_BEFORE_HANDLE_CLOSE")
+                try:
+                    handle.Close()  # _winapi.CloseHandle raises on native FALSE.
+                except BaseException as primary:
+                    code = getattr(primary, "winerror", None)
+                    if code is None:
+                        code = getattr(primary, "errno", None)
+                    # CPython marks Handle.closed before the native call. A
+                    # known failed close keeps the same capability retryable.
+                    # ERROR_INVALID_HANDLE must stay closed to avoid GC reuse.
+                    if code is not None and code != 6:
+                        handle.closed = False
+                    else:
+                        self._close_retry_allowed = False
+                    raise self._handle_failure(code, "HELPER_POPEN_HANDLE_CLOSE_UNCONFIRMED") from primary
+                if getattr(handle, "closed", None) is not True:
+                    self._close_retry_allowed = False
+                    raise self._handle_failure(None, "HELPER_POPEN_HANDLE_CLOSE_ACK_MISSING")
+            elif self.handle is not None:
+                try:
+                    kernel = C.WinDLL("kernel32", use_last_error=True, winmode=0x800)
+                    kernel.CloseHandle.argtypes = [W.HANDLE]
+                    kernel.CloseHandle.restype = W.BOOL
+                    closed = bool(kernel.CloseHandle(self.handle))
+                except BaseException as primary:
+                    code = getattr(primary, "winerror", None)
+                    if code is None:
+                        code = getattr(primary, "errno", None)
+                    raise self._handle_failure(code, "HELPER_PROCESS_HANDLE_CLOSE_UNCONFIRMED") from primary
+                if not closed:
+                    raise self._handle_failure(C.get_last_error(), "HELPER_PROCESS_HANDLE_CLOSE_UNCONFIRMED")
+                self.handle = None
+            self._handle_closed = True
+            self.cleanup_evidence = {"confirmed": True, "status": "CONFIRMED",
+                "scope": "DIAGNOSTIC_HELPER_PROCESS_HANDLE", "retained": 0}
+            return dict(self.cleanup_evidence)
 
 
 class ElevationBroker:

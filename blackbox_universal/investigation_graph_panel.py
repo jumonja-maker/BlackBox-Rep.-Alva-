@@ -34,6 +34,14 @@ RELATION_COLORS = {"EXACT_IDENTITY": "#087b76", "DIRECT_REFERENCE": "#087b76",
     "BOUNDED_TIME_CORRELATION": "#416a9a", "OBSERVED_DEPENDENCY": "#416a9a",
     "TEMPORAL_COINCIDENCE": "#9a6429", "HYPOTHESIS_ONLY": "#9a6429",
     "NOT_ESTABLISHED": "#7b7183", "CONTRADICTED": "#a12a2a"}
+PROJECTION_NAMES = {
+    "issues": ("issue analysis", "анализ проблем"),
+    "hypotheses": ("hypotheses", "гипотезы"),
+    "actions": ("suggested diagnostic actions", "предложенные диагностические проверки"),
+    "critical_path": ("critical path", "критический путь"),
+    "delay_investigation": ("delay and I/O analysis", "анализ задержек и I/O"),
+    "crash_investigation": ("crash analysis", "анализ сбоев"),
+}
 
 
 def _plain(text=""):
@@ -252,6 +260,9 @@ class InvestigationGraphPanel(QWidget):
         self.source_summary = _plain()
         self.source_summary.setObjectName("invSources")
         layout.addWidget(self.source_summary)
+        self.projection_summary = _plain()
+        self.projection_summary.setObjectName("invProjectionStatus")
+        layout.addWidget(self.projection_summary)
         self.section = QComboBox()
         self.section.setObjectName("invSection")
         for key, en, ru in SECTIONS:
@@ -307,6 +318,8 @@ class InvestigationGraphPanel(QWidget):
         self._models["critical"], self._tables["critical"] = critical_model, self.critical_table
         self._add_page(critical_page)
         hypotheses_page = QVBoxLayout()
+        self.hypothesis_summary = _plain()
+        hypotheses_page.addWidget(self.hypothesis_summary)
         self.hypothesis_table, hypothesis_model = self._table(hypotheses_page, "invHypotheses", [
             ("category", "Category", "Категория"), ("description", "Explanation", "Объяснение"),
             ("status", "Status", "Статус")])
@@ -320,6 +333,8 @@ class InvestigationGraphPanel(QWidget):
         self.binding_status = _plain()
         self.binding_status.setObjectName("invLiveBinding")
         verification_page.addWidget(self.binding_status)
+        self.actions_summary = _plain()
+        verification_page.addWidget(self.actions_summary)
         actions = ActionGrid(max_columns=3)
         self.bind_button = self._button(actions, "invBindLiveTarget", "Use selected process for NEW measurements", "Выбрать процесс для НОВЫХ измерений", self.bind_live_target)
         self.before_button = self._button(actions, "invCaptureBefore", "1 · Capture BEFORE", "1 · Снять ДО", self.capture_before)
@@ -354,6 +369,8 @@ class InvestigationGraphPanel(QWidget):
         self._button(recurrence_actions, "invMergeGroups", "Merge groups with reason…", "Объединить группы с причиной…", lambda: self.manual_group("MERGE"))
         self._button(recurrence_actions, "invSplitGroup", "Split group with reason…", "Разделить группу с причиной…", lambda: self.manual_group("SPLIT"))
         recurrence_page.addLayout(recurrence_actions)
+        self.recurrence_summary = _plain()
+        recurrence_page.addWidget(self.recurrence_summary)
         self.recurrence_table, recurrence_model = self._table(recurrence_page, "invRecurrences", [
             ("group_id", "Group", "Группа"), ("status", "Status", "Статус"),
             ("case_ids", "Cases", "Расследования"), ("versions", "Versions", "Версии"),
@@ -489,6 +506,7 @@ class InvestigationGraphPanel(QWidget):
             basis = self.tr2("Manual · ", "Вручную · ") if descriptor.get("selection_basis") == "EXPLICIT_MANUAL_TOOL_NOT_HYPOTHESIS_RECOMMENDATION" else self.tr2("Suggested · ", "Предложено · ")
             self.action_combo.setItemText(i, basis + self.tr2(en, ru) + " · " + str(descriptor.get("availability", "NOT_ESTABLISHED")))
         self._render_summary()
+        self._render_critical((self.case or {}).get("critical_path", {}))
         self._render_integrity()
         self._render_delays()
         self._render_crash()
@@ -713,7 +731,8 @@ class InvestigationGraphPanel(QWidget):
             return
         report = (self.case or {}).get('crash_investigation')
         if not isinstance(report, dict):
-            self.crash_summary.setText(self.tr2('Crash projection was not recorded for this investigation.',
+            self.crash_summary.setText(self._projection_notice("crash_investigation") or self.tr2(
+                'Crash projection was not recorded for this investigation.',
                 'Проекция данных сбоя для этого расследования не записана.'))
             self.crash_report.setPlainText(self.tr2('Cause: UNKNOWN. Choose saved evidence explicitly.',
                 'Причина: UNKNOWN. Явно выберите сохранённые данные.'))
@@ -822,7 +841,8 @@ class InvestigationGraphPanel(QWidget):
             'OBSERVATIONS_AVAILABLE': ('Recorded observations available', 'Доступны записанные наблюдения')}
         status = report.get('status', 'NOT_ESTABLISHED')
         title = statuses.get(status, ('Delay analysis not recorded', 'Анализ задержек не записан'))
-        self.delay_summary.setText(self.tr2(*title) + self.tr2(' · findings: ', ' · наблюдений: ') + str(len(findings)))
+        self.delay_summary.setText(self._projection_notice("delay_investigation") or
+            self.tr2(*title) + self.tr2(' · findings: ', ' · наблюдений: ') + str(len(findings)))
         rows = []
         for finding in findings[:1000]:
             if not isinstance(finding, dict):
@@ -940,6 +960,7 @@ class InvestigationGraphPanel(QWidget):
         return True
 
     def _render_summary(self):
+        self._render_projection_status()
         self.source_summary.setText(self.tr2("Saved sources: ", "Сохранённые источники: ") +
             str(len(self.case.get("sources", [])) if self.case else len(self.sources)))
         if not self.case:
@@ -952,6 +973,36 @@ class InvestigationGraphPanel(QWidget):
             "\n" + _value(self.case.get("coverage"), 3000) + "\n" + _value(self.case.get("limitations"), 3000) +
             self.tr2("\nDeclared context: ", "\nЗаявленный контекст: ") +
             _value({"app_identity": self.case.get("app_identity"), "scenario": self.case.get("scenario")}, 1500))
+
+    def _omitted_projections(self):
+        case = self.case or {}
+        coverage = case.get("coverage")
+        rows = coverage.get("omitted_models") if isinstance(coverage, dict) else None
+        if not isinstance(rows, list):
+            return []
+        return list(dict.fromkeys(row["model"] for row in rows[:32]
+            if isinstance(row, dict) and type(row.get("model")) is str
+            and row["model"] in PROJECTION_NAMES and row["model"] not in case))
+
+    def _projection_notice(self, model):
+        if model not in self._omitted_projections():
+            return ""
+        return self.tr2("Analysis view unavailable: ", "Представление анализа недоступно: ") + self.tr2(
+            *PROJECTION_NAMES[model]) + self.tr2(
+            ". It was not included because of the saved result size limit. Missing rows do not establish an absence of problems.",
+            ". Оно не включено из-за ограничения размера сохраняемого результата. Отсутствие строк не доказывает отсутствие проблем.")
+
+    def _render_projection_status(self):
+        omitted = self._omitted_projections()
+        self.projection_summary.setText(self.tr2("Analysis views incomplete: ", "Представления анализа неполны: ") +
+            ", ".join(self.tr2(*PROJECTION_NAMES[model]) for model in omitted) + self.tr2(
+                ". Counts for these views are unknown. The saved source graph remains available.",
+                ". Количество результатов этих представлений неизвестно. Сохранённый граф источников доступен.") if omitted else "")
+        self.projection_summary.setVisible(bool(omitted))
+        for label, model in ((self.hypothesis_summary, "hypotheses"), (self.actions_summary, "actions"),
+                             (self.recurrence_summary, "issues")):
+            label.setText(self._projection_notice(model))
+            label.setVisible(bool(label.text()))
 
     def _row_selected(self, table, model):
         rows = table.selectionModel().selectedRows()
@@ -1132,6 +1183,12 @@ class InvestigationGraphPanel(QWidget):
         return accepted
 
     def _render_critical(self, report):
+        unavailable = self._projection_notice("critical_path")
+        if unavailable:
+            self._models["critical"].set_rows([])
+            self.critical_view.scene().clear()
+            self.critical_summary.setText(unavailable)
+            return
         if not isinstance(report, dict):
             report = {}
         segments = report.get("segments", report.get("intervals", []))

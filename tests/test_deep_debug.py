@@ -296,7 +296,7 @@ class DeepDebugContracts(unittest.TestCase):
     def test_debug_owner_loop_stays_alive_after_retained_close_then_retries(self):
         item = session()
         api = item._api
-        api.close = Mock()
+        api.close = Mock(return_value={"confirmed": True})
         first = _Command("_close", {}, time.monotonic() + 10, None, threading.Event())
         retry = _Command("_close", {}, time.monotonic() + 10, None, threading.Event())
         item._queue.put(first)
@@ -320,7 +320,7 @@ class DeepDebugContracts(unittest.TestCase):
     def test_background_int3_failure_retains_debug_thread_for_cleanup_request(self):
         item = session()
         api = item._api
-        api.close = Mock()
+        api.close = Mock(return_value={"confirmed": True})
         item._attached = True
         close = _Command("_close", {}, time.monotonic() + 10, None, threading.Event())
         item._queue.get = Mock(side_effect=[queue.Empty, close, queue.Empty])
@@ -380,9 +380,12 @@ class DeepDebugContracts(unittest.TestCase):
         self.assertEqual(item._queue.qsize(), 1)
         command = item._queue.get_nowait()
         # A result assignment alone is not the worker's publication barrier.
-        command.result = {"status": "COMPLETED", "data": {"state": "DETACHED"}}
+        command.result = {"status": "COMPLETED", "data": {"state": "DETACHED"},
+                          "native_owner_cleanup": {"confirmed": True, "handles_closed": True,
+                                                   "worker_exit_confirmed": True}}
         self.assertEqual(item.close()["status"], "RECOVERY_UNCONFIRMED")
         completion.is_set.return_value = True
+        item._worker.is_alive.return_value = False
         self.assertEqual(item.close(), command.result)
         self.assertEqual(completion.wait.call_count, 1)
 

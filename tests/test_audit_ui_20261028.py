@@ -36,8 +36,6 @@ class AuditUi(unittest.TestCase):
         try:
             if self.window is not None:
                 close_and_drain(self.window, self.app, timeout=20)
-                self.window.deleteLater()
-                QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
         finally:
             self.pref_patch.stop()
             self.temp.cleanup()

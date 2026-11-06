@@ -234,7 +234,8 @@ class AdminLeaseServiceTests(unittest.TestCase):
                             "operations": sorted(self.service._scope)},
                 "context_released": completed,
                 "result": {"status": "COMPLETED" if completed else "RECOVERY_UNCONFIRMED", "data": (
-                    {"target": None, "operations": [], "cleanup": {"status": "COMPLETED", "data": {}}}
+                    {"target": None, "operations": [], "cleanup": {"status": "COMPLETED", "data": {
+                        "cleanup": {"confirmed": True, "status": "CONFIRMED"}}}}
                     if completed else {"owner_retained": True, "target": self.a.to_dict(),
                                        "cleanup": {"status": "RECOVERY_UNCONFIRMED"}})}}
 
