@@ -24,6 +24,22 @@ def _gui_phase(phase, **metadata):
                                        sort_keys=True), flush=True)
 
 
+def _assert_visible_hit_point(widget, position):
+    """Refuse direct Qt events at points clipped out of the rendered window."""
+    from blackbox_core.chain_qa import require
+    point = widget.mapToGlobal(position)
+    ancestor = widget
+    while ancestor is not None:
+        mapped = ancestor.mapFromGlobal(point)
+        require(ancestor.isVisible() and ancestor.rect().contains(mapped),
+                "R60_GUI_POINTER_OUTSIDE_VISIBLE_ANCESTOR_" +
+                (ancestor.objectName() or type(ancestor).__name__)[:128] + ":" + json.dumps({
+                    "control": widget.objectName()[:128], "point": [position.x(), position.y()],
+                    "mapped_point": [mapped.x(), mapped.y()], "ancestor_rect": list(ancestor.rect().getRect())},
+                    sort_keys=True))
+        ancestor = ancestor.parentWidget()
+
+
 def _real_button_click(widget):
     """Send a real pointer click to the style's interactive button area.
 
@@ -55,6 +71,7 @@ def _real_button_click(widget):
         position = indicator.center()
     _gui_phase("CLICK_HIT_POINT", object_name=control["object_name"],
                position=[position.x(), position.y()], checkbox=checkbox)
+    _assert_visible_hit_point(widget, position)
     fired, toggled = [], []
     def received(*_):
         fired.append(True)
@@ -80,7 +97,7 @@ def _real_button_click(widget):
 
 def run_chain_gui(app, window, output, evidence_root, source_sha, *, failure_guard=None):
     _gui_phase("ENTER")
-    from PySide6.QtCore import QBuffer, QIODevice, QPoint, QPointF, Qt
+    from PySide6.QtCore import QBuffer, QIODevice, QPoint, QPointF, QRect, Qt
     from PySide6.QtTest import QTest
     from PySide6.QtWidgets import QScrollArea
     from blackbox_core.chain_qa import (actual_invocations, file_hash, require, read_json, save,
@@ -142,6 +159,7 @@ def run_chain_gui(app, window, output, evidence_root, source_sha, *, failure_gua
                    class_name=type(widget).__name__[:64])
         visible(widget)
         require(widget.isEnabled() and widget.isVisible(), "R60_GUI_VALUE_CONTROL_UNAVAILABLE_" + widget.objectName())
+        _assert_visible_hit_point(widget, widget.rect().center())
         widget.setFocus()
         QTest.keyClick(widget, Qt.Key.Key_A, Qt.KeyboardModifier.ControlModifier)
         QTest.keyClicks(widget, str(value))
@@ -153,6 +171,7 @@ def run_chain_gui(app, window, output, evidence_root, source_sha, *, failure_gua
         index = widget.findData(value)
         require(index >= 0, "R60_GUI_COMBO_VALUE_MISSING_" + str(value))
         visible(widget)
+        _assert_visible_hit_point(widget, widget.rect().center())
         widget.setFocus()
         QTest.keyClick(widget, Qt.Key.Key_Home)
         for _ in range(index):
@@ -166,8 +185,10 @@ def run_chain_gui(app, window, output, evidence_root, source_sha, *, failure_gua
         require(item is not None, "R60_EDITOR_TOOL_MISSING_" + tool)
         panel.palette.scrollToItem(item)
         visible(panel.palette)
+        point = panel.palette.visualItemRect(item).center()
+        _assert_visible_hit_point(panel.palette.viewport(), point)
         QTest.mouseClick(panel.palette.viewport(), Qt.MouseButton.LeftButton,
-                         pos=panel.palette.visualItemRect(item).center())
+                         pos=point)
         click(panel.add_button)
         return panel.document["nodes"][-1]["node_id"]
 
@@ -178,6 +199,7 @@ def run_chain_gui(app, window, output, evidence_root, source_sha, *, failure_gua
         combo(panel.target_port, input_port)
         before = len(panel.document["edges"])
         visible(panel.connect_button)
+        _assert_visible_hit_point(panel.connect_button, panel.connect_button.rect().center())
         panel.connect_button.setFocus()
         QTest.keyClick(panel.connect_button, Qt.Key.Key_Space)
         idle()
@@ -187,7 +209,39 @@ def run_chain_gui(app, window, output, evidence_root, source_sha, *, failure_gua
         else:
             require(len(panel.document["edges"]) == before + 1, "R60_EDITOR_EDGE_NOT_COMMITTED_" + panel.status.text())
 
-    def screenshot(language):
+    def workspace_geometry(widget):
+        full = QRect(widget.mapTo(window, QPoint()), widget.size())
+        shown = QRect(full)
+        ancestor = widget.parentWidget()
+        while ancestor is not None:
+            shown = shown.intersected(QRect(ancestor.mapTo(window, QPoint()), ancestor.size()))
+            ancestor = ancestor.parentWidget()
+        return {"logical_rect": list(full.getRect()), "visible_logical_rect": list(shown.getRect()),
+                "fully_visible": widget.isVisible() and shown == full}
+
+    def prepare_workspace_capture():
+        # These are the actual page's scroll bars, not an edited/cropped image.
+        # Keep the title, controls and workspace together at the top of the page.
+        ancestor = panel.parentWidget()
+        while ancestor is not None:
+            if isinstance(ancestor, QScrollArea):
+                ancestor.horizontalScrollBar().setValue(ancestor.horizontalScrollBar().minimum())
+                ancestor.verticalScrollBar().setValue(ancestor.verticalScrollBar().minimum())
+            ancestor = ancestor.parentWidget()
+        app.processEvents()
+        controls = {"notice": panel.notice, "start": panel.start_button, "validate": panel.validate_button,
+                    "open": panel.open_button, "save": panel.save_button,
+                    "canvas": panel.canvas, "inspector": panel.inspector_tabs}
+        geometry = {name: workspace_geometry(widget) for name, widget in controls.items()}
+        require(all(geometry[name]["fully_visible"] for name in ("notice", "start", "validate", "open", "save")),
+                "R60_GUI_WORKSPACE_HEADER_OR_TOOLBAR_CLIPPED:" + json.dumps(geometry, sort_keys=True))
+        for name in ("canvas", "inspector"):
+            rect = geometry[name]["visible_logical_rect"]
+            require(rect[2] >= (300 if name == "canvas" else 240) and rect[3] >= 180,
+                    "R60_GUI_WORKSPACE_VIEW_TOO_CLIPPED:" + name + ":" + json.dumps(geometry[name], sort_keys=True))
+        return geometry
+
+    def screenshot(language, geometry):
         image = window.grab().toImage()
         captured_width, captured_height = image.width(), image.height()
         if image.width() > 1280:
@@ -205,6 +259,10 @@ def run_chain_gui(app, window, output, evidence_root, source_sha, *, failure_gua
         chunks = [encoded[index:index + 12000] for index in range(0, len(encoded), 12000)]
         metadata = {"id": label, "file": name, "sha256": digest, "bytes": len(raw),
             "captured_pixels": [captured_width, captured_height], "encoded_pixels": [image.width(), image.height()],
+            "logical_window_client": [window.width(), window.height()],
+            "window_device_pixel_ratio": window.devicePixelRatioF(), "workspace_geometry": geometry,
+            "reported_platform_screen_logical_rect": list(window.screen().geometry().getRect()),
+            "viewport_scope": "EXPLICIT_LOGICAL_WINDOW_RENDER_NOT_PHYSICAL_DESKTOP_ACCEPTANCE",
             "chunks": len(chunks), "language": language, "scale": proof["scale"], "source_sha": source_sha,
             "delivery": "PNG_BASE64_IN_CI_LOG_NO_ACTIONS_ARTIFACTS"}
         print("R60_GUI_PNG_BEGIN " + json.dumps(metadata, sort_keys=True), flush=True)
@@ -284,6 +342,25 @@ def run_chain_gui(app, window, output, evidence_root, source_sha, *, failure_gua
                 "trace_to_session_alignment": "NOT_ESTABLISHED", "root_cause_proven": False}
 
     try:
+        _gui_phase("REPRESENTATIVE_LOGICAL_VIEWPORT_BEGIN")
+        # The offscreen plugin reports a small virtual screen. Its maximized
+        # state can force a client size below the product's 1020x690 minimum.
+        # Render a normal supported desktop window instead and retain the real
+        # Qt/DPI/capture bounds; this establishes no physical monitor coverage.
+        window.showNormal()
+        window.resize(1600, 1000)
+        app.processEvents()
+        require(window.width() >= window.minimumWidth() and window.height() >= window.minimumHeight(),
+                "R60_GUI_VIEWPORT_BELOW_DECLARED_PRODUCT_MINIMUM")
+        proof["viewport"] = {"requested_logical_client": [1600, 1000],
+            "actual_logical_client": [window.width(), window.height()],
+            "minimum_logical_client": [window.minimumWidth(), window.minimumHeight()],
+            "window_geometry_logical": list(window.geometry().getRect()),
+            "window_device_pixel_ratio": window.devicePixelRatioF(), "platform": app.platformName(),
+            "reported_platform_screen_logical_rect": list(window.screen().geometry().getRect()),
+            "reported_platform_screen_device_pixel_ratio": window.screen().devicePixelRatio(),
+            "input_scope": "QT_WIDGET_EVENTS_INSIDE_WINDOW_AND_ALL_ANCESTOR_CLIP_RECTS",
+            "physical_monitor_and_native_screen_pointer": "NOT_TESTED"}
         _gui_phase("SOURCE_IDENTITY_BEGIN")
         proof["source_identity"] = background(lambda: source_proof(source_sha))
         _gui_phase("OUTPUT_CREATE_BEGIN")
@@ -335,6 +412,8 @@ def run_chain_gui(app, window, output, evidence_root, source_sha, *, failure_gua
         panel.canvas.centerOn(item)
         app.processEvents()
         point = panel.canvas.mapFromScene(item.scenePos() + QPointF(90, 18))
+        _assert_visible_hit_point(panel.canvas.viewport(), point)
+        _assert_visible_hit_point(panel.canvas.viewport(), point + QPoint(35, 20))
         before = item.pos()
         QTest.mousePress(panel.canvas.viewport(), Qt.MouseButton.LeftButton, pos=point)
         QTest.mouseMove(panel.canvas.viewport(), point + QPoint(35, 20), delay=30)
@@ -396,10 +475,20 @@ def run_chain_gui(app, window, output, evidence_root, source_sha, *, failure_gua
             panel.inspector_tabs.setCurrentIndex(0)
             panel.select_node(first)
             panel.fit_graph()
-            visible(panel.canvas)
             app.processEvents()
             require(panel.canvas.isVisible() and panel.start_button.isEnabled(), "R60_EDITOR_TRANSLATION_HID_CONTROLS")
-            screenshot(language)
+            reachable = (("start", panel.start_button), ("pause", panel.pause_button),
+                         ("stop", panel.cancel_button), ("resume", panel.resume_button),
+                         ("canvas", panel.canvas), ("inspector", panel.inspector_tabs),
+                         ("apply", panel.apply_button), ("connect", panel.connect_button))
+            for _, control in reachable:
+                visible(control)
+                _assert_visible_hit_point(control, control.rect().center())
+            proof.setdefault("workspace_reachability", []).append({"language": language,
+                "controls": [name for name, _ in reachable],
+                "scope": "ACTUAL_SCROLL_AND_VISIBLE_HIT_POINT_NOT_DISABLED_ACTION_EXECUTION"})
+            geometry = prepare_workspace_capture()
+            screenshot(language, geometry)
         _gui_phase("SCREENSHOTS_FINISHED_EXECUTION_BEGIN")
         proof["passive_open_profile"] = True
         click(panel.start_button)

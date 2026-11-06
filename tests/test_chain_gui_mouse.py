@@ -8,7 +8,7 @@ import unittest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import Qt
 from PySide6.QtTest import QSignalSpy, QTest
-from PySide6.QtWidgets import QApplication, QCheckBox, QPushButton, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QApplication, QCheckBox, QPushButton, QScrollArea, QVBoxLayout, QWidget
 
 from blackbox_universal.chain_qa import _real_button_click
 
@@ -69,6 +69,28 @@ class AcceptanceMouseGeometryTests(unittest.TestCase):
         _real_button_click(button)
         self.assertEqual(clicked.count(), 1)
         self.assertFalse(button.isCheckable())
+
+    def test_clipped_direct_widget_click_is_refused_then_actual_scroll_makes_it_reachable(self):
+        scroll = QScrollArea()
+        scroll.setFixedSize(480, 180)
+        content = QWidget()
+        content.resize(900, 600)
+        button = QPushButton("Scroll to explicit action", content)
+        button.setObjectName("scrollAction")
+        button.setGeometry(700, 400, 160, 42)
+        scroll.setWidget(content)
+        self.layout.addWidget(scroll)
+        self.window.show()
+        self.app.processEvents()
+        clicked = QSignalSpy(button.clicked)
+        self.assertTrue(button.isVisible(), "Qt visibility alone must not stand in for viewport clipping")
+        with self.assertRaisesRegex(AssertionError, "R60_GUI_POINTER_OUTSIDE_VISIBLE_ANCESTOR"):
+            _real_button_click(button)
+        self.assertEqual(clicked.count(), 0)
+        scroll.ensureWidgetVisible(button)
+        self.app.processEvents()
+        _real_button_click(button)
+        self.assertEqual(clicked.count(), 1)
 
 
 if __name__ == "__main__":

@@ -38,6 +38,7 @@ def verify(path):
         "blackbox_core.chain_validation", "blackbox_core.chain_store", "blackbox_core.chain_engine",
         "blackbox_core.chain_adapters", "blackbox_core.chain_reports", "blackbox_core.chain_qa",
         "blackbox_core.chain_qa_native", "blackbox_core.chain_qa_faults", "blackbox_core.chain_qa_faults_helper",
+        "blackbox_core.chain_qa_guard",
         "blackbox_universal.chain_builder",
         "blackbox_universal.chain_bridge", "blackbox_universal.chain_qa")
     missing=[name for name in required if name not in archive.toc]
