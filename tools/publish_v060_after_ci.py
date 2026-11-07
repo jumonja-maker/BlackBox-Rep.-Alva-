@@ -35,6 +35,15 @@ PR_FILES = {
     "tools/publish_v060_after_ci.py": "added",
     "tools/release_gate.py": "modified",
 }
+RELEASE_MAIN_SHA = "b74158b720e9acc11551b1fed37e1b57340c46ba"
+RELEASE_HEAD_SHA = "e39361b7036f41a09ad7a9f9f98cee11e4f2c3db"
+PUBLISHER_REPAIR_PR = 43
+PUBLISHER_REPAIR_BRANCH = "fix/v060-release-log-guard-20261107"
+PUBLISHER_REPAIR_FILES = {
+    ".github/workflows/bb-r60-qa.yml": "modified",
+    "tests/test_release_v060_authorization.py": "modified",
+    "tools/publish_v060_after_ci.py": "modified",
+}
 SHELL_NAME = "BLACK.BOX Universal - independent Windows build and release"
 R60_NAME = "BB-R60 Chain Builder exact-source acceptance"
 UI_NAME = "BLACK.BOX UI selection contrast"
@@ -98,7 +107,7 @@ def exact_candidate_run(client, repo, sha, branch, workflow, jobs):
 def endurance_proof(repo, job):
     """Read the mandatory *actual* 5h30 receipt, not a green workflow label."""
     response = subprocess.run(
-        ["gh", "api", f"repos/{repo}/actions/jobs/{job['id']}/logs"],
+        ["gh", "run", "view", "--repo", repo, "--job", str(job["id"]), "--log"],
         capture_output=True, text=True, encoding="utf-8", errors="replace",
         timeout=90, check=True,
     )
@@ -156,8 +165,10 @@ def authorize(client, repo, sha, upstream):
             "MAIN_MOVED")
     main = client(f"repos/{repo}/git/commits/{sha}")
     parent = main.get("parents") or []
-    require(len(parent) == 2 and parent[0].get("sha") == BASE_MAIN_SHA,
-            "RELEASE_VERSION_MERGE_ANCESTRY_CHANGED")
+    require(len(parent) == 2 and parent[0].get("sha") == RELEASE_MAIN_SHA
+            and isinstance(parent[1].get("sha"), str)
+            and re.fullmatch("[0-9a-f]{40}", parent[1]["sha"]),
+            "PUBLISHER_REPAIR_MERGE_ANCESTRY_CHANGED")
 
     r60 = client(f"repos/{repo}/pulls/{R60_PR}")
     require(r60.get("merged") is True and r60.get("merge_commit_sha") == BASE_MAIN_SHA
@@ -171,24 +182,45 @@ def authorize(client, repo, sha, upstream):
 
     pr = client(f"repos/{repo}/pulls/{RELEASE_PR}")
     require(pr.get("number") == RELEASE_PR and pr.get("merged") is True and
-            pr.get("merge_commit_sha") == sha and
+            pr.get("merge_commit_sha") == RELEASE_MAIN_SHA and
             (pr.get("head") or {}).get("ref") == RELEASE_BRANCH and
             (pr.get("base") or {}).get("ref") == "main" and
-            (pr.get("head") or {}).get("sha") == parent[1].get("sha"),
+            (pr.get("head") or {}).get("sha") == RELEASE_HEAD_SHA,
             "UNAPPROVED_RELEASE_VERSION_PR")
+    original_merge = client(f"repos/{repo}/git/commits/{RELEASE_MAIN_SHA}")
+    release_parents = original_merge.get("parents") or []
+    require(len(release_parents) == 2 and
+            release_parents[0].get("sha") == BASE_MAIN_SHA and
+            release_parents[1].get("sha") == RELEASE_HEAD_SHA,
+            "RELEASE_VERSION_ANCESTRY_CHANGED")
     files = client(f"repos/{repo}/pulls/{RELEASE_PR}/files?per_page=100")
     require(isinstance(files, list) and pr.get("changed_files") == len(PR_FILES)
             and len(files) == len(PR_FILES) and
             {x.get("filename"): x.get("status") for x in files} == PR_FILES,
             "UNAPPROVED_RELEASE_FILE_SCOPE")
 
+    fix = client(f"repos/{repo}/pulls/{PUBLISHER_REPAIR_PR}")
+    require(fix.get("number") == PUBLISHER_REPAIR_PR and fix.get("merged") is True
+            and fix.get("merge_commit_sha") == sha
+            and (fix.get("head") or {}).get("ref") == PUBLISHER_REPAIR_BRANCH
+            and (fix.get("head") or {}).get("sha") == parent[1]["sha"]
+            and (fix.get("base") or {}).get("ref") == "main",
+            "UNAPPROVED_PUBLISHER_REPAIR_PR")
+    fix_files = client(f"repos/{repo}/pulls/{PUBLISHER_REPAIR_PR}/files?per_page=100")
+    require(isinstance(fix_files, list) and
+            fix.get("changed_files") == len(PUBLISHER_REPAIR_FILES) and
+            len(fix_files) == len(PUBLISHER_REPAIR_FILES) and
+            {x.get("filename"): x.get("status") for x in fix_files}
+            == PUBLISHER_REPAIR_FILES,
+            "UNAPPROVED_PUBLISHER_REPAIR_FILE_SCOPE")
+
     exact_jobs(client, repo, upstream["id"], MAIN_JOBS)
     source_sha = parent[1]["sha"]
-    shell, _ = exact_candidate_run(client, repo, source_sha, RELEASE_BRANCH,
+    shell, _ = exact_candidate_run(client, repo, source_sha, PUBLISHER_REPAIR_BRANCH,
                                    SHELL_NAME, MAIN_JOBS)
-    ui, _ = exact_candidate_run(client, repo, source_sha, RELEASE_BRANCH,
+    ui, _ = exact_candidate_run(client, repo, source_sha, PUBLISHER_REPAIR_BRANCH,
                                 UI_NAME, UI_JOBS)
-    r60_run, r60_jobs = exact_candidate_run(client, repo, source_sha, RELEASE_BRANCH,
+    r60_run, r60_jobs = exact_candidate_run(client, repo, source_sha, PUBLISHER_REPAIR_BRANCH,
                                             R60_NAME, R60_JOBS)
     os.environ["V060_SOURCE_PR_SHA"] = source_sha
     endurance = endurance_proof(repo, r60_jobs[
@@ -206,6 +238,7 @@ def authorize(client, repo, sha, upstream):
             and old_zip.get("digest") == "sha256:" + PRIOR_ZIP_SHA,
             "PUBLIC_V054_ZIP_CHANGED")
     return {"tag": TAG, "main_sha": sha, "release_pr": RELEASE_PR,
+            "publisher_repair_pr": PUBLISHER_REPAIR_PR,
             "candidate_sha": source_sha, "main_ci": upstream["id"],
             "source_ci": shell["id"], "ui_ci": ui["id"],
             "r60_ci": r60_run["id"], "r60_endurance": endurance}

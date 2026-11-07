@@ -9,7 +9,9 @@ from types import SimpleNamespace
 
 from tools.publish_v060_after_ci import (
     authorize, endurance_proof, BASE_MAIN_SHA, R60_SOURCE_SHA, REPO,
-    RELEASE_PR, RELEASE_BRANCH, PR_FILES, SHELL_NAME, MAIN_JOBS,
+    RELEASE_PR, RELEASE_BRANCH, PR_FILES, RELEASE_MAIN_SHA, RELEASE_HEAD_SHA,
+    PUBLISHER_REPAIR_PR, PUBLISHER_REPAIR_BRANCH, PUBLISHER_REPAIR_FILES,
+    SHELL_NAME, MAIN_JOBS,
     R60_NAME, R60_JOBS, UI_NAME, UI_JOBS, PRIOR_SHA, PRIOR_ZIP_SHA,
 )
 
@@ -50,9 +52,9 @@ def actual_endurance_receipt():
 class CumulativeV060ReleaseTests(unittest.TestCase):
     def setUp(self):
         self.source_runs = [
-            successful_run(SHELL_NAME, 301, HEAD, RELEASE_BRANCH),
-            successful_run(UI_NAME, 302, HEAD, RELEASE_BRANCH),
-            successful_run(R60_NAME, 303, HEAD, RELEASE_BRANCH)]
+            successful_run(SHELL_NAME, 301, HEAD, PUBLISHER_REPAIR_BRANCH),
+            successful_run(UI_NAME, 302, HEAD, PUBLISHER_REPAIR_BRANCH),
+            successful_run(R60_NAME, 303, HEAD, PUBLISHER_REPAIR_BRANCH)]
         self.main_jobs = [job(n, i + 1) for i, n in enumerate(sorted(MAIN_JOBS))]
         self.ui_jobs = [job(n, i + 31) for i, n in enumerate(sorted(UI_JOBS))]
         self.r60_jobs = [job(n, i + 41) for i, n in enumerate(sorted(R60_JOBS))]
@@ -61,6 +63,9 @@ class CumulativeV060ReleaseTests(unittest.TestCase):
         self.release_pr_merged = True
         self.changed = [{"filename": p, "status": PR_FILES[p]}
                         for p in sorted(PR_FILES)]
+        self.repair_pr_merged = True
+        self.repair_changed = [{"filename": p, "status": PUBLISHER_REPAIR_FILES[p]}
+                               for p in sorted(PUBLISHER_REPAIR_FILES)]
         self.r60_sha = R60_SOURCE_SHA
         self.upstream = successful_run(SHELL_NAME, 321, SHA, "main", "push")
         self.upstream["head_repository"] = {"full_name": REPO}
@@ -71,13 +76,21 @@ class CumulativeV060ReleaseTests(unittest.TestCase):
         table = {
             "git/ref/heads/main": {"object": {"sha": self.main_ref}},
             f"git/commits/{SHA}": {"parents": [
-                {"sha": BASE_MAIN_SHA}, {"sha": self.head_parent}]},
+                {"sha": RELEASE_MAIN_SHA}, {"sha": self.head_parent}]},
+            f"git/commits/{RELEASE_MAIN_SHA}": {"parents": [
+                {"sha": BASE_MAIN_SHA}, {"sha": RELEASE_HEAD_SHA}]},
             f"pulls/{RELEASE_PR}": {
                 "number": RELEASE_PR, "merged": self.release_pr_merged,
-                "merge_commit_sha": SHA,
-                "head": {"sha": HEAD, "ref": RELEASE_BRANCH},
+                "merge_commit_sha": RELEASE_MAIN_SHA,
+                "head": {"sha": RELEASE_HEAD_SHA, "ref": RELEASE_BRANCH},
                 "base": {"ref": "main"}, "changed_files": len(self.changed)},
             f"pulls/{RELEASE_PR}/files?per_page=100": self.changed,
+            f"pulls/{PUBLISHER_REPAIR_PR}": {
+                "number": PUBLISHER_REPAIR_PR, "merged": self.repair_pr_merged,
+                "merge_commit_sha": SHA,
+                "head": {"sha": HEAD, "ref": PUBLISHER_REPAIR_BRANCH},
+                "base": {"ref": "main"}, "changed_files": len(self.repair_changed)},
+            f"pulls/{PUBLISHER_REPAIR_PR}/files?per_page=100": self.repair_changed,
             "pulls/41": {
                 "merged": True, "merge_commit_sha": BASE_MAIN_SHA,
                 "head": {"sha": self.r60_sha},
@@ -110,13 +123,20 @@ class CumulativeV060ReleaseTests(unittest.TestCase):
         log = ("2026-11-06T16:21:48Z R60_ENDURANCE_RECEIPT " +
                json.dumps(self.receipt, sort_keys=True) + "\n")
         with patch("tools.publish_v060_after_ci.subprocess.run",
-                   return_value=SimpleNamespace(stdout=log)):
-            return authorize(self.client, REPO, SHA, self.upstream)
+                   return_value=SimpleNamespace(stdout=log)) as caller:
+            result = authorize(self.client, REPO, SHA, self.upstream)
+            lifecycle = next(j for j in self.r60_jobs if j["name"] ==
+                             "R60 actual persisted 5h30 scheduler and owned recording lifecycle")
+            self.assertEqual(caller.call_args.args[0],
+                             ["gh", "run", "view", "--repo", REPO,
+                              "--job", str(lifecycle["id"]), "--log"])
+            return result
 
     def test_authorized_merged_source_and_all_green_jobs(self):
         proof = self.verify()
         self.assertEqual(proof["main_sha"], SHA)
         self.assertEqual(proof["release_pr"], RELEASE_PR)
+        self.assertEqual(proof["publisher_repair_pr"], PUBLISHER_REPAIR_PR)
         self.assertEqual(proof["r60_endurance"]["calls"], 331)
         self.assertGreater(proof["r60_endurance"]["engine_span_s"], 19800)
 
@@ -127,11 +147,25 @@ class CumulativeV060ReleaseTests(unittest.TestCase):
 
     def test_wrong_merge_parent_blocks(self):
         self.head_parent = "e"*40
-        with self.assertRaisesRegex(ValueError, "UNAPPROVED_RELEASE_VERSION_PR"):
+        with self.assertRaisesRegex(ValueError, "UNAPPROVED_PUBLISHER_REPAIR_PR"):
             self.verify()
         self.head_parent = HEAD
+        self.repair_pr_merged = False
+        with self.assertRaisesRegex(ValueError, "UNAPPROVED_PUBLISHER_REPAIR_PR"):
+            self.verify()
+
+    def test_unmerged_original_release_pr_blocks(self):
         self.release_pr_merged = False
         with self.assertRaisesRegex(ValueError, "UNAPPROVED_RELEASE_VERSION_PR"):
+            self.verify()
+
+    def test_changed_publisher_repair_file_scope_blocks(self):
+        self.repair_changed[0]["filename"] = "blackbox_universal/maintenance.py"
+        with self.assertRaisesRegex(ValueError, "UNAPPROVED_PUBLISHER_REPAIR_FILE_SCOPE"):
+            self.verify()
+        self.repair_changed[0]["filename"] = sorted(PUBLISHER_REPAIR_FILES)[0]
+        self.repair_changed[0]["status"] = "removed"
+        with self.assertRaisesRegex(ValueError, "UNAPPROVED_PUBLISHER_REPAIR_FILE_SCOPE"):
             self.verify()
 
     def test_changed_pr_file_or_added_scope_blocks(self):
