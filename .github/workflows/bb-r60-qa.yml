@@ -295,7 +295,16 @@ jobs:
       - name: Release-equivalent native investigation preflight with actual packaged helpers
         if: needs.scope.outputs.gui_only != 'true' && needs.scope.outputs.medium_only != 'true'
         timeout-minutes: 15
-        run: python tools/qa_inv_native.py --output r60-inv-native-preflight --decoder dist/BLACK.BOX-Universal/decoder/BLACK.BOX-Decoder.exe --diagnostic-helper dist/BLACK.BOX-Universal/diagnostic/BLACK.BOX-Diagnostic.exe
+        shell: pwsh
+        run: |
+          # GitHub PR event GITHUB_SHA refers to the synthetic merge commit, while
+          # actions/checkout above explicitly pins the exact PR source HEAD.
+          # Authenticate this invocation against that event-provided source SHA.
+          $actual = (git rev-parse HEAD).Trim()
+          if ($actual -ne $env:BB_QA_SOURCE_SHA) { throw 'INV_NATIVE_PREFLIGHT_EXACT_PR_SOURCE_MISMATCH' }
+          $env:GITHUB_SHA = $env:BB_QA_SOURCE_SHA
+          python tools/qa_inv_native.py --output r60-inv-native-preflight --decoder dist/BLACK.BOX-Universal/decoder/BLACK.BOX-Decoder.exe --diagnostic-helper dist/BLACK.BOX-Universal/diagnostic/BLACK.BOX-Diagnostic.exe
+          if ($LASTEXITCODE -ne 0) { throw 'INV_NATIVE_PREFLIGHT_FAILED' }
       - name: Same actual full chain in frozen EXE using packaged helpers
         if: needs.scope.outputs.gui_only != 'true' && needs.scope.outputs.medium_only != 'true'
         timeout-minutes: 20
