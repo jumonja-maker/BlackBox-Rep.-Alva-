@@ -12,6 +12,8 @@ from tools.publish_v060_after_ci import (
     RELEASE_PR, RELEASE_BRANCH, PR_FILES, RELEASE_MAIN_SHA, RELEASE_HEAD_SHA,
     PUBLISHER_REPAIR_PR, PUBLISHER_REPAIR_BRANCH, PUBLISHER_REPAIR_FILES,
     NATIVE_QA_PR, NATIVE_QA_BRANCH, NATIVE_QA_FILES,
+    NATIVE_QA_MAIN_SHA, NATIVE_QA_HEAD_SHA,
+    THIRD_PARTY_REPAIR_PR, THIRD_PARTY_REPAIR_BRANCH, THIRD_PARTY_REPAIR_FILES,
     PUBLISHER_REPAIR_MAIN_SHA, PUBLISHER_REPAIR_HEAD_SHA,
     SHELL_NAME, MAIN_JOBS,
     R60_NAME, R60_JOBS, UI_NAME, UI_JOBS, PRIOR_SHA, PRIOR_ZIP_SHA,
@@ -54,12 +56,17 @@ def actual_endurance_receipt():
 class CumulativeV060ReleaseTests(unittest.TestCase):
     def setUp(self):
         self.source_runs = [
-            successful_run(SHELL_NAME, 301, HEAD, NATIVE_QA_BRANCH),
-            successful_run(UI_NAME, 302, HEAD, NATIVE_QA_BRANCH),
-            successful_run(R60_NAME, 303, HEAD, NATIVE_QA_BRANCH)]
+            successful_run(SHELL_NAME, 301, HEAD, THIRD_PARTY_REPAIR_BRANCH),
+            successful_run(UI_NAME, 302, HEAD, THIRD_PARTY_REPAIR_BRANCH),
+            successful_run(R60_NAME, 303, HEAD, THIRD_PARTY_REPAIR_BRANCH)]
+        self.historic_runs = [
+            successful_run(SHELL_NAME, 401, NATIVE_QA_HEAD_SHA, NATIVE_QA_BRANCH),
+            successful_run(UI_NAME, 402, NATIVE_QA_HEAD_SHA, NATIVE_QA_BRANCH),
+            successful_run(R60_NAME, 403, NATIVE_QA_HEAD_SHA, NATIVE_QA_BRANCH)]
         self.main_jobs = [job(n, i + 1) for i, n in enumerate(sorted(MAIN_JOBS))]
         self.ui_jobs = [job(n, i + 31) for i, n in enumerate(sorted(UI_JOBS))]
         self.r60_jobs = [job(n, i + 41) for i, n in enumerate(sorted(R60_JOBS))]
+        self.historic_r60_jobs = [job(n, i + 141) for i, n in enumerate(sorted(R60_JOBS))]
         self.head_parent = HEAD
         self.main_ref = SHA
         self.release_pr_merged = True
@@ -68,6 +75,9 @@ class CumulativeV060ReleaseTests(unittest.TestCase):
         self.native_pr_merged = True
         self.native_changed = [{"filename": p, "status": NATIVE_QA_FILES[p]}
                                for p in sorted(NATIVE_QA_FILES)]
+        self.third_party_pr_merged = True
+        self.third_party_changed = [{"filename": p, "status": THIRD_PARTY_REPAIR_FILES[p]}
+                                    for p in sorted(THIRD_PARTY_REPAIR_FILES)]
         self.repair_pr_merged = True
         self.repair_changed = [{"filename": p, "status": PUBLISHER_REPAIR_FILES[p]}
                                for p in sorted(PUBLISHER_REPAIR_FILES)]
@@ -75,13 +85,16 @@ class CumulativeV060ReleaseTests(unittest.TestCase):
         self.upstream = successful_run(SHELL_NAME, 321, SHA, "main", "push")
         self.upstream["head_repository"] = {"full_name": REPO}
         self.receipt = actual_endurance_receipt()
+        self.historic_receipt = {**actual_endurance_receipt(), "source_sha": NATIVE_QA_HEAD_SHA}
 
     def client(self, endpoint):
         path = endpoint.removeprefix(f"repos/{REPO}/")
         table = {
             "git/ref/heads/main": {"object": {"sha": self.main_ref}},
             f"git/commits/{SHA}": {"parents": [
-                {"sha": PUBLISHER_REPAIR_MAIN_SHA}, {"sha": self.head_parent}]},
+                {"sha": NATIVE_QA_MAIN_SHA}, {"sha": self.head_parent}]},
+            f"git/commits/{NATIVE_QA_MAIN_SHA}": {"parents": [
+                {"sha": PUBLISHER_REPAIR_MAIN_SHA}, {"sha": NATIVE_QA_HEAD_SHA}]},
             f"git/commits/{PUBLISHER_REPAIR_MAIN_SHA}": {"parents": [
                 {"sha": RELEASE_MAIN_SHA}, {"sha": PUBLISHER_REPAIR_HEAD_SHA}]},
             f"git/commits/{RELEASE_MAIN_SHA}": {"parents": [
@@ -100,10 +113,16 @@ class CumulativeV060ReleaseTests(unittest.TestCase):
             f"pulls/{PUBLISHER_REPAIR_PR}/files?per_page=100": self.repair_changed,
             f"pulls/{NATIVE_QA_PR}": {
                 "number": NATIVE_QA_PR, "merged": self.native_pr_merged,
-                "merge_commit_sha": SHA,
-                "head": {"sha": HEAD, "ref": NATIVE_QA_BRANCH},
+                "merge_commit_sha": NATIVE_QA_MAIN_SHA,
+                "head": {"sha": NATIVE_QA_HEAD_SHA, "ref": NATIVE_QA_BRANCH},
                 "base": {"ref": "main"}, "changed_files": len(self.native_changed)},
             f"pulls/{NATIVE_QA_PR}/files?per_page=100": self.native_changed,
+            f"pulls/{THIRD_PARTY_REPAIR_PR}": {
+                "number": THIRD_PARTY_REPAIR_PR, "merged": self.third_party_pr_merged,
+                "merge_commit_sha": SHA,
+                "head": {"sha": HEAD, "ref": THIRD_PARTY_REPAIR_BRANCH},
+                "base": {"ref": "main"}, "changed_files": len(self.third_party_changed)},
+            f"pulls/{THIRD_PARTY_REPAIR_PR}/files?per_page=100": self.third_party_changed,
             "pulls/41": {
                 "merged": True, "merge_commit_sha": BASE_MAIN_SHA,
                 "head": {"sha": self.r60_sha},
@@ -114,9 +133,14 @@ class CumulativeV060ReleaseTests(unittest.TestCase):
                 {"jobs": self.main_jobs},
             f"actions/runs?head_sha={HEAD}&per_page=100":
                 {"workflow_runs": self.source_runs},
+            f"actions/runs?head_sha={NATIVE_QA_HEAD_SHA}&per_page=100":
+                {"workflow_runs": self.historic_runs},
             "actions/runs/301/jobs?per_page=100": {"jobs": self.main_jobs},
             "actions/runs/302/jobs?per_page=100": {"jobs": self.ui_jobs},
             "actions/runs/303/jobs?per_page=100": {"jobs": self.r60_jobs},
+            "actions/runs/401/jobs?per_page=100": {"jobs": self.main_jobs},
+            "actions/runs/402/jobs?per_page=100": {"jobs": self.ui_jobs},
+            "actions/runs/403/jobs?per_page=100": {"jobs": self.historic_r60_jobs},
             "releases/tags/v0.5.4": {
                 "draft": False, "prerelease": False,
                 "target_commitish": PRIOR_SHA,
@@ -133,11 +157,17 @@ class CumulativeV060ReleaseTests(unittest.TestCase):
         return table[path]
 
     def verify(self):
-        log = ("2026-11-06T16:21:48Z R60_ENDURANCE_RECEIPT " +
-               json.dumps(self.receipt, sort_keys=True) + "\n")
+        historic = next(j for j in self.historic_r60_jobs if j["name"] ==
+                        "R60 actual persisted 5h30 scheduler and owned recording lifecycle")
+        def fake_run(command, **_kwargs):
+            record = self.historic_receipt if command[-2] == str(historic["id"]) else self.receipt
+            log = ("2026-11-08T07:41:00Z R60_ENDURANCE_RECEIPT " +
+                   json.dumps(record, sort_keys=True) + "\n")
+            return SimpleNamespace(stdout=log)
         with patch("tools.publish_v060_after_ci.subprocess.run",
-                   return_value=SimpleNamespace(stdout=log)) as caller:
+                   side_effect=fake_run) as caller:
             result = authorize(self.client, REPO, SHA, self.upstream)
+            self.assertEqual(caller.call_count, 2)
             lifecycle = next(j for j in self.r60_jobs if j["name"] ==
                              "R60 actual persisted 5h30 scheduler and owned recording lifecycle")
             self.assertEqual(caller.call_args.args[0],
@@ -151,6 +181,8 @@ class CumulativeV060ReleaseTests(unittest.TestCase):
         self.assertEqual(proof["release_pr"], RELEASE_PR)
         self.assertEqual(proof["publisher_repair_pr"], PUBLISHER_REPAIR_PR)
         self.assertEqual(proof["native_qa_pr"], NATIVE_QA_PR)
+        self.assertEqual(proof["third_party_repair_pr"], THIRD_PARTY_REPAIR_PR)
+        self.assertEqual(proof["prior_r60_endurance"]["calls"], 331)
         self.assertEqual(proof["r60_endurance"]["calls"], 331)
         self.assertGreater(proof["r60_endurance"]["engine_span_s"], 19800)
 
@@ -161,11 +193,35 @@ class CumulativeV060ReleaseTests(unittest.TestCase):
 
     def test_wrong_merge_parent_blocks(self):
         self.head_parent = "e"*40
-        with self.assertRaisesRegex(ValueError, "UNAPPROVED_NATIVE_QA_PR"):
+        with self.assertRaisesRegex(ValueError, "UNAPPROVED_THIRD_PARTY_REPAIR_PR"):
             self.verify()
         self.head_parent = HEAD
+        self.third_party_pr_merged = False
+        with self.assertRaisesRegex(ValueError, "UNAPPROVED_THIRD_PARTY_REPAIR_PR"):
+            self.verify()
+
+    def test_unmerged_prior_native_pr_blocks(self):
         self.native_pr_merged = False
         with self.assertRaisesRegex(ValueError, "UNAPPROVED_NATIVE_QA_PR"):
+            self.verify()
+
+    def test_changed_third_party_scope_blocks(self):
+        self.third_party_changed[0]["filename"] = "blackbox_universal/maintenance.py"
+        with self.assertRaisesRegex(ValueError, "UNAPPROVED_THIRD_PARTY_REPAIR_FILE_SCOPE"):
+            self.verify()
+        self.third_party_changed[0]["filename"] = sorted(THIRD_PARTY_REPAIR_FILES)[0]
+        self.third_party_changed[0]["status"] = "removed"
+        with self.assertRaisesRegex(ValueError, "UNAPPROVED_THIRD_PARTY_REPAIR_FILE_SCOPE"):
+            self.verify()
+
+    def test_prior_r60_lifecycle_missing_blocks(self):
+        self.historic_r60_jobs[-1]["conclusion"] = "failure"
+        with self.assertRaisesRegex(ValueError, "REQUIRED_CI_JOB_NOT_GREEN"):
+            self.verify()
+
+    def test_prior_source_ci_missing_blocks(self):
+        self.historic_runs = self.historic_runs[:1]
+        with self.assertRaisesRegex(ValueError, "EXACT_RELEASE_PR_SOURCE_CI_MISSING"):
             self.verify()
 
     def test_unmerged_original_release_pr_blocks(self):
