@@ -456,6 +456,51 @@ def build_graph(normalized, *, target_identity=None, scenario=None, app_identity
         "file_trust": "UNVERIFIED_IMPORT",
         "analysis_provenance": "UNVERIFIED_DERIVATION_RECOMPUTE_SOURCES_FOR_CURRENT_LINK_VALIDATION",
         "verification_class": "DERIVED_FROM_UNVERIFIED_SOURCES"}
+
+    # Fully read, validated source facts can fit the node count but exceed the
+    # display byte cap. Bound only the deterministic graph view, never its
+    # source inventory, budgets, identities, or evidentiary uncertainty.
+    from .investigation_graph_contracts import canonical_json
+    case_bytes = len(canonical_json(case))  # ensure_ascii: characters == bytes
+    if case_bytes > budget.max_result_bytes:
+        target_bytes = budget.max_result_bytes * 3 // 4  # space for derived models
+        shown_count = len(shown)
+        for _ in range(16):
+            budget.check()
+            if case_bytes <= target_bytes or shown_count == 0:
+                break
+            fraction = max(0.25, min(0.80, target_bytes * 0.9 / case_bytes))
+            shown_count = max(0, min(shown_count - 1, int(shown_count * fraction)))
+            reduced_nodes = ordered[:shown_count]
+            reduced = correlate_evidence(reduced_nodes, list(sources.values()),
+                clock_relations=clocks, budget=budget)
+            case["nodes"] = reduced_nodes
+            case["edges"] = reduced["edges"]
+            case["gaps"] = reduced["gaps"]
+            case["incident_ids"] = sorted(node["node_id"] for node in reduced_nodes
+                                          if node["observation_type"] == "INCIDENT")
+            case["coverage"] = {**coverage, **reduced["coverage"],
+                "evidence_completeness": evidence_completeness,
+                "normalized_nodes": len(raw_nodes), "unique_nodes": len(ordered),
+                "shown_nodes": shown_count, "normalization_nodes_omitted": upstream_omitted,
+                "graph_nodes_omitted": len(ordered) - shown_count,
+                "nodes_omitted": upstream_omitted + len(ordered) - shown_count,
+                "display_graph_complete": False, "graph_byte_limited": True,
+                "edge_candidate_scan_complete": False,
+                "edges_omitted_is_lower_bound": True}
+            case["limitations"] = sorted(set([*limits, *reduced["limitations"],
+                "IMPORTED_GRAPH_IS_NOT_AUTHENTICATED_EVIDENCE",
+                "CAUSAL_ROOT_CAUSE_NOT_AUTOMATICALLY_ESTABLISHED",
+                "DISPLAY_NODE_BUDGET_REACHED",
+                "DISPLAY_GRAPH_RESULT_BYTE_BUDGET_REACHED",
+                "DISPLAY_EDGE_BUDGET_REACHED"]))
+            case_bytes = len(canonical_json(case))
+        # Refuse rather than claim success for an impossible budget.
+        if (shown_count == 0 or case_bytes > target_bytes) and ordered:
+            error = InvestigationError("INVESTIGATION_RESULT_BYTE_BUDGET")
+            error.actual_result_bytes = case_bytes
+            error.result_byte_limit = budget.max_result_bytes
+            raise error
     return validate_case(case, budget=budget)
 
 
