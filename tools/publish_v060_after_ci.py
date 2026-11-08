@@ -56,6 +56,17 @@ NATIVE_QA_FILES = {
     "tools/publish_v060_after_ci.py": "modified",
     "tools/qa_inv_native.py": "modified",
 }
+NATIVE_QA_MAIN_SHA = "e28926b2c14ffdfce5bc7d40ea66b9c968a9e902"
+NATIVE_QA_HEAD_SHA = "7066691ecd951db63984fae9a3f8ec8419410817"
+THIRD_PARTY_REPAIR_PR = 45
+THIRD_PARTY_REPAIR_BRANCH = "fix/v060-pinned-thirdparty-download-20261108"
+THIRD_PARTY_REPAIR_FILES = {
+    ".github/workflows/bb-r60-qa.yml": "modified",
+    "tests/test_qa_decoder_apps_download.py": "added",
+    "tests/test_release_v060_authorization.py": "modified",
+    "tools/publish_v060_after_ci.py": "modified",
+    "tools/qa_decoder_apps.py": "modified",
+}
 SHELL_NAME = "BLACK.BOX Universal - independent Windows build and release"
 R60_NAME = "BB-R60 Chain Builder exact-source acceptance"
 UI_NAME = "BLACK.BOX UI selection contrast"
@@ -177,9 +188,15 @@ def authorize(client, repo, sha, upstream):
             "MAIN_MOVED")
     main = client(f"repos/{repo}/git/commits/{sha}")
     parent = main.get("parents") or []
-    require(len(parent) == 2 and parent[0].get("sha") == PUBLISHER_REPAIR_MAIN_SHA
+    require(len(parent) == 2 and parent[0].get("sha") == NATIVE_QA_MAIN_SHA
             and isinstance(parent[1].get("sha"), str)
             and re.fullmatch("[0-9a-f]{40}", parent[1]["sha"]),
+            "THIRD_PARTY_REPAIR_MERGE_ANCESTRY_CHANGED")
+    native_merge = client(f"repos/{repo}/git/commits/{NATIVE_QA_MAIN_SHA}")
+    native_parents = native_merge.get("parents") or []
+    require(len(native_parents) == 2 and
+            native_parents[0].get("sha") == PUBLISHER_REPAIR_MAIN_SHA and
+            native_parents[1].get("sha") == NATIVE_QA_HEAD_SHA,
             "NATIVE_QA_MERGE_ANCESTRY_CHANGED")
     repair_merge = client(f"repos/{repo}/git/commits/{PUBLISHER_REPAIR_MAIN_SHA}")
     repair_parents = repair_merge.get("parents") or []
@@ -234,9 +251,9 @@ def authorize(client, repo, sha, upstream):
 
     native = client(f"repos/{repo}/pulls/{NATIVE_QA_PR}")
     require(native.get("number") == NATIVE_QA_PR and native.get("merged") is True
-            and native.get("merge_commit_sha") == sha
+            and native.get("merge_commit_sha") == NATIVE_QA_MAIN_SHA
             and (native.get("head") or {}).get("ref") == NATIVE_QA_BRANCH
-            and (native.get("head") or {}).get("sha") == parent[1]["sha"]
+            and (native.get("head") or {}).get("sha") == NATIVE_QA_HEAD_SHA
             and (native.get("base") or {}).get("ref") == "main",
             "UNAPPROVED_NATIVE_QA_PR")
     native_files = client(f"repos/{repo}/pulls/{NATIVE_QA_PR}/files?per_page=100")
@@ -246,13 +263,41 @@ def authorize(client, repo, sha, upstream):
             {x.get("filename"): x.get("status") for x in native_files} == NATIVE_QA_FILES,
             "UNAPPROVED_NATIVE_QA_FILE_SCOPE")
 
+    third_party = client(f"repos/{repo}/pulls/{THIRD_PARTY_REPAIR_PR}")
+    require(third_party.get("number") == THIRD_PARTY_REPAIR_PR and
+            third_party.get("merged") is True and
+            third_party.get("merge_commit_sha") == sha and
+            (third_party.get("head") or {}).get("ref") == THIRD_PARTY_REPAIR_BRANCH and
+            (third_party.get("head") or {}).get("sha") == parent[1]["sha"] and
+            (third_party.get("base") or {}).get("ref") == "main",
+            "UNAPPROVED_THIRD_PARTY_REPAIR_PR")
+    third_party_files = client(f"repos/{repo}/pulls/{THIRD_PARTY_REPAIR_PR}/files?per_page=100")
+    require(isinstance(third_party_files, list) and
+            third_party.get("changed_files") == len(THIRD_PARTY_REPAIR_FILES) and
+            len(third_party_files) == len(THIRD_PARTY_REPAIR_FILES) and
+            {x.get("filename"): x.get("status") for x in third_party_files}
+            == THIRD_PARTY_REPAIR_FILES,
+            "UNAPPROVED_THIRD_PARTY_REPAIR_FILE_SCOPE")
+
     exact_jobs(client, repo, upstream["id"], MAIN_JOBS)
+    # PR44's own 331/19800s and exact-source CI remain independently required;
+    # they never authorize PR45's changed code on their own.
+    prior_shell, _ = exact_candidate_run(client, repo, NATIVE_QA_HEAD_SHA, NATIVE_QA_BRANCH,
+                                         SHELL_NAME, MAIN_JOBS)
+    prior_ui, _ = exact_candidate_run(client, repo, NATIVE_QA_HEAD_SHA, NATIVE_QA_BRANCH,
+                                      UI_NAME, UI_JOBS)
+    prior_r60_run, prior_r60_jobs = exact_candidate_run(
+        client, repo, NATIVE_QA_HEAD_SHA, NATIVE_QA_BRANCH, R60_NAME, R60_JOBS)
+    os.environ["V060_SOURCE_PR_SHA"] = NATIVE_QA_HEAD_SHA
+    prior_endurance = endurance_proof(repo, prior_r60_jobs[
+        "R60 actual persisted 5h30 scheduler and owned recording lifecycle"])
+
     source_sha = parent[1]["sha"]
-    shell, _ = exact_candidate_run(client, repo, source_sha, NATIVE_QA_BRANCH,
+    shell, _ = exact_candidate_run(client, repo, source_sha, THIRD_PARTY_REPAIR_BRANCH,
                                    SHELL_NAME, MAIN_JOBS)
-    ui, _ = exact_candidate_run(client, repo, source_sha, NATIVE_QA_BRANCH,
+    ui, _ = exact_candidate_run(client, repo, source_sha, THIRD_PARTY_REPAIR_BRANCH,
                                 UI_NAME, UI_JOBS)
-    r60_run, r60_jobs = exact_candidate_run(client, repo, source_sha, NATIVE_QA_BRANCH,
+    r60_run, r60_jobs = exact_candidate_run(client, repo, source_sha, THIRD_PARTY_REPAIR_BRANCH,
                                             R60_NAME, R60_JOBS)
     os.environ["V060_SOURCE_PR_SHA"] = source_sha
     endurance = endurance_proof(repo, r60_jobs[
@@ -272,6 +317,9 @@ def authorize(client, repo, sha, upstream):
     return {"tag": TAG, "main_sha": sha, "release_pr": RELEASE_PR,
             "publisher_repair_pr": PUBLISHER_REPAIR_PR,
             "native_qa_pr": NATIVE_QA_PR,
+            "third_party_repair_pr": THIRD_PARTY_REPAIR_PR,
+            "prior_source_ci": prior_shell["id"], "prior_ui_ci": prior_ui["id"],
+            "prior_r60_ci": prior_r60_run["id"], "prior_r60_endurance": prior_endurance,
             "candidate_sha": source_sha, "main_ci": upstream["id"],
             "source_ci": shell["id"], "ui_ci": ui["id"],
             "r60_ci": r60_run["id"], "r60_endurance": endurance}
