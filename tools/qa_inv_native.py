@@ -512,6 +512,15 @@ def run(args):
             stream.close()
         proof["status"] = "PASS" if successful else "FAIL"
         save(output / "native-investigation-qa.json", proof)
+        # Preserve the existing fail-closed result, but expose the reason in
+        # GitHub's job log because Actions Artifacts are intentionally disabled.
+        if not successful:
+            diagnostic = {key: proof.get(key) for key in (
+                "phase", "error", "reason", "traceback",
+                "capture_cleanup_error", "owned_cleanup_errors",
+                "helper_cleanup", "target_cleanup") if key in proof}
+            print("INV_NATIVE_FAILURE_DETAIL " + json.dumps(
+                diagnostic, sort_keys=True, default=str), flush=True)
     print("INV_NATIVE_QA_" + proof["status"], flush=True)
     return 0 if successful else 1
 

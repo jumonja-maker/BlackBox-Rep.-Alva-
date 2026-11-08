@@ -37,12 +37,24 @@ PR_FILES = {
 }
 RELEASE_MAIN_SHA = "b74158b720e9acc11551b1fed37e1b57340c46ba"
 RELEASE_HEAD_SHA = "e39361b7036f41a09ad7a9f9f98cee11e4f2c3db"
+PUBLISHER_REPAIR_MAIN_SHA = "6d54633a2bba6b4c223dcefdd004b2c1eb9d68d2"
+PUBLISHER_REPAIR_HEAD_SHA = "41127bc968b8b85639d865ace408e14b544ac508"
 PUBLISHER_REPAIR_PR = 43
 PUBLISHER_REPAIR_BRANCH = "fix/v060-release-log-guard-20261107"
 PUBLISHER_REPAIR_FILES = {
     ".github/workflows/bb-r60-qa.yml": "modified",
     "tests/test_release_v060_authorization.py": "modified",
     "tools/publish_v060_after_ci.py": "modified",
+}
+NATIVE_QA_PR = 44
+NATIVE_QA_BRANCH = "fix/v060-native-qa-diagnostics-20261108"
+NATIVE_QA_FILES = {
+    ".github/workflows/bb-r60-qa.yml": "modified",
+    "src/blackbox_core/evidence_graph.py": "modified",
+    "tests/test_graph_result_byte_budget.py": "added",
+    "tests/test_release_v060_authorization.py": "modified",
+    "tools/publish_v060_after_ci.py": "modified",
+    "tools/qa_inv_native.py": "modified",
 }
 SHELL_NAME = "BLACK.BOX Universal - independent Windows build and release"
 R60_NAME = "BB-R60 Chain Builder exact-source acceptance"
@@ -165,9 +177,15 @@ def authorize(client, repo, sha, upstream):
             "MAIN_MOVED")
     main = client(f"repos/{repo}/git/commits/{sha}")
     parent = main.get("parents") or []
-    require(len(parent) == 2 and parent[0].get("sha") == RELEASE_MAIN_SHA
+    require(len(parent) == 2 and parent[0].get("sha") == PUBLISHER_REPAIR_MAIN_SHA
             and isinstance(parent[1].get("sha"), str)
             and re.fullmatch("[0-9a-f]{40}", parent[1]["sha"]),
+            "NATIVE_QA_MERGE_ANCESTRY_CHANGED")
+    repair_merge = client(f"repos/{repo}/git/commits/{PUBLISHER_REPAIR_MAIN_SHA}")
+    repair_parents = repair_merge.get("parents") or []
+    require(len(repair_parents) == 2
+            and repair_parents[0].get("sha") == RELEASE_MAIN_SHA
+            and repair_parents[1].get("sha") == PUBLISHER_REPAIR_HEAD_SHA,
             "PUBLISHER_REPAIR_MERGE_ANCESTRY_CHANGED")
 
     r60 = client(f"repos/{repo}/pulls/{R60_PR}")
@@ -201,9 +219,9 @@ def authorize(client, repo, sha, upstream):
 
     fix = client(f"repos/{repo}/pulls/{PUBLISHER_REPAIR_PR}")
     require(fix.get("number") == PUBLISHER_REPAIR_PR and fix.get("merged") is True
-            and fix.get("merge_commit_sha") == sha
+            and fix.get("merge_commit_sha") == PUBLISHER_REPAIR_MAIN_SHA
             and (fix.get("head") or {}).get("ref") == PUBLISHER_REPAIR_BRANCH
-            and (fix.get("head") or {}).get("sha") == parent[1]["sha"]
+            and (fix.get("head") or {}).get("sha") == PUBLISHER_REPAIR_HEAD_SHA
             and (fix.get("base") or {}).get("ref") == "main",
             "UNAPPROVED_PUBLISHER_REPAIR_PR")
     fix_files = client(f"repos/{repo}/pulls/{PUBLISHER_REPAIR_PR}/files?per_page=100")
@@ -214,13 +232,27 @@ def authorize(client, repo, sha, upstream):
             == PUBLISHER_REPAIR_FILES,
             "UNAPPROVED_PUBLISHER_REPAIR_FILE_SCOPE")
 
+    native = client(f"repos/{repo}/pulls/{NATIVE_QA_PR}")
+    require(native.get("number") == NATIVE_QA_PR and native.get("merged") is True
+            and native.get("merge_commit_sha") == sha
+            and (native.get("head") or {}).get("ref") == NATIVE_QA_BRANCH
+            and (native.get("head") or {}).get("sha") == parent[1]["sha"]
+            and (native.get("base") or {}).get("ref") == "main",
+            "UNAPPROVED_NATIVE_QA_PR")
+    native_files = client(f"repos/{repo}/pulls/{NATIVE_QA_PR}/files?per_page=100")
+    require(isinstance(native_files, list) and
+            native.get("changed_files") == len(NATIVE_QA_FILES) and
+            len(native_files) == len(NATIVE_QA_FILES) and
+            {x.get("filename"): x.get("status") for x in native_files} == NATIVE_QA_FILES,
+            "UNAPPROVED_NATIVE_QA_FILE_SCOPE")
+
     exact_jobs(client, repo, upstream["id"], MAIN_JOBS)
     source_sha = parent[1]["sha"]
-    shell, _ = exact_candidate_run(client, repo, source_sha, PUBLISHER_REPAIR_BRANCH,
+    shell, _ = exact_candidate_run(client, repo, source_sha, NATIVE_QA_BRANCH,
                                    SHELL_NAME, MAIN_JOBS)
-    ui, _ = exact_candidate_run(client, repo, source_sha, PUBLISHER_REPAIR_BRANCH,
+    ui, _ = exact_candidate_run(client, repo, source_sha, NATIVE_QA_BRANCH,
                                 UI_NAME, UI_JOBS)
-    r60_run, r60_jobs = exact_candidate_run(client, repo, source_sha, PUBLISHER_REPAIR_BRANCH,
+    r60_run, r60_jobs = exact_candidate_run(client, repo, source_sha, NATIVE_QA_BRANCH,
                                             R60_NAME, R60_JOBS)
     os.environ["V060_SOURCE_PR_SHA"] = source_sha
     endurance = endurance_proof(repo, r60_jobs[
@@ -239,6 +271,7 @@ def authorize(client, repo, sha, upstream):
             "PUBLIC_V054_ZIP_CHANGED")
     return {"tag": TAG, "main_sha": sha, "release_pr": RELEASE_PR,
             "publisher_repair_pr": PUBLISHER_REPAIR_PR,
+            "native_qa_pr": NATIVE_QA_PR,
             "candidate_sha": source_sha, "main_ci": upstream["id"],
             "source_ci": shell["id"], "ui_ci": ui["id"],
             "r60_ci": r60_run["id"], "r60_endurance": endurance}

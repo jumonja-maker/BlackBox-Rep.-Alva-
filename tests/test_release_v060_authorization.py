@@ -11,6 +11,8 @@ from tools.publish_v060_after_ci import (
     authorize, endurance_proof, BASE_MAIN_SHA, R60_SOURCE_SHA, REPO,
     RELEASE_PR, RELEASE_BRANCH, PR_FILES, RELEASE_MAIN_SHA, RELEASE_HEAD_SHA,
     PUBLISHER_REPAIR_PR, PUBLISHER_REPAIR_BRANCH, PUBLISHER_REPAIR_FILES,
+    NATIVE_QA_PR, NATIVE_QA_BRANCH, NATIVE_QA_FILES,
+    PUBLISHER_REPAIR_MAIN_SHA, PUBLISHER_REPAIR_HEAD_SHA,
     SHELL_NAME, MAIN_JOBS,
     R60_NAME, R60_JOBS, UI_NAME, UI_JOBS, PRIOR_SHA, PRIOR_ZIP_SHA,
 )
@@ -52,9 +54,9 @@ def actual_endurance_receipt():
 class CumulativeV060ReleaseTests(unittest.TestCase):
     def setUp(self):
         self.source_runs = [
-            successful_run(SHELL_NAME, 301, HEAD, PUBLISHER_REPAIR_BRANCH),
-            successful_run(UI_NAME, 302, HEAD, PUBLISHER_REPAIR_BRANCH),
-            successful_run(R60_NAME, 303, HEAD, PUBLISHER_REPAIR_BRANCH)]
+            successful_run(SHELL_NAME, 301, HEAD, NATIVE_QA_BRANCH),
+            successful_run(UI_NAME, 302, HEAD, NATIVE_QA_BRANCH),
+            successful_run(R60_NAME, 303, HEAD, NATIVE_QA_BRANCH)]
         self.main_jobs = [job(n, i + 1) for i, n in enumerate(sorted(MAIN_JOBS))]
         self.ui_jobs = [job(n, i + 31) for i, n in enumerate(sorted(UI_JOBS))]
         self.r60_jobs = [job(n, i + 41) for i, n in enumerate(sorted(R60_JOBS))]
@@ -63,6 +65,9 @@ class CumulativeV060ReleaseTests(unittest.TestCase):
         self.release_pr_merged = True
         self.changed = [{"filename": p, "status": PR_FILES[p]}
                         for p in sorted(PR_FILES)]
+        self.native_pr_merged = True
+        self.native_changed = [{"filename": p, "status": NATIVE_QA_FILES[p]}
+                               for p in sorted(NATIVE_QA_FILES)]
         self.repair_pr_merged = True
         self.repair_changed = [{"filename": p, "status": PUBLISHER_REPAIR_FILES[p]}
                                for p in sorted(PUBLISHER_REPAIR_FILES)]
@@ -76,7 +81,9 @@ class CumulativeV060ReleaseTests(unittest.TestCase):
         table = {
             "git/ref/heads/main": {"object": {"sha": self.main_ref}},
             f"git/commits/{SHA}": {"parents": [
-                {"sha": RELEASE_MAIN_SHA}, {"sha": self.head_parent}]},
+                {"sha": PUBLISHER_REPAIR_MAIN_SHA}, {"sha": self.head_parent}]},
+            f"git/commits/{PUBLISHER_REPAIR_MAIN_SHA}": {"parents": [
+                {"sha": RELEASE_MAIN_SHA}, {"sha": PUBLISHER_REPAIR_HEAD_SHA}]},
             f"git/commits/{RELEASE_MAIN_SHA}": {"parents": [
                 {"sha": BASE_MAIN_SHA}, {"sha": RELEASE_HEAD_SHA}]},
             f"pulls/{RELEASE_PR}": {
@@ -87,10 +94,16 @@ class CumulativeV060ReleaseTests(unittest.TestCase):
             f"pulls/{RELEASE_PR}/files?per_page=100": self.changed,
             f"pulls/{PUBLISHER_REPAIR_PR}": {
                 "number": PUBLISHER_REPAIR_PR, "merged": self.repair_pr_merged,
-                "merge_commit_sha": SHA,
-                "head": {"sha": HEAD, "ref": PUBLISHER_REPAIR_BRANCH},
+                "merge_commit_sha": PUBLISHER_REPAIR_MAIN_SHA,
+                "head": {"sha": PUBLISHER_REPAIR_HEAD_SHA, "ref": PUBLISHER_REPAIR_BRANCH},
                 "base": {"ref": "main"}, "changed_files": len(self.repair_changed)},
             f"pulls/{PUBLISHER_REPAIR_PR}/files?per_page=100": self.repair_changed,
+            f"pulls/{NATIVE_QA_PR}": {
+                "number": NATIVE_QA_PR, "merged": self.native_pr_merged,
+                "merge_commit_sha": SHA,
+                "head": {"sha": HEAD, "ref": NATIVE_QA_BRANCH},
+                "base": {"ref": "main"}, "changed_files": len(self.native_changed)},
+            f"pulls/{NATIVE_QA_PR}/files?per_page=100": self.native_changed,
             "pulls/41": {
                 "merged": True, "merge_commit_sha": BASE_MAIN_SHA,
                 "head": {"sha": self.r60_sha},
@@ -137,6 +150,7 @@ class CumulativeV060ReleaseTests(unittest.TestCase):
         self.assertEqual(proof["main_sha"], SHA)
         self.assertEqual(proof["release_pr"], RELEASE_PR)
         self.assertEqual(proof["publisher_repair_pr"], PUBLISHER_REPAIR_PR)
+        self.assertEqual(proof["native_qa_pr"], NATIVE_QA_PR)
         self.assertEqual(proof["r60_endurance"]["calls"], 331)
         self.assertGreater(proof["r60_endurance"]["engine_span_s"], 19800)
 
@@ -147,16 +161,30 @@ class CumulativeV060ReleaseTests(unittest.TestCase):
 
     def test_wrong_merge_parent_blocks(self):
         self.head_parent = "e"*40
-        with self.assertRaisesRegex(ValueError, "UNAPPROVED_PUBLISHER_REPAIR_PR"):
+        with self.assertRaisesRegex(ValueError, "UNAPPROVED_NATIVE_QA_PR"):
             self.verify()
         self.head_parent = HEAD
-        self.repair_pr_merged = False
-        with self.assertRaisesRegex(ValueError, "UNAPPROVED_PUBLISHER_REPAIR_PR"):
+        self.native_pr_merged = False
+        with self.assertRaisesRegex(ValueError, "UNAPPROVED_NATIVE_QA_PR"):
             self.verify()
 
     def test_unmerged_original_release_pr_blocks(self):
         self.release_pr_merged = False
         with self.assertRaisesRegex(ValueError, "UNAPPROVED_RELEASE_VERSION_PR"):
+            self.verify()
+
+    def test_unmerged_publisher_repair_pr_blocks(self):
+        self.repair_pr_merged = False
+        with self.assertRaisesRegex(ValueError, "UNAPPROVED_PUBLISHER_REPAIR_PR"):
+            self.verify()
+
+    def test_changed_native_qa_file_scope_blocks(self):
+        self.native_changed[0]["filename"] = "blackbox_universal/maintenance.py"
+        with self.assertRaisesRegex(ValueError, "UNAPPROVED_NATIVE_QA_FILE_SCOPE"):
+            self.verify()
+        self.native_changed[0]["filename"] = sorted(NATIVE_QA_FILES)[0]
+        self.native_changed[0]["status"] = "removed"
+        with self.assertRaisesRegex(ValueError, "UNAPPROVED_NATIVE_QA_FILE_SCOPE"):
             self.verify()
 
     def test_changed_publisher_repair_file_scope_blocks(self):
