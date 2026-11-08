@@ -473,7 +473,14 @@ def run(args):
         proof["source_integrity_preserved"] = True
         successful = True
     except BaseException as error:
+        # Only bounded numeric diagnostics, never raw source/target contents.
+        # A real aggregate limit failure must remain FAIL (not a partial PASS).
+        byte_details = {name: getattr(error, name) for name in (
+            "analysis_stage", "actual_result_bytes", "reserved_result_bytes",
+            "result_byte_limit", "critical_path_bytes", "retained_graph_bytes")
+            if type(getattr(error, name, None)) in (str, int)}
         proof.update(error=type(error).__name__, reason=str(error)[:1800],
+                     byte_budget_diagnostics=byte_details,
                      traceback=traceback.format_exc(limit=12))
     finally:
         if capture is not None and capture.active:
