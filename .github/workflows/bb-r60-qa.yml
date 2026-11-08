@@ -17,7 +17,7 @@ concurrency:
 jobs:
   scope:
     if: >-
-      (github.event_name == 'pull_request' && (github.head_ref == 'feature/r60-chain-builder-wave03' || github.head_ref == 'release/v060-r10-r60-20261106' || github.head_ref == 'fix/v060-release-log-guard-20261107' || github.head_ref == 'fix/v060-native-qa-diagnostics-20261108')) ||
+      (github.event_name == 'pull_request' && (github.head_ref == 'feature/r60-chain-builder-wave03' || github.head_ref == 'release/v060-r10-r60-20261106' || github.head_ref == 'fix/v060-release-log-guard-20261107' || github.head_ref == 'fix/v060-native-qa-diagnostics-20261108' || github.head_ref == 'fix/v060-pinned-thirdparty-download-20261108')) ||
       (github.event_name == 'push' && (contains(github.event.head_commit.message, '[r60-contracts]') || contains(github.event.head_commit.message, '[r60-native]') || contains(github.event.head_commit.message, '[r60-gui]') || contains(github.event.head_commit.message, '[r60-medium]') || contains(github.event.head_commit.message, '[r60-workspace]'))) ||
       github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
