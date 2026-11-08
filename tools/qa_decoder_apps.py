@@ -25,6 +25,7 @@ import subprocess
 import sys
 import time
 import urllib.request
+from urllib.parse import urlsplit
 from unittest.mock import patch
 import zipfile
 
@@ -41,6 +42,11 @@ NPP_URL = ("https://github.com/notepad-plus-plus/notepad-plus-plus/releases/"
 # Independently matched official npp.8.9.8.1.checksums.sha256 AND the GitHub
 # release-asset digest on 2026-10-28. No floating 'latest' URL is executed.
 NPP_SHA256 = "beddf5548e75c97930d1575ba1c7d113e6e2b33d0a200310e734ca08e225f414"
+# Independently archived public release mirror; bytes MUST match the unchanged
+# upstream-published digest before any executable may be loaded. No 'latest'.
+NPP_MIRROR_URL = ("https://downloads.sourceforge.net/project/notepadplusplus.mirror/"
+                  f"v{NPP_VERSION}/{NPP_ARCHIVE}")
+NPP_DOWNLOAD_URLS = (NPP_URL, NPP_MIRROR_URL)
 MAX_DOWNLOAD = 32 * 1024**2
 MAX_TRACE = 256 * 1024**2
 # Only the controlled native-noise pair opts in. This does not change product
@@ -138,24 +144,52 @@ def safe_extract(archive, destination):
 
 
 def pinned_notepad(output):
+    """Fetch fixed release bytes with bounded network recovery, never trust a mirror.
+
+    A missing primary download is NOT_EXECUTED, not test success; an insecure
+    redirect, oversized response, or checksum mismatch is a hard QA failure.
+    Failed partial downloads cannot be reused on later attempts.
+    """
     archive = output / NPP_ARCHIVE
-    try:
-        with urllib.request.urlopen(NPP_URL, timeout=30) as response, archive.open("xb") as stream:
-            total = 0
-            while block := response.read(1024 * 1024):
-                total += len(block)
-                require(total <= MAX_DOWNLOAD, "NOTEPAD_DOWNLOAD_BUDGET")
-                stream.write(block)
-    except (OSError, TimeoutError) as exc:
-        raise NotExecuted("PINNED_NOTEPAD_DOWNLOAD_UNAVAILABLE: " + str(exc)[:200]) from exc
-    require(file_hash(archive) == NPP_SHA256, "PINNED_NOTEPAD_HASH_MISMATCH")
+    partial = output / (NPP_ARCHIVE + ".partial")
+    require(not archive.exists() and not partial.exists(), "PINNED_NOTEPAD_OUTPUT_ALREADY_EXISTS")
+    acquired_from = None
+    for url in NPP_DOWNLOAD_URLS:
+        for attempt in range(2):
+            try:
+                with urllib.request.urlopen(url, timeout=30) as response:
+                    require(urlsplit(response.geturl()).scheme == "https",
+                            "PINNED_NOTEPAD_INSECURE_REDIRECT")
+                    with partial.open("xb") as stream:
+                        total = 0
+                        while block := response.read(1024 * 1024):
+                            total += len(block)
+                            require(total <= MAX_DOWNLOAD, "NOTEPAD_DOWNLOAD_BUDGET")
+                            stream.write(block)
+                # Verify the exact developer-published SHA before extracting.
+                # Do not treat a corrupted mirror as a transient download error.
+                require(file_hash(partial) == NPP_SHA256, "PINNED_NOTEPAD_HASH_MISMATCH")
+                partial.replace(archive)
+                acquired_from = url
+                break
+            except (OSError, TimeoutError):
+                # Network failures are bounded. Do not hide checksum, budget or
+                # TLS failures by retrying a different source.
+                if attempt == 0:
+                    time.sleep(2)
+            finally:
+                partial.unlink(missing_ok=True)
+        if acquired_from is not None:
+            break
+    if acquired_from is None:
+        raise NotExecuted("PINNED_NOTEPAD_DOWNLOAD_UNAVAILABLE: PINNED_SOURCES_EXHAUSTED")
     folder = output / "notepad-portable"
     safe_extract(archive, folder)
     binary = folder / "notepad++.exe"
     require(binary.is_file(), "PINNED_NOTEPAD_BINARY_MISSING")
-    return binary, {"version": NPP_VERSION, "source_url": NPP_URL,
+    return binary, {"version": NPP_VERSION, "source_url": acquired_from,
                     "archive_sha256": NPP_SHA256,
-                    "provenance": "PINNED_OFFICIAL_PORTABLE_DOWNLOAD_SHA256_VERIFIED",
+                    "provenance": "PINNED_OFFICIAL_RELEASE_SHA256_VERIFIED",
                     "checksum_source": NPP_URL.rsplit("/", 1)[0] +
                     f"/npp.{NPP_VERSION}.checksums.sha256",
                     "isolation": "OWNED_PORTABLE_NO_PLUGINS_OR_UPDATER"}
