@@ -9,13 +9,13 @@
 [**Download latest published Windows x64 release**](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/releases/latest) · [Releases](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/releases) · [Русская версия](README.ru.md)
 
 [![Windows/Linux QA](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/actions/workflows/shell-qa.yml/badge.svg?branch=main)](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/actions/workflows/shell-qa.yml)
-![Development version](https://img.shields.io/badge/source-0.5.5-40766c) ![Windows](https://img.shields.io/badge/platform-Windows%20x64-40766c) ![MIT](https://img.shields.io/badge/license-MIT-40766c)
+![Development source v0.6.0](https://img.shields.io/badge/source-0.6.0-40766c) ![Windows](https://img.shields.io/badge/platform-Windows%20x64-40766c) ![MIT](https://img.shields.io/badge/license-MIT-40766c)
 
-**Source version: v0.5.5.** Downloads and updater availability are determined only by the [official GitHub Release](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/releases/latest). Green CI and a source branch do not themselves publish an update.
+**Source version: v0.6.0 (current development tree).** The [official GitHub Release](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/releases/latest) alone determines which Windows build can actually be downloaded and updated. Until a matching public Release exists, its packaged features may be older than the README. Passing CI does not publish an update.
 
-**R60 — Chain Builder (development patch):** Overview contains an optional internal Chain Builder tab for typed, bounded diagnostic workflows using existing tools. Opening or previewing a chain is passive; interventions retain fresh R10 consent, and unknown evidence/cleanup stays explicit. The six main pages and legacy five-page embedding API remain. This is not a published update or a declaration of completed acceptance. [User and technical guide (RU)](docs/R60_CHAIN_BUILDER_RU.md).
+**R60 — Chain Builder (integrated in the current source):** Overview has an optional Chain Builder workspace for typed, bounded workflows using the existing diagnostic tools. Opening a graph or preview is passive; protected actions still require fresh R10 consent and truthful cleanup receipts. Six primary pages and the five-page embedding interface are preserved. The source feature does not become a public update until a new GitHub Release is published. [Visual tutorials below](#learn-the-new-r10r60-features-visual-walkthrough) · [Full R60 guide (RU)](docs/R60_CHAIN_BUILDER_RU.md).
 
-**R10 — One administrator session (v0.5.5 release candidate):** The top toolbar offers an explicit **Enable administrator rights** control. One verified, time-limited Diagnostic Helper can serve multiple individually authorized process instances (PID + creation FILETIME) without another Windows elevation request within the same active lease. Each intervention still requires individual confirmation; ordinary observation never requests UAC. Token, lifetime, cleanup and a real execution receipt are verified. Physical Secure Desktop UAC is NOT_TESTED. [R10 guide (RU)](docs/R10_RU.md) · [Technical scope](docs/specifications/R10.md) · [v0.5.5 release notes](docs/RELEASE_v0.5.5.md).
+**R10 — one time-limited administrator session (integrated in the current source):** The top toolbar offers **Enable administrator rights** for the existing scoped Diagnostic Helper (up to 900 seconds). Separate process-instance verification (PID + creation FILETIME), action-specific consent, cleanup and execution receipts remain mandatory. Normal OBSERVE never requests UAC, and physical Secure Desktop UAC is NOT_TESTED. [Visual tutorial below](#lesson-1-r10--use-administrator-rights-only-when-needed) · [R10 guide (RU)](docs/R10_RU.md) · [Cumulative release scope](docs/RELEASE_v0.6.0.md).
 
 BLACK.BOX Universal lets you **select a running process or choose an application file**. OBSERVE records operating-system measurements and saves local SQLite, JSON and HTML sessions without changing the target. File selection itself only reads metadata. In the separate BB-DEEP-001 patch, explicit INSPECT and INTERVENE actions can snapshot, pause, debug and modify selected memory after confirmation. They are not started by ordinary sampling. The portable application requires no service, account, cloud server, subscription or separately installed Python.
 
@@ -66,6 +66,98 @@ BLACK.BOX Universal lets you **select a running process or choose an application
 | `decoder/BLACK.BOX-Decoder.exe` | Optional offline ETW/EventPipe decoder, packaged with its own .NET runtime. The app launches it when needed; **do not launch manually**. Included from v0.5.0; not part of the older v0.4.2 ZIP. |
 
 Keep the entire `_internal` folder and the other extracted files. The main EXE is **not** a standalone file you can copy out of the portable folder.
+
+
+## Learn the new R10–R60 features: visual walkthrough
+
+**Who this is for:** start with a normal observation from **Processes → Overview → Reports** (above), then pick a diagnostic path. The examples do not modify another application without explicit consent.
+
+> **Version matters.** The features below are in the current **0.6.0 source tree** on `main`. A green CI run is **not** an official Windows download; the latest [published GitHub Release](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/releases/latest) may still contain an earlier version. The new SVG pictures are **instructional diagrams**, not screenshots. Embedded PNGs are genuine Windows Qt/offscreen captures, some from earlier builds, and never evidence from your own computer.
+
+| Your question | Where to start |
+| --- | --- |
+| What is my process doing? | **Processes → Overview → Start / Stop → Reports** |
+| Do I need privileged inspection? | **Overview → Deep Inspection** (R10) |
+| Where did this finding come from? | **Investigation → Sources and cleanup** (R20) |
+| Why was a thread waiting or using I/O? | **Trace Decoder → Investigation → Critical Path** (R30) |
+| What does a saved crash dump tell me? | **Investigation → Add saved minidump** (R40) |
+| Did behavior change between two runs? | **Reports + Settings** (R50) |
+| Can I combine existing tools safely? | **Overview → Chain Builder** (R60) |
+
+### Lesson 1. R10 — use administrator rights only when needed
+
+![Instructional R10 diagram contrasting passive OBSERVE and a separately approved Deep Inspection action through the scoped Helper](docs/screenshots/lesson-r10-consent.svg)
+
+1. Ordinary **CPU, memory and recording** do not need UAC. Select a running process, **Start**, then **Stop**.
+2. For a more privileged operation, expand **Overview → Deep Inspection**. If the operation requires elevation, choose **Enable administrator rights** in the top toolbar and approve Windows UAC *if prompted*.
+3. The verified Diagnostic Helper lease is limited to **900 seconds**. Each process instance is checked by **PID + creation FILETIME**, and each consequential action needs a **new, separate confirmation**. A prior UAC prompt is not standing permission.
+4. End the session and inspect the real receipt. `CLEANUP_REQUIRED` or `RECOVERY_UNCONFIRMED` must not be treated as successful cleanup. Never silently retry an unknown intervention.
+
+Elevation does not bypass Windows protected-process restrictions. [Detailed R10 guide (RU)](docs/R10_RU.md).
+
+### Lesson 2. R20 — inspect evidence provenance and cleanup
+
+1. Open **Overview → Deep Inspection → INVESTIGATE PROBLEM** and add a **saved** session, decoder index, journal or dump metadata.
+2. Build the graph and open **Sources and cleanup**. Read each source type, SHA-256, coverage and the actual execution/cleanup receipt.
+3. Export to JSON/HTML and read the saved result back without overwriting the original input.
+
+A matching SHA-256 proves **byte identity, not authorship**. Imported data remains `UNVERIFIED_IMPORT` or partial where appropriate. [R20 reference (RU)](docs/BB_WAVE_02_R20_RU.md).
+
+### Lesson 3. R30 — trace waits, ready time and I/O
+
+![Genuine Russian-language Windows QA screenshot showing Investigation Engine 3 Critical Path, BLOCKED and READY; captured before R60](docs/screenshots/ru-investigation-v3-critical-path.png)
+
+1. If you have a real **ETL or EventPipe** file, import it through **Trace Decoder**, then choose the saved index and the relevant process/time range.
+2. Open the evidence in Investigation Engine 3 and inspect **Critical Path**, available wait intervals, FileIO and DiskIO.
+3. Compare actual `RUNNING`, `BLOCKED`, `READY` and `UNKNOWN` intervals and check the evidence/source coverage.
+
+A blocked thread does not identify a lock owner by itself. Disk I/O observations may not contain actual service time. [R30 reference (RU)](docs/BB_WAVE_02_R30_RU.md).
+
+### Lesson 4. R40 — investigate an already saved crash
+
+1. Add an **existing minidump**, or supported Windows Event Log/WER evidence, to Investigation.
+2. Inspect saved crash context and AMD64 stacks. Local PE/PDB symbols must match the recorded module.
+3. Read the explicit limitations: absent symbols, incomplete context and unknown live-process identity. Do not attach dump/memory bytes to a routine share export.
+
+Opening a saved dump is not the same as creating a new one. A new dump requires permission, an eligible target and separate consent. [R40 reference (RU)](docs/BB_WAVE_02_R40_RU.md).
+
+### Lesson 5. R50 — compare before and after, and review incidents
+
+![Genuine earlier Windows QA screenshot of Reports — navigation reference, not fabricated R50 evidence](docs/screenshots/en-reports.png)
+
+1. In **Reports**, set a scenario, scenario version and comparable workload **before recording**.
+2. In **Settings**, choose **Standard**, **Detailed** or **Incident Burst**, suitable triggers and bounded prehistory. Selecting a profile does not silently enable ETW, dumps or interventions.
+3. Record run A using **Start → repeatable application action → Stop**. Repeat with the same workload after a change.
+4. In Reports, select **Compare investigations**, inspect the reasons for comparability, **Save comparison JSON / HTML**, and reopen the saved result if needed.
+
+`COMPARABLE` means the **recorded conditions** can be compared; it does not prove improvement. `NOT_COMPARABLE` and `INCONCLUSIVE` must not be rewritten as a win. [R50 reference (RU)](docs/R50_RU.md).
+
+### Lesson 6. R60 — build a typed diagnostic chain
+
+![Illustrated Chain Builder graph: saved trace, decoder, independent wait and FileIO branches, and separate verified exports](docs/screenshots/lesson-r60-chain-builder.svg)
+
+*This is a teaching diagram, not an actual program screenshot.*
+
+1. Open **Overview → Chain Builder**. Set a name and choose a profile for **Windows**, a **selected application** or a **specific investigation**. A profile alone never selects arbitrary targets.
+2. Start with an **existing ETL/EventPipe trace**: add `load_source` with type `TRACE`, add `decode_trace`, and connect `source → trace`.
+3. Connect the `TRACE_INDEX` output to `waits` and/or `file_io`. Send each resulting `REPORT` to its own `export_report`. Incompatible port types are rejected; a saved OBSERVE `SESSION` is **not** a `TRACE`.
+4. Click **Check / preview** and inspect the effective profile, missing inputs, privileges, limits and declared resource ownership. Preview is **passive**.
+5. Choose **Start** deliberately. Live targets or Deep tools still require fresh process identity and separate R10 consent. Use **Pause**, **Continue** and **Stop chain** with their actual completion/cleanup statuses.
+6. Save a new `*.bbchain.json` definition and `*.bbprofile.json` profile; inspect run history and JSON/HTML exports in **Reports**. Opening history never resumes work automatically.
+
+**Canvas tips:** drag nodes with the mouse; pan via the middle button or **Space + left drag**; scroll to zoom; **Fit graph** restores the view. `CONDITION`, `JOIN` and bounded `REPEAT` are typed controls, not arbitrary Python/scripts. Repeats are limited to read-only work, and partial branch input must be explicitly allowed. [Full R60 Chain Builder guide (RU)](docs/R60_CHAIN_BUILDER_RU.md).
+
+### What the result statuses mean
+
+| Status | Actual meaning |
+| --- | --- |
+| `COMPLETED` | The declared operation completed; root cause is **not** proven. |
+| `PARTIAL` / `INCOMPLETE` | Only some requested evidence or results were available. |
+| `UNKNOWN` / `NOT_ESTABLISHED` | The sources do not establish that claim. |
+| `RECOVERY_UNCONFIRMED` / `CLEANUP_REQUIRED` | Resumption or owned cleanup is unconfirmed; consequential work is not silently retried. |
+
+**Privacy:** ETW traces may capture other processes; dumps and memory can contain secrets. Review files before sharing. GitHub-hosted Windows acceptance is not a physical Windows 10/11 or interactive UAC Secure Desktop test.
+
 
 ## What is included?
 

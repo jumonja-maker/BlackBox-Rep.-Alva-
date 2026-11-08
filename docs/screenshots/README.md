@@ -51,3 +51,25 @@ fabrication were used.
 `ru-investigation.png` — инструменты Investigation 0.1.2.
 Кадр подлинный, но прокручен до «Критического пути»; показанные
 интервалы ожидания и готовности не удостоверяют причину зависания.
+
+## Illustrated R10/R60 tutorials / Учебные схемы R10/R60
+
+The files `lesson-r10-consent.svg` and `lesson-r60-chain-builder.svg` are
+**source-derived bilingual vector diagrams**, not screenshots of a running
+application and not synthetic performance evidence. They were authored to
+explain the workflows described in [R10](../R10_RU.md) and
+[R60 Chain Builder](../R60_CHAIN_BUILDER_RU.md). They contain no scripts,
+external resources or executable instructions.
+
+- `lesson-r10-consent.svg`: a passive `OBSERVE` route versus an explicitly
+  approved R10/Deep action through the time-bounded Diagnostic Helper. It
+  cannot prove UAC Secure Desktop behavior on physical Windows hardware.
+- `lesson-r60-chain-builder.svg`: a read-only typed sample
+  `TRACE → TRACE_INDEX → REPORT` using `load_source`, `decode_trace`,
+  `waits`, `file_io` and separate `export_report` nodes. This is not a
+  complete screenshot of the Qt canvas, nor an automatically executed chain.
+
+**Русский:** это схемы для обучения, а **не настоящие скриншоты**.
+Остальные PNG в этой папке сохраняют документированное происхождение из
+Windows CI и показывают интерфейс ранних проверенных версий. Не подменяйте
+ими снимки актуального R60 или реальные диагностические данные.

@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="460" viewBox="0 0 1280 460" role="img" aria-labelledby="t d">
+<title id="t">BLACK.BOX Chain Builder: typed, read-only workflow example</title>
+<desc id="d">Bilingual Russian English diagram. Saved TRACE leads to decode_trace TRACE_INDEX, then branches to waits and file_io, each giving REPORT to separate export_report steps. This is an instructional diagram rather than a screenshot.</desc>
+<defs>
+ <marker id="arr" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 Z" fill="#416178"/></marker>
+ <style>text{font-family:Segoe UI,Arial,sans-serif;fill:#243447} .big{font-size:23px;font-weight:700} .sub{font-size:15px;fill:#536b78} .mono{font-size:17px;font-family:Consolas,monospace;font-weight:700} .port{font-size:14px;fill:#286a69;font-weight:700} .line{fill:none;stroke:#416178;stroke-width:3;marker-end:url(#arr)} .node{stroke:#55748c;stroke-width:2;fill:#fffdfa} .pill{fill:#e3f0ec} .cap{font-size:14px;fill:#526b75}</style>
+</defs>
+<rect x="1" y="1" width="1278" height="458" rx="18" fill="#f7f1e6" stroke="#aab9b4" stroke-width="2"/>
+<path d="M18 1 H1262 Q1279 1 1279 18 V86 H1 V18 Q1 1 18 1" fill="#0b8884"/>
+<text x="37" y="39" style="fill:#fffdf6;font-size:25px;font-weight:800;letter-spacing:1.2px">BLACK.BOX · CHAIN BUILDER / КОНСТРУКТОР ЦЕПОЧЕК</text>
+<text x="38" y="66" style="fill:#d9f6ef;font-size:15px">Пример: только чтение сохранённой трассы · Example: saved-trace read-only workflow</text>
+<rect x="1087" y="30" rx="13" width="155" height="28" fill="#d9f4e8"/>
+<text x="1164" y="49" text-anchor="middle" style="fill:#17655f;font-size:13px;font-weight:700">NO UAC / БЕЗ UAC</text>
+<path class="line" d="M276 230 H344"/>
+<path class="line" d="M576 230 C604 230 592 160 633 160"/>
+<path class="line" d="M576 230 C604 230 592 323 633 323"/>
+<path class="line" d="M865 160 H948"/>
+<path class="line" d="M865 323 H948"/>
+<g>
+<rect class="node" x="39" y="182" rx="13" width="237" height="99"/>
+<rect x="39" y="182" rx="13" width="237" height="10" fill="#ee7768"/>
+<text class="big" x="57" y="218">Saved trace</text><text class="sub" x="57" y="240">Сохранённая ETL / nettrace</text>
+<rect class="pill" x="55" y="250" rx="8" width="101" height="24"/><text class="port" x="105" y="267" text-anchor="middle">TRACE</text>
+</g>
+<g>
+<rect class="node" x="344" y="182" rx="13" width="232" height="99"/>
+<rect x="344" y="182" rx="13" width="232" height="10" fill="#e7a964"/>
+<text class="big" x="362" y="218">Decode trace</text><text class="sub" x="362" y="240">Декодировать трассу</text>
+<rect class="pill" x="359" y="250" rx="8" width="137" height="24"/><text class="port" x="427" y="267" text-anchor="middle">TRACE_INDEX</text>
+</g>
+<g>
+<rect class="node" x="633" y="113" rx="13" width="232" height="95"/>
+<rect x="633" y="113" rx="13" width="232" height="10" fill="#8bcbbd"/>
+<text class="big" x="651" y="150">Wait analysis</text><text class="sub" x="651" y="174">Анализ ожиданий</text>
+<rect class="pill" x="650" y="179" rx="7" width="93" height="22"/><text class="port" x="697" y="195" text-anchor="middle">REPORT</text>
+</g>
+<g>
+<rect class="node" x="633" y="277" rx="13" width="232" height="95"/>
+<rect x="633" y="277" rx="13" width="232" height="10" fill="#8bcbbd"/>
+<text class="big" x="651" y="314">File I/O</text><text class="sub" x="651" y="337">Файловые операции</text>
+<rect class="pill" x="650" y="344" rx="7" width="93" height="22"/><text class="port" x="697" y="360" text-anchor="middle">REPORT</text>
+</g>
+<g>
+<rect class="node" x="948" y="113" rx="13" width="288" height="95"/>
+<rect x="948" y="113" rx="13" width="288" height="10" fill="#ef8d7d"/>
+<text class="big" x="966" y="150">Export report</text><text class="sub" x="966" y="173">Экспорт JSON / HTML</text>
+<rect class="pill" x="964" y="179" rx="7" width="93" height="22"/><text class="port" x="1010" y="195" text-anchor="middle">REPORT</text>
+</g>
+<g>
+<rect class="node" x="948" y="277" rx="13" width="288" height="95"/>
+<rect x="948" y="277" rx="13" width="288" height="10" fill="#ef8d7d"/>
+<text class="big" x="966" y="314">Export report</text><text class="sub" x="966" y="337">Отдельный JSON / HTML</text>
+<rect class="pill" x="964" y="344" rx="7" width="93" height="22"/><text class="port" x="1010" y="360" text-anchor="middle">REPORT</text>
+</g>
+<text x="49" y="414" class="cap">Порты типизированы: TRACE → TRACE_INDEX → REPORT · Connections reject incompatible types.</text>
+<text x="49" y="436" class="cap">Учебная схема, не скриншот GUI / Instructional diagram, not a UI screenshot. Start requires an explicit click.</text>
+</svg>
