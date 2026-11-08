@@ -252,7 +252,7 @@ def authorize(client, repo, sha, upstream):
                                    SHELL_NAME, MAIN_JOBS)
     ui, _ = exact_candidate_run(client, repo, source_sha, NATIVE_QA_BRANCH,
                                 UI_NAME, UI_JOBS)
-    r60_run, r60_jobs = exact_candidate_run(client, repo, source_sha, PUBLISHER_REPAIR_BRANCH,
+    r60_run, r60_jobs = exact_candidate_run(client, repo, source_sha, NATIVE_QA_BRANCH,
                                             R60_NAME, R60_JOBS)
     os.environ["V060_SOURCE_PR_SHA"] = source_sha
     endurance = endurance_proof(repo, r60_jobs[

@@ -55,8 +55,8 @@ class CumulativeV060ReleaseTests(unittest.TestCase):
     def setUp(self):
         self.source_runs = [
             successful_run(SHELL_NAME, 301, HEAD, NATIVE_QA_BRANCH),
-            successful_run(UI_NAME, 302, HEAD, PUBLISHER_REPAIR_BRANCH),
-            successful_run(R60_NAME, 303, HEAD, PUBLISHER_REPAIR_BRANCH)]
+            successful_run(UI_NAME, 302, HEAD, NATIVE_QA_BRANCH),
+            successful_run(R60_NAME, 303, HEAD, NATIVE_QA_BRANCH)]
         self.main_jobs = [job(n, i + 1) for i, n in enumerate(sorted(MAIN_JOBS))]
         self.ui_jobs = [job(n, i + 31) for i, n in enumerate(sorted(UI_JOBS))]
         self.r60_jobs = [job(n, i + 41) for i, n in enumerate(sorted(R60_JOBS))]
