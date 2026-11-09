@@ -84,6 +84,30 @@ def validate_receipt(proof, *, source_sha, frozen, scale):
             all(row.get("actual_qt_input") is True and row.get("context_unchanged") is True and
                 row.get("target_visible_in_viewport") is True for row in sections),
             "EXPERT_RECEIPT_SECTIONS")
+    anchors = proof.get("anchor_geometry", [])
+    require(len(anchors) == 4 and {(row.get("language"), row.get("stage")) for row in anchors} ==
+            {(language, stage) for language in ("EN", "RU") for stage in ("saved-report", "fixture-minimum-width")},
+            "EXPERT_RECEIPT_ANCHOR_GEOMETRY_SCOPE")
+    for row in anchors:
+        buttons = row.get("buttons", [])
+        reveal_top = row.get("stage") == "fixture-minimum-width"
+        require(row.get("reveal_top") is reveal_top and row.get("geometry_view") ==
+                ("AT_REPORT_TOP_AFTER_SCREENSHOT" if reveal_top else "SAME_VIEW_AFTER_SCREENSHOT") and
+                all(type(row.get(key)) is int and row[key] >= 0
+                    for key in ("scroll_before_probe", "scroll_at_probe")) and
+                (row["scroll_at_probe"] == 0 if reveal_top else
+                 row["scroll_before_probe"] == row["scroll_at_probe"]),
+                "EXPERT_RECEIPT_ANCHOR_GEOMETRY_VIEW")
+        require(row.get("workspace_before_timeline") is True and len(buttons) == 6 and
+                {button.get("name") for button in buttons} ==
+                ({"expertSection_" + section for section in SECTIONS} | {"copyAnalysisContext"}) and
+                all(button.get("rect") == button.get("visible_bounds") and
+                    type(button.get("rect")) is list and len(button["rect"]) == 4 and
+                    all(type(value) is int for value in button["rect"]) and
+                    button["rect"][2] > 0 and button["rect"][3] > 0 and
+                    all(button.get(key) is True for key in
+                        ("workspace_contains", "minimum_size_met", "siblings_disjoint", "ancestors_contain"))
+                    for button in buttons), "EXPERT_RECEIPT_ANCHOR_BUTTON_CLIPPED")
     minimum = proof.get("minimum_width", [])
     require(len(minimum) == 2 and {row.get("language") for row in minimum} == {"EN", "RU"},
             "EXPERT_RECEIPT_MINIMUM_WIDTH_LANGUAGES")
@@ -212,7 +236,8 @@ def run_gui(app, window, output, source_sha):
         "source_identity": identity, "frozen": bool(getattr(sys, "frozen", False)), "gui_pid": os.getpid(),
         "scale": scale, "dpi_scope": "QT_SCALE_FACTOR_SIMULATION", "physical_windows_10_11": "NOT_TESTED",
         "secure_desktop": "NOT_TESTED", "navigation": [], "recordings": [], "screenshots": [],
-        "sections": [], "shortcuts": [], "minimum_width": [], "callback_errors": [], "unexpected_dialogs": [],
+        "sections": [], "shortcuts": [], "minimum_width": [], "anchor_geometry": [],
+        "callback_errors": [], "unexpected_dialogs": [],
         "cleanup": {"owners_closed": False}}
     old_hook = sys.excepthook
     timer = QTimer()
@@ -311,6 +336,52 @@ def run_gui(app, window, output, source_sha):
             "delivery": "PNG_BASE64_IN_CI_LOG_NO_ACTIONS_ARTIFACTS"})
         save(output / "expert-gui.json", proof)
 
+    def check_anchor_geometry(stage, language, *, reveal_top=False):
+        scroll = window.stack.currentWidget()
+        scroll_before_probe = scroll.verticalScrollBar().value()
+        if reveal_top:
+            scroll.verticalScrollBar().setValue(0)
+            app.processEvents()
+        workspace = window.report_context.parentWidget()
+        timeline = window._expert_sections["timeline"]
+        buttons = (*window.expert_section_buttons.values(), window.copy_context_button)
+        facts = {"stage": stage, "language": language,
+            "geometry_view": "AT_REPORT_TOP_AFTER_SCREENSHOT" if reveal_top else "SAME_VIEW_AFTER_SCREENSHOT",
+            "reveal_top": reveal_top, "scroll_before_probe": scroll_before_probe,
+            "scroll_at_probe": scroll.verticalScrollBar().value(),
+            "logical_window_client": [window.width(), window.height()],
+            "workspace_rect": list(workspace.geometry().getRect()),
+            "timeline_rect": list(timeline.geometry().getRect()),
+            "workspace_before_timeline": workspace.parentWidget() is timeline.parentWidget() and
+                workspace.geometry().bottom() <= timeline.geometry().top(), "buttons": []}
+        for button in buttons:
+            ancestors = []
+            ancestor = button.parentWidget()
+            while ancestor is not None:
+                mapped = QRect(button.mapTo(ancestor, QPoint()), button.size())
+                ancestors.append({"name": ancestor.objectName() or type(ancestor).__name__,
+                    "mapped_rect": list(mapped.getRect()), "contents_rect": list(ancestor.contentsRect().getRect()),
+                    "contains_button": ancestor.contentsRect().contains(mapped)})
+                if ancestor is window:
+                    break
+                ancestor = ancestor.parentWidget()
+            facts["buttons"].append({"name": button.objectName(), "rect": list(button.rect().getRect()),
+                "workspace_geometry": list(button.geometry().getRect()),
+                "visible_bounds": list(button.visibleRegion().boundingRect().getRect()),
+                "minimum_size": [button.minimumSizeHint().width(), button.minimumSizeHint().height()],
+                "minimum_size_met": button.width() >= button.minimumSizeHint().width() and
+                    button.height() >= button.minimumSizeHint().height(),
+                "workspace_contains": workspace.rect().contains(button.geometry()),
+                "siblings_disjoint": all(not button.geometry().intersects(other.geometry())
+                    for other in buttons if other is not button),
+                "ancestors_contain": bool(ancestors) and all(row["contains_button"] for row in ancestors),
+                "ancestors": ancestors})
+        proof["anchor_geometry"].append(facts)
+        require(facts["workspace_before_timeline"] and
+                all(row["rect"] == row["visible_bounds"] and row["minimum_size_met"] and
+                    row["workspace_contains"] and row["siblings_disjoint"] and row["ancestors_contain"]
+                    for row in facts["buttons"]), "EXPERT_ANCHOR_BUTTONS_CLIPPED_" + stage + "_" + language)
+
     sys.excepthook = callback_error
     timer.timeout.connect(reject_dialogs)
     timer.start(25)
@@ -400,6 +471,7 @@ def run_gui(app, window, output, source_sha):
                 "handoff_actual_qt_input": True, "report_html_unknown_preserved": True,
                 "source_files_unchanged_after_review": True})
             screenshot("saved-report", language, "REAL_GUI_PROCESS_RECORDING")
+            check_anchor_geometry("saved-report", language)
 
         phase("SYNTHETIC_IMPORTED_EVIDENCE")
         fixture_path = synthetic_recording(output / "TEST_ONLY_SYNTHETIC_IMPORTED_EVIDENCE")
@@ -494,6 +566,7 @@ def run_gui(app, window, output, source_sha):
             click(window.findChild(QPushButton, "expertSection_findings"))
             reveal(panel.table)
             screenshot("fixture-minimum-width", language, fixture["scope"])
+            check_anchor_geometry("fixture-minimum-width", language, reveal_top=True)
             require(minimum["logical_window_client"] == [1020, 850] and
                     minimum["expanded_sections"] == ["library", "actions", "technical"] and
                     minimum["outer_horizontal_scroll_maximum"] == 0 and

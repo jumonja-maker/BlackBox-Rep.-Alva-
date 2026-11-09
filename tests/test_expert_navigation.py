@@ -710,23 +710,45 @@ class ExpertNavigationTests(unittest.TestCase):
         from blackbox_universal.theme import set_retro_theme
         set_retro_theme(self.app)
         window = self.window
-        window.resize(1020, 850)
-        window.research_toggle.setChecked(True)
-        window.library_toggle.setChecked(True)
-        window.library_panel.storage_toggle.setChecked(True)
         window.show()
-        for language in ("RU", "EN"):
-            with self.subTest(language=language):
-                window._set_language(language)
-                window._navigate("reports")
-                self.app.processEvents()
-                available = window.stack.currentWidget().viewport().width()
-                for panel in (window.research_panel, window.library_panel):
-                    self.assertLessEqual(panel.width(), available)
-                for button in (*window.expert_section_buttons.values(), window.copy_context_button):
-                    self.assertGreaterEqual(button.width(), button.minimumSizeHint().width())
-                    self.assertGreaterEqual(button.x(), 0)
-                    self.assertLessEqual(button.x()+button.width(), button.parentWidget().width())
+        window._navigate("reports")
+        self.app.processEvents()
+        self.load_recorded_a()
+        buttons = (*window.expert_section_buttons.values(), window.copy_context_button)
+        workspace = window.report_context.parentWidget()
+        timeline = window._expert_sections["timeline"]
+        # The screenshot regression occurred with saved context and the
+        # optional panels collapsed. Exercise expansion and both reflow
+        # directions without manually assigning any child geometry.
+        for expanded in (False, True):
+            window.research_toggle.setChecked(expanded)
+            window.library_toggle.setChecked(expanded)
+            window.library_panel.storage_toggle.setChecked(expanded)
+            for language in ("EN", "RU", "EN"):
+                for width in (1280, 1020, 1280):
+                    with self.subTest(expanded=expanded, language=language, width=width):
+                        window._set_language(language)
+                        window.resize(width, 850)
+                        scroll = window.stack.currentWidget()
+                        self.app.processEvents()
+                        scroll.verticalScrollBar().setValue(0)
+                        self.app.processEvents()
+                        available = scroll.viewport().width()
+                        for panel in (window.research_panel, window.library_panel):
+                            if panel.isVisible():
+                                self.assertLessEqual(panel.width(), available)
+                        self.assertGreaterEqual(len({button.y() for button in buttons}), 2)
+                        self.assertLessEqual(workspace.geometry().bottom(), timeline.geometry().top())
+                        for index, button in enumerate(buttons):
+                            self.assertGreaterEqual(button.width(), button.minimumSizeHint().width())
+                            self.assertGreaterEqual(button.height(), button.minimumSizeHint().height())
+                            self.assertTrue(workspace.rect().contains(button.geometry()),
+                                            (button.text(), button.geometry(), workspace.rect()))
+                            self.assertEqual(button.visibleRegion().boundingRect(), button.rect(),
+                                             (button.text(), button.visibleRegion().boundingRect(), button.rect()))
+                            for other in buttons[index + 1:]:
+                                self.assertFalse(button.geometry().intersects(other.geometry()),
+                                                 (button.text(), other.text()))
 
     def test_modal_and_closing_shortcuts_cannot_change_page_or_review(self):
         window = self.window

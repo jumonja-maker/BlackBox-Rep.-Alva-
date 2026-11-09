@@ -64,12 +64,20 @@ class ActionGrid(QLayout):
     def heightForWidth(self, width):
         return self._arrange(QRect(0, 0, width, 0), apply=False)
 
+    def minimumHeightForWidth(self, width):
+        return self.heightForWidth(width)
+
     def minimumSize(self):
-        size = QSize(0, 0)
-        for item in self._visible_items():
-            size = size.expandedTo(self._hint(item))
+        hints = [self._hint(item) for item in self._visible_items()]
+        width = max((hint.width() for hint in hints), default=0)
+        # Even at the widest arrangement, max_columns can require several
+        # rows. A one-button minimum lets a parent box layout shrink this
+        # layout while _arrange still places later rows outside its bounds.
+        row_heights = [max(hint.height() for hint in hints[start:start + self.max_columns])
+                       for start in range(0, len(hints), self.max_columns)]
+        height = sum(row_heights) + max(0, self.spacing()) * max(0, len(row_heights) - 1)
         left, top, right, bottom = self.getContentsMargins()
-        return size + QSize(left + right, top + bottom)
+        return QSize(width + left + right, height + top + bottom)
 
     def sizeHint(self):
         items = self._visible_items()

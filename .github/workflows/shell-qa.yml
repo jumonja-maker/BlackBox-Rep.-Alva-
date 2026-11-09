@@ -212,6 +212,37 @@ jobs:
           dotnet-version: '10.0.x'
       - name: Build bundled self-contained Microsoft TraceEvent decoder
         run: python tools/build_decoder.py --rid win-x64
+      - name: Actual built native host rejects invalid paths without publishing output
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          python - <<'PY'
+          import hashlib, json, os
+          from pathlib import Path
+          import sys, unittest
+          if os.environ.get('GITHUB_ACTIONS') != 'true' or os.environ.get('RUNNER_ENVIRONMENT') != 'github-hosted':
+              raise SystemExit('NATIVE_PATH_GUARD_REQUIRES_GITHUB_HOSTED_RUNNER')
+          from blackbox_core.decoder_service import helper_path
+          from blackbox_universal.provenance import source_identity
+          identity = source_identity(os.environ['SOURCE_SHA'])
+          if identity.get('source_identity_status') != 'VERIFIED_EXPECTED_HEAD':
+              raise SystemExit('NATIVE_PATH_GUARD_SOURCE_MISMATCH')
+          helper = helper_path().resolve(strict=True)
+          if helper != Path('decoder/BLACK.BOX-Decoder.exe').resolve(strict=True):
+              raise SystemExit('NATIVE_PATH_GUARD_BUILT_HELPER_MISMATCH')
+          sys.path.insert(0, str(Path('tests').resolve()))
+          suite = unittest.defaultTestLoader.loadTestsFromName(
+              'test_decoder_contract_audit.DecoderContractAuditTests.test_native_host_invalid_paths_report_failure_without_publishing')
+          result = unittest.TextTestRunner(verbosity=2).run(suite)
+          passed = result.testsRun == 1 and not result.skipped and result.wasSuccessful()
+          with helper.open('rb') as stream:
+              digest = hashlib.file_digest(stream, 'sha256').hexdigest()
+          print('NATIVE_INVALID_PATH_GATE ' + json.dumps({'status': 'PASS' if passed else 'FAIL',
+              'source_identity': identity, 'helper_sha256': digest, 'tests_run': result.testsRun,
+              'skipped': len(result.skipped), 'source_mode_native_helper': True, 'publication': False}, sort_keys=True))
+          raise SystemExit(0 if passed else 1)
+          PY
       - name: Install pinned Microsoft dotnet-trace for owned EventPipe QA
         shell: pwsh
         run: |

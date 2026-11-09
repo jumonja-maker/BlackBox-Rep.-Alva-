@@ -41,7 +41,10 @@ MAX_OUTPUT = 1152 * 1024**2
 NATIVE_OUTPUT_CAP = 384 * 1024**2
 NATIVE_OUTPUT_HEADROOM = 256 * 1024 + 4096 + 2
 MIN_NOISE_ROWS = 10000
-PRELUDE_SECONDS = 15
+# A fixed preparation allowance, not a lower handoff target. Hosted CPU/file
+# preparation had not reached its 8s schedule baseline's count after 15s.
+# Keep one bounded wait within the unchanged child/owner/whole-run budgets.
+PRELUDE_SECONDS = 30
 NATIVE_PRELUDE_SECONDS = 65
 CONTROLLED_SECONDS = 660
 # A real-noise stimulus floor, never a substitute for observing MAX_OUTPUT.

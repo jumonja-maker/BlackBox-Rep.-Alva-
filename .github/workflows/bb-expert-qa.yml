@@ -156,6 +156,8 @@ jobs:
         run: python -m unittest discover -s tests -p 'test_research_product.py' -v
       - name: Actual native output-budget oracle and controlled profile refusal regressions
         run: python -m unittest discover -s tests -p 'test_decoder_apps_qa.py' -v
+      - name: Owned Wave02 progress snapshot and strict persisted watchdog regressions
+        run: python -m unittest discover -s tests -p 'test_wave02_endurance_receipts.py' -v
 
   source-workflow:
     name: Actual Qt workflow RU EN / scale ${{ matrix.scale }}

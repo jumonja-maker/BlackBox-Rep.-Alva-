@@ -2217,7 +2217,8 @@ class ControlledMinimumStimulusProtocolTests(unittest.TestCase):
         self.assertEqual(native['wait_seconds'], 0); self.assertEqual(reads, [0])
 
     def test_minimum_cannot_replace_handoff_target_or_existing_deadlines_including_slow_receipt(self):
-        for options, expected_wait in (({'target': 10000}, 15), ({'whole_deadline': 8}, 8), ({'hash_advance': 16}, 16)):
+        for options, expected_wait in (({'target': 10000}, 30), ({'whole_deadline': 8}, 8),
+                                      ({'hash_advance': 31}, 31), ({'whole_deadline': 15, 'hash_advance': 16}, 16)):
             with self.subTest(options=options):
                 prelude, reads, failure = self.invoke_prelude(**options)
                 self.assertIsInstance(failure, AssertionError)
@@ -2276,7 +2277,7 @@ class ControlledMinimumStimulusProtocolTests(unittest.TestCase):
             for change in ({'requested_minimum_roundtrips': True}, {'requested_minimum_roundtrips': 1},
                            {'roundtrips_verified': 3}, {'requested_minimum_prelude_seconds': 10 if positive else 0},
                            {'prelude': {**second['prelude'], 'requested_minimum_seconds': True}},
-                           {'prelude': {**second['prelude'], 'wait_seconds': 66 if positive else 16}},
+                           {'prelude': {**second['prelude'], 'wait_seconds': 66 if positive else 31}},
                            {'prelude': {**second['prelude'], 'observed_handoffs': 9999}},
                            {'prelude': {**second['prelude'], 'status': 'FAILED'}},
                            {'workload_budget': {**second['workload_budget'], 'roundtrips_verified': 3}}):
@@ -2365,7 +2366,7 @@ class ControlledMinimumStimulusProtocolTests(unittest.TestCase):
 class PreludeFailureAndBudgetCompositionTests(unittest.TestCase):
     """Fault/clock fixtures only; all real acceptance still runs in Windows CI."""
 
-    def test_native_prelude_has_its_finite_preparation_window_and_python_stays_fifteen(self):
+    def test_native_and_python_preludes_keep_distinct_finite_preparation_windows(self):
         helper = ControlledMinimumStimulusProtocolTests()
         prelude, _, error = helper.invoke_prelude(
             target=640, minimum=0, implementation='NATIVE_WIN32')
@@ -2378,7 +2379,29 @@ class PreludeFailureAndBudgetCompositionTests(unittest.TestCase):
         self.assertEqual(native['wait_seconds'], 65)
         python, _, error = helper.invoke_prelude(target=100000, minimum=10)
         self.assertIsInstance(error, AssertionError)
-        self.assertEqual(python['wait_seconds'], 15)
+        self.assertEqual(python['wait_seconds'], 30)
+        self.assertEqual(python['maximum_wait_seconds'], 30)
+        self.assertEqual(noise_policy('PYTHON_CTYPES_WIN32'),{'implementation':'PYTHON_CTYPES_WIN32',
+            'ttl_seconds':70,'progress_limit':281,'owner_seconds':85})
+
+    def test_python_prelude_can_reach_the_unchanged_baseline_count_after_fifteen_seconds(self):
+        helper=ControlledMinimumStimulusProtocolTests()
+        prelude,reads,error=helper.invoke_prelude(target=320,minimum=10)
+        self.assertIsNone(error)
+        self.assertEqual(prelude['status'],'COMPLETED')
+        self.assertEqual(prelude['target_handoffs'],320)
+        self.assertEqual(prelude['observed_handoffs'],320)
+        self.assertEqual(prelude['wait_seconds'],19)
+        self.assertEqual(reads,list(range(20)))
+        self.assertEqual(prelude['requested_minimum_seconds'],10)
+        first,second=helper.comparison_pair(positive=False)
+        second={**second,'prelude':{**second['prelude'],'wait_seconds':19}}
+        observed=validate_comparison(first,second,positive=False)
+        self.assertEqual(observed['second_observed_prelude_seconds'],19)
+        self.assertEqual(observed['second_maximum_prelude_seconds'],30)
+        for change in ({'observed_handoffs':9999},{'wait_seconds':31},{'status':'FAILED'}):
+            with self.subTest(change=change),self.assertRaisesRegex(AssertionError,'NOT_COMPARABLE'):
+                validate_comparison(first,{**second,'prelude':{**second['prelude'],**change}},positive=False)
 
     def test_prelude_retains_original_os_error_and_numeric_phase_without_private_text(self):
         from tools import qa_decoder_budget_diagnostic as driver

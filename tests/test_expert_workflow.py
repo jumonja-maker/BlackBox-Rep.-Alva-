@@ -160,6 +160,16 @@ def passed_receipt():
                            "viewport_width": 788, "outer_horizontal_scroll_maximum": 0,
                            "research_panel_width": 752, "library_panel_width": 752}
                           for language in ("EN", "RU")],
+        "anchor_geometry": [{"language": language, "stage": stage, "workspace_before_timeline": True,
+            "reveal_top": stage == "fixture-minimum-width",
+            "geometry_view": "AT_REPORT_TOP_AFTER_SCREENSHOT" if stage == "fixture-minimum-width" else
+                "SAME_VIEW_AFTER_SCREENSHOT",
+            "scroll_before_probe": 300 if stage == "fixture-minimum-width" else 0, "scroll_at_probe": 0,
+            "buttons": [{"name": name, "rect": [0, 0, 200, 32], "visible_bounds": [0, 0, 200, 32],
+                "workspace_contains": True, "minimum_size_met": True, "siblings_disjoint": True,
+                "ancestors_contain": True} for name in
+                tuple("expertSection_" + section for section in SECTIONS) + ("copyAnalysisContext",)]}
+            for language in ("EN", "RU") for stage in ("saved-report", "fixture-minimum-width")],
         "recordings": [], "screenshots": [],
         "fixture": {"scope": "TEST_ONLY_SYNTHETIC_IMPORTED_EVIDENCE", "source_unchanged": True,
                     "languages": ["EN", "RU"], "finding_selection_actual_qt_input": True,
@@ -223,6 +233,24 @@ class ExpertReceiptGateTests(unittest.TestCase):
             target = proof
             for name in path[:-1]:
                 target = target[name]
+            target[path[-1]] = value
+            with self.subTest(path=path), self.assertRaises(AssertionError):
+                self.validate(proof)
+
+    def test_clicked_anchor_cannot_substitute_for_unclipped_button_geometry(self):
+        for path, value in ((("anchor_geometry",), []),
+                            (("anchor_geometry", 0, "geometry_view"), "AT_REPORT_TOP_AFTER_SCREENSHOT"),
+                            (("anchor_geometry", 1, "reveal_top"), False),
+                            (("anchor_geometry", 1, "scroll_at_probe"), 300),
+                            (("anchor_geometry", 0, "workspace_before_timeline"), False),
+                            (("anchor_geometry", 0, "buttons", 3, "visible_bounds"), [0, 0, 200, 10]),
+                            (("anchor_geometry", 0, "buttons", 3, "siblings_disjoint"), False),
+                            (("anchor_geometry", 0, "buttons", 3, "ancestors_contain"), False),
+                            (("anchor_geometry", 0, "buttons", 3, "minimum_size_met"), False)):
+            proof = deepcopy(passed_receipt())
+            target = proof
+            for key in path[:-1]:
+                target = target[key]
             target[path[-1]] = value
             with self.subTest(path=path), self.assertRaises(AssertionError):
                 self.validate(proof)
