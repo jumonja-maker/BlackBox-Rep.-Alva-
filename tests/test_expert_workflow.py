@@ -155,6 +155,11 @@ def passed_receipt():
         "sections": [{"language": language, "section": section, "actual_qt_input": True,
                       "context_unchanged": True, "target_visible_in_viewport": True}
                      for language in ("EN", "RU") for section in SECTIONS],
+        "minimum_width": [{"language": language, "logical_window_client": [1020, 850],
+                           "actual_qt_resize": True, "expanded_sections": ["library", "actions", "technical"],
+                           "viewport_width": 788, "outer_horizontal_scroll_maximum": 0,
+                           "research_panel_width": 752, "library_panel_width": 752}
+                          for language in ("EN", "RU")],
         "recordings": [], "screenshots": [],
         "fixture": {"scope": "TEST_ONLY_SYNTHETIC_IMPORTED_EVIDENCE", "source_unchanged": True,
                     "languages": ["EN", "RU"], "finding_selection_actual_qt_input": True,
@@ -169,10 +174,11 @@ def passed_receipt():
                       for name in ("session.sqlite3", "report.json", "report.html")},
             "recorded_sources": {name: {"sha256": "b" * 64, "bytes": 128}
                                  for name in ("session.sqlite3", "session-v2.sqlite3")}})
-        for stage in ("saved-report", "fixture-findings", "fixture-events"):
+        for stage in ("saved-report", "fixture-findings", "fixture-minimum-width", "fixture-incident-card", "fixture-events"):
             proof["screenshots"].append({"id": stage + language, "source_sha": source_sha,
                 "language": language, "scale": "1", "frozen": False, "bytes": 128, "sha256": "c" * 64,
                 "stage": stage,
+                "logical_window_client": [1020, 850] if stage == "fixture-minimum-width" else [1440, 1000],
                 "scope": "REAL_GUI_PROCESS_RECORDING" if stage == "saved-report" else "TEST_ONLY_SYNTHETIC_IMPORTED_EVIDENCE"})
     return proof
 
@@ -208,6 +214,10 @@ class ExpertReceiptGateTests(unittest.TestCase):
                             (("recordings", 0, "handoff_actual_qt_input"), False),
                             (("recordings", 0, "recorded_status"), "RECORDING"),
                             (("recordings", 0, "source_files_unchanged_after_review"), False),
+                            (("minimum_width", 0, "logical_window_client"), [1440, 1000]),
+                            (("minimum_width", 0, "outer_horizontal_scroll_maximum"), 114),
+                            (("minimum_width", 0, "research_panel_width"), 902),
+                            (("minimum_width", 0, "library_panel_width"), 902),
                             (("screenshots", 0, "source_sha"), "d" * 40)):
             proof = deepcopy(passed_receipt())
             target = proof

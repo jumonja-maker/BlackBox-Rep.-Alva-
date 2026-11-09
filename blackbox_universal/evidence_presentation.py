@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import math
+from io import StringIO
 
 from .investigation_view import title as legacy_title
 
@@ -169,14 +170,14 @@ def tr(language: str, en: str, ru: str) -> str:
 
 
 def label(code, language: str, *, with_code: bool = False) -> str:
-    code = str(code)
+    code = _literal(code)
     pair = _LABELS.get(code) or _TITLES.get(code)
     text = tr(language, *pair) if pair else code
     return f"{text} [{code}]" if with_code and text != code else text
 
 
 def title(code, language: str) -> str:
-    code = str(code)
+    code = _literal(code)
     if code in _TITLES:
         return label(code, language)
     for prefix in ("INCIDENT_", "DERIVED_"):
@@ -187,8 +188,88 @@ def title(code, language: str) -> str:
 
 
 def raw_json(row: dict) -> str:
-    """Serialize the complete original object; never a presentation projection."""
-    return json.dumps(row, ensure_ascii=False, indent=2)
+    """Keep complete JSON without quadratic indentation of deep imports.
+
+    Ordinary records remain indented. Large or deeply nested records use an
+    iterative compact encoder: no fields are discarded and recursion depth
+    does not depend on an imported document's shape.
+    """
+    pending = [(row, 0)]
+    nodes = 0
+    characters = 0
+    while pending:
+        value, depth = pending.pop()
+        nodes += 1
+        if nodes > 4096 or depth > 24 or characters > 131072:
+            return _compact_json(row)
+        if isinstance(value, dict):
+            if len(value) > 4096:
+                return _compact_json(row)
+            if any(not isinstance(key, str) for key in value):
+                raise TypeError("Evidence JSON object keys must be strings")
+            pending.extend((item, depth + 1) for item in value.values())
+        elif isinstance(value, list):
+            if len(value) > 4096:
+                return _compact_json(row)
+            pending.extend((item, depth + 1) for item in value)
+        elif isinstance(value, str):
+            characters += len(value)
+        elif value is not None and type(value) not in (bool, int, float):
+            raise TypeError("Unsupported evidence JSON value")
+    return _unicode_text(json.dumps(row, ensure_ascii=False, indent=2, allow_nan=False))
+
+
+def _compact_json(value) -> str:
+    output = StringIO()
+    pending = [("value", value)]
+    active = set()
+    while pending:
+        frame = pending.pop()
+        if frame[0] in ("object", "array"):
+            kind, iterator, first, identity = frame
+            try:
+                item = next(iterator)
+            except StopIteration:
+                output.write("}" if kind == "object" else "]")
+                active.remove(identity)
+                continue
+            if not first:
+                output.write(",")
+            pending.append((kind, iterator, False, identity))
+            if kind == "object":
+                key, item = item
+                if not isinstance(key, str):
+                    raise TypeError("Evidence JSON object keys must be strings")
+                output.write(json.dumps(key, ensure_ascii=False))
+                output.write(":")
+            pending.append(("value", item))
+        else:
+            item = frame[1]
+            if isinstance(item, (dict, list)):
+                identity = id(item)
+                if identity in active:
+                    raise ValueError("Circular evidence object")
+                active.add(identity)
+                output.write("{" if isinstance(item, dict) else "[")
+                iterator = iter(item.items()) if isinstance(item, dict) else iter(item)
+                pending.append(("object" if isinstance(item, dict) else "array", iterator, True, identity))
+            else:
+                if item is not None and type(item) not in (bool, int, float, str):
+                    raise TypeError("Unsupported evidence JSON value")
+                output.write(json.dumps(item, ensure_ascii=False, allow_nan=False))
+    return _unicode_text(output.getvalue())
+
+
+def _unicode_text(text: str) -> str:
+    """Escape lone imported surrogates without altering JSON string meaning."""
+    return text.encode("utf-8", errors="backslashreplace").decode("utf-8")
+
+
+def _literal(value, *, limit=4096) -> str:
+    if isinstance(value, (dict, list)):
+        return "[recorded structure; see Raw JSON]"
+    text = _unicode_text(str(value))
+    return text if len(text) <= limit else text[:limit] + "… [see complete Raw JSON]"
 
 
 def _scalar(value, language: str) -> str:
@@ -196,11 +277,33 @@ def _scalar(value, language: str) -> str:
         return tr(language, "Not recorded / unknown (null)", "Не записано / неизвестно (null)")
     if type(value) is bool:
         return tr(language, "Yes (true)", "Да (true)") if value else tr(language, "No (false)", "Нет (false)")
-    return str(value)
+    if type(value) is float and not math.isfinite(value):
+        return tr(language, "Invalid non-finite value: ", "Недопустимое неконечное значение: ") + str(value)
+    return _literal(value)
 
 
 def _number(value) -> bool:
     return type(value) is int or type(value) is float and math.isfinite(value)
+
+
+def scaled_text(value, divisor: int, *, places: int = 2) -> str:
+    """Format integer measurements without converting huge imports to float."""
+    if type(value) is int:
+        scale = 10 ** places
+        rounded = (abs(value) * scale + divisor // 2) // divisor
+        whole, fraction = divmod(rounded, scale)
+        return ("-" if value < 0 else "") + f"{whole}.{fraction:0{places}d}"
+    if type(value) is float and math.isfinite(value):
+        return f"{value / divisor:.{places}f}"
+    return _literal(value)
+
+
+def valid_timestamp(value) -> bool:
+    return type(value) is int and 0 <= value < 2**63
+
+
+def seconds_text(nanoseconds: int) -> str:
+    return scaled_text(nanoseconds, 1_000_000_000, places=3)
 
 
 def _value(value, key: str, metric: str, language: str) -> str:
@@ -208,28 +311,37 @@ def _value(value, key: str, metric: str, language: str) -> str:
         return _scalar(value, language)
     unit_key = metric if key in ("delta", "threshold", "value", "min", "max", "mean") else key
     if unit_key in ("rss_bytes", "private_bytes", "uss_bytes", "read_bytes", "write_bytes", "growth_bytes"):
-        return f"{value / 1048576:.2f} MiB ({value} " + tr(language, "bytes)", "байт)")
+        return f"{scaled_text(value, 1048576)} MiB ({value} " + tr(language, "bytes)", "байт)")
     if unit_key in ("observed_bytes_s", "threshold_bytes_s", "read_bps", "write_bps"):
-        return f"{value / 1048576:.2f} MiB/s ({value} " + tr(language, "bytes/s)", "байт/с)")
+        return f"{scaled_text(value, 1048576)} MiB/s ({value} " + tr(language, "bytes/s)", "байт/с)")
     return str(value)
 
 
-def fact_lines(value, language: str, *, indent: int = 0, metric: str = "") -> list[str]:
-    """Render all fields, including unknown additions, with only known units."""
+def fact_lines(value, language: str, *, indent: int = 0, metric: str = "", _budget=None) -> list[str]:
+    """Bound the default view; complete unknown additions remain in Raw JSON."""
+    if _budget is None:
+        _budget = [1024]
     pad = "  " * indent
+    if _budget[0] <= 0 or indent >= 24:
+        return [pad + tr(language, "More recorded data in complete Raw JSON", "Остальные сохранённые данные — в полном JSON")]
+    _budget[0] -= 1
     if isinstance(value, dict):
         metric = value.get("metric", metric)
         metric = metric if isinstance(metric, str) else ""
         lines = []
         for key, item in value.items():
-            name = tr(language, *_FIELDS[key]) if key in _FIELDS else str(key)
+            if _budget[0] <= 0:
+                lines.append(pad + tr(language, "More recorded fields in complete Raw JSON", "Остальные поля — в полном JSON"))
+                break
+            _budget[0] -= 1
+            name = tr(language, *_FIELDS[key]) if key in _FIELDS else _literal(key)
             if isinstance(item, (dict, list)):
                 lines.append(f"{pad}{name}:")
                 lines.extend(fact_lines(item, language, indent=indent + 1,
-                                        metric=key if key in _FIELDS and key.endswith("_bytes") else ""))
+                                        metric=key if key in _FIELDS and key.endswith("_bytes") else "", _budget=_budget))
             else:
                 shown = label(item, language, with_code=True) if key in ("code", "status", "interpretation", "verification_class", "class", "recommendation_type") and item is not None else _value(item, key, metric, language)
-                if key == "metric" and item in _FIELDS:
+                if key == "metric" and isinstance(item, str) and item in _FIELDS:
                     shown = f"{tr(language, *_FIELDS[item])} [{item}]"
                 lines.append(f"{pad}{name}: {shown}")
         return lines or [pad + tr(language, "Empty object", "Пустой объект")]
@@ -238,9 +350,13 @@ def fact_lines(value, language: str, *, indent: int = 0, metric: str = "") -> li
             return [pad + tr(language, "None recorded", "Не записано")]
         lines = []
         for number, item in enumerate(value, 1):
+            if _budget[0] <= 0:
+                lines.append(pad + tr(language, "More recorded rows in complete Raw JSON", "Остальные строки — в полном JSON"))
+                break
+            _budget[0] -= 1
             if isinstance(item, (dict, list)):
                 lines.append(f"{pad}{number}.")
-                lines.extend(fact_lines(item, language, indent=indent + 1, metric=metric))
+                lines.extend(fact_lines(item, language, indent=indent + 1, metric=metric, _budget=_budget))
             else:
                 lines.append(f"{pad}• {_scalar(item, language)}")
         return lines
@@ -250,17 +366,19 @@ def fact_lines(value, language: str, *, indent: int = 0, metric: str = "") -> li
 def time_text(row: dict, origin, language: str, *, events: bool = False) -> str:
     start = row.get("time_ns" if events else "start_ns")
     end = start if events else row.get("end_ns")
-    if type(start) is not int:
-        return tr(language, "Time not recorded", "Время не записано")
+    if not valid_timestamp(start):
+        return tr(language, "Time not recorded", "Время не записано") if start is None else tr(language, "Invalid recorded timestamp: ", "Недопустимая метка времени: ") + _scalar(start, language)
+    if not events and end is not None and (not valid_timestamp(end) or end < start):
+        return tr(language, "Invalid recorded interval: ", "Недопустимый сохранённый интервал: ") + _scalar(start, language) + "–" + _scalar(end, language) + " ns"
     exact = f"{start}" if end == start or end is None else f"{start}–{end}"
-    if type(origin) is not int:
+    if not valid_timestamp(origin):
         result = exact + tr(language, " ns; recording origin unknown", " нс; начало отсчёта записи неизвестно")
         if not events and end is None:
             result += tr(language, "; end not recorded", "; конец не записан")
         return result
-    result = f"{(start - origin) / 1e9:.3f}"
+    result = seconds_text(start - origin)
     if type(end) is int and end != start:
-        result += f"–{(end - origin) / 1e9:.3f}"
+        result += "–" + seconds_text(end - origin)
     result += tr(language, " s from recording origin", " с от начала отсчёта записи")
     if not events and end is None:
         result += tr(language, "; end not recorded", "; конец не записан")
@@ -268,14 +386,16 @@ def time_text(row: dict, origin, language: str, *, events: bool = False) -> str:
 
 
 def _section(lines: list[str], language: str, en: str, ru: str, value) -> None:
-    lines.extend(("", tr(language, en, ru)))
+    lines.extend(("", _literal(tr(language, en, ru))))
     lines.extend(fact_lines(value, language))
 
 
 def _codes(lines: list[str], language: str, en: str, ru: str, values) -> None:
     lines.extend(("", tr(language, en, ru)))
     if isinstance(values, list):
-        lines.extend("• " + label(value, language, with_code=True) for value in values)
+        lines.extend("• " + label(value, language, with_code=True) for value in values[:1024])
+        if len(values) > 1024:
+            lines.append(tr(language, "Additional codes in complete Raw JSON", "Остальные коды — в полном JSON"))
         if not values:
             lines.append(tr(language, "None recorded", "Не записано"))
     else:
@@ -284,9 +404,9 @@ def _codes(lines: list[str], language: str, en: str, ru: str, values) -> None:
 
 def detail_text(row: dict, language: str, *, origin=None, events: bool = False, card: bool = False) -> str:
     if card:
-        return incident_text(row, language)
+        return _bounded_detail(incident_text(row, language), language)
     code = row.get("code", "UNKNOWN")
-    lines = [title(code, language), tr(language, "Code: ", "Код: ") + str(code),
+    lines = [title(code, language), tr(language, "Code: ", "Код: ") + _literal(code),
              time_text(row, origin, language, events=events),
              tr(language, "Severity: ", "Уровень: ") + label(row.get("severity", "UNKNOWN"), language, with_code=True)]
     if events:
@@ -309,7 +429,15 @@ def detail_text(row: dict, language: str, *, origin=None, events: bool = False, 
     extra = {key: value for key, value in row.items() if key not in consumed}
     if extra:
         _section(lines, language, "References and additional recorded fields", "Ссылки и дополнительные сохранённые поля", extra)
-    return "\n".join(lines)
+    return _bounded_detail("\n".join(lines), language)
+
+
+def _bounded_detail(text: str, language: str) -> str:
+    text = _unicode_text(text)
+    if len(text) <= 65536:
+        return text
+    return text[:65536] + "\n" + tr(language, "Display limit reached. Complete record remains in Raw JSON.",
+                                    "Достигнут предел показа. Полная запись сохранена в JSON.")
 
 
 def incident_text(row: dict, language: str) -> str:
@@ -318,7 +446,10 @@ def incident_text(row: dict, language: str) -> str:
              tr(language, "Root cause: ", "Причина: ") + label(row.get("root_cause", "UNKNOWN"), language, with_code=True),
              tr(language, "Source trust: ", "Доверие к источнику: ") + label(row.get("source_trust", "UNKNOWN"), language, with_code=True)]
     _section(lines, language, "Recorded incident", "Сохранённый инцидент", row.get("incident"))
-    for name, snapshot in row.get("snapshots", {}).items():
+    snapshots = row.get("snapshots")
+    if snapshots is not None and not isinstance(snapshots, dict):
+        _section(lines, language, "Recorded snapshots (unrecognized structure)", "Сохранённые измерения (неизвестная структура)", snapshots)
+    for name, snapshot in (snapshots.items() if isinstance(snapshots, dict) else ()):
         title_pair = {"before": ("Snapshot near start", "Измерение вблизи начала"),
                       "at_end": ("Snapshot near end", "Измерение вблизи конца"),
                       "post": ("Snapshot in post-context", "Измерение в контексте после")}.get(name, (name, name))

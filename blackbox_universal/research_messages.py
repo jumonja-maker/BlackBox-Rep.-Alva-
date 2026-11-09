@@ -31,9 +31,9 @@ MESSAGES={
 
 MESSAGES.update({
  'PURGE_REQUIRES_OWNED_TRASH':('Only finalized app-owned recordings in Trash can be permanently deleted. Move the selected recording to Trash first.','Окончательно удалить можно только завершённые собственные записи в корзине. Сначала переместите выбранную запись в корзину.'),
- 'PURGE_OWNER_STILL_ACTIVE':('Another cleanup is running. Wait for it to finish, then refresh the list.','Другая очистка ещё выполняется. Дождитесь её завершения и обновите список.'),
+ 'PURGE_OWNER_STILL_ACTIVE':('Cleanup is active or its owner exit cannot be verified. Preserve the journal and refresh after checking its owner.','Очистка активна или завершение её владельца не подтверждено. Сохраните журнал и обновите список после проверки владельца.'),
  'PURGE_NEW_OR_REPLACED_FILE':('The folder now contains a new or replaced file. No stale deletion plan is accepted; review the folder.','В папке появился новый или заменённый файл. Прежний план удаления не принимается; проверьте содержимое папки.'),
- 'EXPORT_RECOVERY_OWNER_ACTIVE':('The exporter is still running. Wait for it to exit before recovery.','Процесс экспорта ещё работает. Дождитесь его завершения перед восстановлением.'),
+ 'EXPORT_RECOVERY_OWNER_ACTIVE':('The exporter is active or its exit cannot be verified. Preserve the journal and verify the owner before recovery.','Процесс экспорта активен или его завершение не подтверждено. Сохраните журнал и проверьте владельца перед восстановлением.'),
  'EXPORT_RECOVERY_BUILD_INCOMPLETE':('This export was not fully built, or new files are present. Preserve the journal and retry export from the original recording; only inventoried temporary files can be discarded.','Экспорт не был полностью построен либо появились новые файлы. Сохраните журнал и повторите экспорт исходной записи; удалить можно только проверенные временные файлы.'),
  'EXPORT_RECOVERY_FILE_CHANGED':('An export file changed. Keep the journal and inspect the files; automatic replacement is refused.','Файл экспорта изменился. Сохраните журнал и проверьте файлы; автоматическая замена запрещена.'),
  'EXPORT_DESTINATION_EXISTS':('The destination is occupied. Choose a different name or folder; existing files are preserved.','Путь уже занят. Выберите другое имя или папку; существующие файлы сохранены.'),

@@ -33,7 +33,7 @@ _LABELS = {
 
 
 def _integer(value, *, minimum=0):
-    return type(value) is int and value >= minimum
+    return type(value) is int and minimum <= value < 2**63
 
 
 def _number_text(value, unknown):
@@ -45,7 +45,7 @@ def _number_text(value, unknown):
 
 def _recorded_text(value, unknown):
     if type(value) is str and value:
-        return value
+        return value if len(value)<=512 else value[:512]+"… [recorded text truncated]"
     return _number_text(value, unknown)
 
 
@@ -101,8 +101,14 @@ def format_analysis_context(folder: Path | None, packet, *, loading=False, faile
         return source_line + f"\n{label('read')}: {label('no_source')}"
 
     interval = packet.get("interval") if isinstance(packet, dict) else None
-    matching = (isinstance(packet, dict) and packet.get("folder") == selected
+    matching = (_integer(instance_id, minimum=1) and isinstance(packet, dict) and packet.get("folder") == selected
                 and isinstance(interval, dict))
+    if matching:
+        for key, allowed in (("schema_version", (2,)), ("source_schema_version", (1, 2))):
+            if key in interval and (type(interval[key]) is not int or interval[key] not in allowed):
+                matching = False
+        if interval.get("source_schema_version") == 1 and instance_id != 1:
+            matching = False
     if matching and "instance_id" in interval:
         recorded_instance = interval["instance_id"]
         matching = (type(recorded_instance) is type(instance_id)

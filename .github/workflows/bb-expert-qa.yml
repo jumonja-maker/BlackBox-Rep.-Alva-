@@ -61,6 +61,14 @@ jobs:
         run: python -m unittest discover -s tests -p 'test_research_gui.py' -v
       - name: Existing Qt fixture ownership and control lifecycle regressions
         run: python -m unittest discover -s tests -p 'test_chain_fixture_lifecycle.py' -v
+      - name: Exact unpublished archive provenance binary inventory and versioned notes
+        run: python -m unittest discover -s tests -p 'test_release_gate.py' -v
+      - name: Optional job cancellation retries and owner failure regressions
+        run: python -m unittest discover -s tests -p 'test_optional_jobs.py' -v
+      - name: Crash evidence and transactional tracerpt staging regressions
+        run: python -m unittest discover -s tests -p 'test_crash_and_trace_decode.py' -v
+      - name: Imported storage identity and bounded source validation regressions
+        run: python -m unittest discover -s tests -p 'test_storage_import_boundaries.py' -v
 
   source-workflow:
     name: Actual Qt workflow RU EN / scale ${{ matrix.scale }}
@@ -112,7 +120,8 @@ jobs:
               'status': 'PASS' if passed else 'FAIL', 'source_sha': os.environ['EXPERT_SOURCE_SHA'],
               'gates': gates, 'full_source_and_portable_gate': 'SEPARATE_FINAL_PR_SHELL_QA_REQUIRED',
               'physical_dpi': 'NOT_TESTED', 'secure_desktop': 'NOT_TESTED',
-              'full_5h30_endurance': 'NOT_RERUN_SAMPLER_HELPER_SCHEDULER_UNCHANGED',
+              'full_5h30_endurance': 'NOT_RERUN_BASE_SAMPLER_AND_PERSISTED_SCHEDULER_UNCHANGED',
+              'targeted_owner_failure_paths': 'BRIDGE_QUIT_RETRY_OPTIONAL_JOBS_AND_TRANSACTIONAL_TRACERPT_STAGING',
               'published_release': False}, sort_keys=True))
           raise SystemExit(0 if passed else 1)
           PY

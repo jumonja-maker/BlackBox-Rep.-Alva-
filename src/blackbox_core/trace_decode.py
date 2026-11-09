@@ -4,53 +4,105 @@ Event headers identify their emitter, not necessarily a causal/faulting target.
 No symbols/downloads, decoded stack guesses, or invented event-loss numbers.
 """
 from __future__ import annotations
-import hashlib,os,subprocess,tempfile,time,xml.etree.ElementTree as ET
+import hashlib,os,subprocess,time,xml.etree.ElementTree as ET
 from pathlib import Path
 from .session_v2 import safe_path
 from .optional_jobs import OwnedProcess
 NS={'e':'http://schemas.microsoft.com/win/2004/08/events/event'}
+MAX_XML_BYTES=32*1024**2
+MAX_XML_NODES=1_000_000
+MAX_XML_DEPTH=64
+XML_PARSE_SECONDS=10
 def file_hash(path):
  h=hashlib.sha256()
  with path.open('rb') as f:
   for block in iter(lambda:f.read(1024**2),b''):h.update(block)
  return h.hexdigest()
 def parse_xml(path,*,target_pid,max_rows=500):
- if type(target_pid) is not int or target_pid<=0 or type(max_rows) is not int or not 1<=max_rows<=500:raise ValueError('INVALID_TRACE_DECODE_POLICY')
- path=safe_path(path)
- if path.stat().st_size>32*1024**2:raise ValueError('TRACE_DECODE_XML_BUDGET')
- # Reject declarations over the complete bounded file, including UTF-16 output.
- with path.open('rb') as f:
-  tail=b''
-  for chunk in iter(lambda:f.read(65536),b''):
-   check=(tail+chunk).replace(b'\x00',b'').upper()
-   if b'<!DOCTYPE' in check or b'<!ENTITY' in check:raise ValueError('UNSAFE_TRACE_XML')
-   tail=chunk[-64:]
- rows=[];scanned=0;recognized=0;matched=0;providers={};deadline=time.monotonic()+10
- iterator=ET.iterparse(path,events=('start','end'));_,root=next(iterator)
- for event,node in iterator:
-  if event!='end' or node.tag.split('}')[-1]!='Event':continue
-  scanned+=1
-  if scanned%128==0 and time.monotonic()>deadline:raise TimeoutError('TRACE_DECODE_PARSE_TIMEOUT')
-  system=node.find('e:System',NS)
-  if system is None:system=node.find('System')
-  if system is not None:
-   def child(name):
-    value=system.find('e:'+name,NS)
-    return value if value is not None else system.find(name)
-   execution=child('Execution');provider=child('Provider');eid=child('EventID');stamp=child('TimeCreated')
-   if provider is not None and eid is not None and (eid.text or '').strip() and stamp is not None:recognized+=1
-   try:emitter=int(execution.get('ProcessID','')) if execution is not None else None
-   except ValueError:emitter=None
-   if emitter==target_pid:
-    matched+=1;name=(provider.get('Name') or provider.get('Guid') or 'UNKNOWN_PROVIDER')[:128] if provider is not None else 'UNKNOWN_PROVIDER'
-    if name in providers or len(providers)<128:providers[name]=providers.get(name,0)+1
-    if len(rows)<max_rows:rows.append({'source':'ETW_TRACERPT','provider':name,'event_id':(eid.text or '')[:32] if eid is not None else None,
-     'emitter_pid':emitter,'thread_id':execution.get('ThreadID','')[:32],
-     'timestamp_utc':stamp.get('SystemTime','')[:80] if stamp is not None else None,
-     'scope':'TARGET_EMITTER_PID_NOT_CAUSAL_ATTRIBUTION','verification_class':'UNVERIFIED_IMPORT'})
-  node.clear();root.clear()
- return {'rows':rows,'scanned_events':scanned,'recognized_header_events':recognized,'matching_emitter_events':matched,'rows_omitted':max(0,matched-len(rows)),
-  'provider_counts':providers,'event_payloads_retained':False,'decoded_scope':'EVENT_HEADERS_ONLY_NOT_STACKS_OR_GC_PAYLOADS'}
+    if type(target_pid) is not int or target_pid<=0 or type(max_rows) is not int or not 1<=max_rows<=500:
+        raise ValueError('INVALID_TRACE_DECODE_POLICY')
+    path=safe_path(path)
+    if path.stat().st_size>MAX_XML_BYTES:
+        raise ValueError('TRACE_DECODE_XML_BUDGET')
+    deadline=time.monotonic()+XML_PARSE_SECONDS
+    rows=[];scanned=0;recognized=0;matched=0;providers={}
+    stack=[];event_depth=None;header_depth=None;nodes=0
+
+    def check():
+        if time.monotonic()>deadline:
+            raise TimeoutError('TRACE_DECODE_PARSE_TIMEOUT')
+
+    parser=ET.XMLPullParser(events=('start','end'))
+    total=0;tail=b''
+    with path.open('rb') as stream:
+        while True:
+            check()
+            chunk=stream.read(65536)
+            if not chunk:
+                break
+            total+=len(chunk)
+            if total>MAX_XML_BYTES:
+                raise ValueError('TRACE_DECODE_XML_BUDGET')
+            # Inspect each chunk before parsing, including split UTF-16
+            # declarations. No second, mutable-source pass is needed.
+            declaration=(tail+chunk).replace(b'\x00',b'').upper()
+            if b'<!DOCTYPE' in declaration or b'<!ENTITY' in declaration:
+                raise ValueError('UNSAFE_TRACE_XML')
+            tail=chunk[-64:]
+            parser.feed(chunk)
+            for event,node in parser.read_events():
+                check()
+                if event=='start':
+                    nodes+=1
+                    if nodes>MAX_XML_NODES:
+                        raise ValueError('TRACE_DECODE_XML_NODE_BUDGET')
+                    stack.append(node)
+                    if len(stack)>MAX_XML_DEPTH:
+                        raise ValueError('TRACE_DECODE_XML_DEPTH_BUDGET')
+                    name=node.tag.split('}')[-1]
+                    if event_depth is None and name=='Event':
+                        event_depth=len(stack)
+                    elif event_depth is not None and len(stack)==event_depth+1 and name=='System':
+                        header_depth=len(stack)
+                    continue
+                depth=len(stack)
+                if event_depth is not None and depth==event_depth:
+                    scanned+=1
+                    system=node.find('e:System',NS)
+                    if system is None:system=node.find('System')
+                    if system is not None:
+                        def child(name):
+                            value=system.find('e:'+name,NS)
+                            return value if value is not None else system.find(name)
+                        execution=child('Execution');provider=child('Provider');eid=child('EventID');stamp=child('TimeCreated')
+                        if provider is not None and eid is not None and (eid.text or '').strip() and stamp is not None:
+                            recognized+=1
+                        try:emitter=int(execution.get('ProcessID','')) if execution is not None else None
+                        except ValueError:emitter=None
+                        if emitter==target_pid:
+                            matched+=1
+                            name=(provider.get('Name') or provider.get('Guid') or 'UNKNOWN_PROVIDER')[:128] if provider is not None else 'UNKNOWN_PROVIDER'
+                            if name in providers or len(providers)<128:providers[name]=providers.get(name,0)+1
+                            if len(rows)<max_rows:
+                                rows.append({'source':'ETW_TRACERPT','provider':name,
+                                    'event_id':(eid.text or '')[:32] if eid is not None else None,
+                                    'emitter_pid':emitter,'thread_id':execution.get('ThreadID','')[:32],
+                                    'timestamp_utc':stamp.get('SystemTime','')[:80] if stamp is not None else None,
+                                    'scope':'TARGET_EMITTER_PID_NOT_CAUSAL_ATTRIBUTION','verification_class':'UNVERIFIED_IMPORT'})
+                    event_depth=None;header_depth=None
+                elif header_depth is not None:
+                    # Keep only a current Event's System header intact until
+                    # its Event end; payload and unrelated XML are disposable.
+                    if depth==header_depth:header_depth=None
+                    stack.pop()
+                    continue
+                node.clear()
+                if depth>1:stack[-2].remove(node)
+                stack.pop()
+        parser.close()
+        check()
+    return {'rows':rows,'scanned_events':scanned,'recognized_header_events':recognized,'matching_emitter_events':matched,'rows_omitted':max(0,matched-len(rows)),
+        'provider_counts':providers,'event_payloads_retained':False,'decoded_scope':'EVENT_HEADERS_ONLY_NOT_STACKS_OR_GC_PAYLOADS'}
 
 def decode(path,*,target_pid):
  base={'source':'ETW_TRACERPT','status':'UNSUPPORTED_PLATFORM','decoded':False,'lost_events':None,
@@ -61,8 +113,9 @@ def decode(path,*,target_pid):
  if path.suffix.lower()!='.etl' or not path.is_file() or not 0<path.stat().st_size<=256*1024**2:raise ValueError('INVALID_ETL_OR_INPUT_SIZE_LIMIT')
  tool=Path(os.environ.get('SystemRoot','C:/Windows'))/'System32'/'tracerpt.exe'
  if not tool.is_file():return {**base,'status':'TOOL_UNAVAILABLE'}
+ from .decoder_service import _private_decode_stage
  before=file_hash(path);owner=None
- with tempfile.TemporaryDirectory(prefix='blackbox-tracerpt-') as tmp:
+ with _private_decode_stage() as (tmp,_release_stage):
   directory=Path(tmp);output=directory/'events.xml';log=directory/'tool.log'
   try:
    with log.open('xb') as stream:

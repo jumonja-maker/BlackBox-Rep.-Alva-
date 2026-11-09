@@ -6,6 +6,7 @@ base sampler or Qt. Paths are local explicit inputs, never shell commands.
 """
 from __future__ import annotations
 import json
+import math
 import os
 from pathlib import Path
 import sys
@@ -24,7 +25,17 @@ def validate_identity(pid, created):
     import psutil
     if type(pid) is not int or pid <= 0 or type(created) not in (int, float) or created <= 0:
         raise ValueError('INVALID_TARGET_IDENTITY')
-    if abs(psutil.Process(pid).create_time() - created) > .000001:
+    try:
+        if not math.isfinite(created):
+            raise ValueError('INVALID_TARGET_IDENTITY')
+    except OverflowError:
+        raise ValueError('INVALID_TARGET_IDENTITY') from None
+    actual=psutil.Process(pid).create_time()
+    try:
+        actual_valid=(type(actual) in (int,float) and actual>0 and math.isfinite(actual))
+    except OverflowError:
+        actual_valid=False
+    if not actual_valid or abs(actual - created) > .000001:
         raise ValueError('TARGET_INSTANCE_CHANGED')
 
 

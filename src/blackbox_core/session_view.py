@@ -41,6 +41,36 @@ def _validated_process_instance(raw):
     return row
 
 
+def _validated_session_clock(metadata):
+    """A schema label cannot turn malformed imported anchors into a clock.
+
+    Zero is a valid recorded epoch/origin/uncertainty. Resolution must remain
+    positive, and an optional end cannot precede this recording's origin.
+    Values are checked as stored; no wall-clock or live-process fallback is
+    allowed for imported evidence.
+    """
+    for name in ("started_utc_ns", "monotonic_origin_ns", "anchor_monotonic_ns",
+                 "anchor_utc_ns", "anchor_uncertainty_ns"):
+        value = metadata.get(name)
+        if type(value) is not int or value < 0:
+            raise SessionReadError("INVALID_IMPORTED_SESSION_CLOCK")
+    resolution = metadata.get("monotonic_resolution_ns")
+    source = metadata.get("clock_source")
+    ended = metadata.get("ended_monotonic_ns")
+    if (type(resolution) is not int or resolution <= 0 or
+            type(source) is not str or not source or len(source) > 256 or
+            (ended is not None and (type(ended) is not int or
+                                   ended < metadata["monotonic_origin_ns"]))):
+        raise SessionReadError("INVALID_IMPORTED_SESSION_CLOCK")
+
+
+def _legacy_scope(series, instance_id):
+    if type(instance_id) is not int or instance_id != 1:
+        raise SessionReadError("LEGACY_PROCESS_INSTANCE_UNSUPPORTED")
+    if series != "STANDARD":
+        raise SessionReadError("LEGACY_SERIES_UNSUPPORTED")
+
+
 @dataclass
 class _Stats:
     count: int = 0
@@ -118,11 +148,13 @@ class SchemaV1Reader(_Reader):
             raise
 
     def bounds(self,series="STANDARD",instance_id=1):
+        _legacy_scope(series, instance_id)
         row=self.db.execute("SELECT min(elapsed_ms),max(elapsed_ms),count(*) FROM samples").fetchone()
         return ((row[0]*1_000_000 if row[0] is not None else None),
                 (row[1]*1_000_000 if row[1] is not None else None),row[2])
 
     def iter_samples(self,start,end,*,series="STANDARD",instance_id=1):
+        _legacy_scope(series, instance_id)
         # No index may be added to a historic file. This is a streaming scan
         # on v1; v2 uses ix_v2_samples_interval. Unsupported fields stay NULL.
         cursor=self.db.execute("SELECT * FROM samples WHERE elapsed_ms BETWEEN ? AND ? ORDER BY seq",
@@ -147,10 +179,25 @@ class SchemaV2Reader(_Reader):
                     rows[0]["contract_version"] not in (CONTRACT_VERSION,"bb-di-001/session/2.0")):
                 raise SessionReadError("UNSUPPORTED_SCHEMA2_CONTRACT")
             meta=dict(rows[0])
+            _validated_session_clock(meta)
             targets=self.db.execute("SELECT * FROM targets LIMIT 2").fetchall()
             if len(targets)!=1 or targets[0]["session_uuid"]!=meta["session_uuid"]:
                 raise SessionReadError("INVALID_SCHEMA2_TARGET")
             target=dict(targets[0])
+            if (type(target.get("target_id")) is not int or target["target_id"] != 1 or
+                    type(target.get("root_pid")) is not int or target["root_pid"] <= 0 or
+                    type(target.get("root_creation_time")) not in (int, float) or
+                    not math.isfinite(target["root_creation_time"]) or target["root_creation_time"] <= 0):
+                raise SessionReadError("INVALID_SCHEMA2_TARGET")
+            roots=self.db.execute("SELECT instance_id FROM process_instances WHERE pid=? "
+                "AND creation_time=? LIMIT 2",(target["root_pid"],target["root_creation_time"])).fetchall()
+            # The writer creates recording root 1 before any child or sample.
+            # Every public default-scope API uses 1. Reject inconsistent
+            # imports instead of attributing another instance's counters to
+            # the target identity displayed in recording metadata.
+            if len(roots) != 1 or type(roots[0][0]) is not int or roots[0][0] != 1:
+                raise SessionReadError("INVALID_SCHEMA2_ROOT_INSTANCE")
+            self.root_instance=1
             self.metadata={**meta,"pid":target["root_pid"],"creation_time":target["root_creation_time"],
                 "executable_name":target["executable_name"],"file_trust":"UNVERIFIED_IMPORT",
                 "recorded_verification_class":target["verification_class"],
@@ -161,8 +208,6 @@ class SchemaV2Reader(_Reader):
                 "warnings":["SOURCE_FILE_NOT_AUTHENTICATED","TID_REUSE_CANNOT_BE_EXCLUDED",
                             "SYSTEM_CLOCK_CAN_ADJUST_AFTER_ANCHOR"],
                 "capabilities":[dict(r) for r in self.db.execute("SELECT * FROM capabilities LIMIT 64")]}
-            self.root_instance=self.db.execute("SELECT instance_id FROM process_instances WHERE pid=? "
-                "AND creation_time=?",(target["root_pid"],target["root_creation_time"])).fetchone()[0]
         except Exception:
             self.close()
             raise
@@ -404,6 +449,7 @@ class SessionView:
         if type(top_n) is not int or not 1<=top_n<=256:
             raise SessionReadError("INVALID_TOP_N")
         if not self.is_v2:
+            _legacy_scope("STANDARD", instance_id)
             return {"status":"LEGACY_LIMITED_DATA","top_threads":[],"root_cause_proven":False}
         self.reader.renew_deadline()
         start,end,total=self._range(start_ns,end_ns,"DETAILED",instance_id)

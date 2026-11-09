@@ -33,6 +33,10 @@ class FixtureBridge(QObject):
         return len(self.calls)
 
 
+class IdentifiedFixtureBridge(FixtureBridge):
+    command_result = Signal(str, str, object, object)
+
+
 def finding_page(key, *, rows=None, more=False, cursor=None):
     return {"request_key": key, "metadata": {"monotonic_origin_ns": 1_000_000_000},
             "findings": [finding(1), finding(2)] if rows is None else rows,
@@ -318,6 +322,125 @@ class ExpertEvidencePanelTests(unittest.TestCase):
         self.assertIn("All process instances", events.source_context.text(), "The visible old page retains its actual query scope while loading")
         self.host.probe.result_ready.emit(events.op, {**packet, "request_key": events._generation}, None)
         self.assertIn("Recorded instance ID 7", events.source_context.text())
+
+    def test_page_failure_retains_the_accepted_cursor_and_changed_filter_failure_clears_old_evidence(self):
+        panel = self.panel()
+        panel.refresh()
+        cursor = [2_000_000_002, "fixture-cursor"]
+        first = finding_page(panel._generation, more=True, cursor=cursor)
+        self.host.probe.result_ready.emit(panel.op, first, None)
+        panel.forward()
+        self.host.probe.result_ready.emit(panel.op, None, "PAGE_READ_FAILED")
+        self.assertIs(panel.packet, first)
+        self.assertEqual(panel._history, [])
+        self.assertIsNone(panel._cursor)
+        self.assertIn("Previous page retained", panel.status.text())
+        panel.forward()
+        self.assertEqual(self.host.probe.calls[-1][1]["after"], cursor)
+        self.host.probe.result_ready.emit(panel.op, None, "PAGE_READ_FAILED")
+        panel.question.setCurrentIndex(panel.question.findData("CPU"))
+        panel.refresh()
+        self.host.probe.result_ready.emit(panel.op, None, "<i>FILTER_READ_FAILED</i>")
+        self.assertIsNone(panel.packet)
+        self.assertEqual(panel.table.rowCount(), 0)
+        self.assertEqual(panel.details.toPlainText(), "")
+        self.assertEqual([label.text() for label in panel.summaries], ["—"] * 3)
+        self.assertFalse(panel.next.isEnabled())
+        self.assertEqual(panel.status.textFormat(), Qt.TextFormat.PlainText)
+
+    def test_send_failure_rolls_back_pagination_without_losing_the_accepted_page(self):
+        panel = self.panel()
+        panel.refresh()
+        self.host.probe.result_ready.emit(panel.op, finding_page(panel._generation, more=True, cursor=[7, "fixture"]), None)
+        accepted = panel.packet
+        original_send = self.host.probe.send
+        self.host.probe.send = lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("QUEUE_FULL"))
+        try:
+            panel.forward()
+            self.assertIs(panel.packet, accepted)
+            self.assertEqual(panel._history, [])
+            self.assertIsNone(panel._cursor)
+            self.assertFalse(panel._busy)
+            self.assertIn("QUEUE_FULL", panel.status.text())
+        finally:
+            self.host.probe.send = original_send
+
+    def test_exact_command_ids_ignore_foreign_page_and_card_results_and_errors(self):
+        self.host.probe = IdentifiedFixtureBridge(self.host)
+        panel = self.panel()
+        panel.refresh()
+        page = finding_page(panel._generation)
+        self.host.probe.command_result.emit("unrelated", panel.op, page, None)
+        self.host.probe.result_ready.emit(panel.op, page, None)
+        self.assertTrue(panel._busy)
+        self.assertIsNone(panel.packet)
+        self.host.probe.command_result.emit(str(panel._request_id), panel.op, page, None)
+        self.assertIs(panel.packet, page)
+        panel.open_card()
+        card = {"status": "OBSERVATION_ONLY", "snapshots": []}
+        self.host.probe.command_result.emit("unrelated", "incident_card", card, None)
+        self.host.probe.command_result.emit("unrelated", "incident_card", None, "FOREIGN_FAILURE")
+        self.assertTrue(panel._busy)
+        self.assertIsNone(panel.card_packet)
+        self.host.probe.command_result.emit(str(panel._request_id), "incident_card", card, None)
+        self.assertIs(panel.card_packet, card)
+        self.assertIn("unrecognized structure", panel.details.toPlainText())
+
+    def test_malformed_page_envelopes_fail_once_without_retries_or_qt_callback_errors(self):
+        panel = self.panel()
+        for changes in ({"schema_version": 99}, {"findings": None}, {"findings": [None]},
+                        {"findings": [finding()] * 101}, {"has_more": True, "next_cursor": None},
+                        {"has_more": True, "next_cursor": []}, {"has_more": True, "next_cursor": [False, "id"]}):
+            with self.subTest(changes=changes):
+                panel.refresh()
+                calls = len(self.host.probe.calls)
+                result = {**finding_page(panel._generation), **changes}
+                self.host.probe.result_ready.emit(panel.op, result, None)
+                self.app.processEvents()
+                self.assertFalse(panel._busy)
+                self.assertIsNone(panel.packet)
+                self.assertIn("Invalid evidence response", panel.status.text())
+                self.assertEqual(len(self.host.probe.calls), calls)
+
+    def test_missing_summary_and_invalid_time_are_explicit_while_raw_fields_remain_complete(self):
+        panel = self.panel()
+        panel.refresh()
+        row = finding()
+        row.update(start_ns=17, end_ns=0)
+        row["facts"] = [{"metric": "rss_bytes", "delta": 10**330}]
+        result = finding_page(panel._generation, rows=[row])
+        result.update(metadata=None, summary=None, coverage=None, application_io_latency=None)
+        self.host.probe.result_ready.emit(panel.op, result, None)
+        self.assertIsNone(panel.origin)
+        self.assertFalse(panel.investigate.isEnabled())
+        self.assertFalse(panel.navigate.isEnabled())
+        self.assertIn("Invalid recorded interval", panel.details.toPlainText())
+        self.assertIn(str(10**330), panel.details.toPlainText())
+        self.assertIn("not observed", panel.summaries[1].text())
+        panel.raw.setChecked(True)
+        self.assertEqual(json.loads(panel.details.toPlainText()), row)
+
+    def test_invalid_raw_values_have_an_explicit_error_and_preserve_the_original_packet(self):
+        import math
+        panel = self.panel()
+        panel.refresh()
+        row = finding()
+        row["facts"].append({"rss_bytes": float("nan")})
+        result = finding_page(panel._generation, rows=[row])
+        self.host.probe.result_ready.emit(panel.op, result, None)
+        self.assertIn("Invalid non-finite value", panel.details.toPlainText())
+        panel.raw.setChecked(True)
+        self.assertIn("cannot be represented as JSON", panel.details.toPlainText())
+        self.assertIn("not changed", panel.details.toPlainText())
+        self.assertIs(panel.packet, result)
+        self.assertTrue(math.isnan(row["facts"][-1]["rss_bytes"]))
+        panel.raw.setChecked(False)
+        self.assertIn("Invalid non-finite value", panel.details.toPlainText())
+        row["facts"].pop()
+        row["detail"]["cycle"] = row["detail"]
+        panel.raw.setChecked(True)
+        self.assertIn("Circular", panel.details.toPlainText())
+        self.assertIs(row["detail"]["cycle"], row["detail"])
 
 
 if __name__ == "__main__":

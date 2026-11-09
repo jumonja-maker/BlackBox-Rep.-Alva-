@@ -15,6 +15,8 @@ class ReleaseGateTests(unittest.TestCase):
         self.files = {PREFIX + n: b'fixture' for n in REQUIRED}
         for n in ('README.md', 'README.ru.md'):
             self.files[PREFIX+n] = b'> Feedback: DonJeoJesky@outlook.com\n'
+        self.files[PREFIX+'RELEASE-NOTES.md'] = (
+            '# BLACK.BOX Universal v' + VERSION + ' — UNPUBLISHED DEVELOPMENT CANDIDATE\n').encode('utf-8')
         self.files[PREFIX+'_internal/blackbox-build.json'] = json.dumps({
             'schema_version': 1, 'source_sha': 'a'*40, 'source_tree_sha': 'b'*40,
             'tracked_worktree_clean': True, 'version': VERSION}).encode()
@@ -48,6 +50,23 @@ class ReleaseGateTests(unittest.TestCase):
         result=self.check()
         self.assertEqual(result['status'],'VERIFIED_RELEASE_ARCHIVE')
         self.assertFalse(result['release_published'])
+        self.assertEqual(result['release_notes_version'], VERSION)
+    def test_old_release_notes_are_refused_even_with_valid_inventory(self):
+        self.files[PREFIX+'RELEASE-NOTES.md'] = b'# BLACK.BOX Universal v0.5.5\n'
+        self._inventory()
+        with self.assertRaisesRegex(ValueError,'RELEASE_NOTES_VERSION_MISMATCH'):
+            self.check()
+    def test_missing_release_notes_are_refused(self):
+        del self.files[PREFIX+'RELEASE-NOTES.md']
+        self._inventory()
+        with self.assertRaisesRegex(ValueError,'MISSING_REQUIRED_RELEASE_FILE:RELEASE-NOTES.md'):
+            self.check()
+    def test_release_notes_cannot_prefix_match_another_version(self):
+        self.files[PREFIX+'RELEASE-NOTES.md'] = (
+            '# BLACK.BOX Universal v' + VERSION + '.1\n').encode('utf-8')
+        self._inventory()
+        with self.assertRaisesRegex(ValueError,'RELEASE_NOTES_VERSION_MISMATCH'):
+            self.check()
     def test_wrong_embedded_version_is_refused(self):
         key=PREFIX+'_internal/blackbox-build.json'
         data=json.loads(self.files[key]);data['version']='0.5.0'

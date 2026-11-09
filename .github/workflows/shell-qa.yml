@@ -167,7 +167,7 @@ jobs:
     if: github.event_name != 'pull_request' || (github.head_ref != 'patch/bb-deep-001' && github.head_ref != 'patch/bb-inv-003')
     name: Windows portable exe
     # Exact-SHA native decoder acceptance accompanies the release candidate.
-    # Publication still requires *all* three jobs green.
+    # This workflow verifies an unpublished candidate and never publishes.
     runs-on: windows-latest
     outputs:
       wave02_endurance_required: ${{ steps.wave02-scope.outputs.endurance_required }}
@@ -353,7 +353,7 @@ jobs:
           if (-not (Test-Path "$output\INVESTIGATION-LICENSE.txt")) { throw 'Investigation license missing' }
           if (-not (Test-Path "$output\LICENSE")) { throw "Missing public application license" }
           if (-not (Test-Path "$output\README.ru.md")) { throw "Russian README missing from Windows release" }
-          Copy-Item -LiteralPath "docs\RELEASE_v0.5.5.md" -Destination "$output\RELEASE-NOTES.md" -Force
+          Copy-Item -LiteralPath "docs\RELEASE_v0.6.0.md" -Destination "$output\RELEASE-NOTES.md" -Force
           Copy-Item -LiteralPath "docs\R10_RU.md" -Destination "$output\R10-ADMIN-RU.md" -Force
           Copy-Item -LiteralPath "docs\specifications\R10.md" -Destination "$output\R10-SPECIFICATION.md" -Force
           Copy-Item docs/BB_INV_003_RU.md "$output/INVESTIGATION-ENGINE-3-RU.md" -Force
@@ -365,15 +365,23 @@ jobs:
         run: |
           Compress-Archive -LiteralPath "dist\BLACK.BOX-Universal" -DestinationPath "BLACK.BOX-Universal-Windows.zip" -Force
           if (-not (Test-Path "BLACK.BOX-Universal-Windows.zip")) { throw "ZIP missing" }
-      - name: Native official v0.5.4 to v0.5.5 update and full portable uninstall
+      - name: Native official v0.5.4 to unpublished candidate update and full portable uninstall
         shell: pwsh
         timeout-minutes: 16
         run: |
           python tools/qa_windows_maintenance_e2e.py --built-zip "BLACK.BOX-Universal-Windows.zip" --expected-sha "${{ github.event.pull_request.head.sha || github.sha }}" --evidence "portable-maintenance-e2e" --baseline-release v0.5.4
           if ($LASTEXITCODE -ne 0) { throw 'Real portable update/uninstall acceptance failed' }
+      - name: Verify final unpublished ZIP against exact source tree and complete binary inventory
+        shell: pwsh
+        run: |
+          $tree = (git rev-parse 'HEAD^{tree}').Trim()
+          if ($LASTEXITCODE -ne 0) { throw 'Could not read candidate source tree' }
+          python tools/release_gate.py --archive "BLACK.BOX-Universal-Windows.zip" --source-sha "${{ github.event.pull_request.head.sha || github.sha }}" --source-tree $tree --report "candidate-archive-verification.json"
+          if ($LASTEXITCODE -ne 0) { throw 'Final unpublished archive verification failed' }
+          Get-Content -LiteralPath "candidate-archive-verification.json" -Raw
 
-# Publication v0.5.5 occurs only in separate release-v055.yml after green exact-main hosted QA.
-# No GitHub Actions Artifacts or cache are required for v0.5.5.
+# Publication remains separately authorized and guarded by the release workflows.
+# This QA workflow publishes no release, Actions artifacts, or cache.
 
   exact-main-acceptance:
     name: Exact-main complete QA gate (artifactless)

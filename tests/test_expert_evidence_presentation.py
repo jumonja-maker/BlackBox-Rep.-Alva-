@@ -99,6 +99,87 @@ class ExpertEvidencePresentationTests(unittest.TestCase):
         self.assertIn("end not recorded", time_text(finding(), 0, "EN"))
         self.assertIn("end not recorded", time_text(finding(), None, "EN"))
 
+    def test_huge_integer_measurements_and_nonfinite_values_do_not_overflow_or_become_zero(self):
+        huge = 10**330
+        for language in ("EN", "RU"):
+            text = "\n".join(fact_lines({"metric": "rss_bytes", "delta": huge}, language))
+            self.assertIn(str(huge), text)
+            self.assertIn("MiB", text)
+            self.assertNotIn("inf", text)
+            for value in (float("nan"), float("inf"), -float("inf")):
+                invalid = "\n".join(fact_lines({"rss_bytes": value}, language))
+                self.assertIn("non-finite" if language == "EN" else "неконечное", invalid)
+                self.assertNotIn("0.00 MiB", invalid)
+
+    def test_deep_and_wide_imports_have_bounded_default_views_and_complete_compact_raw_json(self):
+        nested = {"leaf": "точное значение \"quoted\"\n"}
+        for _ in range(600):
+            nested = {"next": nested}
+        text = "\n".join(fact_lines(nested, "EN"))
+        self.assertIn("complete Raw JSON", text)
+        self.assertLess(len(text), 20000)
+        raw = raw_json(nested)
+        self.assertLess(len(raw), 10000, "Indentation must not amplify a deeply nested import")
+        decoded = json.loads(raw)
+        for _ in range(600):
+            decoded = decoded["next"]
+        self.assertEqual(decoded, {"leaf": "точное значение \"quoted\"\n"})
+        wide = {"rows": list(range(5000)), "long": "x" * 140000}
+        self.assertEqual(json.loads(raw_json(wide)), wide)
+        self.assertIn("complete Raw JSON", "\n".join(fact_lines(wide, "EN")))
+        row = finding()
+        row["facts"] = [{"unknown": "x" * 140000}]
+        self.assertIn("complete Raw JSON", detail_text(row, "EN"))
+        self.assertEqual(json.loads(raw_json(row)), row)
+
+    def test_malformed_snapshot_containers_remain_literal_and_invalid_clocks_stay_explicit(self):
+        for snapshots in (None, [], "provider-owned", False):
+            card = {"snapshots": snapshots, "post_context_complete": None}
+            self.assertIn("Incident observations", detail_text(card, "EN", card=True))
+            self.assertEqual(json.loads(raw_json(card)), card)
+        for invalid in (False, -1, 2**63, 10**330, float("nan"), "17"):
+            self.assertIn("Invalid recorded timestamp", time_text({"time_ns": invalid}, 0, "EN", events=True))
+        self.assertIn("origin unknown", time_text({"time_ns": 17}, -1, "EN", events=True))
+        self.assertIn("Invalid recorded interval", time_text({"start_ns": 17, "end_ns": 0}, 0, "EN"))
+
+    def test_long_unknown_codes_have_explicit_previews_and_raw_record_remains_complete(self):
+        row = finding()
+        row["code"] = "UNRECOGNIZED_" + "z" * 140000
+        unknown_key = "vendor_key_" + "k" * 140000
+        unknown_status = "VENDOR_STATUS_" + "s" * 140000
+        row["facts"] = [{unknown_key: 42, "status": unknown_status}]
+        text = detail_text(row, "EN")
+        self.assertLess(len(text), 65536)
+        self.assertIn("complete Raw JSON", text)
+        self.assertIn("vendor_key_", text)
+        self.assertIn("VENDOR_STATUS_", text)
+        self.assertNotIn(unknown_key, text)
+        self.assertNotIn(unknown_status, text)
+        self.assertEqual(json.loads(raw_json(row)), row)
+
+    def test_raw_json_preserves_json_types_escapes_and_rejects_non_json_values_without_replacement(self):
+        values = {"integer": 0, "negative": -17, "float": 1.25, "true": True, "false": False,
+                  "null": None, "empty_object": {}, "empty_array": [],
+                  "text": "Русский / quoted \" slash \\ newline\ncontrol\x00\x1f",
+                  "surrogate": "literal\ud800", "escaped_surrogate": r"literal\ud800"}
+        for complex_record in (False, True):
+            row = {**values, **({"force_compact": list(range(5000))} if complex_record else {})}
+            raw = raw_json(row)
+            raw.encode("utf-8", errors="strict")
+            self.assertEqual(json.loads(raw), row)
+            self.assertIn(r"\ud800", raw)
+        for value in (float("nan"), float("inf"), -float("inf"), (1, 2), {1: "non-string key"}):
+            for prefix in ({}, {"force_compact": list(range(5000))}):
+                with self.subTest(value=value, compact=bool(prefix)):
+                    with self.assertRaises((TypeError, ValueError)):
+                        raw_json({**prefix, "invalid": value})
+        cyclic = {}
+        cyclic["next"] = cyclic
+        with self.assertRaisesRegex(ValueError, "Circular"):
+            raw_json(cyclic)
+        text = detail_text({"code": "FUTURE", "detail": values}, "EN", events=True)
+        text.encode("utf-8", errors="strict")
+
 
 if __name__ == "__main__":
     unittest.main()

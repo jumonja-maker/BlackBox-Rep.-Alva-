@@ -205,6 +205,41 @@ class ExpertAnalysisContextTests(unittest.TestCase):
         self.assertIn("Read: ready", result)
         self.assertEqual(value, original)
 
+    def test_invalid_selected_instance_cannot_make_a_matching_malformed_packet_ready(self):
+        for invalid in (True, False, 0, -1, 1.0, None, 2**63):
+            with self.subTest(invalid=invalid):
+                result = format_analysis_context(SOURCE_A, packet(instance_id=invalid), instance_id=invalid)
+                self.assertIn("awaiting", result)
+                self.assertIn("Selected recorded instance: unknown", result)
+                self.assertNoPacketEvidence(result)
+
+    def test_unknown_report_or_source_schema_suppresses_interpretation_and_preserves_selection(self):
+        for key, invalid in (("schema_version", 1), ("schema_version", True),
+                             ("schema_version", 99), ("source_schema_version", 99)):
+            with self.subTest(key=key, invalid=invalid):
+                value = packet()
+                value["interval"][key] = invalid
+                result = format_analysis_context(SOURCE_A, value)
+                self.assertIn(str(SOURCE_A), result)
+                self.assertIn("awaiting", result)
+                self.assertNoPacketEvidence(result)
+        legacy = packet()
+        legacy["interval"].update(schema_version=2, source_schema_version=1)
+        self.assertIn("Read: ready", format_analysis_context(SOURCE_A, legacy))
+        legacy["interval"]["instance_id"] = 7
+        self.assertIn("awaiting", format_analysis_context(SOURCE_A, legacy, instance_id=7))
+
+    def test_huge_clock_is_unknown_and_unbounded_imported_status_has_an_explicit_preview(self):
+        value = packet()
+        value["interval"]["metadata"]["monotonic_origin_ns"] = 10**330
+        value["interval"]["metadata"]["recorded_status"] = "status:" + "x" * 140000
+        original = deepcopy(value)
+        result = format_analysis_context(SOURCE_A, value)
+        self.assertIn("recorded monotonic origin (ns): unknown", result)
+        self.assertIn("recorded text truncated", result)
+        self.assertLess(len(result), 2000)
+        self.assertEqual(value, original)
+
 
 if __name__ == "__main__":
     unittest.main()

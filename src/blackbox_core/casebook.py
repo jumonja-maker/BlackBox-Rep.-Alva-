@@ -154,8 +154,35 @@ class CaseBook:
 
 
 def context(folder):
+    # Native writers limit each JSON value to 64 KiB and keep a small set of
+    # keys. Apply an aggregate import budget before export/compare can retain
+    # an arbitrary context table in Python. Overflow is an error, never a
+    # silently truncated statement of the recording's conditions.
+    max_rows,max_bytes,max_value_bytes=128,2*1024**2,65536
+    result={};total=0;deadline=time.monotonic()+3
+    def pairs(items):
+        value={}
+        for key,item in items:
+            if key in value:raise ValueError('INVALID_RESEARCH_CONTEXT_DUPLICATE_KEY')
+            value[key]=item
+        return value
+    def constant(_):raise ValueError('INVALID_RESEARCH_CONTEXT_NONFINITE_JSON')
     with closing(readonly(Path(folder)/"research.sqlite3")) as db:
-        return {r[0]: json.loads(r[1]) for r in db.execute("SELECT key,data FROM context")}
+        db.set_progress_handler(lambda:int(time.monotonic()>=deadline),1000)
+        rows=db.execute("SELECT substr(key,1,257),substr(data,1,65537),"
+                        "length(CAST(key AS BLOB)),length(CAST(data AS BLOB)) "
+                        "FROM context LIMIT ?",(max_rows+1,))
+        for ordinal,row in enumerate(rows,1):
+            key,raw,key_bytes,value_bytes=row
+            if (ordinal>max_rows or type(key) is not str or not key or
+                    type(raw) is not str or type(key_bytes) is not int or not 1<=key_bytes<=256 or
+                    type(value_bytes) is not int or not 1<=value_bytes<=max_value_bytes):
+                raise ValueError('RESEARCH_CONTEXT_BUDGET_EXCEEDED')
+            total+=key_bytes+value_bytes
+            if total>max_bytes:raise ValueError('RESEARCH_CONTEXT_BUDGET_EXCEEDED')
+            if key in result:raise ValueError('INVALID_RESEARCH_CONTEXT_DUPLICATE_KEY')
+            result[key]=json.loads(raw,object_pairs_hook=pairs,parse_constant=constant)
+        return result
 
 
 def evidence_page(folder, *, start_ms=0, end_ms=2**63-1, after_id=0, before_id=None, limit=100):

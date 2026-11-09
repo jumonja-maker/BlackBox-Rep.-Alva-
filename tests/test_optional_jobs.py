@@ -52,6 +52,22 @@ class OptionalJobsTests(unittest.TestCase):
         self.assertEqual(len(jobs.cancel()),1)
     def test_pid_birth_mismatch_is_refused_before_native_capture(self):
         with self.assertRaises(ValueError):execute({'op':'native','pid':os.getpid(),'created':1})
+    def test_nonfinite_birth_never_passes_identity_validation_or_reaches_native_capture(self):
+        from unittest.mock import patch
+        for created in (float('nan'),float('inf'),float('-inf'),10**1000):
+            with self.subTest(created=created), patch('psutil.Process') as process:
+                with self.assertRaisesRegex(ValueError,'INVALID_TARGET_IDENTITY'):
+                    execute({'op':'native','pid':os.getpid(),'created':created})
+                process.assert_not_called()
+    def test_invalid_observed_birth_cannot_match_a_valid_requested_identity(self):
+        from unittest.mock import patch
+        from blackbox_core.operation_worker import validate_identity
+        for actual in (float('nan'),float('inf'),float('-inf'),10**1000,None,False,0,-1):
+            with self.subTest(actual=actual), patch('psutil.Process') as process:
+                process.return_value.create_time.return_value=actual
+                with self.assertRaisesRegex(ValueError,'TARGET_INSTANCE_CHANGED'):
+                    validate_identity(os.getpid(),1234567890.5)
+                process.assert_called_once_with(os.getpid())
     def test_cancel_running_child_returns_explicit_unconfirmed_status(self):
         jobs=OptionalJobs(launcher=lambda args:OwnedProcess([sys.executable,'-c','import time;time.sleep(60)']))
         jobs.submit({'op':'dump','id':'cancel'},{'op':'dump'});jobs.poll();p=jobs.current['owner'].process

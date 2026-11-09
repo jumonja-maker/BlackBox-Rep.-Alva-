@@ -291,9 +291,19 @@ class LibraryCatalog:
             raise ValueError('LIBRARY_INVALID_SCAN')
         if not self.root.is_dir():return {'added':0,'errors':[],'has_more':False,'cursor':after}
         checked(self.root)
+        deadline=time.monotonic()+5
+        def bounded_names(entries):
+            # nsmallest bounds retained names, not directory enumeration.
+            # Refuse an incomplete enumeration before registering anything:
+            # advancing a sorted cursor could otherwise skip unseen names.
+            for count,entry in enumerate(entries,1):
+                if count>10000 or time.monotonic()>=deadline:
+                    raise ValueError('LIBRARY_SCAN_ENUMERATION_BUDGET')
+                if SESSION_NAME.fullmatch(entry.name) and entry.name>after:
+                    yield entry.name
         with os.scandir(self.root) as entries:
-            names=heapq.nsmallest(limit+1,(e.name for e in entries if SESSION_NAME.fullmatch(e.name) and e.name>after))
-        added=0;errors=[];cursor=after;deadline=time.monotonic()+5
+            names=heapq.nsmallest(limit+1,bounded_names(entries))
+        added=0;errors=[];cursor=after
         for name in names[:limit]:
             if time.monotonic()>deadline:break
             try:self.register(self.root/name);added+=1

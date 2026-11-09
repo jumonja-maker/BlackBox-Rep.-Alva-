@@ -1,6 +1,6 @@
 """Explicit, one-use, resumable purge of finalized app-marked Trash only."""
 from contextlib import closing
-import hashlib,json,os,re,time
+import hashlib,json,math,os,re,time
 from pathlib import Path
 from uuid import uuid4
 from .library_files import checked,read_json,atomic_json
@@ -18,11 +18,20 @@ def inventory(root):
  return sorted(rows,key=lambda r:(len(Path(r['relative']).parts),r['relative']),reverse=True)
 def fingerprint(rows):
  return hashlib.sha256(json.dumps(rows,sort_keys=True,separators=(',',':')).encode()).hexdigest()
+def _known_birth(value):
+ if type(value) not in (int,float) or value<=0:return False
+ try:return math.isfinite(value)
+ except OverflowError:return False
 def _alive(journal):
  import psutil
- try:return abs(psutil.Process(journal['owner_pid']).create_time()-journal['owner_created'])<.000001
- except (psutil.NoSuchProcess,KeyError,TypeError):return False
- except psutil.AccessDenied:return True
+ pid=journal.get('owner_pid');created=journal.get('owner_created')
+ if type(pid) is not int or pid<=0:return True
+ try:
+  actual=psutil.Process(pid).create_time()
+ except psutil.NoSuchProcess:return False
+ except (psutil.Error,OSError,ValueError,OverflowError):return True
+ if not _known_birth(created) or not _known_birth(actual):return True
+ return abs(actual-created)<.000001
 def _paths(catalog,row):
  if row['origin']!='LOCAL_APP_MARKED' or row['state'] not in ('TRASH','PURGING','PURGE_PARTIAL'):raise ValueError('PURGE_REQUIRES_OWNED_TRASH')
  if not re.fullmatch('[0-9a-f]{32}',row.get('trash_name') or ''):raise ValueError('PURGE_INVALID_TRASH_ID')

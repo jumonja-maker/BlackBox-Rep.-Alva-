@@ -21,11 +21,16 @@ class RecoveryPanel(QWidget):
   for w,en,ru in self.labels:w.setText(self.tr(en,ru))
   self.note.setText(self.tr('Interrupted exports are retained locally. Recovery/delete requires confirmation; original recordings are not edited.',
    'Прерванные экспорты сохраняются локально. Продолжение/удаление требует подтверждения; исходные записи не редактируются.'))
+  self.controls()
  def controls(self,*_):
   i=self.selection.currentIndex();row=self.rows[i] if 0<=i<len(self.rows) else None
   allowed=bool(row and row.get('owner_active') is False and row.get('state')!='INVALID_RETAINED' and not self.busy)
   self.choose.setEnabled(not self.busy);self.finish.setEnabled(allowed and row.get('can_finish',False));self.discard.setEnabled(allowed)
-  if row:self.detail.setPlainText(row['journal']+'\n'+str(row['state'])+'\n'+self.tr('Owner active: ','Владелец активен: ')+str(row.get('owner_active')))
+  if row:
+   active=row.get('owner_active')
+   owner=self.tr('Exit verified','Завершение подтверждено') if active is False else self.tr('Active or exit not verified','Активен или завершение не подтверждено')
+   self.detail.setPlainText(row['journal']+'\n'+str(row['state'])+'\n'+self.tr('Owner: ','Владелец: ')+owner)
+  else:self.detail.clear()
  def send(self,op,**args):
   try:self.bridge.send(op,**args);self.busy=True;self.controls()
   except (ValueError,RuntimeError) as exc:self.status.setText(str(exc))

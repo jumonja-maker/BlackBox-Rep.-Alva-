@@ -10,6 +10,9 @@ from .contracts import ObserverError, Sample, bounded
 from .event_journal import BoundedEventJournal
 from .session_completion import CompletionNotConfirmed, confirm_v2_completion
 
+REPORT_READ_SECONDS = 15
+REPORT_SQLITE_VALUE_BYTES = 1024 * 1024
+
 
 def _utc() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
@@ -19,11 +22,19 @@ def _open_ro(folder: Path) -> sqlite3.Connection:
     path = Path(folder) / "session.sqlite3"
     if not path.is_file() or path.is_symlink():
         raise ObserverError("INVALID_DATA", "report")
+    db = None
     try:
         db = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)
         db.row_factory = sqlite3.Row
+        db.setlimit(sqlite3.SQLITE_LIMIT_LENGTH, REPORT_SQLITE_VALUE_BYTES)
+        db.execute("PRAGMA query_only=ON")
+        db.execute("PRAGMA trusted_schema=OFF")
+        deadline = time.monotonic() + REPORT_READ_SECONDS
+        db.set_progress_handler(lambda: int(time.monotonic() > deadline), 1000)
         return db
     except sqlite3.Error:
+        if db is not None:
+            db.close()
         raise ObserverError("INVALID_DATA", "report") from None
 
 

@@ -19,11 +19,12 @@ from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QObject, Qt, Signal
+from PySide6.QtCore import QObject, QProcess, Qt, Signal
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QDialog
 
 from blackbox_universal.decoder_window import DecoderWindow
+from blackbox_universal.research_bridge import ResearchBridge
 from blackbox_universal.timeline import SessionTimeline
 from blackbox_universal.window import UniversalWindow
 from qt_test_support import close_and_drain, dispose_closed_fixture
@@ -49,6 +50,27 @@ class ControlledIntervalReader(QObject):
     def complete(self, packet=None, error=""):
         self.result_ready.emit(packet, error)
         self.finished.emit()
+
+
+class ControlledResearchQueue(ResearchBridge):
+    """Real send/shutdown protocol against a process-free writable Qt facade."""
+    def __init__(self, parent=None):
+        QObject.__init__(self, parent)
+        self.sent = []
+        self.process = SimpleNamespace(
+            state=lambda: QProcess.ProcessState.Running, bytesToWrite=lambda: 0,
+            write=self.write_packet)
+        self._pending = {str(index): "TEST_ONLY_PENDING" for index in range(64)}
+        self._queue = []
+        self.closing = False
+        self._stop_deadline = None
+        self.active = True
+        self.last_error = "RECOVERY_UNCONFIRMED"
+        self.session_state = "INTERRUPTED_UNCONFIRMED"
+
+    def write_packet(self, packet):
+        self.sent.append(json.loads(packet))
+        return len(packet)
 
 
 def recorded_interval(folder, *, instance=1, pid=4321):
@@ -426,6 +448,220 @@ class ExpertNavigationTests(unittest.TestCase):
                     self.assertNotEqual(window.report_preview.toPlainText(), loading_text)
         self.assertEqual(window.probe.pid, 98765)
         self.assertFalse(window.probe.active)
+
+    def test_live_attach_and_start_preserve_selected_historic_thread_evidence(self):
+        window = self.window
+        self.load_recorded_a(instance=7)
+        current = window._thread_detail_payload
+        cells = [window.thread_detail_table.item(0, column).text()
+                 for column in range(window.thread_detail_table.columnCount())]
+        with patch.object(window.probe, "attach", side_effect=lambda pid: setattr(window.probe, "pid", pid)), \
+             patch.object(window.probe, "start"), patch.object(window, "_update_all"):
+            window._attach_pid(98765)
+            window._start()
+        self.assertEqual(window.probe.pid, 98765)
+        self.assertEqual(window._interval_folder, self.source_a)
+        self.assertEqual(window._interval_process, 7)
+        self.assertIs(window._thread_detail_payload, current)
+        self.assertEqual([window.thread_detail_table.item(0, column).text()
+                          for column in range(window.thread_detail_table.columnCount())], cells)
+        self.assertIn("4321", window.thread_detail_status.text())
+        self.assertNotIn("98765", window.thread_detail_status.text())
+
+    def test_bridge_dispatch_failures_do_not_claim_start_stop_or_change_interval(self):
+        window = self.window
+        with patch.object(window, "_isolated", True), \
+             patch.object(window.probe, "pending", False, create=True), \
+             patch.object(window.probe, "stopping", False, create=True), \
+             patch("blackbox_universal.window.QMessageBox.warning") as warning:
+            original = window._report_state
+            with patch.object(window.probe, "start", side_effect=RuntimeError("RESEARCH_HELPER_UNAVAILABLE")):
+                window._start()
+            self.assertEqual(window._report_state, original)
+            self.assertFalse(window.probe.active)
+            with patch.object(window.probe, "active", True), \
+                 patch.object(window.probe, "stop", side_effect=RuntimeError("RESEARCH_COMMAND_QUEUE_FULL")):
+                window._stop()
+                self.assertTrue(window.probe.active)
+                self.assertEqual(window._report_state, original)
+            milliseconds = window._timer.interval()
+            with patch.object(window.probe, "send", side_effect=RuntimeError("RESEARCH_HELPER_UNAVAILABLE"), create=True):
+                window._refresh_process_list()
+                self.assertIn("unavailable", window.process_count.text())
+                window.interval_combo.setCurrentIndex(1)
+                self.assertEqual(window._timer.interval(), milliseconds)
+                self.assertEqual(window.interval_combo.currentData(), milliseconds)
+                self.assertIn("INTERVAL_CHANGE_UNAVAILABLE", window.recent_messages.toPlainText())
+                with patch.object(window.probe, "pid", 98765), \
+                     patch("blackbox_universal.window.QFileDialog.getSaveFileName",
+                           return_value=(str(self.root/"TEST_ONLY_EXPORT.json"), "JSON")):
+                    window._export()
+            self.assertEqual(warning.call_count, 3)
+        for handler, command in ((window._prepare_action, "prepare_action"),
+                                 (window._begin_action, "begin_action"),
+                                 (window._end_action, "finish_action")):
+            with self.subTest(command=command), \
+                 patch.object(window.probe, command, side_effect=RuntimeError("RESEARCH_COMMAND_QUEUE_FULL")), \
+                 patch.object(window, "_update_all"), \
+                 patch("blackbox_universal.window.QMessageBox.warning") as warning:
+                handler()
+                warning.assert_called_once()
+
+    def test_queue_full_quit_submission_preserves_unknown_owner_and_can_retry(self):
+        bridge = ControlledResearchQueue(self.window)
+        original = dict(bridge._pending)
+        with self.assertRaisesRegex(RuntimeError, "RESEARCH_COMMAND_QUEUE_FULL"):
+            bridge.shutdown()
+        self.assertFalse(bridge.closing)
+        self.assertTrue(bridge.active)
+        self.assertEqual(bridge.session_state, "INTERRUPTED_UNCONFIRMED")
+        self.assertEqual(bridge.last_error, "RECOVERY_UNCONFIRMED")
+        self.assertEqual(bridge._pending, original)
+        self.assertEqual(bridge.sent, [])
+        self.assertIsNone(bridge._stop_deadline)
+        bridge._pending.pop("0")
+        bridge.shutdown()
+        self.assertTrue(bridge.closing)
+        self.assertEqual(bridge.sent[-1]["op"], "quit")
+        self.assertIn("quit", bridge._pending.values())
+        self.assertIsNotNone(bridge._stop_deadline)
+        bridge.shutdown()
+        self.assertEqual(len(bridge.sent), 1)
+        self.assertTrue(bridge.active, "Submitting quit is not a cleanup acknowledgement")
+
+    def test_rejected_window_selection_restores_the_cached_hwnd(self):
+        class CachedWindowSelection:
+            @property
+            def selected_hwnd(self):
+                return 10
+
+            @selected_hwnd.setter
+            def selected_hwnd(self, _value):
+                raise RuntimeError("RESEARCH_COMMAND_QUEUE_FULL")
+
+        window = self.window
+        window.window_selector.addItem("TEST_ONLY_WINDOW_A", 10)
+        window.window_selector.addItem("TEST_ONLY_WINDOW_B", 20)
+        window.window_selector.setCurrentIndex(window.window_selector.findData(10))
+        with patch.object(window.probe, "window_capture", CachedWindowSelection()):
+            window.window_selector.setCurrentIndex(window.window_selector.findData(20))
+            self.assertEqual(window.window_selector.currentData(), 10)
+            self.assertEqual(window.probe.window_capture.selected_hwnd, 10)
+            self.assertEqual(window.window_capture_status.text(), "WINDOW_SELECTION_UNAVAILABLE")
+
+    def test_rejected_window_shutdown_stays_visible_and_retries_after_dispatch_recovers(self):
+        window = self.window
+        window._chain_close_complete = True
+        window.show()
+        self.app.processEvents()
+        with patch.object(window, "_isolated", True), \
+             patch.object(window.probe, "alive", True, create=True), \
+             patch.object(window.probe, "pending", False, create=True), \
+             patch.object(window.probe, "shutdown", side_effect=RuntimeError("RESEARCH_COMMAND_QUEUE_FULL"), create=True), \
+             patch("blackbox_universal.window.QMessageBox.warning") as warning:
+            self.assertFalse(window.close())
+            self.assertTrue(window.isVisible())
+            self.assertFalse(window._pending_close)
+            self.assertTrue(window._timer.isActive())
+            warning.assert_called_once()
+        window._timer.stop()
+        with patch.object(window, "_isolated", True), \
+             patch.object(window.probe, "alive", True, create=True), \
+             patch.object(window.probe, "shutdown", create=True) as shutdown:
+            self.assertFalse(window.close())
+            self.assertTrue(window._pending_close)
+            self.assertTrue(window.isVisible())
+            shutdown.assert_called_once()
+            window.probe.alive = False
+            window._research_terminated()
+            self.app.processEvents()
+            self.assertFalse(window.isVisible())
+            self.assertFalse(window._pending_close)
+
+    def test_each_window_owned_reader_completion_resumes_deferred_close(self):
+        for field, callback in (("_thread_detail_worker", "_thread_detail_finished"),
+                                ("_investigation_worker", "_investigation_finished"),
+                                ("_update_worker", "_worker_finished")):
+            with self.subTest(owner=field):
+                window = self.make_window()
+                window._chain_close_complete = True
+                reader = ControlledIntervalReader(self.source_a, window)
+                setattr(window, field, reader)
+                reader.finished.connect(getattr(window, callback))
+                window.show()
+                self.app.processEvents()
+                self.assertFalse(window.close())
+                self.assertTrue(window.isVisible())
+                self.assertTrue(window._pending_close)
+                reader.finished.emit()
+                self.app.processEvents()
+                self.assertIsNone(getattr(window, field))
+                self.assertFalse(window.isVisible())
+                self.assertFalse(window._pending_close)
+
+    def test_closing_suppresses_queued_update_investigation_and_recorded_reads(self):
+        window = self.window
+        window.probe.session_folder = self.source_a
+        window.show()
+        with patch("blackbox_universal.window._UpdateWorker") as update, \
+             patch("blackbox_universal.window.InvestigationWorker") as investigation, \
+             patch("blackbox_universal.window.SessionIntervalWorker") as interval, \
+             patch("blackbox_universal.window.ThreadDetailWorker") as threads:
+            window._investigation_retry = (self.source_a, (0, 1000))
+            window._schedule_investigation_retry()
+            with patch.object(window, "_pending_close", True):
+                self.app.processEvents()  # Deliver the already-queued retry.
+                window._automatic_update_check()
+                window._check_updates()
+                window._update_click()
+                window._begin_investigation(folder=self.source_a)
+                window._load_session_interval(self.source_a)
+                window._load_thread_detail()
+                window._investigation_retry = (self.source_a, (0, 1000))
+                window._schedule_investigation_retry()
+                self.assertIsNone(window._investigation_retry)
+            for factory in (update, investigation, interval, threads):
+                factory.assert_not_called()
+
+    def test_export_modal_cannot_switch_the_consented_source_or_use_a_loading_packet(self):
+        window = self.window
+        for completed in (False, True):
+            with self.subTest(completed=completed):
+                self.load_recorded_a()
+                def change_source_during_dialog():
+                    window._load_session_interval(self.source_b)
+                    if completed:
+                        window._interval_worker.complete(recorded_interval(self.source_b))
+                    return QDialog.DialogCode.Accepted
+                with patch("blackbox_universal.window.QDialog.exec", side_effect=change_source_during_dialog), \
+                     patch("blackbox_universal.window.QFileDialog.getExistingDirectory", return_value=str(self.root)), \
+                     patch("blackbox_universal.window.SessionExportWorker") as export:
+                    window._export_session_interval()
+                    export.assert_not_called()
+                if window._interval_worker is not None:
+                    window._interval_worker.complete(recorded_interval(self.source_b))
+
+    def test_reports_and_expert_buttons_fit_minimum_width_in_both_languages(self):
+        from blackbox_universal.theme import set_retro_theme
+        set_retro_theme(self.app)
+        window = self.window
+        window.resize(1020, 850)
+        window.research_toggle.setChecked(True)
+        window.library_toggle.setChecked(True)
+        window.library_panel.storage_toggle.setChecked(True)
+        window.show()
+        for language in ("RU", "EN"):
+            with self.subTest(language=language):
+                window._set_language(language)
+                window._navigate("reports")
+                self.app.processEvents()
+                available = window.stack.currentWidget().viewport().width()
+                for panel in (window.research_panel, window.library_panel):
+                    self.assertLessEqual(panel.width(), available)
+                for button in (*window.expert_section_buttons.values(), window.copy_context_button):
+                    self.assertGreaterEqual(button.width(), button.minimumSizeHint().width())
+                    self.assertGreaterEqual(button.x(), 0)
+                    self.assertLessEqual(button.x()+button.width(), button.parentWidget().width())
 
     def test_modal_and_closing_shortcuts_cannot_change_page_or_review(self):
         window = self.window

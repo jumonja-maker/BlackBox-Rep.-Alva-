@@ -14,7 +14,7 @@ MAX_UNCOMPRESSED = 2 * 1024**3
 REQUIRED = (
     'BLACK.BOX-Universal.exe', 'BLACK.BOX-Maintenance.exe',
     '.blackbox-portable.json', 'LICENSE', 'README.md', 'README.ru.md',
-    'LICENSING.md', 'INVESTIGATION-LICENSE.txt',
+    'LICENSING.md', 'INVESTIGATION-LICENSE.txt', 'RELEASE-NOTES.md',
     '_internal/blackbox-build.json', 'decoder/BLACK.BOX-Decoder.exe',
     'decoder/decoder-manifest.json', 'decoder/notices/TraceEvent-LICENSE.txt',
     'diagnostic/BLACK.BOX-Diagnostic.exe',
@@ -64,6 +64,11 @@ def verify_archive(path, source_sha, source_tree):
                 provenance.get('source_tree_sha') == source_tree and
                 provenance.get('tracked_worktree_clean') is True, 'FROZEN_SOURCE_MISMATCH')
         require(provenance.get('version') == VERSION, 'FROZEN_VERSION_MISMATCH')
+        notes = contents('RELEASE-NOTES.md').decode('utf-8')
+        heading = notes.splitlines()[0] if notes else ''
+        notes_version = re.match(r'^# BLACK\.BOX Universal v([0-9]+\.[0-9]+\.[0-9]+)(?=\s|$)', heading)
+        require(notes_version is not None and notes_version.group(1) == VERSION,
+                'RELEASE_NOTES_VERSION_MISMATCH')
         diagnostic_provenance = json.loads(contents(
             'diagnostic/_internal/blackbox-build.json', 4096))
         require(diagnostic_provenance == provenance, 'DIAGNOSTIC_SOURCE_IDENTITY_MISMATCH')
@@ -142,6 +147,7 @@ def verify_archive(path, source_sha, source_tree):
         checksum = digest(stream)
     return {'status': 'VERIFIED_RELEASE_ARCHIVE', 'version': VERSION,
             'source_sha': source_sha, 'source_tree_sha': source_tree,
+            'release_notes_version': notes_version.group(1),
             'archive': path.name, 'bytes': path.stat().st_size, 'sha256': checksum,
             'decoder_files_verified': len(files),
             'diagnostic_files_verified': diagnostic_count,

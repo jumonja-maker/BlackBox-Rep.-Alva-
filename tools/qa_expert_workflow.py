@@ -84,6 +84,18 @@ def validate_receipt(proof, *, source_sha, frozen, scale):
             all(row.get("actual_qt_input") is True and row.get("context_unchanged") is True and
                 row.get("target_visible_in_viewport") is True for row in sections),
             "EXPERT_RECEIPT_SECTIONS")
+    minimum = proof.get("minimum_width", [])
+    require(len(minimum) == 2 and {row.get("language") for row in minimum} == {"EN", "RU"},
+            "EXPERT_RECEIPT_MINIMUM_WIDTH_LANGUAGES")
+    for row in minimum:
+        require(row.get("logical_window_client") == [1020, 850] and row.get("actual_qt_resize") is True and
+                row.get("expanded_sections") == ["library", "actions", "technical"] and
+                type(row.get("viewport_width")) is int and row["viewport_width"] > 0 and
+                type(row.get("outer_horizontal_scroll_maximum")) is int and
+                row["outer_horizontal_scroll_maximum"] == 0 and
+                all(type(row.get(key)) is int and 0 < row[key] <= row["viewport_width"]
+                    for key in ("research_panel_width", "library_panel_width")),
+                "EXPERT_RECEIPT_MINIMUM_WIDTH_OVERFLOW")
     recordings = proof.get("recordings", [])
     require(len(recordings) == 2 and {row.get("language") for row in recordings} == {"RU", "EN"},
             "EXPERT_RECEIPT_REAL_RECORDINGS")
@@ -120,7 +132,7 @@ def validate_receipt(proof, *, source_sha, frozen, scale):
             fixture.get("raw_json_roundtrip") is True and
             fixture.get("root_cause") == "UNKNOWN", "EXPERT_RECEIPT_FIXTURE_SCOPE_OR_SELECTION")
     screenshots = proof.get("screenshots", [])
-    require(6 <= len(screenshots) <= 16 and len({row.get("id") for row in screenshots}) == len(screenshots),
+    require(10 <= len(screenshots) <= 16 and len({row.get("id") for row in screenshots}) == len(screenshots),
             "EXPERT_RECEIPT_SCREENSHOT_COUNT")
     for row in screenshots:
         require(row.get("language") in ("RU", "EN") and row.get("scale") == scale and
@@ -129,10 +141,14 @@ def validate_receipt(proof, *, source_sha, frozen, scale):
                 re.fullmatch(r"[0-9a-f]{64}", row.get("sha256", "")) and
                 row.get("scope") in ("REAL_GUI_PROCESS_RECORDING", "TEST_ONLY_SYNTHETIC_IMPORTED_EVIDENCE"),
                 "EXPERT_RECEIPT_SCREENSHOT_IDENTITY")
+        if row.get("stage") == "fixture-minimum-width":
+            require(row.get("logical_window_client") == [1020, 850], "EXPERT_RECEIPT_MINIMUM_SCREENSHOT_SIZE")
     require({(row.get("language"), row.get("stage"), row.get("scope")) for row in screenshots} >=
             {(language, stage, scope) for language in ("EN", "RU") for stage, scope in (
                 ("saved-report", "REAL_GUI_PROCESS_RECORDING"),
                 ("fixture-findings", "TEST_ONLY_SYNTHETIC_IMPORTED_EVIDENCE"),
+                ("fixture-minimum-width", "TEST_ONLY_SYNTHETIC_IMPORTED_EVIDENCE"),
+                ("fixture-incident-card", "TEST_ONLY_SYNTHETIC_IMPORTED_EVIDENCE"),
                 ("fixture-events", "TEST_ONLY_SYNTHETIC_IMPORTED_EVIDENCE"))}, "EXPERT_RECEIPT_SCREENSHOT_SCOPE_COVERAGE")
     return proof
 
@@ -196,7 +212,7 @@ def run_gui(app, window, output, source_sha):
         "source_identity": identity, "frozen": bool(getattr(sys, "frozen", False)), "gui_pid": os.getpid(),
         "scale": scale, "dpi_scope": "QT_SCALE_FACTOR_SIMULATION", "physical_windows_10_11": "NOT_TESTED",
         "secure_desktop": "NOT_TESTED", "navigation": [], "recordings": [], "screenshots": [],
-        "sections": [], "shortcuts": [], "callback_errors": [], "unexpected_dialogs": [],
+        "sections": [], "shortcuts": [], "minimum_width": [], "callback_errors": [], "unexpected_dialogs": [],
         "cleanup": {"owners_closed": False}}
     old_hook = sys.excepthook
     timer = QTimer()
@@ -435,6 +451,7 @@ def run_gui(app, window, output, source_sha):
                     "target_rect_in_viewport": list(target_rect.getRect()),
                     "viewport_rect": list(viewport.rect().getRect())})
             click(window.findChild(QPushButton, "expertSection_findings"))
+            phase("FIXTURE_FINDINGS_" + language)
             panel = window.analysis_panel
             click(panel.load)
             pump(lambda: not panel._busy and panel.packet is not None and panel.table.rowCount() >= 2)
@@ -456,6 +473,36 @@ def run_gui(app, window, output, source_sha):
             fixture["copy_detail_roundtrip"] = True
             reveal(panel.table)
             screenshot("fixture-findings", language, fixture["scope"])
+            phase("MINIMUM_REPORTS_WIDTH_" + language)
+            window.resize(1020, 850)
+            app.processEvents()
+            QTest.qWait(30)
+            app.processEvents()
+            scroll = window.stack.currentWidget()
+            viewport_width = scroll.viewport().width()
+            minimum = {"language": language, "logical_window_client": [window.width(), window.height()],
+                "actual_qt_resize": True, "viewport_width": viewport_width,
+                "outer_horizontal_scroll_maximum": scroll.horizontalScrollBar().maximum(),
+                "research_panel_width": window.research_panel.width(),
+                "library_panel_width": window.library_panel.width(),
+                "expanded_sections": [key for key, toggle, target in (
+                    ("library", window.library_toggle, window.library_panel),
+                    ("actions", window.research_toggle, window.research_panel),
+                    ("technical", window.report_technical_toggle, window.report_snapshot_frame))
+                    if toggle.isChecked() and target.isVisible()]}
+            proof["minimum_width"].append(minimum)
+            click(window.findChild(QPushButton, "expertSection_findings"))
+            reveal(panel.table)
+            screenshot("fixture-minimum-width", language, fixture["scope"])
+            require(minimum["logical_window_client"] == [1020, 850] and
+                    minimum["expanded_sections"] == ["library", "actions", "technical"] and
+                    minimum["outer_horizontal_scroll_maximum"] == 0 and
+                    0 < minimum["research_panel_width"] <= viewport_width and
+                    0 < minimum["library_panel_width"] <= viewport_width,
+                    "EXPERT_REPORTS_MINIMUM_WIDTH_OVERFLOW_" + json.dumps(minimum, sort_keys=True))
+            window.resize(1440, 1000)
+            app.processEvents()
+            phase("FIXTURE_INCIDENT_CARD_" + language)
             click(panel.card)
             pump(lambda: not panel._busy and panel.card_packet is not None)
             require(panel.card_packet.get("root_cause") == "UNKNOWN" and
@@ -470,6 +517,7 @@ def run_gui(app, window, output, source_sha):
             click(panel.finding)
             require(panel.card_packet is None and panel.selection() == selected_before,
                     "EXPERT_RETURN_TO_FINDING_CHANGED_SELECTION")
+            phase("FIXTURE_EVENTS_" + language)
             navigate("events")
             events = window.events_panel
             click(events.load)

@@ -50,6 +50,7 @@ from .shortcuts import create_shortcut
 from .maintenance import prepare_external_helper
 from .theme import COLORS
 from .chrome_icons import ChromeButton
+from .action_grid import ActionGrid
 from .widgets import DesktopMark, MetricCard, TrendChart, WindowPanel
 
 
@@ -903,18 +904,19 @@ class UniversalWindow(QMainWindow):
         self.report_context.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self.report_context.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         workspace_layout.addWidget(self.report_context)
-        sections = QGridLayout()
+        sections = ActionGrid(max_columns=3)
+        self.expert_section_layout = sections
         self.expert_section_buttons = {}
-        for index, key in enumerate(self._expert_sections):
+        for key in self._expert_sections:
             button = _button(key)
             button.setObjectName("expertSection_" + key)
             button.clicked.connect(lambda checked=False, section=key: self._show_expert_section(section))
             self.expert_section_buttons[key] = button
-            sections.addWidget(button, 0, index)
+            sections.addWidget(button)
         self.copy_context_button = _button("Copy analysis context")
         self.copy_context_button.setObjectName("copyAnalysisContext")
         self.copy_context_button.clicked.connect(self._copy_analysis_context)
-        sections.addWidget(self.copy_context_button, 1, 0, 1, 2)
+        sections.addWidget(self.copy_context_button)
         workspace_layout.addLayout(sections)
         # Keep the recorded timeline immediately after its source context.
         # All existing panels and their embedding attributes remain available.
@@ -992,7 +994,7 @@ class UniversalWindow(QMainWindow):
 
     def _can_export_interval(self):
         packet = self._interval_packet
-        if (not isinstance(packet, dict) or self._interval_read_error
+        if (not isinstance(packet, dict) or self._interval_read_error or self._pending_close
                 or self._interval_worker is not None or self._interval_pending is not None
                 or self._interval_export_worker is not None
                 or packet.get("folder") != str(self._interval_folder)):
@@ -1035,6 +1037,7 @@ class UniversalWindow(QMainWindow):
             button.setProperty("bb_english", labels[key][0])
         self.copy_context_button.setText("Копировать контекст анализа" if self.language == "RU"
                                          else "Copy analysis context")
+        self.expert_section_layout.invalidate()
         self.live_snapshot_button.setText("Текущее наблюдение" if self.language == "RU" else "Live snapshot")
         self.last_comparison_button.setText("Последнее сравнение" if self.language == "RU" else "Last comparison")
         if "search" in self._expert_actions:
@@ -1319,11 +1322,11 @@ class UniversalWindow(QMainWindow):
     def _automatic_update_check(self) -> None:
         # Never issue hidden HTTP requests while merely constructing a Qt
         # widget in unit tests or while the app is already closing.
-        if self.isVisible() and not self._maintenance_launching:
+        if self.isVisible() and not self._maintenance_launching and not self._pending_close:
             self._check_updates()
 
     def _check_updates(self) -> None:
-        if self._update_worker is not None:
+        if self._update_worker is not None or self._pending_close or self._maintenance_launching:
             return
         self._refresh_update_button("checking")
         self._update_worker = _UpdateWorker("check", self)
@@ -1333,11 +1336,17 @@ class UniversalWindow(QMainWindow):
 
     def _worker_finished(self) -> None:
         # The executable must never close while a QThread remains alive.
+        worker = self._update_worker
         self._update_worker = None
+        if worker is not None:
+            worker.deleteLater()
         if self._pending_update_stage is not None:
             folder = self._pending_update_stage
             self._pending_update_stage = None
             self._launch_maintenance("update", staged=folder)
+        if self._pending_close:
+            self._pending_close = False
+            QTimer.singleShot(0, self.close)
 
     def _update_checked(self, release: object, error: str) -> None:
         self._available_release = release if isinstance(release, Release) else None
@@ -1356,7 +1365,7 @@ class UniversalWindow(QMainWindow):
                     "No newer verified official version is available."))
 
     def _update_click(self) -> None:
-        if self._update_worker is not None:
+        if self._update_worker is not None or self._pending_close or self._maintenance_launching:
             return
         if self._available_release is None:
             self._check_updates()
@@ -1484,8 +1493,15 @@ class UniversalWindow(QMainWindow):
             self._update_event_table()
 
     def _refresh_process_list(self) -> None:
+        if self._pending_close:
+            return
         if self._isolated:
-            self.probe.send("processes")
+            try:
+                self.probe.send("processes")
+            except (OSError, RuntimeError, ValueError):
+                self.process_count.setText("Список процессов недоступен; показаны сохранённые строки."
+                                           if self.language == "RU" else
+                                           "Process list unavailable; showing cached rows.")
             return
         self._process_rows = available_processes()
         self._filter_processes(self.process_search.text())
@@ -1561,7 +1577,7 @@ class UniversalWindow(QMainWindow):
                 "SHA-256 skipped for files larger than 16 MiB."))
 
     def _attach_pid(self, pid: int) -> None:
-        if self._report_worker is not None or self._pending_base_stop is not None:
+        if self._report_worker is not None or self._pending_base_stop is not None or self._pending_close:
             return
         try:
             self.probe.attach(pid)
@@ -1570,10 +1586,11 @@ class UniversalWindow(QMainWindow):
                 self, self._t("Cannot attach"), self._t(
                     "This process is unavailable or protected. Choose another one."))
             return
-        self.thread_detail_table.setRowCount(0)
-        self._thread_detail_payload = None
-        self._thread_detail_state = "default"
-        self._render_thread_detail_status()
+        if self._interval_folder is None:
+            self.thread_detail_table.setRowCount(0)
+            self._thread_detail_payload = None
+            self._thread_detail_state = "default"
+            self._render_thread_detail_status()
         self._update_all()
         self._navigate("dashboard")
 
@@ -1667,10 +1684,18 @@ class UniversalWindow(QMainWindow):
         except (ValueError,RuntimeError) as exc:self.recent_messages.appendPlainText(str(exc))
 
     def _start(self) -> None:
+        if self._pending_close:
+            return
         if self._isolated:
             if self.probe.pending:
                 return
-            self.probe.start()
+            try:
+                self.probe.start()
+            except (OSError, RuntimeError, ValueError, ObserverError):
+                QMessageBox.warning(self, "BLACK.BOX", "Не удалось начать наблюдение; запуск не подтверждён."
+                                    if self.language == "RU" else
+                                    "Observation could not start; recording is not confirmed.")
+                return
             self._set_report_status("recording")
             return
         if (self._base_sample_worker is not None or
@@ -1690,16 +1715,23 @@ class UniversalWindow(QMainWindow):
         self.open_investigation_btn.setEnabled(False)
         self._refresh_investigation_info()
         self._render_investigation_findings()
-        self.thread_detail_table.setRowCount(0)
-        self._thread_detail_payload = None
-        self._thread_detail_state = "default"
-        self._render_thread_detail_status()
+        if self._interval_folder is None:
+            self.thread_detail_table.setRowCount(0)
+            self._thread_detail_payload = None
+            self._thread_detail_state = "default"
+            self._render_thread_detail_status()
         self._update_all()
 
     def _stop(self) -> None:
         if self._isolated:
             if self.probe.active and not self.probe.stopping:
-                self.probe.stop()
+                try:
+                    self.probe.stop()
+                except (OSError, RuntimeError, ValueError, ObserverError):
+                    QMessageBox.warning(self, "BLACK.BOX", "Остановка не отправлена; завершение записи не подтверждено."
+                                        if self.language == "RU" else
+                                        "Stop was not sent; recording finalization is not confirmed.")
+                    return
                 self._set_report_status("saving")
             return
         if not self.probe.active or self._report_worker is not None:
@@ -1842,11 +1874,21 @@ class UniversalWindow(QMainWindow):
 
     def _change_interval(self, index: int) -> None:
         if hasattr(self, "_timer"):
-            self._timer.setInterval(int(self.interval_combo.itemData(index)))
+            milliseconds = int(self.interval_combo.itemData(index))
             if self._isolated:
-                self.probe.send("interval", milliseconds=int(self.interval_combo.itemData(index)))
+                try:
+                    self.probe.send("interval", milliseconds=milliseconds)
+                except (OSError, RuntimeError, ValueError):
+                    previous = self.interval_combo.blockSignals(True)
+                    self.interval_combo.setCurrentIndex(max(0, self.interval_combo.findData(self._timer.interval())))
+                    self.interval_combo.blockSignals(previous)
+                    self.recent_messages.appendPlainText("INTERVAL_CHANGE_UNAVAILABLE")
+                    return
+            self._timer.setInterval(milliseconds)
 
     def _load_thread_detail(self) -> None:
+        if self._pending_close:
+            return
         if self._interval_folder is not None:
             bounds = (self._interval_packet or {}).get("interval", {}).get("selected_interval_ns")
             self._load_session_interval(self._interval_folder, bounds,
@@ -1902,7 +1944,7 @@ class UniversalWindow(QMainWindow):
             panel.setEnabled(False)
 
     def _load_session_interval(self,folder,interval=None,*,instance_id=1,event_cursor=(0,0),process_after=0):
-        if folder is None:
+        if folder is None or self._pending_close:
             return
         folder=Path(folder)
         if folder!=self._interval_folder or instance_id != self._interval_process:
@@ -2089,6 +2131,9 @@ class UniversalWindow(QMainWindow):
     def _export_session_interval(self):
         if not self._can_export_interval():
             return
+        source = self._interval_folder
+        selected = self._interval_packet["interval"]
+        selection = (self._interval_process, tuple(selected["selected_interval_ns"]), selected["series"])
         dialog=QDialog(self)
         dialog.setWindowTitle(self._t("Export privacy preview"))
         layout=QVBoxLayout(dialog)
@@ -2106,9 +2151,12 @@ class UniversalWindow(QMainWindow):
         if dialog.exec()!=QDialog.DialogCode.Accepted:
             return
         output=QFileDialog.getExistingDirectory(self,self._t("Choose export folder"))
-        if not output:
+        if not output or not self._can_export_interval():
             return
         result=self._interval_packet["interval"]
+        if (source != self._interval_folder or selection != (
+                self._interval_process, tuple(result["selected_interval_ns"]), result["series"])):
+            return
         worker=SessionExportWorker(self._interval_folder,Path(output),self,
             interval=tuple(result["selected_interval_ns"]),series=result["series"],
             instance_id=result["instance_id"],include_identifiers=identifiers.isChecked(),
@@ -2215,9 +2263,15 @@ class UniversalWindow(QMainWindow):
             ((" · " + warnings) if warnings else ""))
 
     def _thread_detail_finished(self) -> None:
+        worker = self._thread_detail_worker
         self._thread_detail_worker = None
+        if worker is not None:
+            worker.deleteLater()
         self.library_panel.selection_changed()
         self._update_all()
+        if self._pending_close:
+            self._pending_close = False
+            QTimer.singleShot(0, self.close)
 
     def _tick(self) -> None:
         was_active = self.probe.active
@@ -2399,13 +2453,21 @@ class UniversalWindow(QMainWindow):
             return
         try:
             self.probe.set_window_capture(self.probe.window_capture is None)
-        except (ObserverError,RuntimeError,ValueError):
+        except (ObserverError,RuntimeError,ValueError,OSError):
             self.window_capture_status.setText("WINDOW_CAPTURE_UNAVAILABLE")
         self._update_all()
 
     def _select_target_window(self,index):
         if self.probe.window_capture:
-            self.probe.window_capture.selected_hwnd=self.window_selector.itemData(index)
+            capture = self.probe.window_capture
+            previous = capture.selected_hwnd
+            try:
+                capture.selected_hwnd=self.window_selector.itemData(index)
+            except (OSError, RuntimeError, ValueError):
+                blocked = self.window_selector.blockSignals(True)
+                self.window_selector.setCurrentIndex(max(0, self.window_selector.findData(previous)))
+                self.window_selector.blockSignals(blocked)
+                self.window_capture_status.setText("WINDOW_SELECTION_UNAVAILABLE")
 
     def _toggle_incident_capture(self) -> None:
         if self._report_worker is not None or self._pending_base_stop is not None:
@@ -2425,7 +2487,7 @@ class UniversalWindow(QMainWindow):
             return
         try:
             self.probe.prepare_action()
-        except (ActionError, ObserverError, OSError):
+        except (ActionError, ObserverError, OSError, RuntimeError, ValueError):
             QMessageBox.warning(self, "BLACK.BOX", self._t("Action measurement unavailable"))
         self._update_all()
 
@@ -2434,7 +2496,7 @@ class UniversalWindow(QMainWindow):
             return
         try:
             self.probe.begin_action()
-        except (ActionError, ObserverError, OSError):
+        except (ActionError, ObserverError, OSError, RuntimeError, ValueError):
             QMessageBox.warning(self, "BLACK.BOX", self._t("Action measurement unavailable"))
         self._update_all()
 
@@ -2443,7 +2505,7 @@ class UniversalWindow(QMainWindow):
             return
         try:
             self.probe.finish_action()
-        except (ActionError, ObserverError, OSError):
+        except (ActionError, ObserverError, OSError, RuntimeError, ValueError):
             QMessageBox.warning(self, "BLACK.BOX", self._t("Action measurement unavailable"))
         self._update_all()
 
@@ -2512,7 +2574,8 @@ class UniversalWindow(QMainWindow):
             self, choose: bool = False,
             folder: Path | None = None,
             interval: tuple[int, int] | None = None) -> None:
-        if self._investigation_worker is not None or self._investigation_busy:
+        if (self._investigation_worker is not None or self._investigation_busy
+                or self._pending_close or self._maintenance_launching):
             return
         if folder is None:
             if choose:
@@ -2541,6 +2604,8 @@ class UniversalWindow(QMainWindow):
         self._update_all()
 
     def _investigation_ready(self, payload: object, error: str) -> None:
+        if self._pending_close:
+            return
         if error:
             self._investigation_result = {"error": error}
             QMessageBox.warning(self, self._t("Investigation unavailable"),
@@ -2588,9 +2653,17 @@ class UniversalWindow(QMainWindow):
             worker.deleteLater()
         self._refresh_investigation_info()
         self._update_all()
+        if self._pending_close:
+            self._investigation_retry = None
+            self._pending_close = False
+            QTimer.singleShot(0, self.close)
+            return
         self._schedule_investigation_retry()
 
     def _schedule_investigation_retry(self) -> None:
+        if self._pending_close or self._maintenance_launching:
+            self._investigation_retry = None
+            return
         if (self._investigation_worker is None and not self._investigation_busy
                 and self._investigation_retry):
             folder, interval = self._investigation_retry
@@ -2794,7 +2867,10 @@ class UniversalWindow(QMainWindow):
         if not name:
             return
         if self._isolated:
-            self.probe.send("snapshot_export", destination=name)
+            try:
+                self.probe.send("snapshot_export", destination=name)
+            except (OSError, RuntimeError, ValueError):
+                QMessageBox.warning(self, "Export failed", self._t("Could not write the selected JSON file."))
             return
         try:
             save_snapshot(Path(name), self.probe.snapshot())
@@ -2991,7 +3067,16 @@ class UniversalWindow(QMainWindow):
         if self._isolated and self.probe.alive:
             self._pending_close = True
             self._timer.stop()
-            self.probe.shutdown()
+            try:
+                self.probe.shutdown()
+            except (OSError, RuntimeError, ValueError):
+                self._pending_close = False
+                self._timer.start()
+                self._refresh_expert_context()
+                QMessageBox.warning(self, "BLACK.BOX — RECOVERY_UNCONFIRMED",
+                    "Запрос завершения не отправлен; очистка не подтверждена. Повторите закрытие окна."
+                    if self.language == "RU" else
+                    "Shutdown request was not sent; cleanup is not confirmed. Retry closing this window.")
             event.ignore()
             return
         if self._interval_export_worker is not None:
@@ -3016,23 +3101,21 @@ class UniversalWindow(QMainWindow):
             self._timer.stop()
             event.ignore()
             return
-        if (self._thread_detail_worker is not None and
-                self._thread_detail_worker.isRunning()):
+        if self._thread_detail_worker is not None:
+            self._pending_close = True
+            self._timer.stop()
+            self._thread_detail_worker.requestInterruption()
             event.ignore()
-            QMessageBox.information(self, "BLACK.BOX", self._t(
-                "Thread analysis is finishing; close again after it completes."))
             return
-        if self._investigation_worker is not None and self._investigation_worker.isRunning():
+        if self._investigation_worker is not None:
+            self._pending_close = True
+            self._timer.stop()
             event.ignore()
-            QMessageBox.information(
-                self, "BLACK.BOX", self._t(
-                    "Investigation is finishing; please close the window again afterwards."))
             return
-        if self._update_worker is not None and self._update_worker.isRunning():
+        if self._update_worker is not None:
+            self._pending_close = True
+            self._timer.stop()
             event.ignore()
-            QMessageBox.information(
-                self, "BLACK.BOX Universal",
-                self._t("Finish the current update before closing."))
             return
         if self.probe.active:
             self._pending_close = True
