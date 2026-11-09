@@ -2,6 +2,7 @@
 import unittest
 
 from blackbox_universal.research_e2e import finalized_proof
+from tools.qa_linux_unit_gdb import child_result
 
 
 class ResearchQaFailureTruthfulnessTests(unittest.TestCase):
@@ -24,6 +25,43 @@ class ResearchQaFailureTruthfulnessTests(unittest.TestCase):
             with self.subTest(code=code):
                 proof = finalized_proof({"status": "AWAITING_HELPER_SHUTDOWN"}, code)
                 self.assertEqual(proof["status"], expected)
+
+
+class LinuxNativeChildExitTruthfulnessTests(unittest.TestCase):
+    SHA = 'a' * 40
+
+    def proof(self, **changes):
+        return {'source_sha': self.SHA, 'inferior_started': True, 'inferior_pid': 123,
+                'inferior_exited': True, 'child_exit_code': 0, 'child_exit_signal': None,
+                'debugger_error': None, **changes}
+
+    def result(self, proof, debugger_code=0):
+        return child_result(proof, debugger_code, self.SHA)
+
+    def test_debugger_success_without_an_actual_inferior_exit_cannot_pass(self):
+        for proof in (None, {}, self.proof(inferior_started=False), self.proof(inferior_pid=0),
+                      self.proof(inferior_pid=True), self.proof(inferior_exited=False),
+                      self.proof(source_sha='b' * 40), self.proof(debugger_error='run failed')):
+            with self.subTest(proof=proof):
+                self.assertEqual(self.result(proof)[0], 125)
+
+    def test_actual_unittest_failure_and_native_signal_survive_debugger_status(self):
+        self.assertEqual(self.result(self.proof(child_exit_code=1))[0], 1)
+        self.assertEqual(self.result(self.proof(child_exit_code=7), 7)[0], 7)
+        for debugger_code in (0, 255, -11):
+            with self.subTest(debugger_code=debugger_code):
+                self.assertEqual(self.result(self.proof(child_exit_code=None, child_exit_signal=11),
+                                             debugger_code), (139, 'LINUX_UNIT_CHILD_SIGNAL_11'))
+
+    def test_unknown_ambiguous_or_boolean_exit_values_cannot_pass(self):
+        for code, signal in ((None, None), (0, 11), (True, None), (None, True), (-1, None),
+                             (256, None), (None, 0), (None, 65)):
+            with self.subTest(code=code, signal=signal):
+                self.assertEqual(self.result(self.proof(child_exit_code=code, child_exit_signal=signal))[0], 125)
+
+    def test_child_success_also_requires_successful_debugger_completion(self):
+        self.assertEqual(self.result(self.proof()), (0, 'LINUX_UNIT_CHILD_SUCCESS'))
+        self.assertEqual(self.result(self.proof(), 1)[0], 125)
 
 
 if __name__ == '__main__':

@@ -70,6 +70,8 @@ jobs:
         run: python -m unittest discover -s tests -p 'test_audit_undefined_gate_20261028.py' -v
       - name: Real Qt navigation and evidence presentation contracts
         run: python -m unittest discover -s tests -p 'test_expert*.py' -v
+      - name: Real Qt repeated application style and workspace ownership regression
+        run: python -m unittest discover -s tests -p 'test_workspace_style_lifecycle.py' -v
       - name: Recorded process selection and historic child regressions
         run: python -m unittest discover -s tests -p 'test_process_history_tree.py' -v
       - name: Existing isolated research GUI regressions

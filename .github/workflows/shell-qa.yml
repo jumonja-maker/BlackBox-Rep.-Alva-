@@ -148,7 +148,7 @@ jobs:
       - name: Install Linux Qt shared-library prerequisites
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y libegl1 libopengl0 libxcb-cursor0 libxkbcommon-x11-0
+          sudo apt-get install -y libegl1 libopengl0 libxcb-cursor0 libxkbcommon-x11-0 gdb
       - name: Install integrated shell and observer core
         run: |
           python -m pip install --require-hashes -r requirements/ci-linux-py311.lock
@@ -157,17 +157,7 @@ jobs:
         run: python tools/check_undefined_names.py --report undefined-names-linux.json
       - name: Qt offscreen unit checks
         shell: bash
-        run: |
-          python - <<'PY'
-          import faulthandler, os, unittest
-          if os.environ.get('GITHUB_ACTIONS') != 'true' or os.environ.get('RUNNER_ENVIRONMENT') != 'github-hosted':
-              raise SystemExit('FULL_LINUX_UNIT_SUITE_REQUIRES_GITHUB_HOSTED_RUNNER')
-          faulthandler.dump_traceback_later(120, repeat=True)
-          try:
-              unittest.main(module=None, argv=['unittest', 'discover', '-s', 'tests', '-v'])
-          finally:
-              faulthandler.cancel_dump_traceback_later()
-          PY
+        run: python tools/qa_linux_unit_gdb.py --source-sha "${{ github.event.pull_request.head.sha || github.sha }}"
       - name: Qt offscreen startup smoke
         run: python app.py --smoke
       - name: Real Qt isolated research end-to-end

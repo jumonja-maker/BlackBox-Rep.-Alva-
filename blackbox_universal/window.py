@@ -91,31 +91,58 @@ class _AnalysisWorkspace(QFrame):
     minimum, even though its nested layout requires more height at this width.
     """
 
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._syncing_height = False
+        self._height_metrics_dirty = True
+        self._height_update = QTimer(self)
+        self._height_update.setSingleShot(True)
+        self._height_update.timeout.connect(self._sync_minimum_height)
+
+    def _queue_minimum_height(self):
+        timer = getattr(self, "_height_update", None)
+        if timer is not None and not self._syncing_height and not timer.isActive():
+            timer.start(0)
+
     def _sync_minimum_height(self):
         if getattr(self, "_syncing_height", False) or self.layout() is None:
             return
-        layout = self.layout()
-        required = max(layout.totalMinimumSize().height(),
-                       layout.totalHeightForWidth(self.width()))
-        if required == self.minimumHeight():
-            return
+        self._height_update.stop()
         self._syncing_height = True
+        measured_width = self.width()
         try:
-            self.setMinimumHeight(required)
+            layout = self.layout()
+            if self._height_metrics_dirty:
+                self._height_metrics_dirty = False
+                layout.invalidate()
+            required = max(layout.totalMinimumSize().height(),
+                           layout.totalHeightForWidth(measured_width))
+            if required != self.minimumHeight():
+                self.setMinimumHeight(required)
+                # This runs after the resize/style/layout dispatch has
+                # unwound. Reflow siblings with the new minimum instead of
+                # leaving their old positions beside a newly clamped widget.
+                parent = self.parentWidget()
+                if parent is not None and parent.layout() is not None:
+                    parent.layout().invalidate()
+                    parent.layout().activate()
         finally:
             self._syncing_height = False
+        if self._height_metrics_dirty or self.width() != measured_width:
+            self._queue_minimum_height()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        self._sync_minimum_height()
+        self._queue_minimum_height()
 
     def event(self, event):
+        kind = event.type()
+        if kind in (QEvent.Type.FontChange, QEvent.Type.StyleChange):
+            self._height_metrics_dirty = True
         handled = super().event(event)
-        if event.type() in (QEvent.Type.LayoutRequest, QEvent.Type.FontChange,
-                            QEvent.Type.StyleChange, QEvent.Type.Show):
-            if event.type() in (QEvent.Type.FontChange, QEvent.Type.StyleChange) and self.layout() is not None:
-                self.layout().invalidate()
-            self._sync_minimum_height()
+        if kind in (QEvent.Type.LayoutRequest, QEvent.Type.FontChange,
+                    QEvent.Type.StyleChange, QEvent.Type.Show):
+            self._queue_minimum_height()
         return handled
 
 
