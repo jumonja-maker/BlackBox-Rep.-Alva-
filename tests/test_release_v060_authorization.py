@@ -16,6 +16,8 @@ from tools.publish_v060_after_ci import (
     THIRD_PARTY_REPAIR_PR, THIRD_PARTY_REPAIR_BRANCH, THIRD_PARTY_REPAIR_FILES,
     THIRD_PARTY_REPAIR_MAIN_SHA, THIRD_PARTY_REPAIR_HEAD_SHA,
     INV_BUDGET_REPAIR_PR, INV_BUDGET_REPAIR_BRANCH, INV_BUDGET_REPAIR_FILES,
+    INV_BUDGET_REPAIR_MAIN_SHA, INV_BUDGET_REPAIR_HEAD_SHA,
+    INV_GUI_REPAIR_PR, INV_GUI_REPAIR_BRANCH, INV_GUI_REPAIR_FILES,
     PUBLISHER_REPAIR_MAIN_SHA, PUBLISHER_REPAIR_HEAD_SHA,
     SHELL_NAME, MAIN_JOBS,
     R60_NAME, R60_JOBS, UI_NAME, UI_JOBS, PRIOR_SHA, PRIOR_ZIP_SHA,
@@ -58,9 +60,13 @@ def actual_endurance_receipt():
 class CumulativeV060ReleaseTests(unittest.TestCase):
     def setUp(self):
         self.source_runs = [
-            successful_run(SHELL_NAME, 301, HEAD, INV_BUDGET_REPAIR_BRANCH),
-            successful_run(UI_NAME, 302, HEAD, INV_BUDGET_REPAIR_BRANCH),
-            successful_run(R60_NAME, 303, HEAD, INV_BUDGET_REPAIR_BRANCH)]
+            successful_run(SHELL_NAME, 301, HEAD, INV_GUI_REPAIR_BRANCH),
+            successful_run(UI_NAME, 302, HEAD, INV_GUI_REPAIR_BRANCH),
+            successful_run(R60_NAME, 303, HEAD, INV_GUI_REPAIR_BRANCH)]
+        self.budget_runs = [
+            successful_run(SHELL_NAME, 601, INV_BUDGET_REPAIR_HEAD_SHA, INV_BUDGET_REPAIR_BRANCH),
+            successful_run(UI_NAME, 602, INV_BUDGET_REPAIR_HEAD_SHA, INV_BUDGET_REPAIR_BRANCH),
+            successful_run(R60_NAME, 603, INV_BUDGET_REPAIR_HEAD_SHA, INV_BUDGET_REPAIR_BRANCH)]
         self.third_party_runs = [
             successful_run(SHELL_NAME, 501, THIRD_PARTY_REPAIR_HEAD_SHA, THIRD_PARTY_REPAIR_BRANCH),
             successful_run(UI_NAME, 502, THIRD_PARTY_REPAIR_HEAD_SHA, THIRD_PARTY_REPAIR_BRANCH),
@@ -74,6 +80,7 @@ class CumulativeV060ReleaseTests(unittest.TestCase):
         self.r60_jobs = [job(n, i + 41) for i, n in enumerate(sorted(R60_JOBS))]
         self.historic_r60_jobs = [job(n, i + 141) for i, n in enumerate(sorted(R60_JOBS))]
         self.third_party_r60_jobs = [job(n, i + 541) for i, n in enumerate(sorted(R60_JOBS))]
+        self.budget_r60_jobs = [job(n, i + 641) for i, n in enumerate(sorted(R60_JOBS))]
         self.head_parent = HEAD
         self.main_ref = SHA
         self.release_pr_merged = True
@@ -88,6 +95,9 @@ class CumulativeV060ReleaseTests(unittest.TestCase):
         self.budget_pr_merged = True
         self.budget_changed = [{"filename": p, "status": INV_BUDGET_REPAIR_FILES[p]}
                                for p in sorted(INV_BUDGET_REPAIR_FILES)]
+        self.gui_pr_merged = True
+        self.gui_changed = [{"filename": p, "status": INV_GUI_REPAIR_FILES[p]}
+                            for p in sorted(INV_GUI_REPAIR_FILES)]
         self.repair_pr_merged = True
         self.repair_changed = [{"filename": p, "status": PUBLISHER_REPAIR_FILES[p]}
                                for p in sorted(PUBLISHER_REPAIR_FILES)]
@@ -97,13 +107,16 @@ class CumulativeV060ReleaseTests(unittest.TestCase):
         self.receipt = actual_endurance_receipt()
         self.historic_receipt = {**actual_endurance_receipt(), "source_sha": NATIVE_QA_HEAD_SHA}
         self.third_party_receipt = {**actual_endurance_receipt(), "source_sha": THIRD_PARTY_REPAIR_HEAD_SHA}
+        self.budget_receipt = {**actual_endurance_receipt(), "source_sha": INV_BUDGET_REPAIR_HEAD_SHA}
 
     def client(self, endpoint):
         path = endpoint.removeprefix(f"repos/{REPO}/")
         table = {
             "git/ref/heads/main": {"object": {"sha": self.main_ref}},
             f"git/commits/{SHA}": {"parents": [
-                {"sha": THIRD_PARTY_REPAIR_MAIN_SHA}, {"sha": self.head_parent}]},
+                {"sha": INV_BUDGET_REPAIR_MAIN_SHA}, {"sha": self.head_parent}]},
+            f"git/commits/{INV_BUDGET_REPAIR_MAIN_SHA}": {"parents": [
+                {"sha": THIRD_PARTY_REPAIR_MAIN_SHA}, {"sha": INV_BUDGET_REPAIR_HEAD_SHA}]},
             f"git/commits/{THIRD_PARTY_REPAIR_MAIN_SHA}": {"parents": [
                 {"sha": NATIVE_QA_MAIN_SHA}, {"sha": THIRD_PARTY_REPAIR_HEAD_SHA}]},
             f"git/commits/{NATIVE_QA_MAIN_SHA}": {"parents": [
@@ -138,10 +151,16 @@ class CumulativeV060ReleaseTests(unittest.TestCase):
             f"pulls/{THIRD_PARTY_REPAIR_PR}/files?per_page=100": self.third_party_changed,
             f"pulls/{INV_BUDGET_REPAIR_PR}": {
                 "number": INV_BUDGET_REPAIR_PR, "merged": self.budget_pr_merged,
-                "merge_commit_sha": SHA,
-                "head": {"sha": HEAD, "ref": INV_BUDGET_REPAIR_BRANCH},
+                "merge_commit_sha": INV_BUDGET_REPAIR_MAIN_SHA,
+                "head": {"sha": INV_BUDGET_REPAIR_HEAD_SHA, "ref": INV_BUDGET_REPAIR_BRANCH},
                 "base": {"ref": "main"}, "changed_files": len(self.budget_changed)},
             f"pulls/{INV_BUDGET_REPAIR_PR}/files?per_page=100": self.budget_changed,
+            f"pulls/{INV_GUI_REPAIR_PR}": {
+                "number": INV_GUI_REPAIR_PR, "merged": self.gui_pr_merged,
+                "merge_commit_sha": SHA,
+                "head": {"sha": HEAD, "ref": INV_GUI_REPAIR_BRANCH},
+                "base": {"ref": "main"}, "changed_files": len(self.gui_changed)},
+            f"pulls/{INV_GUI_REPAIR_PR}/files?per_page=100": self.gui_changed,
             "pulls/41": {
                 "merged": True, "merge_commit_sha": BASE_MAIN_SHA,
                 "head": {"sha": self.r60_sha},
@@ -156,6 +175,8 @@ class CumulativeV060ReleaseTests(unittest.TestCase):
                 {"workflow_runs": self.historic_runs},
             f"actions/runs?head_sha={THIRD_PARTY_REPAIR_HEAD_SHA}&per_page=100":
                 {"workflow_runs": self.third_party_runs},
+            f"actions/runs?head_sha={INV_BUDGET_REPAIR_HEAD_SHA}&per_page=100":
+                {"workflow_runs": self.budget_runs},
             "actions/runs/301/jobs?per_page=100": {"jobs": self.main_jobs},
             "actions/runs/302/jobs?per_page=100": {"jobs": self.ui_jobs},
             "actions/runs/303/jobs?per_page=100": {"jobs": self.r60_jobs},
@@ -165,6 +186,9 @@ class CumulativeV060ReleaseTests(unittest.TestCase):
             "actions/runs/501/jobs?per_page=100": {"jobs": self.main_jobs},
             "actions/runs/502/jobs?per_page=100": {"jobs": self.ui_jobs},
             "actions/runs/503/jobs?per_page=100": {"jobs": self.third_party_r60_jobs},
+            "actions/runs/601/jobs?per_page=100": {"jobs": self.main_jobs},
+            "actions/runs/602/jobs?per_page=100": {"jobs": self.ui_jobs},
+            "actions/runs/603/jobs?per_page=100": {"jobs": self.budget_r60_jobs},
             "releases/tags/v0.5.4": {
                 "draft": False, "prerelease": False,
                 "target_commitish": PRIOR_SHA,
@@ -185,16 +209,19 @@ class CumulativeV060ReleaseTests(unittest.TestCase):
                         "R60 actual persisted 5h30 scheduler and owned recording lifecycle")
         third = next(j for j in self.third_party_r60_jobs if j["name"] ==
                      "R60 actual persisted 5h30 scheduler and owned recording lifecycle")
+        budget = next(j for j in self.budget_r60_jobs if j["name"] ==
+                     "R60 actual persisted 5h30 scheduler and owned recording lifecycle")
         def fake_run(command, **_kwargs):
             record = (self.historic_receipt if command[-2] == str(historic["id"]) else
-                      self.third_party_receipt if command[-2] == str(third["id"]) else self.receipt)
+                      self.third_party_receipt if command[-2] == str(third["id"]) else
+                      self.budget_receipt if command[-2] == str(budget["id"]) else self.receipt)
             log = ("2026-11-08T07:41:00Z R60_ENDURANCE_RECEIPT " +
                    json.dumps(record, sort_keys=True) + "\n")
             return SimpleNamespace(stdout=log)
         with patch("tools.publish_v060_after_ci.subprocess.run",
                    side_effect=fake_run) as caller:
             result = authorize(self.client, REPO, SHA, self.upstream)
-            self.assertEqual(caller.call_count, 3)
+            self.assertEqual(caller.call_count, 4)
             lifecycle = next(j for j in self.r60_jobs if j["name"] ==
                              "R60 actual persisted 5h30 scheduler and owned recording lifecycle")
             self.assertEqual(caller.call_args.args[0],
@@ -210,6 +237,8 @@ class CumulativeV060ReleaseTests(unittest.TestCase):
         self.assertEqual(proof["native_qa_pr"], NATIVE_QA_PR)
         self.assertEqual(proof["third_party_repair_pr"], THIRD_PARTY_REPAIR_PR)
         self.assertEqual(proof["inv_budget_repair_pr"], INV_BUDGET_REPAIR_PR)
+        self.assertEqual(proof["inv_gui_repair_pr"], INV_GUI_REPAIR_PR)
+        self.assertEqual(proof["budget_r60_endurance"]["calls"], 331)
         self.assertEqual(proof["third_party_r60_endurance"]["calls"], 331)
         self.assertEqual(proof["prior_r60_endurance"]["calls"], 331)
         self.assertEqual(proof["r60_endurance"]["calls"], 331)
@@ -222,9 +251,13 @@ class CumulativeV060ReleaseTests(unittest.TestCase):
 
     def test_wrong_merge_parent_blocks(self):
         self.head_parent = "e"*40
-        with self.assertRaisesRegex(ValueError, "UNAPPROVED_INV_BUDGET_REPAIR_PR"):
+        with self.assertRaisesRegex(ValueError, "UNAPPROVED_INV_GUI_REPAIR_PR"):
             self.verify()
         self.head_parent = HEAD
+        self.gui_pr_merged = False
+        with self.assertRaisesRegex(ValueError, "UNAPPROVED_INV_GUI_REPAIR_PR"):
+            self.verify()
+        self.gui_pr_merged = True
         self.budget_pr_merged = False
         with self.assertRaisesRegex(ValueError, "UNAPPROVED_INV_BUDGET_REPAIR_PR"):
             self.verify()
@@ -254,6 +287,25 @@ class CumulativeV060ReleaseTests(unittest.TestCase):
         self.budget_changed[0]["filename"] = sorted(INV_BUDGET_REPAIR_FILES)[0]
         self.budget_changed[0]["status"] = "removed"
         with self.assertRaisesRegex(ValueError, "UNAPPROVED_INV_BUDGET_REPAIR_FILE_SCOPE"):
+            self.verify()
+
+    def test_changed_gui_repair_scope_blocks(self):
+        self.gui_changed[0]["filename"] = "blackbox_universal/maintenance.py"
+        with self.assertRaisesRegex(ValueError, "UNAPPROVED_INV_GUI_REPAIR_FILE_SCOPE"):
+            self.verify()
+        self.gui_changed[0]["filename"] = sorted(INV_GUI_REPAIR_FILES)[0]
+        self.gui_changed[0]["status"] = "removed"
+        with self.assertRaisesRegex(ValueError, "UNAPPROVED_INV_GUI_REPAIR_FILE_SCOPE"):
+            self.verify()
+
+    def test_previous_budget_source_is_mandatory(self):
+        self.budget_runs = self.budget_runs[:1]
+        with self.assertRaisesRegex(ValueError, "EXACT_RELEASE_PR_SOURCE_CI_MISSING"):
+            self.verify()
+
+    def test_previous_budget_endurance_is_mandatory(self):
+        self.budget_r60_jobs[-1]["conclusion"] = "skipped"
+        with self.assertRaisesRegex(ValueError, "REQUIRED_CI_JOB_NOT_GREEN"):
             self.verify()
 
     def test_previous_third_party_endurance_is_mandatory(self):

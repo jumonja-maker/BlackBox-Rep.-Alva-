@@ -79,6 +79,17 @@ INV_BUDGET_REPAIR_FILES = {
     "tools/publish_v060_after_ci.py": "modified",
     "tools/qa_inv_native.py": "modified",
 }
+INV_BUDGET_REPAIR_MAIN_SHA = "86fe4dcf3f49bd623da045d554d6ef36abf7bea4"
+INV_BUDGET_REPAIR_HEAD_SHA = "ab81168185d413ecc3efbc4391061996066f052b"
+INV_GUI_REPAIR_PR = 48
+INV_GUI_REPAIR_BRANCH = "fix/v060-investigation-gui-sections-20261109"
+INV_GUI_REPAIR_FILES = {
+    ".github/workflows/bb-r60-qa.yml": "modified",
+    "tests/test_inv_gui_sections.py": "added",
+    "tests/test_release_v060_authorization.py": "modified",
+    "tools/publish_v060_after_ci.py": "modified",
+    "tools/qa_inv_gui.py": "modified",
+}
 SHELL_NAME = "BLACK.BOX Universal - independent Windows build and release"
 R60_NAME = "BB-R60 Chain Builder exact-source acceptance"
 UI_NAME = "BLACK.BOX UI selection contrast"
@@ -200,9 +211,15 @@ def authorize(client, repo, sha, upstream):
             "MAIN_MOVED")
     main = client(f"repos/{repo}/git/commits/{sha}")
     parent = main.get("parents") or []
-    require(len(parent) == 2 and parent[0].get("sha") == THIRD_PARTY_REPAIR_MAIN_SHA
+    require(len(parent) == 2 and parent[0].get("sha") == INV_BUDGET_REPAIR_MAIN_SHA
             and isinstance(parent[1].get("sha"), str)
             and re.fullmatch("[0-9a-f]{40}", parent[1]["sha"]),
+            "INV_GUI_REPAIR_MERGE_ANCESTRY_CHANGED")
+    budget_merge = client(f"repos/{repo}/git/commits/{INV_BUDGET_REPAIR_MAIN_SHA}")
+    budget_parents = budget_merge.get("parents") or []
+    require(len(budget_parents) == 2 and
+            budget_parents[0].get("sha") == THIRD_PARTY_REPAIR_MAIN_SHA and
+            budget_parents[1].get("sha") == INV_BUDGET_REPAIR_HEAD_SHA,
             "INV_BUDGET_REPAIR_MERGE_ANCESTRY_CHANGED")
     third_party_merge = client(f"repos/{repo}/git/commits/{THIRD_PARTY_REPAIR_MAIN_SHA}")
     third_party_parents = third_party_merge.get("parents") or []
@@ -298,9 +315,9 @@ def authorize(client, repo, sha, upstream):
             "UNAPPROVED_THIRD_PARTY_REPAIR_FILE_SCOPE")
     repair = client(f"repos/{repo}/pulls/{INV_BUDGET_REPAIR_PR}")
     require(repair.get("number") == INV_BUDGET_REPAIR_PR and repair.get("merged") is True
-            and repair.get("merge_commit_sha") == sha
+            and repair.get("merge_commit_sha") == INV_BUDGET_REPAIR_MAIN_SHA
             and (repair.get("head") or {}).get("ref") == INV_BUDGET_REPAIR_BRANCH
-            and (repair.get("head") or {}).get("sha") == parent[1]["sha"]
+            and (repair.get("head") or {}).get("sha") == INV_BUDGET_REPAIR_HEAD_SHA
             and (repair.get("base") or {}).get("ref") == "main",
             "UNAPPROVED_INV_BUDGET_REPAIR_PR")
     repair_files = client(f"repos/{repo}/pulls/{INV_BUDGET_REPAIR_PR}/files?per_page=100")
@@ -309,6 +326,19 @@ def authorize(client, repo, sha, upstream):
             len(repair_files) == len(INV_BUDGET_REPAIR_FILES) and
             {x.get("filename"): x.get("status") for x in repair_files} == INV_BUDGET_REPAIR_FILES,
             "UNAPPROVED_INV_BUDGET_REPAIR_FILE_SCOPE")
+    gui = client(f"repos/{repo}/pulls/{INV_GUI_REPAIR_PR}")
+    require(gui.get("number") == INV_GUI_REPAIR_PR and gui.get("merged") is True
+            and gui.get("merge_commit_sha") == sha
+            and (gui.get("head") or {}).get("ref") == INV_GUI_REPAIR_BRANCH
+            and (gui.get("head") or {}).get("sha") == parent[1]["sha"]
+            and (gui.get("base") or {}).get("ref") == "main",
+            "UNAPPROVED_INV_GUI_REPAIR_PR")
+    gui_files = client(f"repos/{repo}/pulls/{INV_GUI_REPAIR_PR}/files?per_page=100")
+    require(isinstance(gui_files, list) and
+            gui.get("changed_files") == len(INV_GUI_REPAIR_FILES) and
+            len(gui_files) == len(INV_GUI_REPAIR_FILES) and
+            {x.get("filename"): x.get("status") for x in gui_files} == INV_GUI_REPAIR_FILES,
+            "UNAPPROVED_INV_GUI_REPAIR_FILE_SCOPE")
 
     exact_jobs(client, repo, upstream["id"], MAIN_JOBS)
     # PR44's own 331/19800s and exact-source CI remain independently required;
@@ -334,12 +364,23 @@ def authorize(client, repo, sha, upstream):
     third_endurance = endurance_proof(repo, third_r60_jobs[
         "R60 actual persisted 5h30 scheduler and owned recording lifecycle"])
 
+    # Preserve PR47's actual native, 331/19800s, UI and full source evidence.
+    budget_shell, _ = exact_candidate_run(client, repo, INV_BUDGET_REPAIR_HEAD_SHA, INV_BUDGET_REPAIR_BRANCH,
+                                          SHELL_NAME, MAIN_JOBS)
+    budget_ui, _ = exact_candidate_run(client, repo, INV_BUDGET_REPAIR_HEAD_SHA, INV_BUDGET_REPAIR_BRANCH,
+                                       UI_NAME, UI_JOBS)
+    budget_r60_run, budget_r60_jobs = exact_candidate_run(
+        client, repo, INV_BUDGET_REPAIR_HEAD_SHA, INV_BUDGET_REPAIR_BRANCH, R60_NAME, R60_JOBS)
+    os.environ["V060_SOURCE_PR_SHA"] = INV_BUDGET_REPAIR_HEAD_SHA
+    budget_endurance = endurance_proof(repo, budget_r60_jobs[
+        "R60 actual persisted 5h30 scheduler and owned recording lifecycle"])
+
     source_sha = parent[1]["sha"]
-    shell, _ = exact_candidate_run(client, repo, source_sha, INV_BUDGET_REPAIR_BRANCH,
+    shell, _ = exact_candidate_run(client, repo, source_sha, INV_GUI_REPAIR_BRANCH,
                                    SHELL_NAME, MAIN_JOBS)
-    ui, _ = exact_candidate_run(client, repo, source_sha, INV_BUDGET_REPAIR_BRANCH,
+    ui, _ = exact_candidate_run(client, repo, source_sha, INV_GUI_REPAIR_BRANCH,
                                 UI_NAME, UI_JOBS)
-    r60_run, r60_jobs = exact_candidate_run(client, repo, source_sha, INV_BUDGET_REPAIR_BRANCH,
+    r60_run, r60_jobs = exact_candidate_run(client, repo, source_sha, INV_GUI_REPAIR_BRANCH,
                                             R60_NAME, R60_JOBS)
     os.environ["V060_SOURCE_PR_SHA"] = source_sha
     endurance = endurance_proof(repo, r60_jobs[
@@ -361,10 +402,13 @@ def authorize(client, repo, sha, upstream):
             "native_qa_pr": NATIVE_QA_PR,
             "third_party_repair_pr": THIRD_PARTY_REPAIR_PR,
             "inv_budget_repair_pr": INV_BUDGET_REPAIR_PR,
+            "inv_gui_repair_pr": INV_GUI_REPAIR_PR,
             "prior_source_ci": prior_shell["id"], "prior_ui_ci": prior_ui["id"],
             "prior_r60_ci": prior_r60_run["id"], "prior_r60_endurance": prior_endurance,
             "third_party_source_ci": third_shell["id"], "third_party_ui_ci": third_ui["id"],
             "third_party_r60_ci": third_r60_run["id"], "third_party_r60_endurance": third_endurance,
+            "budget_source_ci": budget_shell["id"], "budget_ui_ci": budget_ui["id"],
+            "budget_r60_ci": budget_r60_run["id"], "budget_r60_endurance": budget_endurance,
             "candidate_sha": source_sha, "main_ci": upstream["id"],
             "source_ci": shell["id"], "ui_ci": ui["id"],
             "r60_ci": r60_run["id"], "r60_endurance": endurance}

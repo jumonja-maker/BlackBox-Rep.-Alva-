@@ -17,7 +17,7 @@ concurrency:
 jobs:
   scope:
     if: >-
-      (github.event_name == 'pull_request' && (github.head_ref == 'feature/r60-chain-builder-wave03' || github.head_ref == 'release/v060-r10-r60-20261106' || github.head_ref == 'fix/v060-release-log-guard-20261107' || github.head_ref == 'fix/v060-native-qa-diagnostics-20261108' || github.head_ref == 'fix/v060-pinned-thirdparty-download-20261108' || github.head_ref == 'fix/v060-investigation-result-budget-20261108')) ||
+      (github.event_name == 'pull_request' && (github.head_ref == 'feature/r60-chain-builder-wave03' || github.head_ref == 'release/v060-r10-r60-20261106' || github.head_ref == 'fix/v060-release-log-guard-20261107' || github.head_ref == 'fix/v060-native-qa-diagnostics-20261108' || github.head_ref == 'fix/v060-pinned-thirdparty-download-20261108' || github.head_ref == 'fix/v060-investigation-result-budget-20261108' || github.head_ref == 'fix/v060-investigation-gui-sections-20261109')) ||
       (github.event_name == 'push' && (contains(github.event.head_commit.message, '[r60-contracts]') || contains(github.event.head_commit.message, '[r60-native]') || contains(github.event.head_commit.message, '[r60-gui]') || contains(github.event.head_commit.message, '[r60-medium]') || contains(github.event.head_commit.message, '[r60-workspace]'))) ||
       github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
@@ -305,6 +305,16 @@ jobs:
           $env:GITHUB_SHA = $env:BB_QA_SOURCE_SHA
           python tools/qa_inv_native.py --output r60-inv-native-preflight --decoder dist/BLACK.BOX-Universal/decoder/BLACK.BOX-Decoder.exe --diagnostic-helper dist/BLACK.BOX-Universal/diagnostic/BLACK.BOX-Diagnostic.exe
           if ($LASTEXITCODE -ne 0) { throw 'INV_NATIVE_PREFLIGHT_FAILED' }
+      - name: Release-equivalent source Qt investigation through packaged helper and actual native evidence
+        if: needs.scope.outputs.gui_only != 'true' && needs.scope.outputs.medium_only != 'true'
+        timeout-minutes: 12
+        shell: pwsh
+        run: |
+          $actual = (git rev-parse HEAD).Trim()
+          if ($actual -ne $env:BB_QA_SOURCE_SHA) { throw 'INV_GUI_PREFLIGHT_EXACT_PR_SOURCE_MISMATCH' }
+          $env:GITHUB_SHA = $env:BB_QA_SOURCE_SHA
+          python tools/qa_inv_gui.py --output r60-inv-source-gui-preflight --evidence-root r60-inv-native-preflight --probe r60-inv-native-preflight/build/deep-probe.exe --diagnostic-helper dist/BLACK.BOX-Universal/diagnostic/BLACK.BOX-Diagnostic.exe --dpi-scale 1
+          if ($LASTEXITCODE -ne 0) { throw 'INV_GUI_PREFLIGHT_FAILED' }
       - name: Same actual full chain in frozen EXE using packaged helpers
         if: needs.scope.outputs.gui_only != 'true' && needs.scope.outputs.medium_only != 'true'
         timeout-minutes: 20
@@ -339,7 +349,7 @@ jobs:
             $paths = @('r60-source/result.json', 'r60-source/gui/result.json', 'r60-source-gui-1.25/gui/result.json', 'r60-source-gui-1.5/gui/result.json', 'r60-source-gui-2/gui/result.json', 'r60-gui-diagnostic-data/wave02-native.json')
           } else {
             "R60 native result: ${{ job.status }}`nSource: $env:BB_QA_SOURCE_SHA`nRun: $env:GITHUB_RUN_ID attempt $env:GITHUB_RUN_ATTEMPT`nArtifacts/cache/publication: none`nPhysical Windows 10/11 and Secure Desktop: NOT_TESTED" >> $env:GITHUB_STEP_SUMMARY
-            $paths = @('r60-source/result.json', 'r60-frozen/result.json')
+            $paths = @('r60-source/result.json', 'r60-frozen/result.json', 'r60-inv-native-preflight/native-investigation-qa.json', 'r60-inv-source-gui-preflight/gui-investigation-qa.json')
           }
           foreach ($path in $paths) {
             if (Test-Path $path) {
