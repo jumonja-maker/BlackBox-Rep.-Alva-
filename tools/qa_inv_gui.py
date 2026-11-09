@@ -24,6 +24,27 @@ from tools.qa_inv_common import (assert_sources_unchanged, digest, exact_source,
     graph_facts, require, require_hosted, save, validate_export)
 
 
+REQUIRED_SECTION_KEYS = (
+    "overview", "events", "graph", "critical_path", "hypotheses",
+    "verification", "recurrences", "integrity", "delays", "crash",
+)
+
+
+def verify_workspace_sections(panel):
+    """Verify all real Investigation pages, not an obsolete historic count.
+
+    This is deliberately independent of the UI's SECTIONS tuple: removing a
+    feature must fail both source and packaged release QA. The page-to-selector
+    correspondence is checked before bilingual keyboard navigation begins.
+    """
+    actual = tuple(panel.section.itemData(i) for i in range(panel.section.count()))
+    require(actual == REQUIRED_SECTION_KEYS, "INV_TEN_WORKSPACE_SECTIONS_REQUIRED")
+    require(panel.pages.count() == len(REQUIRED_SECTION_KEYS) and
+            all(panel.pages.widget(i) is not None for i in range(len(REQUIRED_SECTION_KEYS))),
+            "INV_WORKSPACE_SELECTOR_PAGE_MAPPING_INCOMPLETE")
+    return actual
+
+
 def run(args):
     require_hosted(windows=True)
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -316,8 +337,11 @@ def run(args):
         require(panel.section.currentData() == "verification" and panel.action_combo.count() > 0,
                 "INV_HYPOTHESIS_DID_NOT_OFFER_IMPLEMENTED_DIAGNOSTICS")
 
-        phase("SEVEN_SECTIONS_BILINGUAL_LAYOUT")
-        require(panel.section.count() == 7, "INV_SEVEN_WORKSPACE_SECTIONS_REQUIRED")
+        phase("TEN_SECTIONS_BILINGUAL_LAYOUT")
+        proof["workspace_section_keys"] = [panel.section.itemData(i)
+                                            for i in range(panel.section.count())]
+        proof["workspace_page_count"] = panel.pages.count()
+        verify_workspace_sections(panel)
         proof["device_pixel_ratio"] = window.devicePixelRatioF()
         for language in ("RU", "EN"):
             window._set_language(language)
