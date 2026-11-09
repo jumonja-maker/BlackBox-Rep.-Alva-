@@ -322,9 +322,10 @@ class ProcessHistoryTreeTests(unittest.TestCase):
                 self.assertEqual(table.rowCount(), 1)
                 table.selectRow(0)
                 before = table.item(0, 5).text()
-                # Exercise the worker's error delivery on a real loaded Qt
-                # view, retaining the last cells and the user's selection.
-                window._thread_detail_ready(None, "DETAIL_READ_UNAVAILABLE")
+                # Exercise an error for the matching selected interval,
+                # retaining its last cells and selection. Standalone live-root
+                # callbacks are ignored once recorded analysis is selected.
+                window._thread_detail_ready(None, "DETAIL_READ_UNAVAILABLE", from_interval=True)
                 for language, text in (("RU", "Данные потоков недоступны; исходная запись не изменена."),
                                        ("EN", "Thread detail is unavailable; source data were not changed.")):
                     window._set_language(language)
@@ -355,8 +356,9 @@ class ProcessHistoryTreeTests(unittest.TestCase):
                 drain()
                 self.assertIsNotNone(window._interval_packet)
                 self.assertTrue(window.export_interval_btn.isEnabled())
-                old_node = window.process_history_table.item_for_instance(1)
-                old_thread_cpu = window.thread_detail_table.item(0, 5).text()
+                self.assertIsNotNone(window.process_history_table.item_for_instance(1))
+                self.assertEqual(window.thread_detail_table.rowCount(), 1)
+                self.assertIsNotNone(window.thread_detail_table.item(0, 5))
                 with closing(sqlite3.connect(folder/FILENAME)) as db:
                     db.execute("UPDATE process_instances SET first_observed_ns='bad-import' WHERE instance_id=1")
                     db.commit()
@@ -368,15 +370,21 @@ class ProcessHistoryTreeTests(unittest.TestCase):
                 drain()
                 self.assertIsNone(window._interval_packet)
                 self.assertFalse(window.export_interval_btn.isEnabled())
-                # A rejected packet never reaches the tree or TID renderers.
-                self.assertIs(window.process_history_table.item_for_instance(1), old_node)
-                self.assertEqual(window.thread_detail_table.item(0, 5).text(), old_thread_cpu)
+                # A rejected interval clears its previous process/thread
+                # presentation rather than leaving stale evidence visible.
+                self.assertIsNone(window.process_history_table.item_for_instance(1))
+                self.assertEqual(window.process_history_table.topLevelItemCount(), 0)
+                self.assertEqual(window.thread_detail_table.rowCount(), 0)
+                self.assertIsNone(window._thread_detail_payload)
                 for language, text in (("RU", "Интервал недоступен; исходные файлы не изменены."),
                                        ("EN", "Selected interval is unavailable; source files were not changed.")):
                     window._set_language(language)
                     self.assertEqual(window.interval_summary.text(), text)
                     self.assertIsNone(window._interval_packet)
                     self.assertFalse(window.export_interval_btn.isEnabled())
+                    self.assertEqual(window.process_history_table.topLevelItemCount(), 0)
+                    self.assertEqual(window.thread_detail_table.rowCount(), 0)
+                    self.assertIsNone(window._thread_detail_payload)
                 self.assertEqual(hashlib.sha256((folder/FILENAME).read_bytes()).hexdigest(), before)
             finally:
                 drain()

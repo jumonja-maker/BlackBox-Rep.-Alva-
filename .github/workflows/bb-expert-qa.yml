@@ -55,6 +55,12 @@ jobs:
         run: python tools/check_undefined_names.py --report expert-static.json
       - name: Real Qt navigation and evidence presentation contracts
         run: python -m unittest discover -s tests -p 'test_expert*.py' -v
+      - name: Recorded process selection and historic child regressions
+        run: python -m unittest discover -s tests -p 'test_process_history_tree.py' -v
+      - name: Existing isolated research GUI regressions
+        run: python -m unittest discover -s tests -p 'test_research_gui.py' -v
+      - name: Existing Qt fixture ownership and control lifecycle regressions
+        run: python -m unittest discover -s tests -p 'test_chain_fixture_lifecycle.py' -v
 
   source-workflow:
     name: Actual Qt workflow RU EN / scale ${{ matrix.scale }}
