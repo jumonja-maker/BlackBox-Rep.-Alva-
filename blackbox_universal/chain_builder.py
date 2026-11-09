@@ -1942,7 +1942,11 @@ class ChainHistoryPanel(QWidget):
         self.table.clearSelection()
         self.table.setCurrentItem(None)
         for index, row in enumerate(self.rows):
-            for column, value in enumerate((row["title"], row["run_id"], self.builder.canvas.state_name(row["state"]))):
+            # History can translate before the builder canvas, or while its
+            # page is hidden. Its labels use the current window language.
+            state = row["state"]
+            state_label = self.builder.tr2(*STATE_NAMES.get(state, (state, state)))
+            for column, value in enumerate((row["title"], row["run_id"], state_label)):
                 self.table.setItem(index, column, QTableWidgetItem(str(value)))
         if selected_id is not None:
             index = next((i for i, row in enumerate(self.rows) if row.get("run_id") == selected_id), None)

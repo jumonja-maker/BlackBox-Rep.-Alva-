@@ -365,10 +365,14 @@ def build_index(source, output, *, input_sha256, format_name, cancel=None,
             or format_name not in (".jsonl", ".etl", ".nettrace")):
         raise ValueError("INVALID_DECODER_SOURCE_IDENTITY")
     output = safe_path(output)
-    def require_new_destination():
+    def require_new_destination(*,publishing=False):
         if not output.parent.is_dir():
             raise ValueError("INDEX_DESTINATION_MUST_BE_NEW")
         for suffix in ("","-wal","-shm","-journal"):
+            # The atomic link retains the established FileExistsError contract
+            # if another publisher wins the main pathname after validation.
+            if publishing and not suffix:
+                continue
             reserved = safe_path(Path(str(output)+suffix))
             if reserved.exists() or reserved.is_symlink():
                 raise ValueError("INDEX_DESTINATION_MUST_BE_NEW")
@@ -523,7 +527,7 @@ def build_index(source, output, *, input_sha256, format_name, cancel=None,
         if before_publish is not None:
             before_publish()
         budget.check("PUBLISH")
-        require_new_destination()
+        require_new_destination(publishing=True)
         # Create-new atomically: unlike os.replace, never overwrite an existing file.
         os.link(part, output)
         return meta

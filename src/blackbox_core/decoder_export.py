@@ -11,8 +11,10 @@ from .decoder_limits import checked_index_path, MAX_INDEX_BYTES
 
 def export_index_copy(source, destination):
     source, destination = checked_index_path(source), safe_path(destination)
-    def require_new_destination():
+    def require_new_destination(*,publishing=False):
         for suffix in ("","-wal","-shm","-journal"):
+            if publishing and not suffix:
+                continue  # os.link reports a competing main-file publication.
             reserved = safe_path(Path(str(destination)+suffix))
             if reserved.exists() or reserved.is_symlink():
                 raise ValueError("OUTPUT_EXISTS")
@@ -45,7 +47,7 @@ def export_index_copy(source, destination):
         if identity(before) != identity(source.stat()) or part.stat().st_size != before.st_size:
             raise ValueError("INDEX_CHANGED_DURING_EXPORT")
         closed_source()
-        require_new_destination()
+        require_new_destination(publishing=True)
         # Same-directory hard link is an atomic no-clobber publication on the
         # supported filesystems. Failure leaves neither a final partial file
         # nor an overwritten destination; no rename-over-existing fallback.

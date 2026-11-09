@@ -4,6 +4,7 @@ Fixtures are synthetic SQLite/JSON, with byte identity checked after refusals.
 No application, process sampler, native helper or external service is used.
 """
 from copy import deepcopy
+from contextlib import closing, contextmanager
 import hashlib
 import os
 from pathlib import Path
@@ -21,7 +22,7 @@ from blackbox_core.detail_analysis import analyze_detail_threads
 def fixture_session(folder, *, count=4):
     folder.mkdir()
     path = folder / "session.sqlite3"
-    with sqlite3.connect(path) as db:
+    with closing(sqlite3.connect(path)) as db, db:
         db.executescript('''
             CREATE TABLE metadata(schema_version INTEGER NOT NULL, session_id TEXT NOT NULL,
                 pid INTEGER NOT NULL, started_utc TEXT NOT NULL, ended_utc TEXT,
@@ -40,12 +41,40 @@ def digest(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+@contextmanager
+def assert_closed_readers(test, module):
+    """Keep actual read handles alive so GC cannot hide a product close leak."""
+    connect = sqlite3.connect
+    opened = []
+
+    def remember(*args, **kwargs):
+        db = connect(*args, **kwargs)
+        opened.append(db)
+        return db
+
+    with patch(module + ".sqlite3.connect", side_effect=remember):
+        try:
+            yield
+        finally:
+            try:
+                test.assertTrue(opened, "The production reader must open its real SQLite connection")
+                for db in opened:
+                    with test.assertRaises(sqlite3.ProgrammingError):
+                        db.execute("SELECT 1")
+            finally:
+                # Preserve the assertion failure without also leaking a handle
+                # into TemporaryDirectory cleanup if a future reader regresses.
+                for db in opened:
+                    db.close()
+
+
 class LegacyAnalysisReadContracts(unittest.TestCase):
     def test_valid_full_4096_sample_contract_remains_read_only(self):
         with tempfile.TemporaryDirectory() as temp:
             path = fixture_session(Path(temp) / "session", count=4096)
             before = digest(path)
-            result = load_session(path.parent)
+            with assert_closed_readers(self, "blackbox_investigation.sqlite_adapter"):
+                result = load_session(path.parent)
             self.assertEqual(len(result["samples"]), 4096)
             self.assertTrue(result["coverage"]["full_session_covered"])
             self.assertEqual(result["pid"], 234)
@@ -54,10 +83,11 @@ class LegacyAnalysisReadContracts(unittest.TestCase):
     def test_oversized_metadata_is_rejected_before_materialization_without_source_change(self):
         with tempfile.TemporaryDirectory() as temp:
             path = fixture_session(Path(temp) / "session")
-            with sqlite3.connect(path) as db:
+            with closing(sqlite3.connect(path)) as db, db:
                 db.execute("UPDATE metadata SET probe=?", ("x" * (1024 * 1024 + 1),))
             before = digest(path)
-            with self.assertRaisesRegex(InvestigationError, "INVALID_SESSION"):
+            with assert_closed_readers(self, "blackbox_investigation.sqlite_adapter"), \
+                 self.assertRaisesRegex(InvestigationError, "INVALID_SESSION"):
                 load_session(path.parent)
             self.assertEqual(digest(path), before)
             self.assertEqual(list(path.parent.iterdir()), [path])
@@ -66,7 +96,8 @@ class LegacyAnalysisReadContracts(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             path = fixture_session(Path(temp) / "session", count=4096)
             before = digest(path)
-            with patch("blackbox_investigation.sqlite_adapter.time.monotonic", side_effect=[0.0] + [100.0] * 50):
+            with assert_closed_readers(self, "blackbox_investigation.sqlite_adapter"), \
+                 patch("blackbox_investigation.sqlite_adapter.time.monotonic", side_effect=[0.0] + [100.0] * 50):
                 with self.assertRaisesRegex(InvestigationError, "INVALID_SESSION"):
                     load_session(path.parent)
             self.assertEqual(digest(path), before)
@@ -126,7 +157,7 @@ class LegacyProbeInputContracts(unittest.TestCase):
 def detail_fixture(folder):
     folder.mkdir()
     path = folder / "detail-v2.sqlite3"
-    with sqlite3.connect(path) as db:
+    with closing(sqlite3.connect(path)) as db, db:
         db.executescript("""
             CREATE TABLE detail_metadata(schema_version INTEGER,pid INTEGER,created REAL);
             CREATE TABLE process_samples(seq INTEGER PRIMARY KEY,time_monotonic_ns INTEGER,
@@ -147,7 +178,8 @@ class LegacyDetailReadContracts(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             path = detail_fixture(Path(temp) / "detail")
             before = digest(path)
-            result = analyze_detail_threads(path.parent)
+            with assert_closed_readers(self, "blackbox_core.detail_analysis"):
+                result = analyze_detail_threads(path.parent)
             self.assertEqual(result["status"], "OK")
             self.assertEqual(result["pair_count"], 1)
             self.assertEqual(result["top_threads"][0]["tid"], 17)
@@ -157,10 +189,11 @@ class LegacyDetailReadContracts(unittest.TestCase):
     def test_zero_tid_cannot_be_reported_as_a_measured_target_thread(self):
         with tempfile.TemporaryDirectory() as temp:
             path = detail_fixture(Path(temp) / "detail")
-            with sqlite3.connect(path) as db:
+            with closing(sqlite3.connect(path)) as db, db:
                 db.execute("UPDATE thread_samples SET tid=0")
             before = digest(path)
-            result = analyze_detail_threads(path.parent)
+            with assert_closed_readers(self, "blackbox_core.detail_analysis"):
+                result = analyze_detail_threads(path.parent)
             self.assertEqual(result["status"], "INVALID_DETAILED_DATA")
             self.assertEqual(result["top_threads"], [])
             self.assertIn("INVALID_THREAD_COUNTER", result["warnings"])
@@ -169,10 +202,11 @@ class LegacyDetailReadContracts(unittest.TestCase):
     def test_oversized_detail_value_is_controlled_and_source_is_unchanged(self):
         with tempfile.TemporaryDirectory() as temp:
             path = detail_fixture(Path(temp) / "detail")
-            with sqlite3.connect(path) as db:
+            with closing(sqlite3.connect(path)) as db, db:
                 db.execute("UPDATE detail_metadata SET created=?", ("x" * (1024 * 1024 + 1),))
             before = digest(path)
-            result = analyze_detail_threads(path.parent)
+            with assert_closed_readers(self, "blackbox_core.detail_analysis"):
+                result = analyze_detail_threads(path.parent)
             self.assertEqual(result["status"], "DETAIL_READ_UNAVAILABLE")
             self.assertEqual(result["top_threads"], [])
             self.assertEqual(digest(path), before)
@@ -180,11 +214,12 @@ class LegacyDetailReadContracts(unittest.TestCase):
     def test_detail_scan_deadline_stops_unindexed_work_without_source_change(self):
         with tempfile.TemporaryDirectory() as temp:
             path = detail_fixture(Path(temp) / "detail")
-            with sqlite3.connect(path) as db:
+            with closing(sqlite3.connect(path)) as db, db:
                 db.executemany("INSERT INTO thread_samples VALUES(?,?,?,?,?)",
                     ((1000, 234, 100 + i, 1.0, 0.0) for i in range(4096)))
             before = digest(path)
-            with patch("blackbox_core.detail_analysis.time.monotonic", side_effect=[0.0] + [100.0] * 50):
+            with assert_closed_readers(self, "blackbox_core.detail_analysis"), \
+                 patch("blackbox_core.detail_analysis.time.monotonic", side_effect=[0.0] + [100.0] * 50):
                 result = analyze_detail_threads(path.parent)
             self.assertEqual(result["status"], "DETAIL_READ_UNAVAILABLE")
             self.assertEqual(result["top_threads"], [])

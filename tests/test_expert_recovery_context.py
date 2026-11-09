@@ -49,7 +49,8 @@ class ExpertRecoveryContextTests(unittest.TestCase):
             panel.selection.clear()
             panel.controls()
             self.assertEqual(panel.detail.toPlainText(), "")
-            for code in ("EXPORT_RECOVERY_OWNER_ACTIVE", "PURGE_OWNER_STILL_ACTIVE"):
+            for code in ("EXPORT_RECOVERY_OWNER_ACTIVE", "PURGE_OWNER_STILL_ACTIVE",
+                         "RECORDING_OWNER_STILL_ACTIVE_OR_UNVERIFIED"):
                 self.assertIn("cannot be verified", explain(code, "EN"))
                 self.assertIn("не подтверждено", explain(code, "RU"))
         finally:

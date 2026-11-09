@@ -415,20 +415,54 @@ class R10AdminToolbarTests(unittest.TestCase):
 
     def consent(self, *, accept, after_open=None):
         observed = []
+        failures = []
+        deadline = time.monotonic() + 5
+        timer = QTimer(self.window)
+        timer.setInterval(10)
         def choose():
             dialog = self.app.activeModalWidget()
-            observed.append((dialog.text(), dialog.objectName(),
-                             dialog.standardButton(dialog.defaultButton())))
-            if after_open:
-                after_open()
-            if accept:
-                button = next(item for item in dialog.buttons()
-                              if dialog.buttonRole(item) == QMessageBox.ButtonRole.AcceptRole)
-            else:
-                button = dialog.button(QMessageBox.StandardButton.Cancel)
-            button.click()
-        QTimer.singleShot(0, choose)
-        self.window.admin_button.click()
+            if not isinstance(dialog, QMessageBox) or dialog.objectName() != "adminSessionConsent":
+                if time.monotonic() >= deadline:
+                    timer.stop()
+                    failures.append(AssertionError("Real administrator consent modal was not shown within 5 seconds"))
+                    pending = self.window.findChild(QMessageBox, "adminSessionConsent")
+                    if pending is not None:
+                        pending.reject()
+                return
+            timer.stop()
+            try:
+                self.assertTrue(dialog.isVisible())
+                self.assertIs(dialog.parentWidget(), self.window)
+                observed.append((dialog.text(), dialog.objectName(),
+                                 dialog.standardButton(dialog.defaultButton())))
+                if after_open:
+                    after_open()
+                if accept:
+                    button = next(item for item in dialog.buttons()
+                                  if dialog.buttonRole(item) == QMessageBox.ButtonRole.AcceptRole)
+                else:
+                    button = dialog.button(QMessageBox.StandardButton.Cancel)
+                self.assertTrue(button.isEnabled())
+                button.click()
+            except Exception as error:
+                failures.append(error)
+                dialog.reject()
+        # A zero-delay callback can run while Qt creates/polishes the dialog,
+        # before it registers the active modal. Exercise that early poll and
+        # then wait for the actual modal/buttons without substituting exec().
+        choose()
+        self.assertEqual(observed, [])
+        timer.timeout.connect(choose)
+        timer.start()
+        try:
+            self.window.admin_button.click()
+            self.wait(lambda: bool(observed or failures), timeout=6)
+        finally:
+            timer.stop()
+            timer.deleteLater()
+        if failures:
+            raise failures[0]
+        self.assertEqual(len(observed), 1)
         self.assertEqual(observed[0][1], "adminSessionConsent")
         self.assertEqual(observed[0][2], QMessageBox.StandardButton.Cancel)
         return observed[0][0]

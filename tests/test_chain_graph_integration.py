@@ -172,7 +172,7 @@ class GraphLatePermissionContracts(unittest.TestCase):
     def test_graph_cancel_revokes_actual_deep_idle_retry_without_closing_foreign_owner(self):
         pending, guard = self.pending_permission()
         self.assertTrue(guard())
-        foreign = SimpleNamespace(command={"tag": "chain:foreign:elevate", "generation": 3,
+        foreign = SimpleNamespace(command={"kind": "elevate", "tag": "chain:foreign:elevate", "generation": 3,
                                          "target": self.native.target}, cancel=Mock())
         self.native.worker = foreign
         self.assertTrue(self.graph.cancel_native_step())

@@ -21,6 +21,7 @@ from tools.qa_decoder_apps import (decode_trace, etw_observations, installed, na
                                    observed_process_image, safe_extract, monitored_run, seven_zip, workload_log_snapshot)
 from tools.qa_decoder_budget_diagnostic import (PAIRS, parse_args, validate_noise_oracle,
     NoiseOwner, BudgetCapture,
+    NATIVE_OUTPUT_CAP, NATIVE_OUTPUT_HEADROOM,
     SEVENZIP_CAPABILITIES, validate_comparison, validate_original_source, validate_positive,
     validate_progress, validate_rejection, validate_workload_activity, validate_case_contract,
     validate_output_observation, seal_and_remove_large_evidence, collect_bounded_case_facts,
@@ -1206,7 +1207,7 @@ class ControlledBudgetProtocolTests(unittest.TestCase):
         with self.assertRaisesRegex(AssertionError, 'OUTPUT_LIMIT_NOT_REACHED'):
             validate_case_contract('OUTPUT_BUDGET_NEGATIVE', True, None, meta, 'a' * 64, native, output)
         byte_meta = {**meta, 'rows': 139635}
-        byte_output = {**output, 'output_bytes': 384 * 1024**2 + 100,
+        byte_output = {**output, 'output_bytes': NATIVE_OUTPUT_CAP-4015, 'native_truncation_reason': 'MAX_OUTPUT',
                        'footer': {'status': 'TRUNCATED', 'rows': 139635}}
         self.assertEqual(validate_case_contract('OUTPUT_BUDGET_NEGATIVE', True, None, byte_meta,
             'a' * 64, native, byte_output), 'EXPECTED_OUTPUT_BUDGET_NEGATIVE')
@@ -1218,6 +1219,30 @@ class ControlledBudgetProtocolTests(unittest.TestCase):
             validate_output_observation({'schema': value['schema'], 'processes': [{**output, 'helper_exit_code': 1}]}, meta)
         with self.assertRaisesRegex(AssertionError, 'OBSERVATION_UNCONFIRMED'):
             validate_output_observation(value, byte_meta)
+
+    def test_output_budget_negative_requires_actual_bounded_footer_and_near_cap_bytes(self):
+        meta={'status':'TRUNCATED','rows':126927,'input_sha256':'a'*64,
+              'import_completeness':'BOUNDED_PREFIX'}
+        native={'qpc_frequency_matches':True}
+        output={'status':'OBSERVED','helper_exit_code':0,'output_bytes':402649169,
+                'output_sha256':'b'*64,'native_truncation_reason':'MAX_OUTPUT',
+                'footer':{'status':'TRUNCATED','rows':126927}}
+        self.assertEqual(validate_case_contract('OUTPUT_BUDGET_NEGATIVE',True,None,meta,'a'*64,native,output),
+                         'EXPECTED_OUTPUT_BUDGET_NEGATIVE')
+        for change in ({'output_bytes':NATIVE_OUTPUT_CAP+1},
+                       {'output_bytes':NATIVE_OUTPUT_CAP-NATIVE_OUTPUT_HEADROOM-1},
+                       {'output_bytes':float(output['output_bytes'])},{'output_bytes':True},
+                       {'native_truncation_reason':'MAX_EVENTS'},
+                       {'native_truncation_reason':'UNKNOWN'},{'native_truncation_reason':None}):
+            with self.subTest(change=change),self.assertRaisesRegex(AssertionError,'OUTPUT_LIMIT_NOT_REACHED'):
+                validate_case_contract('OUTPUT_BUDGET_NEGATIVE',True,None,meta,'a'*64,native,{**output,**change})
+        for change in ({'helper_exit_code':1},{'helper_exit_code':False},{'status':'UNCONFIRMED'},
+                       {'output_sha256':'invalid'}, {'footer':{'status':'DECODED','rows':126927}},
+                       {'footer':{'status':'TRUNCATED','rows':126926}}):
+            with self.subTest(change=change),self.assertRaisesRegex(AssertionError,'OBSERVATION_UNCONFIRMED'):
+                validate_case_contract('OUTPUT_BUDGET_NEGATIVE',True,None,meta,'a'*64,native,{**output,**change})
+        with self.assertRaisesRegex(AssertionError,'PREFIX_NOT_ESTABLISHED'):
+            validate_case_contract('OUTPUT_BUDGET_NEGATIVE',True,None,meta,'c'*64,native,output)
 
 
 class NativeOutputAndRetentionProtocolTests(unittest.TestCase):

@@ -8,7 +8,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from blackbox_core.casebook import CaseBook, action_statistics, episode, evidence_page, readonly
+from blackbox_core.casebook import CaseBook, action_statistics, episode, evidence_page, readonly, recover_case
 from blackbox_core.interval_report import _safe_native_details, math_isfinite
 from blackbox_core.library_files import read_json, tree_summary
 from blackbox_core.session_view import SessionReadError, SessionView
@@ -125,6 +125,36 @@ class ResearchStorageFunctionTests(unittest.TestCase):
                 CaseBook(folder, 42, 1., {})
         self.assertEqual(len(captured), 1)
         with self.assertRaises(sqlite3.ProgrammingError):captured[0].execute("SELECT 1")
+
+    def test_recovery_refuses_active_or_unknown_identity_before_creating_a_destination(self):
+        from types import SimpleNamespace
+        for pid,birth,actual in ((None,None,1.),(True,1.,1.),(42,None,1.),(42,False,1.),
+                                (42,'invalid',1.),(42,10**330,1.),(42,1.,1.),
+                                (42,1.,float('nan')),(42,1.,10**330)):
+            with self.subTest(pid=pid,birth=birth,actual=actual):
+                self.book.set_context('worker_pid',pid)
+                self.book.set_context('worker_created',birth)
+                destination=self.root/'recovery'
+                before=(self.root/'research.sqlite3').read_bytes()
+                with patch('psutil.Process',return_value=SimpleNamespace(create_time=lambda:actual)):
+                    with self.assertRaisesRegex(ValueError,'OWNER_STILL_ACTIVE_OR_UNVERIFIED'):
+                        recover_case(self.root,destination)
+                self.assertFalse(destination.exists())
+                self.assertEqual((self.root/'research.sqlite3').read_bytes(),before)
+
+    def test_recovery_of_definitively_dead_owner_keeps_source_and_labels_partial_copy(self):
+        import psutil
+        self.book.set_context('worker_pid',42)
+        self.book.set_context('worker_created',None)
+        before=(self.root/'research.sqlite3').read_bytes()
+        destination=self.root/'recovered'
+        with patch('psutil.Process',side_effect=psutil.NoSuchProcess(42)):
+            result=recover_case(self.root,destination)
+        self.assertEqual(result['state'],'RECOVERED_INCOMPLETE')
+        self.assertEqual((self.root/'research.sqlite3').read_bytes(),before)
+        with closing(readonly(destination/'research.sqlite3')) as db:
+            self.assertEqual(json.loads(db.execute("SELECT data FROM context WHERE key='state'").fetchone()[0]),
+                             'RECOVERED_INCOMPLETE')
 
 
 class LegacyClockAndMarkerTests(unittest.TestCase):

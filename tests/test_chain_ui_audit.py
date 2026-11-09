@@ -234,9 +234,20 @@ class ChainStateAuditTests(unittest.TestCase):
         history.table.selectRow(0)
         history._received("history", [b, a], "")
         self.assertEqual(history.selected()["run_id"], "saved-a")
+        self.assertEqual(self.panel.canvas.language, "EN")
         self.host.language = "RU"
         history.retranslate()
         self.assertEqual(history.table.item(1, 2).text(), "Завершено")
+        self.assertEqual(history.table.item(0, 2).text(), "Ошибка")
+        self.assertEqual(history.selected()["run_id"], "saved-a")
+        # A hidden/previously translated canvas is independent of history's
+        # current language in both directions; no execution is dispatched.
+        self.panel.retranslate()
+        self.assertEqual(self.panel.canvas.language, "RU")
+        self.host.language = "EN"
+        history.retranslate()
+        self.assertEqual(history.table.item(1, 2).text(), "Completed")
+        self.assertEqual(history.table.item(0, 2).text(), "Failed")
         self.assertEqual(history.selected()["run_id"], "saved-a")
         history._received("history", [b], "")
         self.assertIsNone(history.selected())

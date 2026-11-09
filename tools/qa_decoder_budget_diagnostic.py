@@ -35,6 +35,11 @@ NOISE_SECONDS = 70
 MAX_NOISE_RSS = 128 * 1024**2
 MAX_NOISE_LOG = 64 * 1024
 MAX_OUTPUT = 1152 * 1024**2
+# Production JSONL stops before the next <=256-KiB event plus its newline
+# and a 4096-byte footer reserve. A correct MAX_OUTPUT prefix stays below
+# 384 MiB; the discarded next event bounds how far below it can finish.
+NATIVE_OUTPUT_CAP = 384 * 1024**2
+NATIVE_OUTPUT_HEADROOM = 256 * 1024 + 4096 + 2
 MIN_NOISE_ROWS = 10000
 PRELUDE_SECONDS = 15
 NATIVE_PRELUDE_SECONDS = 65
@@ -799,13 +804,18 @@ def native_attribution(index, meta, oracle, deadline, target_pids=()):
 
 
 def validate_output_observation(value, meta):
+    apps.require(type(value) is dict, 'ACTUAL_NATIVE_OUTPUT_OBSERVATION_MISSING')
     processes = value.get('processes')
     apps.require(value.get('schema') == 'blackbox.native-output-observation/1' and type(processes) is list and
         len(processes) == 1, 'ACTUAL_NATIVE_OUTPUT_OBSERVATION_MISSING')
     item = processes[0]
+    apps.require(type(item) is dict, 'ACTUAL_NATIVE_OUTPUT_OBSERVATION_UNCONFIRMED')
     apps.require(item.get('status') == 'OBSERVED' and item.get('helper_exit_code') == 0 and
+        type(item.get('helper_exit_code')) is int and
         type(item.get('output_bytes')) is int and item['output_bytes'] > 0 and
+        type(item.get('output_sha256')) is str and
         re.fullmatch(r'[a-f0-9]{64}', item.get('output_sha256', '')) and
+        type(item.get('footer')) is dict and type(item['footer'].get('rows')) is int and
         item.get('footer') == {'status': meta['status'], 'rows': meta['rows']},
         'ACTUAL_NATIVE_OUTPUT_OBSERVATION_UNCONFIRMED')
     return item
@@ -821,8 +831,12 @@ def validate_case_contract(expectation, assertion_observed, result, meta, actual
         if expectation == 'ROW_BUDGET_NEGATIVE':
             apps.require(meta['rows'] == 250000, 'EXPECTED_NATIVE_ROW_LIMIT_NOT_REACHED')
         elif expectation == 'OUTPUT_BUDGET_NEGATIVE':
-            apps.require(meta['rows'] < 250000 and output['output_bytes'] > 384 * 1024**2,
+            apps.require(meta['rows'] < 250000 and type(output.get('output_bytes')) is int and
+                         NATIVE_OUTPUT_CAP-NATIVE_OUTPUT_HEADROOM <= output['output_bytes'] <= NATIVE_OUTPUT_CAP and
+                         output.get('native_truncation_reason') == 'MAX_OUTPUT',
                          'EXPECTED_NATIVE_OUTPUT_LIMIT_NOT_REACHED')
+            validate_output_observation({'schema': 'blackbox.native-output-observation/1',
+                                         'processes': [output]}, meta)
         else:
             apps.require(meta['rows'] == 250000, 'EXPECTED_NATIVE_ROW_LIMIT_NOT_REACHED')
         if expectation != 'OUTPUT_BUDGET_NEGATIVE':

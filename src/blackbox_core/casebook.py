@@ -780,16 +780,13 @@ def verify_package(path, *, max_total_bytes=4*1024**3):
 
 def recover_case(folder,destination):
     """Copy committed observations; never alter the interrupted source."""
-    import psutil
     folder,destination=Path(folder),Path(destination)
     original=context(folder)
-    pid,created=original.get("worker_pid"),original.get("worker_created")
-    if original.get("state")=="RECORDING" and pid is not None:
-        try:
-            p=psutil.Process(pid)
-            if created is None or abs(p.create_time()-created)<.000001:
-                raise ValueError("RECORDING_OWNER_STILL_ACTIVE")
-        except psutil.NoSuchProcess:pass
+    if original.get("state")=="RECORDING":
+        from .export_recovery import owner_alive
+        if owner_alive({'owner_pid':original.get('worker_pid'),
+                        'owner_created':original.get('worker_created')}):
+            raise ValueError("RECORDING_OWNER_STILL_ACTIVE_OR_UNVERIFIED")
     destination.mkdir(exist_ok=False)
     for name in ("session.sqlite3","session-v2.sqlite3","research.sqlite3","detail-v2.sqlite3"):
         source=folder/name

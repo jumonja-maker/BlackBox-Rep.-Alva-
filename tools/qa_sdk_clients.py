@@ -10,8 +10,10 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
+import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT), str(ROOT / 'src')]
@@ -120,6 +122,40 @@ def run_client(command, folder, log_name, *, environment=None, timeout=120):
     return child.pid
 
 
+def run_preparation(command, output, *, environment=None):
+    """Run the actual app outside the checkout, retaining owned log evidence."""
+    temporary = tempfile.TemporaryDirectory(prefix='blackbox-sdk-preparation-')
+    outside = Path(temporary.name).resolve()
+    facts = {'status': 'FAIL', 'cwd_outside_checkout': not outside.is_relative_to(ROOT.resolve()),
+             'owned_cwd_removed': False, 'retained_logs': []}
+    retained = output / 'preparation-logs'
+    try:
+        retained.mkdir()
+        require(facts['cwd_outside_checkout'], 'SDK_PREPARATION_CWD_MUST_BE_OUTSIDE_CHECKOUT')
+        run_client(command, outside, 'preparation.log', environment=environment, timeout=60)
+    except BaseException as error:
+        facts['error_type'] = type(error).__name__
+        raise
+    finally:
+        try:
+            for name in ('preparation.log', 'blackbox-sdk-qa-error.txt'):
+                source = outside / name
+                if source.is_file() and not source.is_symlink():
+                    shutil.copy2(source, retained / name)
+                    facts['retained_logs'].append(name)
+        finally:
+            try:
+                temporary.cleanup()
+            finally:
+                facts['owned_cwd_removed'] = not outside.exists()
+                (output / 'preparation-working-directory.json').write_text(
+                    json.dumps(facts, indent=2), encoding='utf-8')
+    require(facts['owned_cwd_removed'], 'SDK_PREPARATION_CWD_CLEANUP_UNCONFIRMED')
+    facts['status'] = 'PASS'
+    (output / 'preparation-working-directory.json').write_text(json.dumps(facts, indent=2), encoding='utf-8')
+    return facts
+
+
 def main():
     hosted()
     parser = argparse.ArgumentParser(description=__doc__)
@@ -133,8 +169,6 @@ def main():
             'SDK_QA_CHECKOUT_MISMATCH')
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=False)
-    outside = output / 'outside-source'
-    outside.mkdir()
     generated = output / 'generated'
     command = ([str(args.exe.resolve(strict=True))] if args.exe else [sys.executable, str(ROOT / 'app.py')])
     command += ['--qa-sdk-prepare', str(generated), '--qa-commit-sha', args.source_sha]
@@ -144,12 +178,13 @@ def main():
         environment['PATH'] = os.pathsep.join((str(system / 'System32'), str(system)))
         environment.pop('PYTHONPATH', None)
         environment.pop('PYTHONHOME', None)
-    run_client(command, outside, 'preparation.log', environment=environment, timeout=60)
+    preparation_working_directory = run_preparation(command, output, environment=environment)
     proof = json.loads((generated / 'preparation-source.json').read_text(encoding='utf-8'))
     require(proof.get('status') == 'PASS' and proof.get('source_sha') == args.source_sha and
             proof.get('frozen') is bool(args.exe) and
             proof.get('source_identity', {}).get('source_identity_status') == 'VERIFIED_EXPECTED_HEAD',
             'SDK_ACTUAL_PREPARATION_RECEIPT_MISMATCH')
+    proof['preparation_working_directory'] = preparation_working_directory
     for kind, files in proof['files'].items():
         require(all(digest(generated / kind / name) == expected for name, expected in files.items()),
                 'SDK_GENERATED_FILE_CHANGED_BEFORE_COMPILATION')

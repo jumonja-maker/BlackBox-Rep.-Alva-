@@ -92,6 +92,8 @@ def copy_navigation_index(source, output, *, expected_trace_sha256=None,
     for suffix in ("", "-wal", "-shm", "-journal"):
         candidate = safe_path(Path(str(output)+suffix))
         if candidate.exists() or candidate.is_symlink():
+            if not suffix:
+                raise FileExistsError("DECODER_NAVIGATION_DESTINATION_NOT_NEW")
             raise ValueError("DECODER_NAVIGATION_DESTINATION_NOT_NEW")
     before = source.stat()
     if not source.is_file() or not 16 <= before.st_size <= MAX_INDEX_BYTES:

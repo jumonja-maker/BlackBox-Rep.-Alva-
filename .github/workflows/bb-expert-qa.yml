@@ -144,6 +144,18 @@ jobs:
         run: python -m unittest discover -s tests -p 'test_event_stream_audit.py' -v
       - name: Investigation imported-source audit
         run: python -m unittest discover -s tests -p 'test_investigation_import_audit.py' -v
+      - name: Actual failed decoder export compatibility regressions
+        run: python -m unittest discover -s tests -p 'test_decoder_export.py' -v
+      - name: Actual failed decoder read-only destination regressions
+        run: python -m unittest discover -s tests -p 'test_decoder_reliability.py' -v
+      - name: Actual failed Investigation decoder-navigation regressions
+        run: python -m unittest discover -s tests -p 'test_inv_decoder_navigation.py' -v
+      - name: Actual owned R10 consent-modal and default-Cancel regressions
+        run: python -m unittest discover -s tests -p 'test_r10_admin_gui.py' -v
+      - name: Existing research SDK package and size-budget compatibility regressions
+        run: python -m unittest discover -s tests -p 'test_research_product.py' -v
+      - name: Actual native output-budget oracle and controlled profile refusal regressions
+        run: python -m unittest discover -s tests -p 'test_decoder_apps_qa.py' -v
 
   source-workflow:
     name: Actual Qt workflow RU EN / scale ${{ matrix.scale }}

@@ -82,8 +82,10 @@ def bounded_zip(path, *, max_members=10000, max_total_bytes):
             stream.seek(0)
             with zipfile.ZipFile(stream) as archive:
                 members = archive.infolist()
-                if len(members) != expected or sum(item.file_size for item in members) > max_total_bytes:
-                    raise ValueError("ZIP_MEMBER_OR_UNCOMPRESSED_BUDGET")
+                if len(members) != expected:
+                    raise ValueError("ZIP_MEMBER_COUNT_CHANGED")
+                if sum(item.file_size for item in members) > max_total_bytes:
+                    raise ValueError("ZIP_UNCOMPRESSED_SIZE_BUDGET")
                 yield archive
     except (zipfile.BadZipFile, struct.error, OverflowError, EOFError) as error:
         raise ValueError("INVALID_ZIP_STRUCTURE") from error

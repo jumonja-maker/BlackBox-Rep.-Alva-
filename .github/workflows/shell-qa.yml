@@ -156,7 +156,18 @@ jobs:
       - name: Undefined name gate
         run: python tools/check_undefined_names.py --report undefined-names-linux.json
       - name: Qt offscreen unit checks
-        run: python -m unittest discover -s tests -v
+        shell: bash
+        run: |
+          python - <<'PY'
+          import faulthandler, os, unittest
+          if os.environ.get('GITHUB_ACTIONS') != 'true' or os.environ.get('RUNNER_ENVIRONMENT') != 'github-hosted':
+              raise SystemExit('FULL_LINUX_UNIT_SUITE_REQUIRES_GITHUB_HOSTED_RUNNER')
+          faulthandler.dump_traceback_later(120, repeat=True)
+          try:
+              unittest.main(module=None, argv=['unittest', 'discover', '-s', 'tests', '-v'])
+          finally:
+              faulthandler.cancel_dump_traceback_later()
+          PY
       - name: Qt offscreen startup smoke
         run: python app.py --smoke
       - name: Real Qt isolated research end-to-end
