@@ -40,7 +40,15 @@ def _check_directory(stream, max_members):
         raise ValueError("ZIP_DIRECTORY_BUDGET_OR_MULTIDISK")
     stop = end[zipfile._ECD_LOCATION]
     if end[zipfile._ECD_SIGNATURE] == zipfile.stringEndArchive64:
-        stop -= zipfile.sizeEndCentDir64 + zipfile.sizeEndCentDir64Locator
+        # CPython3.11.9 reports the ordinary footer location; 3.11.14
+        # reports the ZIP64 footer location. Inspect the actual record so
+        # the same bounded policy works on both pinned runner interpreters.
+        stream.seek(stop)
+        signature=stream.read(4)
+        if signature==zipfile.stringEndArchive:
+            stop -= zipfile.sizeEndCentDir64 + zipfile.sizeEndCentDir64Locator
+        elif signature!=zipfile.stringEndArchive64:
+            raise ValueError("ZIP_DIRECTORY_FOOTER_LOCATION_INVALID")
     start = stop - size
     if start < 0:
         raise ValueError("ZIP_DIRECTORY_RANGE_INVALID")

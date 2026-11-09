@@ -56,7 +56,9 @@ class ChainReportCohortTests(unittest.TestCase):
         original = self.store.read_events
         advanced = []
         with closing(sqlite3.connect(self.journal)) as pinned:
-            self.assertEqual(pinned.execute("PRAGMA journal_mode").fetchone()[0], "wal")
+            # The product also supports DELETE journals. Explicitly create
+            # this fixture's WAL interleaving rather than assuming OS defaults.
+            self.assertEqual(pinned.execute("PRAGMA journal_mode=WAL").fetchone()[0], "wal")
             pinned.execute("BEGIN")
             pinned.execute("SELECT count(*) FROM actions").fetchone()
             before = hashlib.sha256(self.journal.read_bytes()).hexdigest()

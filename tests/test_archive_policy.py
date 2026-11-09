@@ -40,6 +40,14 @@ class ArchivePolicyTests(unittest.TestCase):
                 self.assertEqual(result["authenticity"], "UNVERIFIED")
                 self.assertEqual(self.path.read_bytes(), before)
 
+    def test_prepended_zip64_archive_uses_actual_footer_locations(self):
+        self.package(zip64=True)
+        before=b'TEST_ONLY_SELF_EXTRACTING_PREFIX\r\n'+self.path.read_bytes()
+        self.path.write_bytes(before)
+        result=verify_package(self.path)
+        self.assertEqual(result['integrity'],'VERIFIED')
+        self.assertEqual(self.path.read_bytes(),before)
+
     def test_forged_small_footer_count_cannot_materialize_extra_members(self):
         self.package()
         data = bytearray(self.path.read_bytes())
