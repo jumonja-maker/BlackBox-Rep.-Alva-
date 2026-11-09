@@ -185,7 +185,8 @@ def run_gui(app, window, output, source_sha):
     hosted_windows()
     from PySide6.QtCore import QBuffer, QIODevice, QPoint, QRect, QThread, QTimer, Qt
     from PySide6.QtTest import QTest
-    from PySide6.QtWidgets import QApplication, QMessageBox, QPushButton, QScrollArea
+    from PySide6.QtWidgets import (QApplication, QCheckBox, QMessageBox, QPushButton,
+                                   QScrollArea, QStyle, QStyleOptionButton)
     from blackbox_universal.provenance import source_identity
     output = Path(output).resolve()
     output.mkdir(parents=True, exist_ok=True)
@@ -237,7 +238,18 @@ def run_gui(app, window, output, source_sha):
         receiver = lambda *_: delivered.append(True)
         widget.clicked.connect(receiver)
         try:
-            QTest.mouseClick(widget, Qt.MouseButton.LeftButton)
+            point = widget.rect().center()
+            if isinstance(widget, QCheckBox):
+                # A checkbox may expand across the layout, while Qt accepts
+                # hits only on its indicator/text. Its overall center can be
+                # empty space. Click the actual style indicator instead.
+                option = QStyleOptionButton()
+                option.initFrom(widget)
+                option.text = widget.text()
+                point = widget.style().subElementRect(
+                    QStyle.SubElement.SE_CheckBoxIndicator, option, widget).center()
+            require(widget.rect().contains(point), "EXPERT_POINTER_POINT_OUTSIDE_CONTROL")
+            QTest.mouseClick(widget, Qt.MouseButton.LeftButton, pos=point)
             app.processEvents()
         finally:
             widget.clicked.disconnect(receiver)
