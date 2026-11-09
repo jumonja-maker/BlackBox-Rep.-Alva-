@@ -121,7 +121,7 @@ class NativeClientTests(unittest.TestCase):
             folder=Path(temp)/"client";event=Path(temp)/"event.jsonl"
             write_preparation(folder,event,"a"*32)
             # All literal paths are controlled test paths; always quote cmd paths.
-            from tools.qa_sdk_clients import cpp_failure_program
+            from tools.qa_sdk_clients import CPP_UNICODE_OPERATION, cpp_failure_program
             source=cpp_failure_program(event,'a'*32)
             (folder/"main.cpp").write_text(source)
             (folder/"build.cmd").write_text('@echo off\ncall "'+str(dev)+'" -no_logo -arch=x64\nif errorlevel 1 exit /b 1\ncl /nologo /EHsc /Zi /Fd:compile.pdb /std:c++17 main.cpp /Fe:client.exe /link /DEBUG /PDB:client.pdb\n',encoding="utf-8")
@@ -129,8 +129,10 @@ class NativeClientTests(unittest.TestCase):
             self.assertEqual(build.returncode,0,build.stdout[-4000:]+build.stderr[-4000:])
             child=subprocess.Popen([str(folder/"client.exe")],cwd=folder);self.assertEqual(child.wait(timeout=15),0)
             tail=EventTail(event,"a"*32,child.pid);rows=tail.poll();self.assertTrue(tail.ready)
-            self.assertEqual(rows[0]['seq'],3);self.assertEqual(rows[0]['client_dropped'],2)
-            self.assertEqual(tail.client_dropped,2)
+            self.assertEqual(len(rows),1);self.assertEqual(tail.invalid,0)
+            self.assertEqual(rows[0]['seq'],6);self.assertEqual(rows[0]['client_dropped'],5)
+            self.assertEqual(tail.client_dropped,5)
+            self.assertEqual(rows[0]['operation_id'],CPP_UNICODE_OPERATION)
             from blackbox_core.symbols import verify_symbols
             self.assertEqual(verify_symbols(folder/"client.exe",folder/"client.pdb")["status"],"MATCH")
 

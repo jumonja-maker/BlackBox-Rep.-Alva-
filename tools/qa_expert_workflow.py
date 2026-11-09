@@ -90,6 +90,16 @@ def validate_receipt(proof, *, source_sha, frozen, scale):
             "EXPERT_RECEIPT_ANCHOR_GEOMETRY_SCOPE")
     for row in anchors:
         buttons = row.get("buttons", [])
+        caption = row.get("caption", {})
+        require(type(caption) is dict and caption.get("has_height_for_width") is True and
+                caption.get("policy_has_height_for_width") is True and
+                all(type(caption.get(key)) is int and caption[key] > 0
+                    for key in ("allocated_height", "required_height_at_actual_width", "actual_width")) and
+                caption["allocated_height"] >= caption["required_height_at_actual_width"] and
+                caption.get("rect") == [0, 0, caption["actual_width"], caption["allocated_height"]] and
+                caption.get("visible_bounds") == caption["rect"] and
+                caption.get("workspace_contains") is True and caption.get("no_button_overlap") is True,
+                "EXPERT_RECEIPT_WRAPPED_CAPTION_CLIPPED")
         reveal_top = row.get("stage") == "fixture-minimum-width"
         require(row.get("reveal_top") is reveal_top and row.get("geometry_view") ==
                 ("AT_REPORT_TOP_AFTER_SCREENSHOT" if reveal_top else "SAME_VIEW_AFTER_SCREENSHOT") and
@@ -343,6 +353,7 @@ def run_gui(app, window, output, source_sha):
             scroll.verticalScrollBar().setValue(0)
             app.processEvents()
         workspace = window.report_context.parentWidget()
+        caption = window.report_context
         timeline = window._expert_sections["timeline"]
         buttons = (*window.expert_section_buttons.values(), window.copy_context_button)
         facts = {"stage": stage, "language": language,
@@ -353,7 +364,16 @@ def run_gui(app, window, output, source_sha):
             "workspace_rect": list(workspace.geometry().getRect()),
             "timeline_rect": list(timeline.geometry().getRect()),
             "workspace_before_timeline": workspace.parentWidget() is timeline.parentWidget() and
-                workspace.geometry().bottom() <= timeline.geometry().top(), "buttons": []}
+                workspace.geometry().bottom() <= timeline.geometry().top(), "buttons": [],
+            "caption": {"has_height_for_width": caption.hasHeightForWidth(),
+                "policy_has_height_for_width": caption.sizePolicy().hasHeightForWidth(),
+                "actual_width": caption.width(), "allocated_height": caption.height(),
+                "required_height_at_actual_width": caption.heightForWidth(caption.width()),
+                "rect": list(caption.rect().getRect()),
+                "workspace_geometry": list(caption.geometry().getRect()),
+                "visible_bounds": list(caption.visibleRegion().boundingRect().getRect()),
+                "workspace_contains": workspace.rect().contains(caption.geometry()),
+                "no_button_overlap": all(not caption.geometry().intersects(button.geometry()) for button in buttons)}}
         for button in buttons:
             ancestors = []
             ancestor = button.parentWidget()
@@ -377,6 +397,12 @@ def run_gui(app, window, output, source_sha):
                 "ancestors_contain": bool(ancestors) and all(row["contains_button"] for row in ancestors),
                 "ancestors": ancestors})
         proof["anchor_geometry"].append(facts)
+        label = facts["caption"]
+        require(label["has_height_for_width"] and label["policy_has_height_for_width"] and
+                label["required_height_at_actual_width"] > 0 and
+                label["allocated_height"] >= label["required_height_at_actual_width"] and
+                label["rect"] == label["visible_bounds"] and label["workspace_contains"] and
+                label["no_button_overlap"], "EXPERT_WRAPPED_CAPTION_CLIPPED_" + stage + "_" + language)
         require(facts["workspace_before_timeline"] and
                 all(row["rect"] == row["visible_bounds"] and row["minimum_size_met"] and
                     row["workspace_contains"] and row["siblings_disjoint"] and row["ancestors_contain"]

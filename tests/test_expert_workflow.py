@@ -161,6 +161,10 @@ def passed_receipt():
                            "research_panel_width": 752, "library_panel_width": 752}
                           for language in ("EN", "RU")],
         "anchor_geometry": [{"language": language, "stage": stage, "workspace_before_timeline": True,
+            "caption": {"has_height_for_width": True, "policy_has_height_for_width": True,
+                "actual_width": 600, "allocated_height": 48, "required_height_at_actual_width": 48,
+                "rect": [0, 0, 600, 48], "visible_bounds": [0, 0, 600, 48],
+                "workspace_contains": True, "no_button_overlap": True},
             "reveal_top": stage == "fixture-minimum-width",
             "geometry_view": "AT_REPORT_TOP_AFTER_SCREENSHOT" if stage == "fixture-minimum-width" else
                 "SAME_VIEW_AFTER_SCREENSHOT",
@@ -253,6 +257,15 @@ class ExpertReceiptGateTests(unittest.TestCase):
                 target = target[key]
             target[path[-1]] = value
             with self.subTest(path=path), self.assertRaises(AssertionError):
+                self.validate(proof)
+
+    def test_gate_refuses_wrapped_context_without_actual_caption_geometry(self):
+        for key, value in (("has_height_for_width", False), ("policy_has_height_for_width", False),
+                           ("allocated_height", 24), ("visible_bounds", [0, 0, 600, 13]),
+                           ("workspace_contains", False), ("no_button_overlap", False)):
+            proof = deepcopy(passed_receipt())
+            proof["anchor_geometry"][0]["caption"][key] = value
+            with self.subTest(key=key), self.assertRaisesRegex(AssertionError, 'WRAPPED_CAPTION_CLIPPED'):
                 self.validate(proof)
 
 

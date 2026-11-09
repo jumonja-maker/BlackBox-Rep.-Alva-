@@ -18,6 +18,10 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT), str(ROOT / 'src')]
 TOKEN = 'BLACKBOX_PUBLIC_SDK_QA_TOKEN_00001'
+CPP_UNICODE_OPERATION = 'операция-é-🚀'
+CPP_UNICODE_LITERAL = r'u8"\u043e\u043f\u0435\u0440\u0430\u0446\u0438\u044f-\u00e9-\U0001F680"'
+CPP_FAILED_EMIT_CASES = ('record_size', 'actual_write_sharing_denial', 'utf8_overlong',
+                         'utf8_surrogate', 'utf8_above_unicode_max')
 
 CS_FAILURE_PROGRAM = '''class Program {
   static int Main() {
@@ -40,7 +44,10 @@ def cpp_failure_program(event_path, token=TOKEN):
             '  bool unexpected=bb.emit("share-denied");\n'
             '  if(!CloseHandle(held))return 12;\n'
             '  if(unexpected)return 13;\n'
-            '  return bb.emit("blackbox.ready")?0:1;\n}\n')
+            '  if(bb.emit("blackbox.ready",std::string("\\xC0\\xAF",2)))return 20;\n'
+            '  if(bb.emit(std::string("\\xED\\xA0\\x80",3)))return 21;\n'
+            '  if(bb.emit("blackbox.ready",std::string("\\xF4\\x90\\x80\\x80",4)))return 22;\n'
+            '  return bb.emit("blackbox.ready",' + CPP_UNICODE_LITERAL + ')?0:1;\n}\n')
 
 
 def require(value, reason):
@@ -82,7 +89,7 @@ def prepare_main(argv):
     return 0
 
 
-def verify_event(path, pid, clock):
+def verify_event(path, pid, clock, *, sequence=3, failed_calls=2, operation_id=None):
     """Independent file readback plus the actual incremental reader."""
     from blackbox_core.instrumentation import EventTail
     raw = Path(path).read_bytes()
@@ -90,15 +97,21 @@ def verify_event(path, pid, clock):
     value = json.loads(raw)
     require(value.get('schema_version') == 1 and value.get('pid') == pid and
             type(value.get('tid')) is int and value['tid'] > 0 and value.get('token') == TOKEN and
-            value.get('seq') == 3 and value.get('client_dropped') == 2 and
+            value.get('seq') == sequence and value.get('client_dropped') == failed_calls and
             value.get('kind') == 'blackbox.ready' and value.get('source_clock') == clock,
             'SDK_COMPILED_DROP_RECOVERY_RECORD_MISMATCH')
+    require(operation_id is None or value.get('operation_id') == operation_id,
+            'SDK_COMPILED_UNICODE_OPERATION_CHANGED')
     reader = EventTail(path, TOKEN, pid)
     rows = reader.poll()
-    require(reader.ready and reader.invalid == 0 and reader.client_dropped == 2 and
-            len(rows) == 1 and rows[0]['seq'] == 3, 'SDK_ACTUAL_READER_DID_NOT_PRESERVE_CLIENT_FAILURE_COUNT')
+    require(reader.ready and reader.invalid == 0 and reader.client_dropped == failed_calls and
+            len(rows) == 1 and rows[0]['seq'] == sequence,
+            'SDK_ACTUAL_READER_DID_NOT_PRESERVE_CLIENT_FAILURE_COUNT')
+    require(operation_id is None or rows[0].get('operation_id') == operation_id,
+            'SDK_ACTUAL_READER_UNICODE_OPERATION_CHANGED')
     return {'pid': pid, 'event_sha256': hashlib.sha256(raw).hexdigest(), 'bytes': len(raw),
-            'seq': 3, 'client_failed_emit_calls': 2, 'actual_reader_ready': True,
+            'seq': sequence, 'client_failed_emit_calls': failed_calls, 'actual_reader_ready': True,
+            'unicode_operation_id': operation_id, 'unicode_operation_roundtrip_verified': operation_id is not None,
             'source_clock': clock, 'os_loss': 'NOT_MEASURED', 'source_trust': 'APP_EVENTS_UNAUTHENTICATED'}
 
 
@@ -206,7 +219,9 @@ def main():
     run_client([compiler, '/nologo', '/EHsc', '/std:c++17', str(cpp / 'main.cpp'), '/Fe:' + str(executable)],
                cpp, 'compile.log', environment=compiler_env)
     cpp_pid = run_client([str(executable)], cpp, 'client.log', timeout=20)
-    proof['cpp'] = verify_event(cpp / 'events.jsonl', cpp_pid, 'WIN32_GETTICKCOUNT64')
+    proof['cpp'] = verify_event(cpp / 'events.jsonl', cpp_pid, 'WIN32_GETTICKCOUNT64',
+                                sequence=6, failed_calls=5, operation_id=CPP_UNICODE_OPERATION)
+    proof['cpp']['known_failed_emit_cases'] = list(CPP_FAILED_EMIT_CASES)
     require(all(digest(generated / kind / name) == expected for kind, files in proof['files'].items()
                 for name, expected in files.items()), 'SDK_ORIGINAL_GENERATED_FILES_CHANGED')
     proof.update(exe_sha256=digest(args.exe) if args.exe else None,

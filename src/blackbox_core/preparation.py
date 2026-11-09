@@ -81,19 +81,25 @@ public sealed class BlackBoxEvents {
 // Windows C++17 client. Path/token come from blackbox-config.json.
 class BlackBoxEvents {
   std::wstring path; std::string token; unsigned long long seq=0,dropped=0; std::mutex mutex;
+  static bool validUtf8(const std::string& s) {
+    if(s.size()>8192)return false;
+    return s.empty() || MultiByteToWideChar(CP_UTF8,MB_ERR_INVALID_CHARS,s.data(),static_cast<int>(s.size()),nullptr,0)>0;
+  }
   static std::string quote(const std::string& s) {
     std::string out="\""; const char* hex="0123456789abcdef";
     for (unsigned char c:s) { if (c=='"'||c=='\\') { out+='\\';out+=c; }
-      else if(c<32 || c>=127) { out+="\\u00";out+=hex[c>>4];out+=hex[c&15]; } else out+=c; }
+      else if(c<32) { out+="\\u00";out+=hex[c>>4];out+=hex[c&15]; } else out+=c; }
     return out+"\"";
   }
 public:
   BlackBoxEvents(std::wstring file, std::string key):path(file),token(key){}
   bool emit(const std::string& kind,const std::string& operation="") {
     std::lock_guard<std::mutex> lock(mutex);
+    ++seq;
+    if(!validUtf8(token)||!validUtf8(kind)||!validUtf8(operation)){++dropped;return false;}
     auto line=std::string("{\"schema_version\":1,\"token\":")+quote(token)+
       ",\"pid\":"+std::to_string(GetCurrentProcessId())+",\"tid\":"+std::to_string(GetCurrentThreadId())+
-      ",\"seq\":"+std::to_string(++seq)+",\"kind\":"+quote(kind)+
+      ",\"seq\":"+std::to_string(seq)+",\"kind\":"+quote(kind)+
       ",\"source_clock\":\"WIN32_GETTICKCOUNT64\",\"source_ns\":"+std::to_string(GetTickCount64()*1000000ULL)+
       ",\"operation_id\":"+quote(operation)+",\"attributes\":{},\"client_dropped\":"+std::to_string(dropped)+"}\n";
     if(line.size()>8192){++dropped;return false;}
@@ -147,6 +153,7 @@ module.exports={BlackBoxEvents};
         "1. Python: copy blackbox_event_client.py and blackbox-config.json beside your program; use example.py.\n"
         "2. .NET 6+: include BlackBoxEvents.cs; construct with the config path; call Emit(\"blackbox.ready\").\n"
         "3. Windows C++17: include BlackBoxEvents.hpp; supply the path and token from config; emit blackbox.ready.\n"
+        "   C++ narrow strings are UTF-8; valid text is preserved, malformed UTF-8 returns false and counts as a failed Emit.\n"
         "4. Node/Electron: require blackbox-events.cjs; construct BlackBoxEvents(configPath); emit blackbox.ready.\n"
         "   After app.whenReady(), explicit startChromeTrace(contentTracing)/stopChromeTrace(contentTracing) captures the runtime's trace.\n"
         "   Other runtimes: append JSONL matching the clients' schema (8192-byte maximum per event).\n"

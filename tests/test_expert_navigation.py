@@ -713,7 +713,16 @@ class ExpertNavigationTests(unittest.TestCase):
         window.show()
         window._navigate("reports")
         self.app.processEvents()
-        self.load_recorded_a()
+        # A selected source may wrap across several lines. The controlled
+        # reader keeps this presentation test independent of path access.
+        source = self.root / ("recorded-source-" * 12) / ("selected-source-" * 12)
+        window._load_session_interval(source)
+        window._interval_worker.complete(recorded_interval(source))
+        self.assertTrue(window.report_context.wordWrap())
+        self.assertTrue(window.report_context.hasHeightForWidth())
+        self.assertTrue(window.report_context.sizePolicy().hasHeightForWidth())
+        self.assertGreater(window.report_context.heightForWidth(350),
+                           window.report_context.heightForWidth(1100))
         buttons = (*window.expert_section_buttons.values(), window.copy_context_button)
         workspace = window.report_context.parentWidget()
         timeline = window._expert_sections["timeline"]
@@ -725,7 +734,7 @@ class ExpertNavigationTests(unittest.TestCase):
             window.library_toggle.setChecked(expanded)
             window.library_panel.storage_toggle.setChecked(expanded)
             for language in ("EN", "RU", "EN"):
-                for width in (1280, 1020, 1280):
+                for width in (1440, 1020, 1280, 1440):
                     with self.subTest(expanded=expanded, language=language, width=width):
                         window._set_language(language)
                         window.resize(width, 850)
@@ -737,6 +746,8 @@ class ExpertNavigationTests(unittest.TestCase):
                         for panel in (window.research_panel, window.library_panel):
                             if panel.isVisible():
                                 self.assertLessEqual(panel.width(), available)
+                        self.assertGreaterEqual(window.report_context.height(),
+                                                window.report_context.heightForWidth(window.report_context.width()))
                         self.assertGreaterEqual(len({button.y() for button in buttons}), 2)
                         self.assertLessEqual(workspace.geometry().bottom(), timeline.geometry().top())
                         for index, button in enumerate(buttons):

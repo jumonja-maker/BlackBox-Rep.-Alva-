@@ -910,7 +910,12 @@ class UniversalWindow(QMainWindow):
         self.report_context.setObjectName("analysisSessionContext")
         self.report_context.setTextFormat(Qt.TextFormat.PlainText)
         self.report_context.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        self.report_context.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        # Word wrap enables QLabel's height-for-width policy. Replacing the
+        # policy here loses that flag and can allocate a one-line caption
+        # above the grid while the text still paints several lines.
+        context_policy = self.report_context.sizePolicy()
+        context_policy.setHorizontalPolicy(QSizePolicy.Policy.Ignored)
+        self.report_context.setSizePolicy(context_policy)
         workspace_layout.addWidget(self.report_context)
         sections = ActionGrid(max_columns=3)
         self.expert_section_layout = sections

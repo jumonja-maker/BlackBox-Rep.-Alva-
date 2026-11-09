@@ -119,6 +119,9 @@ class ArtifactlessEnduranceReceiptTests(unittest.TestCase):
 
 class OwnedProgressReadTests(unittest.TestCase):
     def fixture(self, root):
+        # The real parent stores the resolved session identity. Windows TEMP
+        # may use a RUNNER~1 alias before strict resolution expands it.
+        root = root.resolve()
         folder = root / 'sessions' / 'actual-sqlite-fixture'
         folder.mkdir(parents=True)
         with closing(sqlite3.connect(folder / 'session.sqlite3')) as db:
