@@ -7,6 +7,7 @@ without invoking an external diagnostic runtime.
 from __future__ import annotations
 
 from datetime import datetime
+import html
 import json
 import os
 import shutil
@@ -23,13 +24,13 @@ from blackbox_core.contracts import ObserverError
 from blackbox_core.report import compare as compare_sessions
 from blackbox_core.sampling_health import BusyTickTracker
 from PySide6.QtCore import Qt, QTimer, QThread, Signal, QSettings, QUrl, QStandardPaths, QPoint
-from PySide6.QtGui import QAction, QDesktopServices, QIcon
+from PySide6.QtGui import QAction, QDesktopServices, QIcon, QKeySequence
 from PySide6.QtWidgets import (
-    QAbstractItemView, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QSpinBox, QFileDialog, QFrame,
+    QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QSpinBox, QFileDialog, QFrame,
     QGridLayout, QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit,
     QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QPushButton,
     QScrollArea, QStackedWidget, QTabWidget, QTableWidget, QTableWidgetItem,
-    QVBoxLayout, QWidget,
+    QSizePolicy, QVBoxLayout, QWidget,
 )
 
 from .monitor import ReadOnlyProbe, available_processes, save_snapshot
@@ -136,6 +137,12 @@ class UniversalWindow(QMainWindow):
             self.language = "EN"
         self._update_worker = None
         self._report_state = "waiting"
+        self._expert_sections = {}
+        self._expert_actions = {}
+        self._report_preview_kind = "live"
+        self._comparison_preview = None
+        self._comparison_sources = None
+        self._comparison_state = "idle"
         self._available_release = None
         self._maintenance_launching = False
         self._pending_update_stage = None
@@ -178,6 +185,7 @@ class UniversalWindow(QMainWindow):
         self._nav_buttons: dict[str, QPushButton] = {}
         self._page_ids: dict[str, int] = {}
         self._build()
+        self._install_expert_shortcuts()
         if isolated:
             self.probe.updated.connect(self._research_updated)
             self.probe.terminated.connect(self._research_terminated)
@@ -443,7 +451,14 @@ class UniversalWindow(QMainWindow):
         status.content.addWidget(self.start_btn)
         self.stop_btn = _button("■  STOP OBSERVING")
         self.stop_btn.clicked.connect(self._stop)
-        status.content.addWidget(self.stop_btn)
+        stop_actions = QHBoxLayout()
+        stop_actions.addWidget(self.stop_btn, 3)
+        self.review_result_button = _button("RESULT", "accent")
+        self.review_result_button.setObjectName("reviewRecordingResult")
+        self.review_result_button.clicked.connect(self._review_latest_recording)
+        self.review_result_button.setEnabled(False)
+        stop_actions.addWidget(self.review_result_button, 2)
+        status.content.addLayout(stop_actions)
         self.mark_problem_btn = _button("⚑  MARK PROBLEM")
         self.mark_problem_btn.clicked.connect(self._mark_problem)
         status.content.addWidget(self.mark_problem_btn)
@@ -701,10 +716,12 @@ class UniversalWindow(QMainWindow):
         h.addWidget(_label("LOCAL DISK / REPORTS", "eyebrow", False))
         h.addStretch()
         save = _button("▣  SAVE JSON SNAPSHOT", "primary")
+        self.live_export_button = save
         save.clicked.connect(self._export)
         h.addWidget(save)
         content.addLayout(h)
         interval_panel = WindowPanel("Investigation Summary", "FULL SELECTED INTERVAL / READ ONLY")
+        self.report_interval_panel = interval_panel
         interval_actions = QGridLayout()
         self.load_interval_current = _button("LOAD RECORDED SESSION")
         self.load_interval_current.setObjectName("loadRecordedInterval")
@@ -742,11 +759,24 @@ class UniversalWindow(QMainWindow):
         interval_panel.content.addLayout(track_controls)
         content.addWidget(interval_panel)
         frame = WindowPanel("Structured observation", "SCHEMA 1")
+        self.report_snapshot_frame = frame
+        self.report_preview_source = _label("", "caption")
+        self.report_preview_source.setTextFormat(Qt.TextFormat.PlainText)
+        frame.content.addWidget(self.report_preview_source)
+        snapshot_sources = QHBoxLayout()
+        self.live_snapshot_button = _button("Live snapshot")
+        self.live_snapshot_button.clicked.connect(self._show_live_snapshot)
+        self.last_comparison_button = _button("Last comparison")
+        self.last_comparison_button.clicked.connect(self._show_last_comparison)
+        snapshot_sources.addWidget(self.live_snapshot_button)
+        snapshot_sources.addWidget(self.last_comparison_button)
+        frame.content.addLayout(snapshot_sources)
         self.report_preview = QPlainTextEdit()
         self.report_preview.setReadOnly(True)
         self.report_preview.setMinimumHeight(180)
         frame.content.addWidget(self.report_preview)
         technical_toggle = QCheckBox("Technical data (legacy JSON)")
+        self.report_technical_toggle = technical_toggle
         technical_toggle.toggled.connect(frame.setVisible)
         content.addWidget(technical_toggle)
         content.addWidget(frame)
@@ -761,6 +791,7 @@ class UniversalWindow(QMainWindow):
         self.session_location = _label("No persisted session yet", "caption")
         controls.addWidget(self.session_location,1,0,1,2)
         compare_button = _button("≍  COMPARE TWO SESSIONS")
+        self.compare_sessions_button = compare_button
         compare_button.clicked.connect(self._compare_sessions)
         controls.addWidget(compare_button,0,1)
         content.addLayout(controls)
@@ -855,7 +886,198 @@ class UniversalWindow(QMainWindow):
         self.chain_history_toggle.toggled.connect(self._chain_history_visible)
         content.insertWidget(1, self.chain_history_toggle)
         content.insertWidget(2, self.chain_history_panel)
+        self._expert_sections = {
+            "timeline": interval_panel,
+            "findings": self.analysis_panel,
+            "library": self.library_toggle,
+            "actions": self.research_toggle,
+            "technical": technical_toggle,
+        }
+        workspace = QFrame()
+        workspace.setObjectName("expertAnalysisWorkspace")
+        workspace_layout = QVBoxLayout(workspace)
+        workspace_layout.setContentsMargins(0, 0, 0, 0)
+        self.report_context = _label("", "caption")
+        self.report_context.setObjectName("analysisSessionContext")
+        self.report_context.setTextFormat(Qt.TextFormat.PlainText)
+        self.report_context.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.report_context.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        workspace_layout.addWidget(self.report_context)
+        sections = QGridLayout()
+        self.expert_section_buttons = {}
+        for index, key in enumerate(self._expert_sections):
+            button = _button(key)
+            button.setObjectName("expertSection_" + key)
+            button.clicked.connect(lambda checked=False, section=key: self._show_expert_section(section))
+            self.expert_section_buttons[key] = button
+            sections.addWidget(button, 0, index)
+        self.copy_context_button = _button("Copy analysis context")
+        self.copy_context_button.setObjectName("copyAnalysisContext")
+        self.copy_context_button.clicked.connect(self._copy_analysis_context)
+        sections.addWidget(self.copy_context_button, 1, 0, 1, 2)
+        workspace_layout.addLayout(sections)
+        # Keep the recorded timeline immediately after its source context.
+        # All existing panels and their embedding attributes remain available.
+        content.removeWidget(interval_panel)
+        content.insertWidget(1, interval_panel)
+        content.insertWidget(1, workspace)
         return page
+
+    def _install_expert_shortcuts(self):
+        for number, (page, title) in enumerate(self.PAGES, 1):
+            action = QAction(title, self)
+            action.setShortcut(QKeySequence("Ctrl+" + str(number)))
+            action.triggered.connect(lambda checked=False, key=page: self._expert_navigate(key))
+            self.addAction(action)
+            self._expert_actions[page] = action
+        search = QAction("Find process", self)
+        search.setShortcut(QKeySequence("Ctrl+L"))
+        search.triggered.connect(self._focus_process_search)
+        self.addAction(search)
+        review = QAction("Open recording result", self)
+        review.setShortcut(QKeySequence("Ctrl+Shift+R"))
+        review.triggered.connect(self._review_latest_recording)
+        self.addAction(review)
+        self._expert_actions.update(search=search, review=review)
+
+    def _expert_navigate(self, page):
+        if not self._pending_close and QApplication.activeModalWidget() is None:
+            self._navigate(page)
+
+    def _focus_process_search(self):
+        if self._pending_close or QApplication.activeModalWidget() is not None:
+            return
+        self._navigate("processes")
+        self.process_search.setFocus(Qt.FocusReason.ShortcutFocusReason)
+        self.process_search.selectAll()
+
+    def _can_review_latest_recording(self):
+        return bool(self.probe.session_folder is not None and not self.probe.active
+                    and self._report_state in ("saved", "unavailable")
+                    and self._report_worker is None and self._pending_base_stop is None
+                    and not (self._isolated and self.probe.pending) and not self._pending_close)
+
+    def _review_latest_recording(self):
+        if not self._can_review_latest_recording() or QApplication.activeModalWidget() is not None:
+            return
+        # Analysis of saved evidence never attaches a target or starts capture.
+        self._load_session_interval(Path(self.probe.session_folder))
+        self._navigate("reports")
+
+    def _show_expert_section(self, key):
+        if key not in self._expert_sections or self._pending_close:
+            return
+        self._navigate("reports")
+        if key == "library":
+            self.library_toggle.setChecked(True)
+        elif key == "actions":
+            self.research_toggle.setChecked(True)
+        elif key == "technical":
+            self.report_technical_toggle.setChecked(True)
+            self._update_report_preview()
+        target = self._expert_sections[key]
+
+        def reveal():
+            if self._pending_close or self.stack.currentIndex() != self._page_ids["reports"]:
+                return
+            scroll = self.stack.currentWidget()
+            offset = target.mapTo(scroll.widget(), QPoint(0, 0)).y()
+            scroll.verticalScrollBar().setValue(max(0, offset - 12))
+
+        QTimer.singleShot(0, reveal)
+
+    def _copy_analysis_context(self):
+        if self._interval_folder is not None:
+            QApplication.clipboard().setText(self.report_context.text())
+
+    def _can_export_interval(self):
+        packet = self._interval_packet
+        if (not isinstance(packet, dict) or self._interval_read_error
+                or self._interval_worker is not None or self._interval_pending is not None
+                or self._interval_export_worker is not None
+                or packet.get("folder") != str(self._interval_folder)):
+            return False
+        interval = packet.get("interval", {})
+        return (interval.get("instance_id", self._interval_process) == self._interval_process
+                and interval.get("metadata", {}).get("recorded_status") not in (None, "RECORDING"))
+
+    def _refresh_expert_context(self):
+        if not hasattr(self, "report_context"):
+            return
+        from .expert_context import format_analysis_context
+        text = format_analysis_context(
+            self._interval_folder, self._interval_packet,
+            loading=self._interval_worker is not None or self._interval_pending is not None,
+            failed=self._interval_read_error, language=self.language,
+            instance_id=self._interval_process)
+        self.report_context.setText(text)
+        self.report_context.setToolTip("<qt><pre>" + html.escape(text) + "</pre></qt>")
+        self.copy_context_button.setEnabled(self._interval_folder is not None)
+        self.export_interval_btn.setEnabled(self._can_export_interval())
+        ready = self._can_review_latest_recording()
+        self.review_result_button.setEnabled(ready)
+        if "review" in self._expert_actions:
+            self._expert_actions["review"].setEnabled(ready)
+        self.review_result_button.setText("РЕЗУЛЬТАТ" if self.language == "RU" else "RESULT")
+        description = ("Открыть результат записи (Ctrl+Shift+R). Сеанс анализируется без смены живой цели."
+                       if self.language == "RU" else
+                       "Open recording result (Ctrl+Shift+R). Analysis does not change the live target.")
+        self.review_result_button.setAccessibleName(description.split(" (")[0])
+        if not ready:
+            description += (" Доступно после остановки и завершения сохранения." if self.language == "RU"
+                            else " Available after recording stops and finalization finishes.")
+        self.review_result_button.setToolTip(description)
+        labels = {"timeline": ("Timeline", "Шкала"), "findings": ("Findings", "Находки"),
+                  "library": ("Library", "Библиотека"), "actions": ("Actions / SDK", "Действия / SDK"),
+                  "technical": ("Snapshot / compare", "Снимок / сравнение")}
+        for key, button in self.expert_section_buttons.items():
+            button.setText(labels[key][self.language == "RU"])
+            button.setProperty("bb_english", labels[key][0])
+        self.copy_context_button.setText("Копировать контекст анализа" if self.language == "RU"
+                                         else "Copy analysis context")
+        self.live_snapshot_button.setText("Текущее наблюдение" if self.language == "RU" else "Live snapshot")
+        self.last_comparison_button.setText("Последнее сравнение" if self.language == "RU" else "Last comparison")
+        if "search" in self._expert_actions:
+            self._expert_actions["search"].setText("Найти процесс" if self.language == "RU" else "Find process")
+            self._expert_actions["review"].setText("Открыть результат записи" if self.language == "RU"
+                                                else "Open recording result")
+        self.last_comparison_button.setEnabled(self._comparison_state == "ready")
+        self.compare_sessions_button.setEnabled(self._comparison_state != "loading")
+        if self._interval_folder is not None:
+            self.thread_detail_refresh.setEnabled(
+                self._thread_detail_worker is None and self._interval_worker is None
+                and self._interval_pending is None)
+        self.open_report_button.setText("HTML последней записи" if self.language == "RU"
+                                        else "Latest recording HTML")
+        source = str(self.probe.session_folder) if self.probe.session_folder is not None else "—"
+        self.open_report_button.setToolTip("<qt>" + html.escape(source) + "</qt>")
+        self.live_export_button.setText("JSON текущего наблюдения" if self.language == "RU"
+                                        else "Export live observation JSON")
+        for number, (page, _title) in enumerate(self.PAGES, 1):
+            self._nav_buttons[page].setToolTip(
+                self._nav_buttons[page].text().strip() + " · Ctrl+" + str(number))
+        profile_tips = {
+            "STANDARD": ("Base observation counters; does not enable ETW, dumps or interventions.",
+                         "Базовые счётчики наблюдения; ETW, дампы и вмешательства не включаются."),
+            "DETAILED": ("Adds bounded thread, child-process and memory queries; no automatic ETW or dump.",
+                         "Добавляет ограниченные опросы потоков, потомков и памяти; ETW и дампы не включаются автоматически."),
+            "INCIDENT_BURST": ("Bounded incident-triggered detail; trigger and budgets remain in Settings.",
+                               "Ограниченный подробный сбор по триггеру; триггеры и бюджеты находятся в настройках."),
+        }
+        for index in range(self.dashboard_profile.count()):
+            code = self.dashboard_profile.itemData(index)
+            if code in profile_tips:
+                self.dashboard_profile.setItemData(index,
+                    profile_tips[code][self.language == "RU"], Qt.ItemDataRole.ToolTipRole)
+
+    def _show_live_snapshot(self):
+        self._report_preview_kind = "live"
+        self._show_expert_section("technical")
+
+    def _show_last_comparison(self):
+        if self._comparison_state == "ready":
+            self._report_preview_kind = "comparison"
+            self._show_expert_section("technical")
 
     def _chain_history_visible(self, visible):
         if visible:
@@ -958,6 +1180,7 @@ class UniversalWindow(QMainWindow):
         changing.add(self.interval_summary)
         changing.add(self.thread_detail_status)
         changing.add(self.window_capture_status)
+        changing.update((self.report_context, self.report_preview_source))
         from PySide6.QtWidgets import QLabel
         for label in self.findChildren(QLabel):
             if label in changing or label.objectName() == "metricValue":
@@ -1063,6 +1286,7 @@ class UniversalWindow(QMainWindow):
             self.chain_history_toggle.setText("ИСТОРИЯ ДИАГНОСТИЧЕСКИХ ЦЕПОЧЕК" if language == "RU" else "DIAGNOSTIC CHAIN HISTORY")
         if self.stack.currentIndex() == self._page_ids["reports"]:
             self._update_report_preview()
+        self._refresh_expert_context()
 
     def _open_github(self) -> None:
         QDesktopServices.openUrl(
@@ -1623,6 +1847,11 @@ class UniversalWindow(QMainWindow):
                 self.probe.send("interval", milliseconds=int(self.interval_combo.itemData(index)))
 
     def _load_thread_detail(self) -> None:
+        if self._interval_folder is not None:
+            bounds = (self._interval_packet or {}).get("interval", {}).get("selected_interval_ns")
+            self._load_session_interval(self._interval_folder, bounds,
+                                        instance_id=self._interval_process)
+            return
         folder = self.probe.session_folder
         if (self._thread_detail_worker is not None or folder is None or
                 not (folder / "detail-v2.sqlite3").is_file()):
@@ -1650,20 +1879,46 @@ class UniversalWindow(QMainWindow):
             self.research_panel.begin.setValue(0)
             self.research_panel.end.setValue(max(.001,(result["metadata"].get("duration_ms") or 0)/1000))
 
+    def _clear_recorded_view(self, folder):
+        """Drop source-bound presentation when selecting another recording.
+
+        Empty presentation is not a zero-valued measurement. The live probe,
+        current target and its report are deliberately left untouched.
+        """
+        self._interval_packet = None
+        self.session_timeline.set_interval(None)
+        self.session_event_details.clear()
+        self.session_event_table.setRowCount(0)
+        self.process_history_table.apply_page({})
+        self.process_history_summary.setText(
+            "Записанные процессы ещё не загружены." if self.language == "RU" else
+            "Recorded processes have not been loaded.")
+        self._thread_detail_payload = None
+        self._thread_detail_state = "default"
+        self.thread_detail_table.setRowCount(0)
+        self._render_thread_detail_status()
+        for panel in (self.analysis_panel, self.events_panel):
+            panel.invalidate_interval(folder)
+            panel.setEnabled(False)
+
     def _load_session_interval(self,folder,interval=None,*,instance_id=1,event_cursor=(0,0),process_after=0):
         if folder is None:
             return
         folder=Path(folder)
-        if folder!=self._interval_folder:
-            self.session_event_details.clear()
-            self._thread_detail_payload=None
-            self._thread_detail_state="default"
+        if folder!=self._interval_folder or instance_id != self._interval_process:
+            self._clear_recorded_view(folder)
         self._interval_folder=folder
         self._interval_process=instance_id
+        self._interval_read_error=False
+        self.interval_summary.setText(self._t("Reading all selected observations…"))
+        self.export_interval_btn.setEnabled(False)
+        self.analysis_panel.setEnabled(False)
+        self.events_panel.setEnabled(False)
         args=(folder,interval,instance_id,event_cursor,process_after)
         if self._interval_worker is not None:
             self._interval_pending=args
             self._interval_worker.requestInterruption()
+            self._refresh_expert_context()
             return
         self._interval_read_error=False
         self.interval_summary.setText(self._t("Reading all selected observations…"))
@@ -1671,6 +1926,7 @@ class UniversalWindow(QMainWindow):
         worker=SessionIntervalWorker(folder,self,interval=interval,instance_id=instance_id,
                                      event_cursor=event_cursor,process_after=process_after)
         self._interval_worker=worker
+        self._refresh_expert_context()
         worker.result_ready.connect(self._session_interval_ready)
         worker.finished.connect(self._session_interval_finished)
         worker.start()
@@ -1704,23 +1960,29 @@ class UniversalWindow(QMainWindow):
         if self._interval_pending is not None or self._pending_close:
             return
         if error or not isinstance(packet,dict):
-            self._interval_packet=None
+            self._clear_recorded_view(self._interval_folder)
             self._interval_read_error=True
             self.export_interval_btn.setEnabled(False)
             self._render_interval_summary()
+            self._refresh_expert_context()
             return
         if packet["folder"]!=str(self._interval_folder):
             return
+        if packet.get("interval", {}).get("instance_id", self._interval_process) != self._interval_process:
+            return
         self._interval_packet=packet
         self._interval_read_error=False
+        self.analysis_panel.setEnabled(True)
+        self.events_panel.setEnabled(True)
         result=packet["interval"]
         self._render_interval_summary()
         self.session_timeline.set_interval(result)
-        self.export_interval_btn.setEnabled(self._interval_export_worker is None and
-            result["metadata"]["recorded_status"] not in (None,"RECORDING"))
-        self._thread_detail_ready({"folder":packet["folder"],"analysis":packet["threads"]},"")
+        self.export_interval_btn.setEnabled(self._can_export_interval())
+        self._thread_detail_ready({"folder":packet["folder"],"analysis":packet["threads"]},"",
+                                  from_interval=True)
         rows=packet["processes"]["rows"]
-        self.analysis_panel.apply_interval(packet['folder'],tuple(result['selected_interval_ns']),origin=result['metadata']['monotonic_origin_ns'])
+        self.analysis_panel.apply_interval(packet['folder'],tuple(result['selected_interval_ns']),
+            origin=result['metadata']['monotonic_origin_ns'], instance_id=self._interval_process)
         self.events_panel.apply_interval(packet['folder'],tuple(result['selected_interval_ns']),origin=result['metadata']['monotonic_origin_ns'],processes=rows)
         self.process_history_table.apply_page(packet['processes'],selected_instance=self._interval_process)
         self._render_process_history_summary()
@@ -1753,6 +2015,7 @@ class UniversalWindow(QMainWindow):
             self._interval_pending=None
             self._load_session_interval(folder,interval,instance_id=instance,
                                         event_cursor=event_cursor,process_after=process_after)
+        self._refresh_expert_context()
 
     def _timeline_range_requested(self,start,end):
         if self._interval_folder is not None:
@@ -1824,7 +2087,7 @@ class UniversalWindow(QMainWindow):
             self._navigate("reports")
 
     def _export_session_interval(self):
-        if self._interval_packet is None or self._interval_export_worker is not None:
+        if not self._can_export_interval():
             return
         dialog=QDialog(self)
         dialog.setWindowTitle(self._t("Export privacy preview"))
@@ -1868,11 +2131,15 @@ class UniversalWindow(QMainWindow):
         self._interval_export_worker=None
         if worker:
             worker.deleteLater()
-        self.export_interval_btn.setEnabled(self._interval_packet is not None)
+        self.export_interval_btn.setEnabled(self._can_export_interval())
         if self._pending_close:
             QTimer.singleShot(0,self.close)
 
-    def _thread_detail_ready(self, payload: object, error: str) -> None:
+    def _thread_detail_ready(self, payload: object, error: str, *, from_interval=False) -> None:
+        # A delayed standalone read of the live root must not replace the
+        # selected historical interval or child-process thread presentation.
+        if self._interval_folder is not None and not from_interval:
+            return
         if error or type(payload) is not dict:
             self._thread_detail_state="error"
             self._render_thread_detail_status()
@@ -2066,6 +2333,7 @@ class UniversalWindow(QMainWindow):
             self._t("System ready. Choose a process in the PROCESS EXPLORER."))
         if self.stack.currentIndex() == self._page_ids["events"]:
             self._update_event_table()
+        self._refresh_expert_context()
 
     def _refresh_target_binding(self, selected: bool, running: bool) -> None:
         """Explain what is attached without claiming recording before Start."""
@@ -2395,6 +2663,25 @@ class UniversalWindow(QMainWindow):
                 self.event_table.setItem(row, col, QTableWidgetItem(value))
 
     def _update_report_preview(self) -> None:
+        if self._report_preview_kind == "comparison":
+            sources = self._comparison_sources or ("—", "—")
+            self.report_preview_source.setText(
+                ("Сравнение сохранённых сеансов: " if self.language == "RU" else
+                 "Saved-session comparison: ") + str(sources[0]) + " ↔ " + str(sources[1]))
+            if self._comparison_state == "ready":
+                self.report_preview.setPlainText(json.dumps(
+                    self._comparison_preview, ensure_ascii=False, indent=2))
+            else:
+                self.report_preview.setPlainText(
+                    ("Сравнение выполняется…" if self.language == "RU" else "Comparing sessions…")
+                    if self._comparison_state == "loading" else
+                    ("Сравнение недоступно; исходные записи не изменены." if self.language == "RU" else
+                     "Comparison unavailable; source recordings were not changed."))
+            return
+        self.report_preview_source.setText(
+            ("Снимок текущего наблюдения: " if self.language == "RU" else "Live observation snapshot: ") +
+            ("PID " + str(self.probe.pid) if self.probe.pid is not None else "—") +
+            (" · " + str(self.probe.session_folder) if self.probe.session_folder is not None else ""))
         if self.probe.pid is None:
             self.report_preview.setPlainText(
                 self._t("// No report yet.\n// Choose a process, start observing, "
@@ -2415,30 +2702,45 @@ class UniversalWindow(QMainWindow):
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(page)))
 
     def _compare_sessions(self) -> None:
+        if self._comparison_state == "loading":
+            return
         first = QFileDialog.getExistingDirectory(self, "Choose first saved session")
         if not first:
             return
         second = QFileDialog.getExistingDirectory(self, "Choose second saved session")
         if not second:
             return
+        self._comparison_sources = (first, second)
+        self._report_preview_kind = "comparison"
+        self._comparison_state = "loading"
+        self._comparison_preview = None
         if self._isolated:
-            self.probe.send("compare", before=first, after=second)
-            self._navigate("reports")
+            try:
+                self.probe.send("compare", before=first, after=second)
+            except (OSError, RuntimeError, ValueError):
+                self._comparison_state = "failed"
+            self._show_expert_section("technical")
+            self._refresh_expert_context()
             return
         try:
             result = compare_sessions(Path(first), Path(second))
         except (ObserverError, OSError, ValueError, TypeError):
+            self._comparison_state = "failed"
+            self._show_expert_section("technical")
+            self._refresh_expert_context()
             QMessageBox.warning(self, "Comparison failed",
                                 "These folders do not contain valid BLACK.BOX sessions.")
             return
-        self._navigate("reports")
-        self.report_preview.setPlainText(json.dumps(
-            result, ensure_ascii=False, indent=2))
+        self._comparison_preview = result
+        self._comparison_state = "ready"
+        self._show_expert_section("technical")
+        self._refresh_expert_context()
 
     def _set_report_status(self, state: str) -> None:
         """Show the state of independently saved local process reports."""
         self._report_state = state
         self._refresh_report_status()
+        self._refresh_expert_context()
 
     def _refresh_report_status(self) -> None:
         ru = self.language == "RU"
@@ -2752,12 +3054,16 @@ class UniversalWindow(QMainWindow):
                        'Retry cleanup before closing; the diagnostic operation will not be repeated.')
             QMessageBox.warning(self, 'BLACK.BOX — RECOVERY_UNCONFIRMED', message)
             return
+        if op == "compare":
+            self._comparison_preview = payload if not error and isinstance(payload, dict) else None
+            self._comparison_state = "ready" if self._comparison_preview is not None else "failed"
+            self._update_report_preview()
+            self._refresh_expert_context()
+            return
         if error:
             return
         if op == "processes" and isinstance(payload, list):
             self._process_rows = payload
             self._filter_processes(self.process_search.text())
-        elif op == "compare":
-            self.report_preview.setPlainText(json.dumps(payload, ensure_ascii=False, indent=2))
         elif op == "snapshot_export":
             self._refresh_report_status()

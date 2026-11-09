@@ -4,225 +4,112 @@
 
 > **Antivirus / Windows SmartScreen notice:** Antivirus software or Microsoft Defender SmartScreen may warn about BLACK.BOX because its portable executable is unsigned and can inspect processes. **If the project interests you, you may add a narrowly scoped antivirus exception only after independently verifying and trusting the file.** Download from the [official repository Releases](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/releases), check the published ZIP SHA-256, and scan/review the download first. A warning is **not proof of a false positive**, and an exception reduces protection. Do **not** disable antivirus globally.
 
-**A portable Windows tool for process observation, deep inspection and controlled diagnostic actions.**
+**A portable Windows workspace for recording a process, reviewing local evidence and running explicitly authorized diagnostics.**
 
-[**Download latest published Windows x64 release**](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/releases/latest) · [Releases](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/releases) · [Русская версия](README.ru.md)
+[**Download published Windows x64 ZIP**](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/releases/latest) · [Expert workflow guide](docs/USER_GUIDE_EN.md) · [Русская версия](README.ru.md)
 
 [![Windows/Linux QA](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/actions/workflows/shell-qa.yml/badge.svg?branch=main)](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/actions/workflows/shell-qa.yml)
-![Development version](https://img.shields.io/badge/source-0.5.5-40766c) ![Windows](https://img.shields.io/badge/platform-Windows%20x64-40766c) ![MIT](https://img.shields.io/badge/license-MIT-40766c)
+![Source version](https://img.shields.io/badge/source-0.6.0-40766c) ![Windows](https://img.shields.io/badge/platform-Windows%20x64-40766c) ![MIT](https://img.shields.io/badge/license-MIT-40766c)
 
-**Source version: v0.5.5.** Downloads and updater availability are determined only by the [official GitHub Release](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/releases/latest). Green CI and a source branch do not themselves publish an update.
+**Source/development version: v0.6.0. Latest published release verified for this patch: v0.5.4.** The expert workflow changes and R10–R60 source features described here are development work; they do not mean that a v0.6.0 ZIP has been published. Downloads and the updater follow the [official GitHub Release](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/releases/latest). A source commit or green CI does not publish an update.
 
-**R60 — Chain Builder (development patch):** Overview contains an optional internal Chain Builder tab for typed, bounded diagnostic workflows using existing tools. Opening or previewing a chain is passive; interventions retain fresh R10 consent, and unknown evidence/cleanup stays explicit. The six main pages and legacy five-page embedding API remain. This is not a published update or a declaration of completed acceptance. [User and technical guide (RU)](docs/R60_CHAIN_BUILDER_RU.md).
+## Use a recording to answer a concrete question
 
-**R10 — One administrator session (v0.5.5 release candidate):** The top toolbar offers an explicit **Enable administrator rights** control. One verified, time-limited Diagnostic Helper can serve multiple individually authorized process instances (PID + creation FILETIME) without another Windows elevation request within the same active lease. Each intervention still requires individual confirmation; ordinary observation never requests UAC. Token, lifetime, cleanup and a real execution receipt are verified. Physical Secure Desktop UAC is NOT_TESTED. [R10 guide (RU)](docs/R10_RU.md) · [Technical scope](docs/specifications/R10.md) · [v0.5.5 release notes](docs/RELEASE_v0.5.5.md).
+| Task | Start with | Review and output |
+| --- | --- | --- |
+| Reproduce a slowdown, memory rise or I/O spike | Select the process; record the workload and mark the relevant moment | Timeline, recorded counters, gaps and source-linked findings; local SQLite/JSON/HTML |
+| Compare two runs of the same workload | Keep target, capture profile, interval and workload conditions comparable | Session/action comparison with counts, variability and incompatible conditions |
+| Examine a saved trace or crash capture | Open the existing ETL/EventPipe/JSONL in Trace Decoder, or use the relevant saved-source tool | Filtered events, supported stacks/symbols and explicit coverage; JSON/HTML exports |
+| Check a diagnostic hypothesis against more evidence | Open Deep Inspection or Investigation Engine 3 inside Overview | Source links, partial critical paths, hypotheses and separately confirmed verification steps |
 
-BLACK.BOX Universal lets you **select a running process or choose an application file**. OBSERVE records operating-system measurements and saves local SQLite, JSON and HTML sessions without changing the target. File selection itself only reads metadata. In the separate BB-DEEP-001 patch, explicit INSPECT and INTERVENE actions can snapshot, pause, debug and modify selected memory after confirmation. They are not started by ordinary sampling. The portable application requires no service, account, cloud server, subscription or separately installed Python.
+CPU, RSS, I/O, waits and temporal coincidence describe observations. They do not, by themselves, establish an application's internal root cause. Missing access, clocks, symbols and coverage remain explicit.
 
-> **Important:** BLACK.BOX provides observational evidence, not proof of an application's internal root cause. High CPU, rising memory, or a process exiting do not, on their own, establish why it failed.
+## Select → record → stop → review
 
-**Investigation Engine 3 — v0.5.4:** Overview → Deep Inspection → **INVESTIGATE PROBLEM** links saved evidence, partial wait paths and testable hypotheses. BEFORE/ACTION/AFTER steps require individual user confirmation. Incomplete identity, clocks and coverage remain explicit. [Guide](docs/BB_INV_003_EN.md) · [Русская инструкция](docs/BB_INV_003_RU.md) · [Specification](docs/specifications/BB-INV-003.md). [Visual step-by-step walkthrough](#investigation-engine-3-v054-visual-walkthrough).
+1. **Select.** On **Processes**, search by name/PID, select the intended running instance and attach. Check its identity on **Overview**. PID plus creation time distinguishes an instance; selecting a file or browsing a recorded child does not start recording or rebind the live target.
+2. **Record.** Choose **Standard**, **Detailed** or **Incident Burst** and check the sampling interval before **Start Observing**. Reproduce the workload. Add a problem mark or action boundaries when useful; these are user statements, not verified OS failures.
+3. **Stop.** Use **Stop Observing** and check the save/finalization status. SQLite measurements and generated reports have distinct failure states; a report error does not establish that the recording was lost. Preserve the shown session folder and retry only the failed operation.
+4. **Review.** In Overview, use **Open recording result** when the stopped recording is ready. This explicitly opens its saved evidence in **Reports**; Stop keeps your current page. Reports also opens other saved sessions. Check the session, process instance, interval and coverage before reading findings, then narrow the range, compare or export.
 
-**BB-DEEP-001 — available since v0.5.3:** The expandable **Deep Inspection** block stays inside Overview and provides Processes, Modules, Threads, Handles, Memory, Network, Disk, Debug and Timeline panels. Operation-specific access checks can offer a standard Windows UAC prompt for a scoped diagnostic helper; the GUI remains unelevated. Sensitive memory and dumps are excluded from ordinary sharing. Historical trace instance IDs are not silently equated with current process creation times. See the [English guide and supported boundaries](docs/BB_DEEP_001.md), [Russian guide](docs/BB_DEEP_001_RU.md) and [original specification](docs/specifications/BB-DEEP-001.md). The v0.5.3 release was verified on exact-SHA GitHub-hosted CI.
+Reports keeps the loaded analysis folder/range visible and offers section navigation to the timeline, findings, library, capture actions and technical data. **Copy analysis context** puts the displayed context on the local clipboard; review it before sharing. **Ctrl+1…6** switches between the six pages; **Ctrl+L** opens Processes and focuses search.
 
-**BB-DEEP-001 — released in v0.5.3:** Deep process inspection, controlled debugger/memory actions and scoped Diagnostic Helper within Overview. [v0.5.3 release notes](docs/RELEASE_v0.5.3.md).
+For repeatable experiments, note the application version, workload and capture conditions alongside the recording. Ordinary observation does not request UAC. Profiles do not automatically start ETW, EventPipe or a dump.
 
-**Decoder completion in v0.5.2 source:** Offline trace/session clock correlation (with explicit uncertainty), ETW off-CPU/ready-delay analysis, native PDB source lines/inline sites/OMAP and bounded import recovery. Clock evidence is not trace authentication, scheduler events do not prove a lock owner, and unsupported symbols remain unknown. See [completion scope and acceptance limits](docs/TRACE_DECODER_COMPLETION_PATCH.md) and [v0.5.2 release notes](docs/RELEASE_v0.5.2.md). The installed version is determined only by the published GitHub Release, not a source commit.
+[Detailed workflow and interpretation](docs/USER_GUIDE_EN.md) · [Russian guide](docs/USER_GUIDE_RU.md) · [Expert workflow patch scope (RU)](docs/EXPERT_WORKFLOW_PATCH_RU.md)
 
-**v0.5.0 Trace Decoder:** The sixth page imports ETL, EventPipe and BLACK.BOX JSONL offline using the bundled self-contained Microsoft TraceEvent helper. It provides events, GC intervals, capture-clock evidence, module observations, local native PE/PDB checks and derived symbol names, and separate .NET/native ETW CPU sample trees. Select PID, process instance, thread and the time interval explicitly; export JSON or script-free HTML/SVG flame views. The decoder does not record automatically or download symbols. Counts are not CPU%, GC elapsed is not a pause, and trace/session clock alignment remains **NOT_ESTABLISHED**. See [release scope and limits](docs/RELEASE_v0.5.0.md), [module/PDB contract](docs/TRACE_DECODER_PHASE5_PATCH.md) and [native CPU/filter contract](docs/TRACE_DECODER_PHASE5_PACKET2.md). Publication is gated on the exact commit's Windows/Linux/portable and real trace acceptance; a source branch is not itself a published update.
+## Observation, inspection and intervention
 
-**v0.4.2 desktop:** The turquoise banner and monitor icon are compact, the decorative sparkle row is gone, and the FILE/HELP toolbar uses less height. The chart, Current Session and other pages begin higher on screen; normal Windows window controls remain. CI measures the actual workspace start at full and minimum window sizes in RU/EN, with Windows offscreen DPI captures at 100–200%. This is layout-only: evidence collection and recording behavior are unchanged.
-
-**v0.4.1 desktop:** The window starts maximized but can be restored or resized. The decorative START footer and redundant VIEW menu are removed; the telemetry chart uses the available vertical area. Privacy/security details remain in this README rather than occupying space in Settings.
-
-**v0.5.1 audit corrections:** independent recording/index failure handling, copy-only share privacy, Stop/retry lifecycle, complete findings and explicit notes, CSV and Unicode profile search fixes. Includes the reviewed PR #25 fixes and additional embedded-path/schema regressions. [Release details and limits](docs/RELEASE_v0.5.1.md). Source code is not a published update until the release gate completes.
-
-## What BLACK.BOX looks like
-
-![Real Windows CI capture of BLACK.BOX Universal Overview with telemetry chart and recording controls](docs/screenshots/en-overview.png)
-
-*Overview — actual Windows CI/offscreen screenshot of the earlier `main` development build. The dashboard is waiting for a target; no measurement is fabricated. The older v0.4.2 release lacks the decoder; v0.5.0 adds it. These screenshots predate the complete v0.5.0 decoder controls.*
-
-## Download and first run
-
-1. Download the [latest Windows ZIP](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/releases/latest) and **extract it completely** to a writable directory.
-2. Double-click **`BLACK.BOX-Universal.exe`**.
-3. Open **Processes**. Either select a running application from the list and click **Attach**, or click **Select Application File** to choose an EXE (or another file).
-4. If you chose an EXE, click **Find Running EXE** to attach to an already running instance, or **Launch Selected EXE** and explicitly approve starting the file. Then go to **Overview**, click **Start**, interact with the application, and click **Stop**.
-5. In **Reports**, examine the recorded data, open the saved HTML, export a snapshot, or compare two sessions.
-
-### Select and attach a process
-
-![Real Windows CI process explorer showing the executable picker, process search and Attach Selected Process](docs/screenshots/en-processes.png)
-
-*Processes — search by process name or PID, or choose an EXE file. Attaching does not start recording; use **Start** in Overview when you are ready.*
-
-**Which EXE files are included in v0.5.0?**
-
-| File | Purpose |
+| Scope | What it means |
 | --- | --- |
-| `BLACK.BOX-Universal.exe` | Main application. **Launch this one.** |
-| `BLACK.BOX-Maintenance.exe` | Helps update or remove the portable application after the main EXE closes. Usually runs automatically. |
-| `decoder/BLACK.BOX-Decoder.exe` | Optional offline ETW/EventPipe decoder, packaged with its own .NET runtime. The app launches it when needed; **do not launch manually**. Included from v0.5.0; not part of the older v0.4.2 ZIP. |
+| **OBSERVE** | Read-only operating-system counter collection for the selected accessible process. It does not modify target memory. |
+| **INSPECT** | Explicit additional queries and captures in Deep Inspection. Access, supported sources and sensitive output depend on the operation; a dump can briefly pause a target. |
+| **INTERVENE** | Explicit operations such as debugger actions, thread suspend/resume or selected memory writes. They require operation/target confirmation and applicable access; observation never starts them. |
 
-Keep the entire `_internal` folder and the other extracted files. The main EXE is **not** a standalone file you can copy out of the portable folder.
+The GUI remains unelevated. The source R10 administrator session uses a scoped, time-bounded Diagnostic Helper; each intervention retains its own consent and PID/creation-time check. Enabling rights is not blanket permission for later actions. Windows protection can still deny access. Unknown execution or cleanup stays unknown; rollback after a crash is not guaranteed. See [Deep Inspection](docs/BB_DEEP_001.md) and [R10 scope (RU)](docs/R10_RU.md).
 
-## What is included?
+## Six pages, one working context
 
-| Tab | Capabilities |
+| Page | Use it for |
 | --- | --- |
-| **Overview** | CPU/RSS metrics, graphs, Start/Stop and live target identity. The BB-DEEP-001 patch adds a collapsed Deep Inspection block with explicit diagnostic actions. |
-| **Processes** | Select by name/PID **or choose an application file**. Match a running EXE by its full path, or launch a selected EXE only after explicit confirmation. |
-| **Event Log** | Local observation messages; session start/stop events are persisted in SQLite. |
-| **Reports** | Current snapshot, `report.json`, readable offline `report.html`, manual export and session comparison. |
-| **Settings** | RU/EN interface, 1/2/5-second sampling intervals, update checks, desktop shortcut, feedback and removal. |
-| **Trace Decoder — included since v0.5.0** | Offline ETL/EventPipe/JSONL reading with separate CPU sample stacks and GC intervals. Included in the published v0.5.1 release; v0.4.2 predates this page. |
+| **Overview** | Live target identity, recording state, capture profile, telemetry and explicit advanced diagnostics inside the page |
+| **Processes** | Search and attach a live instance; inspect an application file; browse recorded process/thread history |
+| **Event Log** | Filter observation/lifecycle events and inspect original event references |
+| **Reports** | Open current or saved recordings, select a time range, analyze, compare and export local evidence |
+| **Settings** | Sampling and recording policy, recovery, updates and maintenance |
+| **Trace Decoder** | Offline ETL, EventPipe `.nettrace` and BLACK.BOX JSONL analysis with explicit process/thread/time filters |
 
-### Settings — capture profiles and recovery controls
+A saved recording, an imported trace, a live target and a diagnostic run are different sources. Opening history does not authorize a live action. The six primary pages and legacy five-page embedding API are retained.
 
-![Windows CI screenshot of BLACK.BOX Settings with Standard capture profile, recording policy and interrupted-export recovery](docs/screenshots/en-settings.png)
+![Historical Windows CI screenshot of the Overview page](docs/screenshots/en-overview.png)
 
-*Settings — select a capture profile **before recording**. Standard provides base counters, Detailed adds bounded thread/child/memory queries, and Burst adds incident-triggered detail. Disabled actions require an applicable target or state. Scroll down for export recovery and measurement definitions. Language switching (RU / ENG) is in the left sidebar; **Check Updates** is in the top toolbar. Choosing a profile does not automatically capture ETW or dumps.*
+*Historical Windows CI/offscreen capture, predating this expert workflow patch. It documents the earlier shell, not acceptance of the current layout. [Screenshot provenance](docs/screenshots/README.md).*
 
-### Reports and saved observations
+## Portable package and local evidence
 
-![Windows CI screenshot of Reports page with saved-session investigation and export controls](docs/screenshots/en-reports.png)
+Extract the **entire** published ZIP to a writable folder, then launch **`BLACK.BOX-Universal.exe`**. Keep `_internal` and all companion files. No separate Python installation, account, subscription or mandatory cloud service is required by the portable application.
 
-*Reports — inspect or export local evidence after a session; incomplete or inaccessible measurements are not silently reported as zero.*
+| Packaged executable | Purpose |
+| --- | --- |
+| `BLACK.BOX-Universal.exe` | Main desktop application |
+| `BLACK.BOX-Maintenance.exe` | Update/removal helper, normally launched by the application |
+| `decoder/BLACK.BOX-Decoder.exe` | Bundled offline TraceEvent decoder with its runtime, launched when needed |
 
-### Development-only trace analysis
+For an EXE file, BLACK.BOX reads metadata and can match a running instance by full executable path. Launching the selected EXE requires a separate confirmation. Other files provide metadata only; file selection never executes them. Local SHA-256 is calculated for files up to 16 MiB. File inspection is not malware scanning or static code analysis.
 
-![Windows CI screenshot of the sixth Trace Decoder tab in the current main development build](docs/screenshots/en-decoder.png)
-
-*Trace Decoder (published since v0.5.0, retained in v0.5.1) — import an ETL, EventPipe `.nettrace`, or BLACK.BOX JSONL file offline. CPU profiler samples, event-associated stacks and GC intervals have distinct meanings. Older v0.4.2 packages do not contain this tab.*
-
-Some counters are inaccessible for protected processes or unavailable on a particular system. Missing values are displayed as **unknown**, not misleading zeros. RSS describes the selected process; it is **not** the summed memory usage of a complete process tree.
-
-### What happens when I select a file?
-
-- **EXE:** BLACK.BOX reads file metadata and PE architecture, and can find a currently running instance **by exact executable path**, not a guessed filename. You can also choose to start the EXE yourself; starting it from BLACK.BOX requires a separate confirmation.
-- **DLL, SYS, MSI, COM, BAT, CMD, PS1, PY, JAR, and other files:** display **read-only metadata** (type, size, modification time and, where possible, PE architecture). These are not stand-alone running processes and BLACK.BOX does not silently run them.
-- A SHA-256 checksum is calculated **locally** for files up to 16 MiB; larger files are not hashed in the GUI. Choosing or inspecting any file never executes it.
-
-**File inspection is not malware scanning, static code analysis, or active application debugging.** Live CPU/RSS/I/O monitoring requires a running, accessible process.
-
-### Where does my data go?
-
-By default, each recording is saved under:
+Default recording location:
 
 ```text
 %USERPROFILE%\Documents\BLACK.BOX Universal\sessions\
 └── <session-folder>\
     ├── session.sqlite3  # Measurements and lifecycle events
     ├── report.json      # Structured summary
-    └── report.html      # Human-readable offline report
+    └── report.html      # Offline report
 ```
 
-Reports can be viewed and compared without an internet connection. No process observations are uploaded automatically. **Review recorded data before sharing it**, since names and timestamps can reveal private activity.
+Additional captures and analyses have their own files and status. Share export creates a redacted copy; original recordings stay local. Memory/dumps and raw traces require separate inclusion. Known-field redaction cannot recognize every secret in free text: review exports before sharing. Checksums establish byte identity, not trusted authorship. No observations are uploaded automatically.
 
-## Updates and privacy
+**Check Updates** uses published GitHub Releases, verifies the downloaded ZIP size/SHA-256 and uses Maintenance after the application closes. Startup update checking is enabled by default and can be disabled in Settings. Sessions under Documents are intended to survive updates/removal. [Updates, feedback and removal](docs/UPDATES_FEEDBACK_UNINSTALL.md).
 
-**Check Updates** compares the current version with the latest published [GitHub Release](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/releases). A commit pushed to `main` is **not** an update until a new version is released. If an update is available, confirm the download and installation; BLACK.BOX verifies the ZIP's size and SHA-256 and uses the Maintenance helper to replace the application after it closes.
+## Advanced reference and history
 
-Checking GitHub for updates at startup is **enabled by default** and can be switched off in **Settings**. Other than this check and links you deliberately open, monitoring and reports are local. Session folders under Documents are intended to survive updates and application removal.
+Use these after choosing the evidence needed for the question:
 
-See [Updates and maintenance](docs/UPDATES_FEEDBACK_UNINSTALL.md).
+- [Deep Inspection: operations and boundaries](docs/BB_DEEP_001.md) · [Investigation Engine 3: evidence graph and manual verification](docs/BB_INV_003_EN.md)
+- [Trace Decoder completion and limits](docs/TRACE_DECODER_COMPLETION_PATCH.md) · [Native CPU/filter contract](docs/TRACE_DECODER_PHASE5_PACKET2.md) · [Module/PDB contract](docs/TRACE_DECODER_PHASE5_PATCH.md)
+- [R10 administrator session (RU)](docs/R10_RU.md) · [R20 provenance](docs/BB_WAVE_02_R20_RU.md) · [R30 waits/I/O](docs/BB_WAVE_02_R30_RU.md) · [R40 crash evidence](docs/BB_WAVE_02_R40_RU.md) · [R50 incidents/comparison](docs/R50_RU.md) · [R60 Chain Builder](docs/R60_CHAIN_BUILDER_RU.md). R10–R60 here describe source/development features beyond the published v0.5.4 package.
+- [Voluntary application instrumentation / SDK](docs/SDK_GUIDE.md): add examples to your own source and rebuild; external observation alone does not expose internal application stages.
+- Published-release history: [v0.5.4](docs/RELEASE_v0.5.4.md), [v0.5.3](docs/RELEASE_v0.5.3.md), [v0.5.2](docs/RELEASE_v0.5.2.md), [v0.5.1](docs/RELEASE_v0.5.1.md), [v0.5.0](docs/RELEASE_v0.5.0.md). [v0.5.5](docs/RELEASE_v0.5.5.md) and [v0.6.0](docs/RELEASE_v0.6.0.md) documents are candidate/development notes, not evidence of publication.
+- [Architecture](docs/ARCHITECTURE.md) · [Product scope](docs/PRODUCT_SCOPE.md) · [QA evidence](docs/QA_EVIDENCE.md) · [Release gates](docs/RELEASE_GATES.md) · [Historical implementation checklist](docs/BB_DI_001_IMPLEMENTATION_STATUS.md)
 
-## Reliability and visual hardening in v0.3.6
+Offline session investigation identifies suspicious recorded intervals and writes separate JSON/HTML. It does not itself collect missing ETW/stacks. Investigation Engine 3 correlates supported saved sources; `BLOCKED` is not proof of lock ownership and hypotheses remain testable proposals. Trace sample counts are not CPU%; GC elapsed time is not a stop-the-world pause. Imported data remains unverified; trace/session clock alignment must be established for the actual inputs.
 
-- Race-safe report publication refuses overwriting existing `report.json` or `report.html` even when another writer races the check; preserves originals on failure.
-- Only true observation warnings/errors appear in error summaries. User problem markers are no longer counted as errors; SQLite events are read incrementally.
-- Stronger release ZIP validation rejects reserved Windows names, malformed paths, special nodes, Unicode/case aliases, collisions and preexisting staging roots.
-- The portable updater and uninstaller reject Windows junction/reparse points, including ancestor folders; unreadable path metadata fails closed. Updates preserve user sessions or revert a failed replacement when possible.
-- CPU plots rescale for multicore processes above 100% without clipping observed peaks.
-- Automated RU/EN Qt offscreen screenshots at 100/125/150/200% scaling supplement, but do not replace, manual physical Windows DPI and update/rollback checks.
+Hosted Windows/Linux, native and portable checks cover their recorded scenarios and exact source commits. They do not establish physical Windows 10/11 acceptance, interactive Secure Desktop UAC, assistive-technology acceptance, antivirus reputation or universal long-run reliability. Historical PR #17 and its 128-requirement checklist describe an earlier milestone, not the current patch's acceptance status. Use exact-commit CI evidence and the relevant patch report for current results. Binaries are unsigned; bundled license notices do not constitute a complete legal redistribution audit.
 
-[Independent review and remaining acceptance limitations](docs/DEEP_HARDENING_REVIEW.md).
+## Development and CLI
 
+The source uses Python 3.11+, PySide6/Qt, psutil, SQLite and `blackbox_core`. Follow [AGENTS.md](AGENTS.md) for this patch: application/test/build execution is restricted to GitHub-hosted runners; local source review and edits are allowed. The portable ZIP is the normal desktop distribution.
 
-## Investigation Engine 3 (v0.5.4): visual walkthrough
-
-![Authentic Windows CI screenshot of Investigation Engine 3 showing the Critical Path section, BLOCKED/READY thread intervals and detail table](docs/screenshots/ru-investigation-v3-critical-path.png)
-
-*Authentic **Russian-language** Qt screenshot captured during [BB-INV-003 Windows CI](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/actions/runs/41085704991), source commit `41d50627` (1024 × 720). The workspace is scrolled to **Critical Path**, not showing all seven sections at once. Orange **BLOCKED** marks an observed wait interval; blue **READY** marks a ready-to-run thread. Neither proves lock ownership or root cause. This is not an AI mockup or a measurement from your application.*
-
-**Quick start:** **Overview → Deep Inspection → INVESTIGATE PROBLEM → add recorded sources → Build evidence graph → inspect links and hypotheses → optionally verify manually → export**.
-
-### Step 1. Open the workspace and select evidence
-
-1. Open **Overview**, expand **Deep Inspection**, then choose **INVESTIGATE PROBLEM**. This is a workspace *within Overview*, not a seventh main page. Opening it does not record, debug, or request UAC.
-2. Add one or more **previously recorded** sources: a BLACK.BOX session folder, Trace Decoder SQLite index, Deep Inspection journal, Investigation Engine 2 JSON, recorded JSONL events, or saved minidump metadata. For raw **ETL** or **EventPipe**, first import through **Trace Decoder**, then select the resulting index.
-3. Select **Build evidence graph**. Wait for the result and examine its source list, coverage, truncation warnings and missing evidence. Original input files are not overwritten.
-
-### Step 2. Read the seven internal sections
-
-| Section | What to inspect |
-| --- | --- |
-| **Problem overview** | Sources, incident context, coverage and limits. |
-| **Related observations** | Original events and recorded references supporting a claim. |
-| **Evidence graph** | Nodes and classified links such as `DIRECT_REFERENCE`, `TEMPORAL_COINCIDENCE` or `NOT_ESTABLISHED`. |
-| **Critical path** | Thread intervals: `RUNNING`, `BLOCKED`, `READY`, plus `UNKNOWN` / `INCOMPLETE` gaps. |
-| **Hypotheses** | Supporting and contradicting facts, alternatives, missing measurements and proposed next checks. |
-| **Verification** | A newly confirmed live target, BEFORE/AFTER snapshots and separately authorized diagnostic actions. |
-| **Recurrences** | Related cases, declared application/workload context and compatible capture comparisons. |
-
-**Interpreting the screenshot:** a shared timestamp, PID or image name does not establish a relation. `BLOCKED` does not identify a lock owner; `READY` alone does not explain why a thread has not run. If source identity, clock evidence or stack links are missing, the engine displays an explicit gap. Select a row to inspect its original reference; navigation to threads, stacks, modules or the decoder requires a recorded link.
-
-### Step 3. Manually test a hypothesis
-
-1. In **Hypotheses**, read the selected proposal's **supporting, contradicting and missing evidence**. It is not a proven root cause.
-2. In **Verification**, explicitly select and confirm a **current live process for new measurements**; this does not relabel historical observations.
-3. Select **Capture BEFORE** and wait for its snapshot ID.
-4. If intervention is necessary, choose an existing **manual Deep action**, review rights, impact, timeout, recovery and cleanup, then provide the **explicit parameters** and select **Confirm chosen action**. Only the scoped Diagnostic Helper may request UAC; declining does not discard saved evidence.
-5. Select **Capture AFTER**, then **Compare BEFORE / AFTER**. An observed difference does not by itself prove a fix; a causal conclusion can remain `INCONCLUSIVE`.
-
-**Important:** this feature is not an automatic workflow builder. Changing targets invalidates prior consent; a failed step ends that experiment. On `RECOVERY_UNCONFIRMED`, inspect the outcome and existing Deep Inspection cleanup before attempting anything else.
-
-### Step 4. Save, revisit and compare
-
-- Select **Export investigation** and choose a **new JSON or standalone HTML filename**. Both are local and readable without internet; source sessions and trace files remain separate.
-- Use **Recurrences** only for sufficiently comparable captures. If needed, select **Declare application / workload context**, and separately choose the application binary for its locally computed SHA-256. User-entered version/workload metadata remains user-reported rather than OS-attested.
-- Review any personally entered text before sharing an export. **Export does not upload** evidence to a cloud service.
-- Large investigations can be deliberately partial. Paging the GUI does **not** automatically continue reading the complete original trace.
-
-**Example:** when an application intermittently stops responding, add the saved session and an ETW-derived index, inspect **Critical path**, examine recorded waits and supported thread references, then review a **UI_UNRESPONSIVE** hypothesis. Preserve uncertainty when links are missing; use new manual snapshots only if you need further evidence.
-
-[Complete technical/user guide](docs/BB_INV_003_EN.md) · [Русская инструкция](docs/BB_INV_003_RU.md) · [Specification](docs/specifications/BB-INV-003.md)
-
-## Investigation Engine 0.1.2
-
-![Windows CI screenshot of optional investigation controls in Reports, including ETW and EventPipe actions](docs/screenshots/en-investigation.png)
-
-*Expanded research controls in the current `main` build (not all available in the published version). Greyed-out actions need a suitable target, permission or recording state; advanced sources such as ETW/EventPipe are **explicit opt-in**, not automatic.*
-
-- While recording, click **Mark Problem** (after at least one sample) to save a timestamp and an optional note. This is an explicitly **unverified user mark**, never OS-attested evidence of a hang.
-- Stop recording. In **Reports**, click **Investigate Session** to analyze the just-completed recording or **Investigate Saved** for another local session.
-- Review the new bilingual findings table and click an entry to view the measured facts and their limitations. The **Event Log** shows a separate findings table.
-- Open the independent offline Investigation HTML report. The engine creates new uniquely named JSON/HTML files and does **not overwrite** the original SQLite, JSON or HTML reports.
-
-This offline analysis uses recorded CPU, RSS, I/O and other available counters to identify suspicious *intervals*, not proven root causes. It does **not** perform ETW, wait-chain tracing, stack inspection or native hang detection. Sessions over 4096 samples require explicit approval for an analysis of just the latest 4096 samples and always disclose incomplete coverage. [Investigation Engine license](docs/vendor/investigation-0.1.2-LICENSE).
-
-## Scope and current quality status
-
-BLACK.BOX is **not** a PC cleaner, antivirus or automatic repair utility. The BB-DEEP-001 patch adds Windows Debug API actions and a bounded local minidump metadata/memory reader; it does not claim complete dump unwinding, managed-heap analysis, protection bypass or guaranteed rollback after a crash. Access is decided by Windows. OS counters, wait reasons and successful diagnostic actions do not by themselves prove an application's internal fault.
-
-**Baseline QA for v0.3.2:** [GitHub Actions run #39872624116](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/actions/runs/39872624116) passed **new file-selection and existing process tests on Windows and Linux**, built the Windows executable, and passed frozen-EXE startup/smoke checks for commit [`6c8d9478`](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/commit/6c8d94785492e4373a80720b7812871b94856241). The newer v0.3.6 source, PE file picker, and packaged executable are subject to [current main CI](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/actions?query=branch%3Amain). Manual clean-Windows, update/rollback, antivirus and code-signing acceptance are **not established by these tests**. Distributed EXEs are currently unsigned; third-party package license notices also require final review.
-
-## Developing from source
-
-The project is Python-first: **Python 3.11+**, PySide6/Qt, psutil, SQLite, and the standalone `blackbox_core` package. Developers need Python; users of the portable ZIP do not.
-
-```powershell
-py -3.11 -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install -r requirements.txt
-python -m pip install -e .
-python app.py
-```
-
-For BB-DEEP-001, all automated tests, native controlled workloads, portable-EXE checks and the endurance job run exclusively on GitHub-hosted runners. Follow the [patch validation guide](docs/BB_DEEP_001.md); no mandatory acceptance test is to run on a user's computer. A hosted job does not establish real interactive UAC Secure Desktop behavior or physical Windows 10/11 acceptance.
-
-An optional CLI is available for advanced users. The `record --output` directory must already exist:
+The optional CLI supports `list`, `record`, `summary`, `compare` and `export`. The `record --output` directory must already exist:
 
 ```powershell
 python -m blackbox_core list
@@ -231,30 +118,8 @@ python -m blackbox_core summary .\sessions\<session-folder>
 python -m blackbox_core compare .\sessions\<first-folder> .\sessions\<second-folder>
 ```
 
-It also supports `export`. The desktop GUI is the normal user interface.
-
-### Project layout
-
-```text
-app.py                       GUI entry point and smoke test
-blackbox_universal/          Qt shell, file picker, observer, updates, maintenance
-src/blackbox_core/           Read-only process sampling, SQLite, reports, CLI
-tests/                      Automated tests
-tools/                      Windows icon creation and EXE resource verification
-.github/workflows/           Windows/Linux CI and portable release packaging
-docs/                       Architecture, contracts and release requirements
-```
-
-See [Architecture](docs/ARCHITECTURE.md), [Product scope](docs/PRODUCT_SCOPE.md), [QA evidence](docs/QA_EVIDENCE.md), and [Release gates](docs/RELEASE_GATES.md).
-
 ## License and feedback
 
-The original source is available under [MIT](LICENSE). Packaged dependencies, including Qt/PySide6 and Python, retain their respective licenses; see [Licensing](docs/LICENSING.md).
+Original source: [MIT](LICENSE). Packaged dependencies retain their own terms; see [Licensing](docs/LICENSING.md).
 
-To report a problem, [open an issue](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/issues) with your BLACK.BOX version, Windows version, reproduction steps, and only **non-sensitive** report excerpts. You can also send feedback to **[DonJeoJesky@outlook.com](mailto:DonJeoJesky@outlook.com)**. Please do not include sensitive data from diagnostic reports.
-
-### Integrated diagnostics and scope
-
-BLACK.BOX includes Standard, Detailed and incident-burst observations, persisted process/thread histories, local interval analysis and optional native Windows/WCT, ETW, EventPipe and minidump sources. Additional capture is explicitly controlled; recorded counters do not prove an internal root cause. Session files and local evidence are not uploaded automatically.
-
-The v0.4.1 patch refines desktop layout only: it does **not** add an automatic detective, new system collectors or higher sampling overhead. Physical Windows 10/11, assistive technology, antivirus/OneDrive and the full 128-point diagnostic acceptance remain separate validations. See [implementation status](docs/BB_DI_001_IMPLEMENTATION_STATUS.md) and [research scope](docs/RESEARCH_PRODUCT_IMPLEMENTATION.md).
+[Open an issue](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/issues) or write to **[DonJeoJesky@outlook.com](mailto:DonJeoJesky@outlook.com)** with BLACK.BOX version, Windows version and reproduction steps. Include only non-sensitive report excerpts.

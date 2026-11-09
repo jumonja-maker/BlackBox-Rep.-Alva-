@@ -1,0 +1,112 @@
+name: Expert workflow isolated acceptance (no publication)
+
+on:
+  push:
+    branches: [patch/expert-workflow-20261109]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bb-expert-${{ github.ref }}
+  cancel-in-progress: false
+
+# Full source regressions and the existing portable build run once through
+# shell-qa.yml on the final PR. This workflow adds bounded patch acceptance;
+# it never duplicates the complete build or uploads Actions artifacts.
+jobs:
+  contracts:
+    name: Expert workflow contracts (${{ matrix.os }})
+    if: github.ref == 'refs/heads/patch/expert-workflow-20261109'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            python: '3.11.14'
+            lock: requirements/ci-linux-py311.lock
+          - os: windows-latest
+            python: '3.11.9'
+            lock: requirements/ci-windows-py311.lock
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    env:
+      QT_QPA_PLATFORM: offscreen
+      PYTHONUTF8: '1'
+      BB_QA_SOURCE_SHA: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: ${{ matrix.python }}
+          architecture: x64
+      - name: Linux Qt prerequisites
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -qq && sudo apt-get install -y libegl1 libopengl0 libxcb-cursor0 libxkbcommon-x11-0
+      - name: Install pinned QA dependencies
+        run: |
+          python -m pip install --require-hashes -r ${{ matrix.lock }}
+          python -m pip install --no-build-isolation --no-deps -e .
+      - name: Undefined names and syntax gate
+        run: python tools/check_undefined_names.py --report expert-static.json
+      - name: Real Qt navigation and evidence presentation contracts
+        run: python -m unittest discover -s tests -p 'test_expert*.py' -v
+
+  source-workflow:
+    name: Actual Qt workflow RU EN / scale ${{ matrix.scale }}
+    needs: contracts
+    runs-on: windows-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        scale: ['1', '1.25', '1.5', '2']
+    env:
+      QT_QPA_PLATFORM: offscreen
+      QT_SCALE_FACTOR: ${{ matrix.scale }}
+      PYTHONUTF8: '1'
+      BB_QA_SOURCE_SHA: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.11.9'
+          architecture: x64
+      - name: Install pinned QA dependencies
+        run: |
+          python -m pip install --require-hashes -r requirements/ci-windows-py311.lock
+          python -m pip install --no-build-isolation --no-deps -e .
+      - name: Actual pointer keyboard selection stop report handoff and PNG receipts
+        run: python tools/qa_expert_workflow.py --output expert-workflow --source-sha '${{ github.sha }}'
+
+  acceptance:
+    name: Exact-commit focused expert acceptance
+    if: always() && github.ref == 'refs/heads/patch/expert-workflow-20261109'
+    needs: [contracts, source-workflow]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require every focused matrix member
+        env:
+          EXPERT_GATE_RESULTS: ${{ toJSON(needs) }}
+          EXPERT_SOURCE_SHA: ${{ github.sha }}
+        run: |
+          python - <<'PY'
+          import json, os
+          gates = {key: value['result'] for key, value in json.loads(os.environ['EXPERT_GATE_RESULTS']).items()}
+          passed = len(gates) == 2 and all(value == 'success' for value in gates.values())
+          print('EXPERT_FOCUSED_ACCEPTANCE ' + json.dumps({
+              'status': 'PASS' if passed else 'FAIL', 'source_sha': os.environ['EXPERT_SOURCE_SHA'],
+              'gates': gates, 'full_source_and_portable_gate': 'SEPARATE_FINAL_PR_SHELL_QA_REQUIRED',
+              'physical_dpi': 'NOT_TESTED', 'secure_desktop': 'NOT_TESTED',
+              'full_5h30_endurance': 'NOT_RERUN_SAMPLER_HELPER_SCHEDULER_UNCHANGED',
+              'published_release': False}, sort_keys=True))
+          raise SystemExit(0 if passed else 1)
+          PY
