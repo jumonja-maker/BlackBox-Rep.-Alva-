@@ -14,7 +14,8 @@ import unittest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from tools.qa_expert_workflow import PAGES, SECTIONS, digest, synthetic_recording, validate_receipt
+from tools.qa_expert_workflow import (PAGES, SECTIONS, digest, observe_layout_readiness,
+                                      synthetic_recording, validate_receipt)
 
 
 class ExpertWorkflowQtTests(unittest.TestCase):
@@ -179,6 +180,17 @@ def passed_receipt():
                     "languages": ["EN", "RU"], "finding_selection_actual_qt_input": True,
                     "event_selection_actual_qt_input": True, "incident_card_actual_qt_input": True,
                     "copy_detail_roundtrip": True, "raw_json_roundtrip": True, "root_cause": "UNKNOWN"}}
+    for row in proof["anchor_geometry"]:
+        row["layout_diagnostics"] = {"height_timer_active": False, "height_metrics_dirty": False,
+            "syncing_height": False, "workspace_minimum_height": 118, "workspace_layout_height_for_width": 118,
+            "caption_exact_text": "Selected saved source: TEST_ONLY_SYNTHETIC\nRoot cause: UNKNOWN",
+            "workspace_layout_rect": [0, 0, 600, 118], "parent_layout_rect": [0, 0, 650, 1000],
+            "parent_contents_rect": [0, 0, 650, 1000]}
+    proof["layout_readiness"] = [{"stage": row["stage"], "language": row["language"],
+        "geometry_view": "AT_REPORT_TOP_AFTER_SCREENSHOT" if row["reveal_top"] else "SAME_VIEW_BEFORE_SCREENSHOT",
+        "initial_observed_before_event_drain": True, "timeout_seconds": 2.0, "wait_step_seconds": .02,
+        "settled": True, "samples": 2, "stable_valid_samples": 2, "elapsed_seconds": .02,
+        "initial": deepcopy(row), "final": deepcopy(row)} for row in proof["anchor_geometry"]]
     for language in ("EN", "RU"):
         proof["recordings"].append({"language": language, "scope": "REAL_GUI_PROCESS_RECORDING",
             "samples": 3, "recorded_pid": 123, "research_helper_pid": 456, "recorded_status": "COMPLETED",
@@ -267,6 +279,87 @@ class ExpertReceiptGateTests(unittest.TestCase):
             proof["anchor_geometry"][0]["caption"][key] = value
             with self.subTest(key=key), self.assertRaisesRegex(AssertionError, 'WRAPPED_CAPTION_CLIPPED'):
                 self.validate(proof)
+
+    def test_gate_refuses_unbounded_unstable_or_relabelled_layout_readiness(self):
+        for key, value in (("settled", False), ("samples", 1), ("stable_valid_samples", 1),
+                           ("elapsed_seconds", 2.1), ("elapsed_seconds", float('inf')),
+                           ("timeout_seconds", 20), ("initial_observed_before_event_drain", False),
+                           ("geometry_view", "AT_REPORT_TOP_AFTER_SCREENSHOT")):
+            proof = passed_receipt(); proof["layout_readiness"][0][key] = value
+            with self.subTest(key=key), self.assertRaisesRegex(AssertionError, 'NATURALLY_SETTLED'):
+                self.validate(proof)
+        for key, value in (("height_timer_active", True), ("height_metrics_dirty", True),
+                           ("syncing_height", True), ("workspace_minimum_height", 0),
+                           ("caption_exact_text", None)):
+            proof = passed_receipt(); proof["layout_readiness"][0]["final"]["layout_diagnostics"][key] = value
+            with self.subTest(key=key), self.assertRaisesRegex(AssertionError, 'NATURALLY_SETTLED'):
+                self.validate(proof)
+        proof = passed_receipt(); proof["layout_readiness"][0]["final"]["workspace_before_timeline"] = False
+        with self.assertRaisesRegex(AssertionError, 'NATURALLY_SETTLED'):
+            self.validate(proof)
+        for key in ("height_timer_active", "workspace_minimum_height", "workspace_layout_height_for_width",
+                    "height_metrics_dirty", "syncing_height", "parent_layout_rect", "caption_exact_text"):
+            proof = passed_receipt(); del proof["layout_readiness"][0]["initial"]["layout_diagnostics"][key]
+            with self.subTest(missing_initial_state=key), self.assertRaisesRegex(AssertionError, 'NATURALLY_SETTLED'):
+                self.validate(proof)
+
+
+class ExpertNaturalLayoutReadinessTests(unittest.TestCase):
+    """Controlled clock/event witnesses for the exact bounded observation loop."""
+
+    def observe(self, observations):
+        clock = [0.0]
+        drains = []
+        samples = iter(observations)
+        final = observations[-1]
+
+        def read():
+            return deepcopy(next(samples, final))
+
+        def wait(seconds):
+            self.assertGreater(seconds, 0)
+            self.assertLessEqual(seconds, .02)
+            clock[0] += seconds
+
+        initial = deepcopy(observations[0])
+        result = observe_layout_readiness(initial, read, lambda: drains.append(clock[0]), wait,
+                                          clock=lambda: clock[0])
+        self.assertEqual(len(drains), result["samples"])
+        return result
+
+    def test_pending_then_healthy_requires_two_identical_quiescent_strict_observations(self):
+        good = deepcopy(passed_receipt()["anchor_geometry"][0])
+        pending = deepcopy(good)
+        pending["caption"]["allocated_height"] = 24
+        pending["layout_diagnostics"]["height_timer_active"] = True
+        changed = deepcopy(good); changed["layout_diagnostics"]["caption_exact_text"] += " updated"
+        proof = self.observe([pending, good, changed, changed])
+        self.assertTrue(proof["settled"])
+        self.assertEqual(proof["initial"], pending)
+        self.assertEqual(proof["final"], changed)
+        self.assertEqual(proof["samples"], 4)
+        self.assertEqual(proof["stable_valid_samples"], 2)
+        self.assertLessEqual(proof["elapsed_seconds"], 2)
+
+    def test_persistent_clipping_times_out_instead_of_certifying_or_repairing_geometry(self):
+        bad = deepcopy(passed_receipt()["anchor_geometry"][0])
+        bad["caption"]["allocated_height"] = 24
+        original = deepcopy(bad)
+        proof = self.observe([bad])
+        self.assertFalse(proof["settled"])
+        self.assertEqual(proof["stable_valid_samples"], 0)
+        self.assertEqual(proof["initial"], original)
+        self.assertEqual(proof["final"], original)
+        self.assertLessEqual(proof["elapsed_seconds"], 2)
+        self.assertLessEqual(proof["samples"], 101)
+        self.assertEqual(bad, original)
+
+    def test_valid_but_still_pending_or_dirty_cannot_claim_natural_readiness(self):
+        for key in ("height_timer_active", "height_metrics_dirty", "syncing_height"):
+            pending = deepcopy(passed_receipt()["anchor_geometry"][0])
+            pending["layout_diagnostics"][key] = True
+            with self.subTest(key=key):
+                self.assertFalse(self.observe([pending])["settled"])
 
 
 if __name__ == "__main__":

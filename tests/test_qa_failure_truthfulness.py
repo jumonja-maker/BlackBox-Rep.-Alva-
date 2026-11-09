@@ -1,8 +1,11 @@
-"""Cleanup success cannot erase an actual earlier research QA failure."""
+"""Cleanup and debugger success cannot erase an actual earlier QA failure."""
+from pathlib import Path
+import sys
+import tempfile
 import unittest
 
 from blackbox_universal.research_e2e import finalized_proof
-from tools.qa_linux_unit_gdb import child_result
+from tools.qa_linux_unit_gdb import UNIT_CODE, child_result, debugger_command
 
 
 class ResearchQaFailureTruthfulnessTests(unittest.TestCase):
@@ -62,6 +65,18 @@ class LinuxNativeChildExitTruthfulnessTests(unittest.TestCase):
     def test_child_success_also_requires_successful_debugger_completion(self):
         self.assertEqual(self.result(self.proof()), (0, 'LINUX_UNIT_CHILD_SUCCESS'))
         self.assertEqual(self.result(self.proof(), 1)[0], 125)
+
+    def test_inferior_code_is_owned_file_not_fragile_multiline_gdb_argument(self):
+        with tempfile.TemporaryDirectory() as owned:
+            command, result_path = debugger_command(owned, self.SHA)
+            driver = Path(command[-1])
+            self.assertEqual(command[command.index('--args') + 1:], [sys.executable, str(driver)])
+            self.assertEqual(driver.parent, Path(owned))
+            self.assertEqual(result_path.parent, Path(owned))
+            self.assertEqual(driver.read_text(encoding='utf-8'), "import sys\nsys.path[0] = ''\n" + UNIT_CODE)
+            self.assertTrue(Path(command[command.index('-x') + 1]).is_file())
+            self.assertNotIn('-c', command)
+            self.assertTrue(all('\n' not in argument for argument in command))
 
 
 if __name__ == '__main__':

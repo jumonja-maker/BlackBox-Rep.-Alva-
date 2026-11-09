@@ -114,6 +114,20 @@ end
 '''.replace('SOURCE_SHA', repr(expected_sha)).replace('RESULT_PATH', repr(str(result_path)))
 
 
+def debugger_command(owned, expected_sha):
+    """Transport Python as a file, never as multiline gdb inferior arguments."""
+    owned = Path(owned)
+    result_path = owned / 'inferior-result.json'
+    script = owned / 'unit-suite.gdb'
+    driver = owned / 'unit-suite.py'
+    script.write_text(debugger_script(result_path, expected_sha), encoding='utf-8')
+    # Python normally puts this temporary directory at sys.path[0]. Replace it
+    # with the original stdin/-c value so discovery still imports from cwdROOT.
+    driver.write_text("import sys\nsys.path[0] = ''\n" + UNIT_CODE, encoding='utf-8')
+    return (['gdb', '--nx', '--nh', '--batch', '--return-child-result',
+             '-x', str(script), '--args', sys.executable, str(driver)], result_path)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--source-sha', required=True)
@@ -131,14 +145,9 @@ def main(argv=None):
           'suite': "unittest discover -s tests -v", 'periodic_dump_seconds': 120,
           'native_backtrace_frames_per_thread': 30}), flush=True)
     with tempfile.TemporaryDirectory(prefix='blackbox-linux-gdb-', dir=os.environ.get('RUNNER_TEMP')) as owned:
-        result_path = Path(owned) / 'inferior-result.json'
-        script = Path(owned) / 'unit-suite.gdb'
-        script.write_text(debugger_script(result_path, args.source_sha), encoding='utf-8')
+        command, result_path = debugger_command(owned, args.source_sha)
         try:
-            # -c preserves the repository cwd as sys.path[0] == '', as in the
-            # previous stdin driver. The complete suite and its order are intact.
-            completed = subprocess.run(['gdb', '--nx', '--nh', '--batch', '--return-child-result',
-                                        '-x', str(script), '--args', sys.executable, '-c', UNIT_CODE], cwd=ROOT)
+            completed = subprocess.run(command, cwd=ROOT)
             proof = json.loads(result_path.read_text(encoding='utf-8')) if result_path.is_file() else None
             code, reason = child_result(proof, completed.returncode, args.source_sha)
         except (OSError, ValueError) as error:

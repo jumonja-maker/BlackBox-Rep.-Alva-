@@ -12,6 +12,7 @@ import base64
 from contextlib import closing
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -26,6 +27,8 @@ SCALES = ("1", "1.25", "1.5", "2")
 PAGES = ("dashboard", "processes", "events", "reports", "settings", "decoder")
 SECTIONS = ("timeline", "findings", "library", "actions", "technical")
 MAX_PNG_BYTES = 768 * 1024
+LAYOUT_SETTLE_SECONDS = 2.0
+LAYOUT_WAIT_SECONDS = .02
 
 
 def require(value, reason):
@@ -49,6 +52,69 @@ def save(path, value):
     temporary = path.with_suffix(path.suffix + ".tmp")
     temporary.write_text(json.dumps(value, ensure_ascii=True, allow_nan=False, indent=2), encoding="ascii")
     temporary.replace(path)
+
+
+def anchor_geometry_valid(facts):
+    """The existing strict caption, button, ancestor and sibling requirements."""
+    label = facts.get("caption", {})
+    return bool(label.get("has_height_for_width") and label.get("policy_has_height_for_width") and
+        type(label.get("required_height_at_actual_width")) is int and
+        type(label.get("allocated_height")) is int and label["required_height_at_actual_width"] > 0 and
+        label["allocated_height"] >= label["required_height_at_actual_width"] and
+        label.get("rect") == label.get("visible_bounds") and label.get("workspace_contains") and
+        label.get("no_button_overlap") and facts.get("workspace_before_timeline") and
+        len(facts.get("buttons", [])) == 6 and
+        all(row.get("rect") == row.get("visible_bounds") and row.get("minimum_size_met") and
+            row.get("workspace_contains") and row.get("siblings_disjoint") and row.get("ancestors_contain")
+            for row in facts["buttons"]))
+
+
+def layout_quiescent(facts):
+    state = facts.get("layout_diagnostics", {})
+    return (state.get("height_timer_active") is False and state.get("height_metrics_dirty") is False and
+            state.get("syncing_height") is False and
+            type(state.get("workspace_minimum_height")) is int and
+            type(state.get("workspace_layout_height_for_width")) is int and
+            state["workspace_minimum_height"] >= state["workspace_layout_height_for_width"] > 0)
+
+
+def layout_diagnostics_complete(facts):
+    state = facts.get("layout_diagnostics", {})
+    return (all(type(state.get(key)) is bool for key in
+                ("height_timer_active", "height_metrics_dirty", "syncing_height")) and
+            type(state.get("workspace_minimum_height")) is int and state["workspace_minimum_height"] >= 0 and
+            type(state.get("workspace_layout_height_for_width")) is int and
+            type(state.get("caption_exact_text")) is str and bool(state["caption_exact_text"]) and
+            all(type(state.get(key)) is list and len(state[key]) == 4 and
+                all(type(value) is int for value in state[key]) for key in
+                ("workspace_layout_rect", "parent_layout_rect", "parent_contents_rect")))
+
+
+def observe_layout_readiness(initial, observe, drain, wait, *, clock=time.monotonic):
+    """Observe normal Qt progress only; never resize, activate or set geometry."""
+    started = clock()
+    previous = None
+    final = initial
+    samples = stable = 0
+    settled = False
+    while clock() - started < LAYOUT_SETTLE_SECONDS:
+        drain()
+        final = observe()
+        samples += 1
+        valid = anchor_geometry_valid(final) and layout_quiescent(final)
+        stable = stable + 1 if valid and final == previous else 1 if valid else 0
+        elapsed = clock() - started
+        if stable >= 2 and elapsed <= LAYOUT_SETTLE_SECONDS:
+            settled = True
+            break
+        previous = final if valid else None
+        # Do not start another timed wait beyond the fixed budget. A Qt
+        # callback itself cannot be preempted; an overrun is never settled.
+        if elapsed + LAYOUT_WAIT_SECONDS >= LAYOUT_SETTLE_SECONDS:
+            break
+        wait(LAYOUT_WAIT_SECONDS)
+    return {"settled": settled, "elapsed_seconds": clock() - started, "samples": samples,
+            "stable_valid_samples": stable, "initial": initial, "final": final}
 
 
 def validate_receipt(proof, *, source_sha, frozen, scale):
@@ -118,6 +184,23 @@ def validate_receipt(proof, *, source_sha, frozen, scale):
                     all(button.get(key) is True for key in
                         ("workspace_contains", "minimum_size_met", "siblings_disjoint", "ancestors_contain"))
                     for button in buttons), "EXPERT_RECEIPT_ANCHOR_BUTTON_CLIPPED")
+    readiness = proof.get("layout_readiness", [])
+    require(len(readiness) == 4 and {(row.get("language"), row.get("stage")) for row in readiness} ==
+            {(language, stage) for language in ("EN", "RU") for stage in ("saved-report", "fixture-minimum-width")},
+            "EXPERT_RECEIPT_LAYOUT_READINESS_SCOPE")
+    for row in readiness:
+        require(row.get("initial_observed_before_event_drain") is True and
+                row.get("timeout_seconds") == LAYOUT_SETTLE_SECONDS and row.get("wait_step_seconds") == LAYOUT_WAIT_SECONDS and
+                row.get("geometry_view") == ("AT_REPORT_TOP_AFTER_SCREENSHOT" if row.get("stage") ==
+                    "fixture-minimum-width" else "SAME_VIEW_BEFORE_SCREENSHOT") and
+                row.get("settled") is True and type(row.get("samples")) is int and row["samples"] >= 2 and
+                type(row.get("stable_valid_samples")) is int and row["stable_valid_samples"] >= 2 and
+                type(row.get("elapsed_seconds")) in (int, float) and math.isfinite(row["elapsed_seconds"]) and
+                0 <= row["elapsed_seconds"] <= LAYOUT_SETTLE_SECONDS and
+                type(row.get("initial")) is dict and type(row.get("final")) is dict and
+                all(layout_diagnostics_complete(state) for state in (row["initial"], row["final"])) and
+                anchor_geometry_valid(row["final"]) and layout_quiescent(row["final"]),
+                "EXPERT_RECEIPT_LAYOUT_NOT_NATURALLY_SETTLED")
     minimum = proof.get("minimum_width", [])
     require(len(minimum) == 2 and {row.get("language") for row in minimum} == {"EN", "RU"},
             "EXPERT_RECEIPT_MINIMUM_WIDTH_LANGUAGES")
@@ -246,7 +329,7 @@ def run_gui(app, window, output, source_sha):
         "source_identity": identity, "frozen": bool(getattr(sys, "frozen", False)), "gui_pid": os.getpid(),
         "scale": scale, "dpi_scope": "QT_SCALE_FACTOR_SIMULATION", "physical_windows_10_11": "NOT_TESTED",
         "secure_desktop": "NOT_TESTED", "navigation": [], "recordings": [], "screenshots": [],
-        "sections": [], "shortcuts": [], "minimum_width": [], "anchor_geometry": [],
+        "sections": [], "shortcuts": [], "minimum_width": [], "anchor_geometry": [], "layout_readiness": [],
         "callback_errors": [], "unexpected_dialogs": [],
         "cleanup": {"owners_closed": False}}
     old_hook = sys.excepthook
@@ -346,20 +429,31 @@ def run_gui(app, window, output, source_sha):
             "delivery": "PNG_BASE64_IN_CI_LOG_NO_ACTIONS_ARTIFACTS"})
         save(output / "expert-gui.json", proof)
 
-    def check_anchor_geometry(stage, language, *, reveal_top=False):
+    def anchor_geometry(stage, language, *, reveal_top=False, scroll_before_probe=None, geometry_view=None):
         scroll = window.stack.currentWidget()
-        scroll_before_probe = scroll.verticalScrollBar().value()
-        if reveal_top:
-            scroll.verticalScrollBar().setValue(0)
-            app.processEvents()
+        if scroll_before_probe is None:
+            scroll_before_probe = scroll.verticalScrollBar().value()
         workspace = window.report_context.parentWidget()
         caption = window.report_context
         timeline = window._expert_sections["timeline"]
         buttons = (*window.expert_section_buttons.values(), window.copy_context_button)
+        parent = workspace.parentWidget()
+        parent_layout = parent.layout() if parent is not None else None
+        height_timer = getattr(workspace, "_height_update", None)
+        diagnostics = {"height_timer_active": height_timer.isActive() if height_timer is not None else None,
+            "workspace_minimum_height": workspace.minimumHeight(),
+            "height_metrics_dirty": getattr(workspace, "_height_metrics_dirty", None),
+            "syncing_height": getattr(workspace, "_syncing_height", None),
+            "caption_exact_text": caption.text(),
+            "workspace_layout_rect": list(workspace.layout().geometry().getRect()),
+            "parent_layout_rect": list(parent_layout.geometry().getRect()) if parent_layout is not None else None,
+            "parent_contents_rect": list(parent.contentsRect().getRect()) if parent is not None else None,
+            "workspace_layout_height_for_width": workspace.layout().totalHeightForWidth(workspace.width())}
         facts = {"stage": stage, "language": language,
-            "geometry_view": "AT_REPORT_TOP_AFTER_SCREENSHOT" if reveal_top else "SAME_VIEW_AFTER_SCREENSHOT",
+            "geometry_view": geometry_view or ("AT_REPORT_TOP_AFTER_SCREENSHOT" if reveal_top else "SAME_VIEW_AFTER_SCREENSHOT"),
             "reveal_top": reveal_top, "scroll_before_probe": scroll_before_probe,
             "scroll_at_probe": scroll.verticalScrollBar().value(),
+            "layout_diagnostics": diagnostics,
             "logical_window_client": [window.width(), window.height()],
             "workspace_rect": list(workspace.geometry().getRect()),
             "timeline_rect": list(timeline.geometry().getRect()),
@@ -396,6 +490,46 @@ def run_gui(app, window, output, source_sha):
                     for other in buttons if other is not button),
                 "ancestors_contain": bool(ancestors) and all(row["contains_button"] for row in ancestors),
                 "ancestors": ancestors})
+        # Hint/HFW queries above may themselves request normal layout work.
+        # Quiescence describes the completed sample, before its next drain.
+        diagnostics.update(height_timer_active=height_timer.isActive() if height_timer is not None else None,
+            height_metrics_dirty=getattr(workspace, "_height_metrics_dirty", None),
+            syncing_height=getattr(workspace, "_syncing_height", None),
+            workspace_minimum_height=workspace.minimumHeight())
+        return facts
+
+    def capture_report_geometry(stage, language, scope, *, reveal_top=False):
+        scroll = window.stack.currentWidget()
+        scroll_before_probe = scroll.verticalScrollBar().value()
+        if reveal_top:
+            # The normal minimum-width image intentionally shows Findings.
+            # Its separate anchor probe is honestly labelled at report top.
+            screenshot(stage, language, scope)
+            scroll.verticalScrollBar().setValue(0)
+        view = "AT_REPORT_TOP_AFTER_SCREENSHOT" if reveal_top else "SAME_VIEW_BEFORE_SCREENSHOT"
+        observe = lambda: anchor_geometry(stage, language, reveal_top=reveal_top,
+            scroll_before_probe=scroll_before_probe, geometry_view=view)
+        # Persist before this readiness loop drains events. Saved-report also
+        # precedes its first grab; minimum-width is explicitly a later top probe.
+        initial = observe()
+        readiness = {"stage": stage, "language": language, "geometry_view": view,
+            "timeout_seconds": LAYOUT_SETTLE_SECONDS, "wait_step_seconds": LAYOUT_WAIT_SECONDS,
+            "initial_observed_before_event_drain": True, "initial": initial, "settled": False}
+        proof["layout_readiness"].append(readiness)
+        save(output / "expert-gui.json", proof)
+
+        def drain():
+            app.processEvents()
+            require(not proof["callback_errors"] and not proof["unexpected_dialogs"], "EXPERT_QT_CALLBACK_OR_DIALOG")
+
+        readiness.update(observe_layout_readiness(initial, observe, drain,
+            lambda seconds: QTest.qWait(round(seconds * 1000))))
+        save(output / "expert-gui.json", proof)
+        if not reveal_top:
+            screenshot(stage, language, scope)
+        if not readiness["settled"]:
+            screenshot(stage + "-layout-timeout-at-report-top", language, scope)
+        facts = anchor_geometry(stage, language, reveal_top=reveal_top, scroll_before_probe=scroll_before_probe)
         proof["anchor_geometry"].append(facts)
         label = facts["caption"]
         require(label["has_height_for_width"] and label["policy_has_height_for_width"] and
@@ -407,6 +541,7 @@ def run_gui(app, window, output, source_sha):
                 all(row["rect"] == row["visible_bounds"] and row["minimum_size_met"] and
                     row["workspace_contains"] and row["siblings_disjoint"] and row["ancestors_contain"]
                     for row in facts["buttons"]), "EXPERT_ANCHOR_BUTTONS_CLIPPED_" + stage + "_" + language)
+        require(readiness["settled"], "EXPERT_LAYOUT_READINESS_DEADLINE_" + stage + "_" + language)
 
     sys.excepthook = callback_error
     timer.timeout.connect(reject_dialogs)
@@ -496,8 +631,7 @@ def run_gui(app, window, output, source_sha):
                 "selected_session_matches": window._interval_folder.resolve() == folder,
                 "handoff_actual_qt_input": True, "report_html_unknown_preserved": True,
                 "source_files_unchanged_after_review": True})
-            screenshot("saved-report", language, "REAL_GUI_PROCESS_RECORDING")
-            check_anchor_geometry("saved-report", language)
+            capture_report_geometry("saved-report", language, "REAL_GUI_PROCESS_RECORDING")
 
         phase("SYNTHETIC_IMPORTED_EVIDENCE")
         fixture_path = synthetic_recording(output / "TEST_ONLY_SYNTHETIC_IMPORTED_EVIDENCE")
@@ -591,8 +725,7 @@ def run_gui(app, window, output, source_sha):
             proof["minimum_width"].append(minimum)
             click(window.findChild(QPushButton, "expertSection_findings"))
             reveal(panel.table)
-            screenshot("fixture-minimum-width", language, fixture["scope"])
-            check_anchor_geometry("fixture-minimum-width", language, reveal_top=True)
+            capture_report_geometry("fixture-minimum-width", language, fixture["scope"], reveal_top=True)
             require(minimum["logical_window_client"] == [1020, 850] and
                     minimum["expanded_sections"] == ["library", "actions", "technical"] and
                     minimum["outer_horizontal_scroll_maximum"] == 0 and
