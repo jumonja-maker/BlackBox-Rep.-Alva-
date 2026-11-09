@@ -43,7 +43,11 @@ class InvestigationWorkspaceSectionTests(unittest.TestCase):
                         self.app.processEvents()
                         self.assertEqual(panel.section.currentData(), key)
                         self.assertIs(panel.pages.currentWidget(), panel.pages.widget(index))
-                self.assertEqual(len(window._nav_buttons), 6)
+                # The embedded UniversalWindow has FIVE public pages. The
+                # production DecoderWindow adds a separate sixth decoder page.
+                # Neither count changes the TEN internal Investigation sections.
+                self.assertEqual(len(window.PAGES), 5)
+                self.assertEqual(len(window._nav_buttons), len(window.PAGES))
             finally:
                 from qt_test_support import close_and_drain
                 close_and_drain(window, self.app, timeout=15)
