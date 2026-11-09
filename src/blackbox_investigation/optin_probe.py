@@ -15,7 +15,7 @@ def observe_selected_process(pid: int, *, expected_created: float | None = None)
         raise InvestigationError("INVALID_PID")
     # Validate all caller-controlled parameters before accessing the OS.
     if expected_created is not None and (type(expected_created) not in (int, float) or
-            not math.isfinite(expected_created) or expected_created <= 0):
+            expected_created <= 0 or expected_created > 1e100 or not math.isfinite(expected_created)):
         raise InvestigationError("INVALID_CREATION_TIME")
     try:
         import psutil

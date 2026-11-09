@@ -28,7 +28,7 @@ def integer(value, low=0, high=2**63-1):
 
 
 def number(value):
-    return type(value) in (int, float) and math.isfinite(value) and abs(value) < 1e15
+    return type(value) in (int, float) and abs(value) < 1e15 and math.isfinite(value)
 
 
 def validate_module_frame(row, frame):
@@ -127,7 +127,7 @@ class ModuleCatalog:
                 "verification_class": "UNVERIFIED_IMPORT", "symbol_names_resolved": False}
 
 
-def read_modules(db, *, after, pid, limit, search):
+def read_modules(db, *, after, pid, limit, search, max_events=250000):
     query = "SELECT id,module_key,pid,process_instance,frame_count,first_event_id,last_event_id,data FROM trace_modules WHERE id>?"
     params = [after]
     if pid:
@@ -136,10 +136,21 @@ def read_modules(db, *, after, pid, limit, search):
         query += " AND instr(lower(name),lower(?))>0"; params.append(search.strip())
     params.append(limit+1)
     rows = db.execute(query+" ORDER BY id LIMIT ?", params).fetchall()
-    result = [{"index_id": r[0], "event": {"type": "TRACE_NATIVE_MODULE_OBSERVATION",
+    result = []
+    from .decoder_index import _saved_json
+    for r in rows[:limit]:
+        if not (integer(r[0],1,MAX_MODULES) and integer(r[2],1) and integer(r[3]) and
+                integer(r[4],1,max_events*128) and integer(r[5],1,max_events) and integer(r[6],r[5],max_events)):
+            raise ValueError("INVALID_INDEX_MODULE")
+        module = _saved_json(r[7])
+        frame = {"module":module,"address":module.get("image_base"),"rva":0}
+        validate_module_frame({"pid":r[2],"process_instance":r[3],"time_ms":module.get("load_time_ms")},frame)
+        if r[1]!=module_key(r[2],module):
+            raise ValueError("INDEX_MODULE_IDENTITY_MISMATCH")
+        result.append({"index_id": r[0], "event": {"type": "TRACE_NATIVE_MODULE_OBSERVATION",
         "module_key": r[1], "pid": r[2], "process_instance": r[3], "frame_count": r[4],
-        "first_event_id": r[5], "last_event_id": r[6], "module": json.loads(r[7]),
-        "verification_class": "UNVERIFIED_IMPORT"}} for r in rows[:limit]]
+        "first_event_id": r[5], "last_event_id": r[6], "module": module,
+        "verification_class": "UNVERIFIED_IMPORT"}})
     return {"rows": result, "has_more": len(rows)>limit,
             "next_cursor": result[-1]["index_id"] if result else after}
 

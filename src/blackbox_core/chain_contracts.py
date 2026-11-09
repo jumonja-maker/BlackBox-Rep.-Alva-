@@ -57,7 +57,8 @@ def identifier(value: Any, code: str = "INVALID_WORKFLOW_IDENTIFIER") -> str:
 
 
 def number(value: Any, low: float, high: float, code: str) -> float:
-    require(type(value) in (int, float) and math.isfinite(value) and low <= value <= high, code)
+    require(type(value) in (int, float) and low <= value <= high and
+            (type(value) is int or math.isfinite(value)), code)
     return float(value)
 
 
@@ -65,32 +66,46 @@ def canonical(value: Any) -> str:
     return json.dumps(value, sort_keys=True, ensure_ascii=True, allow_nan=False, separators=(",", ":"))
 
 
-def json_data(value: Any, *, depth: int = 0, configuration: bool = False) -> Any:
+def json_data(value: Any, *, depth: int = 0, configuration: bool = False, _budget=None) -> Any:
+    if _budget is None:
+        _budget = [MAX_DEFINITION_BYTES]
     require(depth <= 16, "WORKFLOW_DATA_DEPTH")
     if type(value) is dict:
         require(len(value) <= 256 and all(type(k) is str and len(k) <= 128 for k in value), "WORKFLOW_DATA_KEYS")
         if configuration:
             require(not any(k.lower() in _AUTHORITY or k.lower().endswith(("_password", "_token", "_secret"))
                             for k in value), "WORKFLOW_SAVED_AUTHORITY_OR_PAYLOAD_REFUSED")
-        return {k: json_data(v, depth=depth + 1, configuration=configuration) for k, v in value.items()}
+        _budget[0] -= 2 + max(0, len(value) - 1) + sum(len(canonical(k)) + 1 for k in value)
+        require(_budget[0] >= 0, "WORKFLOW_JSON_BYTE_BUDGET")
+        return {k: json_data(v, depth=depth + 1, configuration=configuration, _budget=_budget) for k, v in value.items()}
     if type(value) in (list, tuple):
         require(len(value) <= MAX_EDGES, "WORKFLOW_DATA_ROWS")
-        return [json_data(v, depth=depth + 1, configuration=configuration) for v in value]
+        _budget[0] -= 2 + max(0, len(value) - 1)
+        require(_budget[0] >= 0, "WORKFLOW_JSON_BYTE_BUDGET")
+        return [json_data(v, depth=depth + 1, configuration=configuration, _budget=_budget) for v in value]
     if type(value) is str:
         require(len(value) <= 8192 and not any(ord(c) < 32 and c not in "\n\t\r" for c in value), "WORKFLOW_DATA_TEXT")
-        return value
-    if type(value) is float:
+    elif type(value) is float:
         require(math.isfinite(value), "WORKFLOW_NONFINITE_NUMBER")
-        return value
-    require(value is None or type(value) in (int, bool), "WORKFLOW_NON_JSON_DATA")
+    else:
+        require(value is None or type(value) in (int, bool), "WORKFLOW_NON_JSON_DATA")
+    try:
+        _budget[0] -= len(canonical(value))
+    except (ValueError, OverflowError) as error:
+        raise WorkflowError("WORKFLOW_NON_JSON_DATA") from error
+    require(_budget[0] >= 0, "WORKFLOW_JSON_BYTE_BUDGET")
     return value
 
 
 def parse_json(raw: bytes | str) -> dict:
-    if isinstance(raw, bytes):
-        require(len(raw) <= MAX_DEFINITION_BYTES, "WORKFLOW_JSON_BYTE_BUDGET")
-        raw = raw.decode("utf-8")
-    require(type(raw) is str and len(raw.encode("utf-8")) <= MAX_DEFINITION_BYTES, "WORKFLOW_JSON_BYTE_BUDGET")
+    require(type(raw) in (bytes, str), "WORKFLOW_JSON_BYTE_BUDGET")
+    try:
+        if isinstance(raw, bytes):
+            require(len(raw) <= MAX_DEFINITION_BYTES, "WORKFLOW_JSON_BYTE_BUDGET")
+            raw = raw.decode("utf-8")
+        require(len(raw.encode("utf-8")) <= MAX_DEFINITION_BYTES, "WORKFLOW_JSON_BYTE_BUDGET")
+    except UnicodeError as error:
+        raise WorkflowError("WORKFLOW_JSON_CORRUPT") from error
     def pairs(items):
         result = {}
         for key, value in items:
@@ -101,7 +116,9 @@ def parse_json(raw: bytes | str) -> dict:
         raise WorkflowError("WORKFLOW_NONFINITE_NUMBER")
     try:
         value = json.loads(raw, object_pairs_hook=pairs, parse_constant=constant)
-    except (json.JSONDecodeError, UnicodeError, RecursionError) as error:
+    except WorkflowError:
+        raise
+    except (ValueError, UnicodeError, RecursionError) as error:
         raise WorkflowError("WORKFLOW_JSON_CORRUPT") from error
     require(type(value) is dict, "WORKFLOW_JSON_OBJECT_REQUIRED")
     return json_data(value)
@@ -114,8 +131,9 @@ class PortSpec:
     many: bool = False
 
     def __post_init__(self):
-        require(bool(self.types) and len(set(self.types)) == len(self.types) and
-                all(t in PORT_TYPES for t in self.types), "INVALID_WORKFLOW_PORT_TYPES")
+        require(type(self.types) in (tuple, list) and bool(self.types) and
+                all(type(t) is str and t in PORT_TYPES for t in self.types) and
+                len(set(self.types)) == len(self.types), "INVALID_WORKFLOW_PORT_TYPES")
         require(type(self.required) is bool and type(self.many) is bool, "INVALID_WORKFLOW_PORT_FLAGS")
 
     def to_dict(self):
@@ -132,17 +150,21 @@ class Artifact:
     coverage: dict = field(default_factory=lambda: {"evidence_completeness": "UNKNOWN"})
 
     def __post_init__(self):
-        require(self.kind in PORT_TYPES, "INVALID_WORKFLOW_ARTIFACT_TYPE")
+        require(type(self.kind) is str and self.kind in PORT_TYPES, "INVALID_WORKFLOW_ARTIFACT_TYPE")
         identifier(self.artifact_id)
-        require(type(self.value) is dict and type(self.coverage) is dict and len(self.sources) <= 64 and
-                len(self.clock_domains) <= 64, "INVALID_WORKFLOW_ARTIFACT")
+        require(type(self.value) is dict and type(self.coverage) is dict and
+                type(self.sources) in (tuple, list) and len(self.sources) <= 64 and all(type(row) is dict for row in self.sources) and
+                type(self.clock_domains) in (tuple, list) and len(self.clock_domains) <= 64 and
+                all(type(clock) is str and bool(clock) for clock in self.clock_domains), "INVALID_WORKFLOW_ARTIFACT")
         value = self.to_dict()
         json_data(value)
         require(len(canonical(value).encode()) <= 256 * 1024, "WORKFLOW_ARTIFACT_METADATA_BUDGET")
 
     @classmethod
     def from_dict(cls, value):
-        require(type(value) is dict and set(value) <= {"kind", "value", "artifact_id", "sources", "clock_domains", "coverage"},
+        require(type(value) is dict and {"kind", "value", "artifact_id"} <= set(value) <= {"kind", "value", "artifact_id", "sources", "clock_domains", "coverage"},
+                "INVALID_WORKFLOW_ARTIFACT")
+        require(type(value.get("sources", [])) in (list, tuple) and type(value.get("clock_domains", [])) in (list, tuple),
                 "INVALID_WORKFLOW_ARTIFACT")
         return cls(value["kind"], json_data(value["value"]), identifier(value["artifact_id"]),
                    tuple(json_data(value.get("sources", []))), tuple(value.get("clock_domains", [])),

@@ -6,7 +6,10 @@ frequency. Ordinary ETW/GC event-associated stacks are NOT CPU samples.
 from __future__ import annotations
 import hashlib
 import json
+import math
 import sqlite3
+from .decoder_limits import check_json_shape
+from .decoder_modules import integer, number, validate_module_frame
 
 SAMPLE_PROVIDER = "Microsoft-DotNETCore-SampleProfiler"
 SAMPLE_EVENT = "Thread/Sample"
@@ -139,8 +142,26 @@ class ProfileBuilder:
                 "source_scope": "UNVERIFIED_TRACE_IMPORT"}
 
 
+def _require_profile(value):
+    if not value:
+        raise ValueError("INVALID_INDEX_PROFILE")
+
+
+def _profile_frames(raw):
+    from .decoder_index import MAX_LINE, _pairs
+    _require_profile(type(raw) is str and len(raw)<=MAX_LINE*6)
+    try:
+        frames = json.loads(raw, object_pairs_hook=_pairs,
+            parse_constant=lambda _: (_ for _ in ()).throw(ValueError("NONFINITE_JSON")))
+    except (RecursionError, json.JSONDecodeError) as error:
+        raise ValueError("INVALID_INDEX_PROFILE") from error
+    check_json_shape(frames)
+    _require_profile(type(frames) is list and 1<=len(frames)<=128)
+    return frames
+
+
 def read_profiles(db: sqlite3.Connection, *, mode: str, after: int,
-                  pid: int, limit: int, search: str):
+                  pid: int, limit: int, search: str, max_events=250000):
     if mode == "cpu_stacks":
         sql = ("SELECT display_rank,id,pid,process_instance,identity_quality,signature_sha256,"
                "sample_count,first_event_id,last_event_id,first_ms,last_ms,frame_count,"
@@ -164,6 +185,27 @@ def read_profiles(db: sqlite3.Connection, *, mode: str, after: int,
         for row in rows[:limit]:
             (rank,identifier,pid,instance,quality,hash_value,count,first,last,
              first_ms,last_ms,frame_count,unnamed,status,frames) = row
+            _require_profile(integer(rank,1,MAX_DISTINCT_STACKS) and integer(identifier,1,MAX_DISTINCT_STACKS) and
+                integer(pid,-1) and integer(instance,-max_events) and integer(count,1,max_events) and
+                integer(first,1,max_events) and integer(last,first,max_events) and count<=last-first+1 and
+                number(first_ms) and number(last_ms) and type(status) is str and len(status)<=512 and
+                type(hash_value) is str and len(hash_value)==64 and
+                (quality=="TRACE_PROCESS_INSTANCE_INDEX" if instance>=0 else
+                 quality=="UNKNOWN_PROCESS_INSTANCE_PID_REUSE_POSSIBLE" and count==1 and first==last and instance==-first))
+            frames = _profile_frames(frames)
+            _require_profile(frame_count==len(frames) and type(frame_count) is int and
+                type(unnamed) is int and unnamed==sum(not frame.get("name") for frame in frames if type(frame) is dict))
+            from .decoder_index import validate_event
+            synthetic = {"type":"event","ordinal":first,"pid":pid,"tid":0,"time_ms":first_ms,
+                "process_instance":instance if instance>=0 else None,"provider":SAMPLE_PROVIDER,"name":SAMPLE_EVENT,
+                "payload":{},"frames":frames,"stack_status":status}
+            validate_event(synthetic,first)
+            for frame in frames:
+                validate_module_frame(synthetic,frame)
+                validate_module_frame({**synthetic,"time_ms":last_ms},frame)
+            candidates = (status,None,"") if status=="UNKNOWN" else (status,)
+            _require_profile(any(hashlib.sha256(json.dumps([state,frames],ensure_ascii=True,
+                separators=(",", ":")).encode("ascii")).hexdigest()==hash_value for state in candidates))
             items.append({"index_id":rank,"event":{
                 "type":"CPU_PROFILER_RECORDED_STACK_GROUP","pid":pid,
                 "process_instance":instance if instance>=0 else None,
@@ -171,7 +213,7 @@ def read_profiles(db: sqlite3.Connection, *, mode: str, after: int,
                 "name":SAMPLE_EVENT,"time_ms":first_ms,
                 "first_time_ms":first_ms,"last_time_ms":last_ms,
                 "recorded_sample_count":count,"first_event_id":first,"last_event_id":last,
-                "stack_signature_sha256":hash_value,"frames":json.loads(frames),
+                "stack_signature_sha256":hash_value,"frames":frames,
                 "frame_count":frame_count,"frames_without_names":unnamed,"stack_status":status,
                 "measurement":"EVENT_OCCURRENCES_NOT_CPU_TIME_OR_CPU_PERCENT",
                 "verification_class":"UNVERIFIED_IMPORT","root_cause":"UNKNOWN"}})
@@ -194,6 +236,17 @@ def read_profiles(db: sqlite3.Connection, *, mode: str, after: int,
         for row in rows[:limit]:
             (rank,kind,pid,instance,runtime,generation,gc_type,count,total,peak,minimum,
              first,last,first_id,last_id) = row
+            def duration(value):
+                return type(value) in (int,float) and 0<=value<=max_events*2e15 and math.isfinite(value)
+            _require_profile(integer(rank,1,max_events) and
+                kind in ("GC_ELAPSED_NOT_PAUSE","RUNTIME_SUSPENSION_ENVELOPE","RUNTIME_FULLY_SUSPENDED") and
+                integer(pid,-1) and integer(instance,0) and integer(runtime,0) and
+                (generation is None or integer(generation,0)) and
+                (gc_type is None or type(gc_type) in (str,int) and (type(gc_type) is int or len(gc_type)<=512)) and
+                integer(count,1,max_events) and all(duration(value) for value in (total,peak,minimum)) and
+                minimum<=peak and peak<=total and
+                number(first) and number(last) and first<=last and
+                integer(first_id,1,max_events) and integer(last_id,first_id,max_events))
             items.append({"index_id":rank,"event":{
                 "type":"DERIVED_GC_INTERVAL_AGGREGATE","pid":pid,
                 "process_instance":instance if instance>=0 else None,

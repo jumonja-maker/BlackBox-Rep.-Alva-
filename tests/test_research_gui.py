@@ -2,6 +2,7 @@
 from __future__ import annotations
 from contextlib import closing
 import os
+import json
 from pathlib import Path
 import sqlite3
 import tempfile
@@ -13,7 +14,7 @@ from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM","offscreen")
 from PySide6.QtCore import QTimer,QCoreApplication,QEvent,QItemSelectionModel
-from PySide6.QtWidgets import QApplication,QDialog,QMessageBox
+from PySide6.QtWidgets import QApplication,QDialog,QMessageBox,QWidget
 from blackbox_universal.window import UniversalWindow
 
 
@@ -138,7 +139,17 @@ class IsolatedGuiTests(unittest.TestCase):
         self.window._set_language("RU");self.window._navigate("reports")
         self.window.research_toggle.setChecked(True);self.window.resize(1020,850);self.window.show()
         self.app.processEvents()
-        self.assertLessEqual(self.window.research_panel.width(),self.window.stack.currentWidget().viewport().width())
+        viewport=self.window.stack.currentWidget().viewport()
+        page=self.window.stack.currentWidget().widget()
+        hints=[{'type':type(child).__name__,'name':child.objectName(),
+                'text':child.text()[:100] if callable(getattr(child,'text',None)) else '',
+                'width':child.width(),'minimum':child.minimumWidth(),
+                'minimum_hint':child.minimumSizeHint().width(),'hint':child.sizeHint().width(),
+                'layout_minimum':child.layout().minimumSize().width() if child.layout() else None}
+               for child in page.findChildren(QWidget) if child.isVisibleTo(page)]
+        diagnostic=json.dumps({'viewport':viewport.width(),'page':page.width(),
+            'widgets':sorted(hints,key=lambda row:max(row['minimum'],row['minimum_hint']),reverse=True)[:30]},ensure_ascii=False)
+        self.assertLessEqual(self.window.research_panel.width(),viewport.width(),diagnostic)
         self.window.library_toggle.setChecked(True);self.window.library_panel.storage_toggle.setChecked(True)
         self.app.processEvents()
         self.assertLessEqual(self.window.library_panel.width(),self.window.stack.currentWidget().viewport().width())

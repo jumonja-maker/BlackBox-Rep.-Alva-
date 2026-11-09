@@ -1,0 +1,150 @@
+name: Program recording exact-source long acceptance (no publication)
+
+on:
+  workflow_call:
+    inputs:
+      expected_sha:
+        required: true
+        type: string
+      full_ci_run_id:
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      expected_sha:
+        description: Exact frozen source SHA matching this dispatch ref
+        required: true
+        type: string
+      full_ci_run_id:
+        description: Successful exact-source full shell QA including portable and one-hour profiles
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: program-endurance-${{ github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  source-gate:
+    name: Require successful exact-source full functional and portable QA
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      source_sha: ${{ steps.gate.outputs.verified_sha }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Verify requested source and every full CI job before long work
+        id: gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+          UPSTREAM_RUN_ID: ${{ inputs.full_ci_run_id }}
+          REPOSITORY: ${{ github.repository }}
+        run: python tools/qa_program_endurance.py --expected-sha "$EXPECTED_SHA" --run-id "$UPSTREAM_RUN_ID" --repository "$REPOSITORY"
+
+  preflight:
+    name: Actual isolated GUI preflight / ${{ matrix.profile }}
+    needs: source-gate
+    runs-on: windows-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        profile: [STANDARD, DETAILED]
+    env:
+      QT_QPA_PLATFORM: offscreen
+      PYTHONUTF8: '1'
+      BB_QA_SOURCE_SHA: ${{ needs.source-gate.outputs.source_sha }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ needs.source-gate.outputs.source_sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.11.9'
+          architecture: x64
+      - name: Install exact pinned GUI and observer dependencies
+        run: |
+          python -m pip install --require-hashes -r requirements/ci-windows-py311.lock
+          python -m pip install --no-build-isolation --no-deps -e .
+      - name: Real ninety-second profile and independent saved-series checks
+        timeout-minutes: 10
+        run: python tools/qa_github_endurance.py --output program-preflight --profile '${{ matrix.profile }}' --duration-seconds 90 --expected-sha '${{ needs.source-gate.outputs.source_sha }}'
+      - name: Preserve full preflight verdict and hashes including failures
+        if: always()
+        run: python tools/qa_program_endurance.py --expected-sha '${{ needs.source-gate.outputs.source_sha }}' --verdict program-preflight/qa-verdict.json --profile '${{ matrix.profile }}' --requested-seconds 90
+
+  endurance:
+    name: Real recording / ${{ matrix.profile }} / ${{ matrix.seconds }} seconds
+    needs: [source-gate, preflight]
+    runs-on: windows-latest
+    timeout-minutes: ${{ matrix.job_timeout }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - profile: STANDARD
+            seconds: 19800
+            job_timeout: 355
+            step_timeout: 342
+          - profile: DETAILED
+            seconds: 3600
+            job_timeout: 90
+            step_timeout: 80
+    env:
+      QT_QPA_PLATFORM: offscreen
+      PYTHONUTF8: '1'
+      BB_QA_SOURCE_SHA: ${{ needs.source-gate.outputs.source_sha }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ needs.source-gate.outputs.source_sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.11.9'
+          architecture: x64
+      - name: Install exact pinned GUI and observer dependencies
+        run: |
+          python -m pip install --require-hashes -r requirements/ci-windows-py311.lock
+          python -m pip install --no-build-isolation --no-deps -e .
+      - name: Full requested wall-clock profile and independent saved-store verification
+        timeout-minutes: ${{ matrix.step_timeout }}
+        run: python tools/qa_github_endurance.py --output program-endurance --profile '${{ matrix.profile }}' --duration-seconds '${{ matrix.seconds }}' --expected-sha '${{ needs.source-gate.outputs.source_sha }}'
+      - name: Preserve full exact-source duration coverage completion and hash receipt
+        if: always()
+        run: python tools/qa_program_endurance.py --expected-sha '${{ needs.source-gate.outputs.source_sha }}' --verdict program-endurance/qa-verdict.json --profile '${{ matrix.profile }}' --requested-seconds '${{ matrix.seconds }}'
+
+  acceptance:
+    name: Exact-source Standard five-and-half-hours and Detailed one-hour acceptance
+    if: always()
+    needs: [source-gate, preflight, endurance]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require both actual full profiles and all admission preflights
+        env:
+          GATE_RESULTS: ${{ toJSON(needs) }}
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          python - <<'PY'
+          import json, os
+          gates = {name: data['result'] for name, data in json.loads(os.environ['GATE_RESULTS']).items()}
+          passed = len(gates) == 3 and all(value == 'success' for value in gates.values())
+          print('PROGRAM_RECORDING_ACCEPTANCE ' + json.dumps({
+              'status': 'PASS' if passed else 'FAIL', 'source_sha': os.environ['SOURCE_SHA'], 'gates': gates,
+              'required_profiles_seconds': {'STANDARD': 19800, 'DETAILED': 3600},
+              'r60_persisted_scheduler_5h30': 'SEPARATE_REQUIRED_GATE',
+              'wave02_standard_incident_burst_one_hour': 'REQUIRED_IN_VERIFIED_UPSTREAM_FULL_CI',
+              'physical_windows_10_11': 'NOT_TESTED', 'secure_desktop': 'NOT_TESTED',
+              'published_release': False}, sort_keys=True))
+          raise SystemExit(0 if passed else 1)
+          PY

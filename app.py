@@ -21,6 +21,15 @@ if __name__=='__main__' and '--qa-production' in sys.argv:
     from blackbox_universal.production_qa import main as production_main
     raise SystemExit(production_main(sys.argv[sys.argv.index('--qa-production')+1:]))
 
+if __name__ == '__main__' and '--qa-sdk-prepare' in sys.argv:
+    from tools.qa_sdk_clients import prepare_main
+    try:
+        raise SystemExit(prepare_main(sys.argv[1:]))
+    except Exception:
+        import traceback
+        Path('blackbox-sdk-qa-error.txt').write_text(traceback.format_exc(), encoding='utf-8')
+        raise SystemExit(1)
+
 if __name__ == "__main__" and "--trace-owner" in sys.argv:
     from blackbox_core.trace_owner import run as trace_main
     raise SystemExit(trace_main(sys.argv[sys.argv.index("--trace-owner")+1]))

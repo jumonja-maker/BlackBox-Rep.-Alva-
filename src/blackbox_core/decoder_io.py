@@ -7,6 +7,7 @@ import math
 import re
 
 from .decoder_cpu import ETW_PROVIDER_GUID
+from .decoder_limits import checked_index_path
 
 IO_SCHEMA = "blackbox.trace-io/1"
 MAX_IO_PENDING_METADATA_BYTES = 32 * 1024**2
@@ -43,7 +44,7 @@ def _int(value, minimum=0, maximum=2**63 - 1):
 
 
 def _number(value):
-    return type(value) in (int, float) and math.isfinite(value) and 0 <= value < 1e15
+    return type(value) in (int, float) and 0 <= value < 1e15 and math.isfinite(value)
 
 
 def _require(value):
@@ -206,7 +207,7 @@ def _validate_file_observation(row, value):
     _require(name is None or type(name) is str and 1 <= len(name) <= 2048)
     _require(value["name_status"] in ("RECORDED", "UNAVAILABLE", "TRUNCATED") and
         (name is None) == (value["name_status"] == "UNAVAILABLE"))
-    _require(type(row.get("time_ms")) in (int, float) and math.isfinite(row["time_ms"]) and abs(row["time_ms"]) < 1e15)
+    _require(type(row.get("time_ms")) in (int, float) and abs(row["time_ms"]) < 1e15 and math.isfinite(row["time_ms"]))
     identity = _identity(value["event_thread"], row["time_ms"])
     event_thread = value["event_thread"]
     _require(event_thread["tid"] == row.get("tid") and
@@ -255,12 +256,12 @@ def build_file_io_report(index_path, *, pid=0, process_instance=None, tid=None,
     import sqlite3
     import time
     from .decoder_cpu import ETW_PROVIDER
-    from .decoder_index import APP_ID, validate_event
+    from .decoder_index import APP_ID, _saved_json, read_index_summary, require_index_tables, validate_event
     from .decoder_waits import _identity
     from .session_v2 import safe_path
 
     def finite(value):
-        return type(value) in (int, float) and math.isfinite(value) and abs(value) < 1e15
+        return type(value) in (int, float) and abs(value) < 1e15 and math.isfinite(value)
 
     if (not _int(pid, 0, 2**32-1) or process_instance is not None and not _int(process_instance) or
             tid is not None and not _int(tid, 1, 2**32-1) or
@@ -268,9 +269,7 @@ def build_file_io_report(index_path, *, pid=0, process_instance=None, tid=None,
             start_ms is not None and end_ms is not None and start_ms >= end_ms or
             not _int(max_operations, 1, 20_000)):
         raise ValueError("INVALID_FILE_IO_FILTER")
-    path = safe_path(index_path)
-    if not path.is_file():
-        raise ValueError("INVALID_INDEX_FILE")
+    path = checked_index_path(index_path)
     deadline = time.monotonic() + 30
 
     def check():
@@ -364,7 +363,8 @@ def build_file_io_report(index_path, *, pid=0, process_instance=None, tid=None,
                     db.execute("PRAGMA user_version").fetchone()[0] not in (1, 2, 3, 4)):
                 raise ValueError("INVALID_INDEX_SCHEMA")
             db.execute("BEGIN")
-            summary = json.loads(db.execute("SELECT value FROM metadata WHERE key='summary'").fetchone()[0])
+            require_index_tables(db,("metadata","events"))
+            summary = read_index_summary(db)
             if (type(summary) is not dict or summary.get("status") not in ("DECODED", "TRUNCATED") or
                     not _int(summary.get("rows")) or type(summary.get("input_sha256")) is not str or
                     _KEY.fullmatch(summary["input_sha256"]) is None):
@@ -386,7 +386,7 @@ def build_file_io_report(index_path, *, pid=0, process_instance=None, tid=None,
                 counts["candidate_events"] += 1
                 if counts["candidate_events"] > 250_000:
                     raise ValueError("FILE_IO_EVENT_BUDGET")
-                row = json.loads(raw)
+                row = _saved_json(raw)
                 validate_event(row, event_id)
                 if (row["pid"], row["time_ms"], row["provider"], row["name"]) != (stored_pid, stored_time, provider, name):
                     raise ValueError("INDEX_EVENT_METADATA_MISMATCH")
@@ -486,21 +486,19 @@ def build_disk_io_report(index_path, *, pid=0, process_instance=None, tid=None,
     import sqlite3
     import time
     from .decoder_cpu import ETW_PROVIDER
-    from .decoder_index import APP_ID, validate_event
+    from .decoder_index import APP_ID, _saved_json, read_index_summary, require_index_tables, validate_event
     from .decoder_waits import _identity
     from .session_v2 import safe_path
 
     def finite(value):
-        return type(value) in (int, float) and math.isfinite(value) and abs(value) < 1e15
+        return type(value) in (int, float) and abs(value) < 1e15 and math.isfinite(value)
 
     if (not _int(pid, 0, 2**32-1) or process_instance is not None and not _int(process_instance) or
             tid is not None and not _int(tid, 1, 2**32-1) or
             start_ms is not None and not finite(start_ms) or end_ms is not None and not finite(end_ms) or
             start_ms is not None and end_ms is not None and start_ms >= end_ms or not _int(max_requests, 1, 20_000)):
         raise ValueError("INVALID_DISK_IO_FILTER")
-    path = safe_path(index_path)
-    if not path.is_file():
-        raise ValueError("INVALID_INDEX_FILE")
+    path = checked_index_path(index_path)
     deadline = time.monotonic() + 30
 
     def check():
@@ -527,7 +525,8 @@ def build_disk_io_report(index_path, *, pid=0, process_instance=None, tid=None,
                     db.execute("PRAGMA user_version").fetchone()[0] not in (1, 2, 3, 4)):
                 raise ValueError("INVALID_INDEX_SCHEMA")
             db.execute("BEGIN")
-            summary = json.loads(db.execute("SELECT value FROM metadata WHERE key='summary'").fetchone()[0])
+            require_index_tables(db,("metadata","events"))
+            summary = read_index_summary(db)
             if (type(summary) is not dict or summary.get("status") not in ("DECODED", "TRUNCATED") or
                     not _int(summary.get("rows")) or type(summary.get("input_sha256")) is not str or
                     _KEY.fullmatch(summary["input_sha256"]) is None):
@@ -547,7 +546,7 @@ def build_disk_io_report(index_path, *, pid=0, process_instance=None, tid=None,
                 check(); counts["candidate_events"] += 1
                 if counts["candidate_events"] > 250_000:
                     raise ValueError("DISK_IO_EVENT_BUDGET")
-                row = json.loads(raw)
+                row = _saved_json(raw)
                 validate_event(row, event_id)
                 if (row["pid"], row["time_ms"], row["provider"], row["name"]) != (stored_pid, stored_time, provider, name):
                     raise ValueError("INDEX_EVENT_METADATA_MISMATCH")

@@ -108,6 +108,17 @@ def _read(path, *, limit=MAX_RESULT_BYTES):
     return _strict_json(raw, limit=limit), before
 
 
+def _observed_writer_birth(pid=None):
+    import psutil
+    value=psutil.Process(pid).create_time() if pid is not None else psutil.Process().create_time()
+    try:
+        valid=type(value) in (int,float) and value>0 and math.isfinite(value)
+    except OverflowError:
+        valid=False
+    require(valid,"WORKFLOW_WRITER_OWNERSHIP_UNCONFIRMED")
+    return value
+
+
 def load_definition(path):
     path = safe_path(Path(path))
     value, _ = _read(path, limit=1024 * 1024)
@@ -207,7 +218,7 @@ class WorkflowRunStore:
             for _ in range(3):
                 nonce = uuid4().hex
                 marker = {"schema": "blackbox.workflow-writer/1", "run_id": self.run_id,
-                          "pid": os.getpid(), "process_created": psutil.Process().create_time(),
+                          "pid": os.getpid(), "process_created": _observed_writer_birth(),
                           "owner_nonce": nonce}
                 try:
                     atomic_json(path, marker, exclusive=True, max_bytes=4096)
@@ -221,7 +232,7 @@ class WorkflowRunStore:
                             math.isfinite(existing["process_created"]) and existing["process_created"] > 0,
                             "WORKFLOW_WRITER_LOCK_INVALID")
                     try:
-                        alive = psutil.Process(existing["pid"]).create_time() == existing["process_created"]
+                        alive = _observed_writer_birth(existing["pid"]) == existing["process_created"]
                     except psutil.NoSuchProcess:
                         alive = False
                     except (psutil.AccessDenied, OSError) as error:
@@ -372,7 +383,7 @@ class WorkflowRunStore:
                 answer = EvidenceJournal(self.folder / "journal").append(record)
                 self._event_count += 1
                 self._history_metadata_bytes += metadata_bytes
-                return answer
+                return {**answer,"sequence":self._event_count}
             finally:
                 if temporary_claim:
                     self.release_writer()
@@ -479,7 +490,7 @@ class WorkflowRunStore:
         if self._writer_nonce is not None and owner["owner_nonce"] == self._writer_nonce:
             return False
         try:
-            live = psutil.Process(owner["pid"]).create_time() == owner["process_created"]
+            live = _observed_writer_birth(owner["pid"]) == owner["process_created"]
         except psutil.NoSuchProcess:
             live = False
         except (psutil.AccessDenied, OSError) as error:
@@ -585,6 +596,10 @@ class WorkflowRunStore:
         return records
 
     def load_state(self):
+        return self._state_from_events(self.read_events())
+
+    def _state_from_events(self,events):
+        """Hydrate one already verified snapshot; never mix journal prefixes."""
         nodes = {node.node_id: {"node_id": node.node_id, "tool_id": node.tool_id, "kind": node.kind,
                  "state": "QUEUED", "iterations_completed": 0, "total_iterations": node.repeat_count,
                  "outputs": {}, "run_receipt": None, "run_context": None, "tool_descriptor": None,
@@ -596,7 +611,7 @@ class WorkflowRunStore:
                  "cleanup": {"status": "NOT_COLLECTED", "confirmed": False}, "elapsed_seconds": 0,
                  "output_folder": str(self.folder), "errors": []}
         unfinished = {}
-        for event in self.read_events():
+        for event in events:
             data, event_type = event["data"], event["event"]
             node_id = event.get("node_id") or data.get("node_id")
             if event_type == "node.intent":

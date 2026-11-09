@@ -192,9 +192,18 @@ def assess_trace_capture_metadata(summary, raw):
     Used by session correlation so a journal or index replaced between two
     independent reads cannot inherit the approval of an older version.
     """
+    summary_ok = isinstance(summary,dict)
+    summary = summary if summary_ok else {}
     document_ok = isinstance(raw, dict)
     data = raw if document_ok else {}
     source = data.get("source")
+    source_ok = type(source) is str and len(source)<=128
+    if source_ok:
+        try:
+            source.encode("utf-8")
+        except UnicodeError:
+            source_ok = False
+    source = source if source_ok else None
     fmt = summary.get("format")
     stages_by_source = {
         "ETW_WPR": ("before_tool_start", "after_tool_start",
@@ -215,7 +224,9 @@ def assess_trace_capture_metadata(summary, raw):
     def response(status, **other):
         return {**common, "status": status, **other}
 
-    if not document_ok:
+    if not summary_ok:
+        return response("INVALID_TRACE_INDEX_SUMMARY")
+    if not document_ok or not source_ok:
         return response("INVALID_CAPTURE_JOURNAL")
     if expected_format is None or fmt != expected_format:
         return response("JOURNAL_AND_TRACE_SOURCE_MISMATCH")

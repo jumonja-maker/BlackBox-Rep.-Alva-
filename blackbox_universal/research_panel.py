@@ -9,7 +9,7 @@ from pathlib import Path
 import subprocess
 import sys
 
-from PySide6.QtCore import Qt,Signal
+from PySide6.QtCore import Qt,Signal,QTimer
 from PySide6.QtGui import QColor,QPainter,QPen
 from PySide6.QtWidgets import (QWidget,QVBoxLayout,QHBoxLayout,QGridLayout,QLabel,QPushButton,
     QLineEdit,QSpinBox,QDoubleSpinBox,QFileDialog,QPlainTextEdit,QTableWidget,QTableWidgetItem,
@@ -76,6 +76,9 @@ class ResearchPanel(QWidget):
     def __init__(self,window):
         super().__init__(window);self.window=window;self.bridge=window.probe
         self._labels=[];self.result=None;self._comparison_result=None;self._comparison_sources=None;self._comparison_pending_sources=None
+        self._correlated=hasattr(self.bridge,'command_result');self._requests={};self._latest={}
+        self._legacy_pending={};self._legacy_retry={};self._query_generation=0;self._comparison_generation=0
+        self._retry_timer=QTimer(self);self._retry_timer.setSingleShot(True);self._retry_timer.timeout.connect(self.drain_legacy_retry)
         layout=QVBoxLayout(self);layout.setContentsMargins(0,0,0,0)
         self.status=QLabel();self.status.setWordWrap(True);layout.addWidget(self.status)
         context=QGridLayout()
@@ -137,6 +140,7 @@ class ResearchPanel(QWidget):
         self.preparation_dialog=None
         if hasattr(self.bridge,"result_ready"):
             self.bridge.result_ready.connect(self.receive)
+            if self._correlated:self.bridge.command_result.connect(self.command_received)
             self.bridge.updated.connect(self.refresh)
         else:
             self.setEnabled(False)
@@ -171,8 +175,33 @@ class ResearchPanel(QWidget):
         for name in ('Compare investigations…','Open saved comparison…'):
             self.by_action[name].setEnabled(not getattr(self.bridge,'pending',False))
     def send(self,op,**args):
-        try:return self.bridge.send(op,**args)
-        except (RuntimeError,ValueError) as exc:self.details.setPlainText(str(exc))
+        context=self.request_context(op)
+        if not self._correlated and op in self._legacy_pending:
+            self._legacy_retry[op]=dict(args);return True
+        if not self._correlated:
+            self._legacy_retry.pop(op,None);self._legacy_pending[op]=context
+        try:
+            ident=self.bridge.send(op,**args)
+        except (OSError,RuntimeError,ValueError) as exc:
+            self._legacy_pending.pop(op,None);self.details.setPlainText(str(exc));return None
+        if self._correlated:
+            self._requests[ident]=(op,context);self._latest[op]=ident
+        return ident if ident is not None else True
+    def request_context(self,op):
+        if op in ('episode','evidence_page'):
+            folder=self.folder if self.folder is not None else getattr(self.bridge,'session_folder',None)
+            return self._query_generation,str(folder) if folder is not None else None
+        if op in ('compare','load_comparison'):return self._comparison_generation
+        return None
+    def command_received(self,ident,op,result,error):
+        request=self._requests.pop(ident,None)
+        if request is None or request[0]!=op or self._latest.get(op)!=ident:return
+        if request[1]!=self.request_context(op):return
+        self.receive(op,result,error,owned=True)
+    def drain_legacy_retry(self):
+        for op,args in list(self._legacy_retry.items()):
+            if op not in self._legacy_pending:
+                self._legacy_retry.pop(op,None);self.send(op,**args)
     def configure(self):
         self.send("configure",scenario=self.scenario.text(),scenario_version=self.scenario_version.text(),workload=self.workload.text(),target_version=self.version.text(),budget_mb=self.budget.value(),warmup_count=self.warmups.value())
     def inspect(self):self.send("inspect")
@@ -231,6 +260,8 @@ class ResearchPanel(QWidget):
         if not first:return
         second=QFileDialog.getExistingDirectory(self,self.tr("After session","Сеанс после"))
         if second:
+            self._comparison_generation+=1;self._comparison_result=None
+            self.details.setPlainText(self.tr('Comparing selected recordings…','Сравниваем выбранные записи…'))
             self._comparison_sources=None;self._comparison_pending_sources=(first,second)
             if self.send("compare",before=first,after=second) is None:self._comparison_pending_sources=None
             self.refresh()
@@ -245,6 +276,8 @@ class ResearchPanel(QWidget):
         if getattr(self.bridge,'pending',False):return
         path,_=QFileDialog.getOpenFileName(self,self.tr('Open comparison metadata','Открыть метаданные сравнения'),'','Comparison (*.json *.html)')
         if path:
+            self._comparison_generation+=1;self._comparison_result=None
+            self.details.setPlainText(self.tr('Loading selected comparison…','Читаем выбранное сравнение…'))
             self._comparison_sources=None;self._comparison_pending_sources=None
             self.send('load_comparison',path=path);self.refresh()
     def verify(self):
@@ -261,7 +294,11 @@ class ResearchPanel(QWidget):
         path=QFileDialog.getExistingDirectory(self,self.tr("Open research session","Открыть исследование"))
         if path:self.folder=Path(path);self.load_interval()
     def load_interval(self):
+        self._query_generation+=1;self.clear_episode()
         self.send("episode",folder=str(self.folder) if self.folder else None,start_ms=int(self.begin.value()*1000),end_ms=int(self.end.value()*1000))
+    def clear_episode(self):
+        self.result=None;self.page_data={};self.table.setRowCount(0);self.details.clear()
+        self.timeline.rows=[];self.timeline.start=int(self.begin.value()*1000);self.timeline.end=int(self.end.value()*1000);self.timeline.update()
     def select_interval(self,start,end):
         self.begin.setValue(start/1000);self.end.setValue(end/1000);self.load_interval()
     def show_evidence(self):
@@ -276,12 +313,22 @@ class ResearchPanel(QWidget):
         self.send("evidence_page",folder=str(self.folder) if self.folder else None,
             start_ms=int(self.begin.value()*1000),end_ms=int(self.end.value()*1000),**cursor)
     def render_page(self,page):
-        self.page_data=page;rows=page["rows"];self.table.setRowCount(len(rows))
+        self.page_data=page;rows=page["rows"];self.table.blockSignals(True);self.table.setRowCount(len(rows))
+        self.table.clearSelection();self.table.setCurrentItem(None);self.details.clear()
         for i,r in enumerate(rows):
             for j,key in enumerate(("elapsed_ms","source","quality","kind")):
                 item=QTableWidgetItem(str(r[key]));item.setData(Qt.ItemDataRole.UserRole,r);self.table.setItem(i,j,item)
-    def receive(self,op,result,error):
+        self.table.blockSignals(False)
+    def receive(self,op,result,error,*,owned=False):
         if op.startswith("library_") or op in ("investigation","incident_card","events_query","export_recovery_scan","export_recover"):return
+        if not owned:
+            if op=='start' and not error:
+                self.folder=None;self._query_generation+=1;self.clear_episode()
+            if self._correlated:return
+            if op not in self._legacy_pending:return
+            context=self._legacy_pending.pop(op)
+            if op in self._legacy_retry:self._retry_timer.start(0)
+            if context!=self.request_context(op):return
         if error:
             if op=='compare':self._comparison_sources=None;self._comparison_pending_sources=None;self.refresh()
             from .research_messages import explain

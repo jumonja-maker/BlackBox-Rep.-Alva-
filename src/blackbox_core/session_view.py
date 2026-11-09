@@ -71,6 +71,14 @@ def _legacy_scope(series, instance_id):
         raise SessionReadError("LEGACY_SERIES_UNSUPPORTED")
 
 
+def _legacy_clock(value):
+    # Validate before arithmetic: SQLite affinity is not a stored-type
+    # guarantee. Multiplying imported TEXT here can amplify it a millionfold.
+    if type(value) is not int or not 0<=value<=(2**63-1)//1_000_000:
+        raise SessionReadError("INVALID_IMPORTED_SAMPLE_CLOCK")
+    return value*1_000_000
+
+
 @dataclass
 class _Stats:
     count: int = 0
@@ -101,10 +109,20 @@ class _Stats:
 
 class _Reader:
     def __init__(self,path: Path,*,cancel=None,timeout_s=30):
+        if (type(timeout_s) not in (int,float) or not 0<timeout_s<=7*86400 or
+                (cancel is not None and not callable(cancel))):
+            raise SessionReadError('INVALID_SESSION_READ_POLICY')
+        if cancel is not None and cancel():raise SessionReadError('CANCELLED')
         self.path=safe_path(path)
         if not self.path.is_file() or self.path.stat().st_size>2*1024**3:
             raise SessionReadError("SESSION_UNAVAILABLE_OR_SIZE_LIMIT")
         self.db=sqlite3.connect(self.path.as_uri()+"?mode=ro",uri=True,timeout=.5)
+        try:self._configure(cancel,timeout_s)
+        except BaseException:
+            self.db.close()
+            raise
+
+    def _configure(self,cancel,timeout_s):
         self.db.row_factory=sqlite3.Row
         self.db.setlimit(sqlite3.SQLITE_LIMIT_LENGTH,1024*1024)
         self.db.execute("PRAGMA query_only=ON")
@@ -150,8 +168,8 @@ class SchemaV1Reader(_Reader):
     def bounds(self,series="STANDARD",instance_id=1):
         _legacy_scope(series, instance_id)
         row=self.db.execute("SELECT min(elapsed_ms),max(elapsed_ms),count(*) FROM samples").fetchone()
-        return ((row[0]*1_000_000 if row[0] is not None else None),
-                (row[1]*1_000_000 if row[1] is not None else None),row[2])
+        return ((_legacy_clock(row[0]) if row[0] is not None else None),
+                (_legacy_clock(row[1]) if row[1] is not None else None),row[2])
 
     def iter_samples(self,start,end,*,series="STANDARD",instance_id=1):
         _legacy_scope(series, instance_id)
@@ -160,9 +178,10 @@ class SchemaV1Reader(_Reader):
         cursor=self.db.execute("SELECT * FROM samples WHERE elapsed_ms BETWEEN ? AND ? ORDER BY seq",
                                ((start+999999)//1_000_000,end//1_000_000))
         for raw in cursor:
+            stamp=_legacy_clock(raw['elapsed_ms'])
             row={k:None for k in UNITS}
             row.update(dict(raw))
-            row.update(time_ns=raw["elapsed_ms"]*1_000_000,series_seq=raw["seq"],
+            row.update(time_ns=stamp,series_seq=raw["seq"],
                        thread_count=raw["num_threads"],children_total=raw["children_count"],
                        requested_interval_ns=None)
             if any(row[k] is not None and not _number(row[k]) for k in UNITS):
@@ -553,25 +572,68 @@ class SessionView:
                                "SUM_RSS_DOUBLE_COUNTS_SHARED_PAGES"]}
 
     def event_page(self,start_ns=0,end_ns=2**63-1,*,after=(0,0),limit=100):
-        if type(limit) is not int or not 1<=limit<=200 or len(after)!=2:
+        if (type(limit) is not int or not 1<=limit<=200 or
+                type(after) not in (tuple,list) or len(after)!=2 or
+                any(type(value) is not int or not 0<=value<2**63 for value in after) or
+                type(start_ns) is not int or type(end_ns) is not int or
+                not 0<=start_ns<=end_ns<2**63):
             raise SessionReadError("INVALID_PAGE")
         if not self.is_v2:
             return {"rows":[],"has_more":False,"status":"LEGACY_LIMITED_DATA"}
-        raw=self.db.execute("""SELECT event_id,recorded_ns,observed_ns,instance_id,event_type,
-            source_kind,verification_class,timestamp_precision,correlation_key,measurement_status,
-            substr(detail_json,1,16385) AS detail_json,length(detail_json) AS detail_size,
-            coalesce(observed_ns,recorded_ns) AS event_time_ns FROM events
+        # Local import avoids a module cycle: the unified stream also uses
+        # SessionView, and both public pages share the same strict detail policy.
+        from .event_stream import (_parse_event_detail,MAX_EVENT_SCALAR_CHARS,
+            MAX_EVENT_SCALAR_BYTES,MAX_EVENT_PAGE_BYTES)
+        text_fields=("event_type","source_kind","verification_class","timestamp_precision",
+                     "correlation_key","measurement_status")
+        invalid="""typeof(event_id)!='integer' OR event_id<=0 OR
+            typeof(recorded_ns)!='integer' OR recorded_ns<0 OR
+            (observed_ns IS NOT NULL AND (typeof(observed_ns)!='integer' OR observed_ns<0)) OR
+            (instance_id IS NOT NULL AND (typeof(instance_id)!='integer' OR instance_id<=0))"""
+        invalid+=' OR '+' OR '.join("(typeof("+name+")!='text' OR instr("+name+",char(0))>0 OR length("+name+")>? OR "
+            "length(CAST("+name+" AS BLOB))>?)" for name in text_fields)
+        bounds=tuple(value for _ in text_fields for value in (MAX_EVENT_SCALAR_CHARS,MAX_EVENT_SCALAR_BYTES))
+        if self.db.execute('SELECT 1 FROM events WHERE '+invalid+' LIMIT 1',bounds).fetchone():
+            raise SessionReadError("INVALID_OR_UNSUPPORTED_IMPORTED_EVENT_SCALAR")
+        # Only bounded columns cross into Python, one row at a time. Complete
+        # valid scalar fields pass the check above; no truncated value is used.
+        projection=','.join('substr('+name+',1,'+str(MAX_EVENT_SCALAR_CHARS)+') AS '+name for name in text_fields)
+        query="""SELECT event_id,recorded_ns,observed_ns,instance_id,"""+projection+""",
+            substr(detail_json,1,16385) AS detail_json,length(CAST(detail_json AS BLOB)) AS detail_size,
+            typeof(detail_json) AS detail_type,coalesce(observed_ns,recorded_ns) AS event_time_ns FROM events
             WHERE coalesce(observed_ns,recorded_ns) BETWEEN ? AND ?
             AND (coalesce(observed_ns,recorded_ns),event_id)>(?,?)
-            ORDER BY coalesce(observed_ns,recorded_ns),event_id LIMIT ?""",(start_ns,end_ns,*after,limit+1)).fetchall()
-        rows=[]
-        for item in raw[:limit]:
+            ORDER BY coalesce(observed_ns,recorded_ns),event_id LIMIT ?"""
+        raw=self.db.execute(query,(start_ns,end_ns,*after,limit+1))
+        rows=[];page_bytes=0;has_more=False;page_limit_reason=None
+        for item in raw:
+            if len(rows)==limit:
+                has_more=True
+                break
             row=dict(item)
-            if row.pop("detail_size")>16384:
-                raise SessionReadError("IMPORTED_EVENT_SIZE_LIMIT")
+            text=row.pop("detail_json");size=row.pop("detail_size");kind=row.pop("detail_type")
+            try:
+                row["detail"]=_parse_event_detail(text,size,kind)
+                row["detail_read_status"]="RECORDED_JSON"
+            except SessionReadError as error:
+                if str(error)=="IMPORTED_EVENT_SIZE_LIMIT":
+                    raise
+                # Consumer metadata is separate from the recorded JSON: a
+                # legitimate detail.status or JSON null is never an error flag.
+                row["detail"]=None
+                row["detail_read_status"]="INVALID_OR_UNSUPPORTED_IMPORTED_JSON"
+                row["detail_read_error"]="INVALID_IMPORTED_EVENT"
             row["recorded_verification_class"]=row["verification_class"]
             row["verification_class"]="UNVERIFIED_IMPORT"
-            row["detail"]=json.loads(row.pop("detail_json"))
+            size=len(json.dumps(row,ensure_ascii=True,allow_nan=False,separators=(',',':')).encode('ascii'))+1
+            if page_bytes+size>MAX_EVENT_PAGE_BYTES:
+                if not rows:
+                    raise SessionReadError("IMPORTED_EVENT_ROW_RESPONSE_SIZE_LIMIT")
+                has_more=True;page_limit_reason="SERIALIZED_PAGE_BYTE_LIMIT"
+                break
             rows.append(row)
-        return {"rows":rows,"has_more":len(raw)>limit,
+            page_bytes+=size
+        return {"rows":rows,"has_more":has_more,
+                "page_limit_reason":page_limit_reason,"serialized_rows_bytes":page_bytes,
+                "page_byte_limit":MAX_EVENT_PAGE_BYTES,
                 "next_cursor":[rows[-1]["event_time_ns"],rows[-1]["event_id"]] if rows else None}

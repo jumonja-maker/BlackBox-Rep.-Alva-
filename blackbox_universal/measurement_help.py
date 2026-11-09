@@ -1,5 +1,6 @@
 """Human metric definitions and bounded health; visible Settings only."""
 from html import escape
+from copy import deepcopy
 from PySide6.QtWidgets import QWidget,QVBoxLayout,QPushButton,QTableWidget,QTableWidgetItem,QHeaderView,QDialog,QTextBrowser
 class MeasurementHelp(QWidget):
  def __init__(self,window):
@@ -13,7 +14,7 @@ class MeasurementHelp(QWidget):
  def showEvent(self,event):super().showEvent(event);self._key=None;self.refresh()
  def refresh(self):
   if not self.isVisible():return
-  rows=getattr(self.window.probe,'data',{}).get('sensor_health',{});key=tuple((k,r.get('samples'),r.get('failures'),r.get('status')) for k,r in rows.items())
+  rows=getattr(self.window.probe,'data',{}).get('sensor_health',{});key=deepcopy(rows)
   if key==self._key:return
   self._key=key;self.table.setRowCount(len(rows))
   for i,(name,r) in enumerate(rows.items()):

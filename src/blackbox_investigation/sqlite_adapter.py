@@ -4,12 +4,15 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import sqlite3
+import time
 from .model import InvestigationError, Policy, integer, validate_policy
 from .engine import analyze
 
 
 _EXPECTED_SAMPLES = ("seq", "elapsed_ms", "rss_bytes", "cpu_percent", "num_threads", "read_bytes", "write_bytes", "children_count")
 _EXPECTED_META = ("schema_version", "session_id", "pid", "started_utc", "ended_utc", "exit_code", "probe")
+_MAX_SQL_VALUE_BYTES = 1024 * 1024
+_QUERY_SECONDS = 15.0
 
 
 def load_session(folder: str | Path, *, policy: Policy | None = None,
@@ -36,7 +39,15 @@ def load_session(folder: str | Path, *, policy: Policy | None = None,
     try:
         db = sqlite3.connect(target.resolve().as_uri() + "?mode=ro", uri=True, timeout=1)
         db.row_factory = sqlite3.Row
+        # This legacy reader is separate from blackbox_core.storage._open_ro.
+        # Bound imported values before fetching metadata and SQL work before
+        # COUNT/ORDER scans. The cooperative VM deadline is not a filesystem
+        # call timeout and never changes a writer/sampler connection.
+        deadline = time.monotonic() + _QUERY_SECONDS
+        db.setlimit(sqlite3.SQLITE_LIMIT_LENGTH, _MAX_SQL_VALUE_BYTES)
+        db.set_progress_handler(lambda: int(time.monotonic() >= deadline), 1000)
         db.execute("PRAGMA query_only=ON")
+        db.execute("PRAGMA trusted_schema=OFF")
         db.execute("PRAGMA busy_timeout=500")
         meta_cols = tuple(row[1] for row in db.execute("PRAGMA table_info(metadata)"))
         sample_cols = tuple(row[1] for row in db.execute("PRAGMA table_info(samples)"))

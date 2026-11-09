@@ -10,13 +10,17 @@ from .session_v2 import safe_path
 from .optional_jobs import OwnedProcess
 NS={'e':'http://schemas.microsoft.com/win/2004/08/events/event'}
 MAX_XML_BYTES=32*1024**2
+MAX_TRACE_INPUT_BYTES=256*1024**2
 MAX_XML_NODES=1_000_000
 MAX_XML_DEPTH=64
 XML_PARSE_SECONDS=10
 def file_hash(path):
- h=hashlib.sha256()
+ h=hashlib.sha256();total=0
  with path.open('rb') as f:
-  for block in iter(lambda:f.read(1024**2),b''):h.update(block)
+  for block in iter(lambda:f.read(1024**2),b''):
+   total+=len(block)
+   if total>MAX_TRACE_INPUT_BYTES:raise ValueError('TRACE_DECODE_INPUT_SIZE_LIMIT')
+   h.update(block)
  return h.hexdigest()
 def parse_xml(path,*,target_pid,max_rows=500):
     if type(target_pid) is not int or target_pid<=0 or type(max_rows) is not int or not 1<=max_rows<=500:
@@ -110,7 +114,7 @@ def decode(path,*,target_pid):
    'NO_ETL_CLOCK_ALIGNMENT_TO_SESSION_ASSUMED','LOSS_COUNT_UNKNOWN','NO_GC_OR_DISK_LATENCY_INFERRED_FROM_HEADERS']}
  if os.name!='nt':return base
  path=safe_path(path)
- if path.suffix.lower()!='.etl' or not path.is_file() or not 0<path.stat().st_size<=256*1024**2:raise ValueError('INVALID_ETL_OR_INPUT_SIZE_LIMIT')
+ if path.suffix.lower()!='.etl' or not path.is_file() or not 0<path.stat().st_size<=MAX_TRACE_INPUT_BYTES:raise ValueError('INVALID_ETL_OR_INPUT_SIZE_LIMIT')
  tool=Path(os.environ.get('SystemRoot','C:/Windows'))/'System32'/'tracerpt.exe'
  if not tool.is_file():return {**base,'status':'TOOL_UNAVAILABLE'}
  from .decoder_service import _private_decode_stage

@@ -3,8 +3,9 @@ import hashlib,os,shutil,subprocess,sys,time
 from pathlib import Path
 from threading import Thread,Event
 from uuid import uuid4
-from .trace_owner import _read,_write
+from .trace_owner import _read,_write,_TraceCleanupProof,_release_lease
 from .session_v2 import safe_path
+from .trace_cleanup import terminal_cleanup_proven
 from .trace_clock_evidence import (capture_trace_clock_bracket,
  new_clock_order_samples,append_clock_order_sample)
 PROFILES=('gc-collect','gc-verbose')
@@ -40,7 +41,7 @@ def same_target(data):
 def run(journal):
  import psutil
  from .research_worker import _streams
- from .optional_jobs import OwnedProcess
+ from .optional_jobs import OwnedProcess,OwnedProcessCleanupUnconfirmed
  path=safe_path(journal);data=_read(path);uid=data['uid'];policy=data['policy']
  if (not isinstance(uid,str) or len(uid)!=32 or any(c not in '0123456789abcdef' for c in uid) or path.name!='EVENTPIPE_'+uid+'.trace.json'
   or type(policy['seconds']) is not int or not 1<=policy['seconds']<=60 or policy['profile'] not in PROFILES
@@ -48,7 +49,7 @@ def run(journal):
  inp,_=_streams();lease=Event()
  def read_lease():inp.readline(64);lease.set()
  Thread(target=read_lease,name='blackbox-eventpipe-lease',daemon=True).start()
- capture=path.parent/('eventpipe-'+uid+'.nettrace');log=path.parent/('eventpipe-'+uid+'.log');owner=None
+ capture=path.parent/('eventpipe-'+uid+'.nettrace');log=path.parent/('eventpipe-'+uid+'.log');owner=None;cleanup_failure=None
  data.update(state='STARTING',guardian_pid=os.getpid(),guardian_created=psutil.Process().create_time(),source='EVENTPIPE_DOTNET_TRACE',decoded=False,lost_events=None)
  _write(path,data)
  try:
@@ -109,21 +110,35 @@ def run(journal):
     'stop_completion_status':'FORCED_TERMINATION_AFTER_BOUNDED_GRACE' if forced_termination else 'TOOL_EXIT_OBSERVED',
     'handshake_status':'TOOL_SUCCESS_NONEMPTY_OUTPUT_NOT_INDEPENDENTLY_ATTESTED' if success else 'NOT_CONFIRMED',
     'size_policy':'POLLED_SOFT_LIMIT_NOT_FILESYSTEM_QUOTA'})
- except BaseException as exc:data.update(state='FAILED',error=(type(exc).__name__+': '+str(exc))[:512])
+ except BaseException as exc:
+  # A partially constructed OwnedProcess can retain the original capability.
+  # Keep it until the same owner's cleanup has actually succeeded.
+  if owner is None:owner=getattr(exc,'owner',None)
+  if isinstance(exc,OwnedProcessCleanupUnconfirmed):cleanup_failure=exc
+  data.update(state='FAILED',error=(type(exc).__name__+': '+str(exc))[:512])
  finally:
-  if owner:owner.close(kill=True)
+  try:
+   # A failed exact-owner close has already attempted the existing cleanup.
+   # Record that actual failure; do not silently turn finally into recovery.
+   if cleanup_failure is not None:raise cleanup_failure
+   if owner:owner.close(kill=True)
+   data['resource_cleanup']={'confirmed':True,'scope':'EXACT_OWNED_EVENTPIPE_PROCESS_BOUNDARY','uid':uid}
+  except BaseException as exc:
+   data.update(state='CLEANUP_REQUIRED',cleanup_error=(type(exc).__name__+': '+str(exc))[:512],
+    resource_cleanup={'confirmed':False,'scope':'EXACT_OWNED_EVENTPIPE_PROCESS_BOUNDARY','uid':uid})
   data['ended_ns']=time.monotonic_ns()
   if isinstance(data.get('clock_anchors'),dict):
    data['clock_anchors']['guardian_finally']=capture_trace_clock_bracket()
   _write(path,data)
  return 0 if data['state']=='COMPLETED' else 1
-class DotnetTrace:
+class DotnetTrace(_TraceCleanupProof):
  def __init__(self,folder,pid,seconds=10,*,tool=None,profile='gc-collect',max_bytes=256*1024**2,session_path=None):
   import psutil
   if tool is not None:raise ValueError('CUSTOM_EVENTPIPE_EXECUTABLE_NOT_ALLOWED')
   if type(seconds) is not int or not 1<=seconds<=60 or profile not in PROFILES or type(max_bytes) is not int or not 1024**2<=max_bytes<=1024**3:raise ValueError('INVALID_EVENTPIPE_POLICY')
   if not shutil.which('dotnet-trace'):raise OSError('DOTNET_TRACE_TOOL_UNAVAILABLE')
   self.folder=safe_path(folder);self.uid=uuid4().hex;self.path=self.folder/('EVENTPIPE_'+self.uid+'.trace.json');self.process=None;self.reported=False
+  self._terminal_result=None;self._cleanup_confirmed=True
   self.data={'schema_version':1,'uid':self.uid,'state':'RESERVED','consent':'EXPLICIT_USER_COMMAND',
    'owner_pid':os.getpid(),'owner_created':psutil.Process().create_time(),'target':{'pid':pid,'created':psutil.Process(pid).create_time()},
    'policy':{'seconds':seconds,'max_bytes':max_bytes,'profile':profile},'decoded':False,'lost_events':None}
@@ -136,26 +151,38 @@ class DotnetTrace:
   with self.path.open('xb'):pass
   _write(self.path,self.data)
   args=[sys.executable,'--runtime-owner',str(self.path)] if getattr(sys,'frozen',False) else [sys.executable,'-m','blackbox_core.runtime_trace',str(self.path)]
-  try:self.process=subprocess.Popen(args,stdin=subprocess.PIPE,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
+  try:
+   self.process=subprocess.Popen(args,stdin=subprocess.PIPE,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
+   self._cleanup_confirmed=False
   except BaseException as exc:
    self.data.update(state='FAILED',error=type(exc).__name__);_write(self.path,self.data);raise
   return {'source':'EVENTPIPE_DOTNET_TRACE','status':'START_REQUESTED','journal':self.path.name,
    'target_pid':self.data['target']['pid'],'duration_seconds':self.data['policy']['seconds'],'profile':self.data['policy']['profile'],'decoded':False,'lost_events':None}
  def poll(self):
   if self.process is None or self.process.poll() is None or self.reported:return None
-  self.reported=True;process=self.process;rc=process.returncode
-  if process.stdin is not None:process.stdin.close()
+  process=self.process;rc=process.returncode
+  _release_lease(process,clear=False)
+  self.reported=True
   self.process=None
-  try:self.data=_read(self.path)
-  except (OSError,ValueError):return {'source':'EVENTPIPE_DOTNET_TRACE','status':'JOURNAL_UNAVAILABLE','decoded':False,'lost_events':None}
+  try:
+   current=_read(self.path)
+   if type(current) is not dict or current.get('uid')!=self.uid:raise ValueError('INVALID_EVENTPIPE_JOURNAL')
+   self.data=current
+  except (OSError,ValueError):
+   self._cleanup_confirmed=False
+   self._terminal_result={'source':'EVENTPIPE_DOTNET_TRACE','status':'JOURNAL_UNAVAILABLE','journal':self.path.name,'decoded':False,'lost_events':None}
+   return self._terminal_result
   state=self.data.get('state','UNKNOWN')
-  if state not in ('COMPLETED','FAILED'):state='GUARDIAN_EXITED_UNCONFIRMED'
-  return {'source':'EVENTPIPE_DOTNET_TRACE','status':state,'journal':self.path.name,'exit_code':rc,'details':self.data,'decoded':False,'lost_events':None}
+  if state not in ('COMPLETED','FAILED','CLEANUP_REQUIRED') or state=='COMPLETED' and rc!=0:state='GUARDIAN_EXITED_UNCONFIRMED'
+  self._cleanup_confirmed=(state in ('COMPLETED','FAILED') and
+   terminal_cleanup_proven(self.data,journal=self.path.name))
+  self._terminal_result={'source':'EVENTPIPE_DOTNET_TRACE','status':state,'journal':self.path.name,'exit_code':rc,'details':self.data,'decoded':False,'lost_events':None}
+  return self._terminal_result
  def stop(self):
-  if self.process is None:return None
-  if self.process.stdin is not None:self.process.stdin.close();self.process.stdin=None
+  if self.process is None:return self._terminal_result
+  _release_lease(self.process)
   try:self.process.wait(timeout=8)
   except subprocess.TimeoutExpired:return {'source':'EVENTPIPE_DOTNET_TRACE','status':'GUARDIAN_CLEANUP_PENDING','journal':self.path.name,'decoded':False,'lost_events':None}
-  return self.poll()
+  return self.poll() or self._terminal_result
 if __name__=='__main__':raise SystemExit(run(sys.argv[1]))
 

@@ -5,6 +5,7 @@ from pathlib import Path
 from uuid import uuid4
 from .library_files import checked,read_json,atomic_json
 from .owned_unlink import file_identity,remove_entry
+from .trace_cleanup import terminal_cleanup_proven
 def inventory(root):
  root=checked(root);rows=[];stack=[root];deadline=time.monotonic()+10
  while stack:
@@ -50,13 +51,14 @@ def _review(catalog,row):
   if marker.get('lifecycle')!='FINALIZED':raise ValueError('LIBRARY_FINALIZATION_UNCONFIRMED')
   from .library_catalog import recording_metadata,TERMINAL
   if recording_metadata(payload)['state'] not in TERMINAL:raise ValueError('LIBRARY_FINALIZATION_UNCONFIRMED')
-  artifacts=payload/'artifacts'
-  if artifacts.exists():
-   for journal in artifacts.glob('*.trace.json'):
-    if read_json(journal,65536).get('state') not in ('COMPLETED','FAILED','RECOVERED_NAMED_CANCEL','RECOVERED_OWNED_TOOL_STOP'):raise ValueError('LIBRARY_TRACE_STILL_ACTIVE')
   manifest={'kind':'BLACKBOX_PURGE_MANIFEST','schema_version':1,'entry_id':row['entry_id'],'marker_uid':row['marker_uid'],
    'root_id':catalog._owner()['root_id'],'payload_identity':file_identity(payload),'entries':inventory(payload)}
   atomic_json(path,manifest,exclusive=True,max_bytes=8*1024**2)
+ artifacts=payload/'artifacts'
+ if artifacts.exists():
+  for count,journal in enumerate(artifacts.glob('*.trace.json')):
+   if count>=64:raise ValueError('LIBRARY_TRACE_JOURNAL_BUDGET')
+   if not terminal_cleanup_proven(read_json(journal,65536),journal=journal.name):raise ValueError('LIBRARY_TRACE_STILL_ACTIVE')
  if payload.exists():
   if file_identity(payload)!=manifest['payload_identity']:raise ValueError('PURGE_PAYLOAD_CHANGED')
   actual=inventory(payload);known={r['relative']:r for r in manifest['entries']}

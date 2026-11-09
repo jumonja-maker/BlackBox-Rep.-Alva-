@@ -21,7 +21,36 @@ internal static class Program
     static string Hash(string path)
     {
         using var input = File.OpenRead(path);
-        return Convert.ToHexString(SHA256.HashData(input)).ToLowerInvariant();
+        using var digest = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        byte[] buffer = new byte[1024 * 1024];
+        long bytes = 0;
+        int count;
+        while ((count = input.Read(buffer, 0, buffer.Length)) != 0)
+        {
+            bytes += count;
+            if (bytes > MaxInput) throw new InvalidDataException("INPUT_BUDGET_OR_TYPE");
+            digest.AppendData(buffer, 0, count);
+        }
+        return Convert.ToHexString(digest.GetHashAndReset()).ToLowerInvariant();
+    }
+    static void LocalPath(string path)
+    {
+        if (path.StartsWith("\\\\", StringComparison.Ordinal) || path.StartsWith("//", StringComparison.Ordinal))
+            throw new InvalidDataException("UNSAFE_LOCAL_PATH");
+        string relative = path[(Path.GetPathRoot(path)?.Length ?? 0)..];
+        foreach (string part in relative.Split(new[] { Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar }))
+            if (part.Contains(':') || part.EndsWith(' ') || part.EndsWith('.'))
+                throw new InvalidDataException("UNSAFE_LOCAL_PATH");
+        for (string? part = path; !string.IsNullOrEmpty(part); part = Path.GetDirectoryName(part))
+        {
+            try
+            {
+                if ((File.GetAttributes(part) & FileAttributes.ReparsePoint) != 0)
+                    throw new InvalidDataException("UNSAFE_LOCAL_PATH");
+            }
+            catch (FileNotFoundException) { }
+            catch (DirectoryNotFoundException) { }
+        }
     }
     static string Bounded(string? value, ref bool clipped, int limit = 2048)
     {
@@ -267,10 +296,12 @@ internal static class Program
             return 2;
         }
         bool inlineModules = args.Length == 3;
-        string input = Path.GetFullPath(args[0]), output = Path.GetFullPath(args[1]);
         string? scratch = null;
         try
         {
+            LocalPath(args[0]); LocalPath(args[1]);
+            string input = Path.GetFullPath(args[0]), output = Path.GetFullPath(args[1]);
+            LocalPath(input); LocalPath(output);
             string ext = Path.GetExtension(input).ToLowerInvariant();
             if (ext != ".etl" && ext != ".nettrace") throw new InvalidDataException("UNSUPPORTED_FORMAT");
             if (ext == ".etl" && !OperatingSystem.IsWindows()) throw new PlatformNotSupportedException("ETL_REQUIRES_WINDOWS");
@@ -289,7 +320,7 @@ internal static class Program
             using var log = new TraceLog(etlx);
             using var stream = new FileStream(output, FileMode.CreateNew, FileAccess.Write, FileShare.Read);
             using var writer = new StreamWriter(stream, new UTF8Encoding(false));
-            writer.WriteLine(JsonSerializer.Serialize(new { type = "header", protocol = Protocol,
+            string header = JsonSerializer.Serialize(new { type = "header", protocol = Protocol,
                 engine = "Microsoft.Diagnostics.Tracing.TraceEvent", package_version = "4.0.0", host_version = "0.2.0",
                 source_format = ext, input_sha256 = before, clock = "TRACE_RELATIVE_MILLISECONDS",
                 calendar_clock = "TRACEEVENT_QPC_TO_UTC_RECONSTRUCTION_NOT_ATTESTED",
@@ -301,28 +332,43 @@ internal static class Program
                 trace_counter_kind = "TRACEEVENT_SOURCE_COUNTER",
                 trace_counter_frequency_provenance = "TRACEEVENT_4_0_PERSISTED_SOURCE_METADATA",
                 thread_schedule_contract = "blackbox.thread-schedule/1", io_contract = "blackbox.trace-io/1",
-                capture_loss = (int?)null, cpu_sample_contract = "blackbox.cpu-sample/1", symbol_policy = "NO_SYMBOL_SERVER_OR_SOURCE_DOWNLOAD" }, Json));
+                capture_loss = (int?)null, cpu_sample_contract = "blackbox.cpu-sample/1", symbol_policy = "NO_SYMBOL_SERVER_OR_SOURCE_DOWNLOAD" }, Json);
+            writer.WriteLine(header);
+            long writtenBytes = Encoding.UTF8.GetByteCount(header) + Encoding.UTF8.GetByteCount(writer.NewLine);
+            const int FooterReserve = 4096;
             long count = 0; bool limited = false;
             string? truncationReason = null;
             foreach (var e in log.Events)
             {
-                if (count >= MaxEvents || stream.Position > MaxOutput)
+                if (count >= MaxEvents)
                 {
                     limited = true;
-                    truncationReason = count >= MaxEvents ? "MAX_EVENTS" : "MAX_OUTPUT";
+                    truncationReason = "MAX_EVENTS";
                     break;
                 }
-                var row = Row(e, ++count, log);
+                var row = Row(e, count + 1, log);
                 string line = EventLine(row, inlineModules);
+                int lineBytes = Encoding.UTF8.GetByteCount(line) + Encoding.UTF8.GetByteCount(writer.NewLine);
+                if (writtenBytes + lineBytes + FooterReserve > MaxOutput)
+                {
+                    limited = true;
+                    truncationReason = "MAX_OUTPUT";
+                    break;
+                }
                 writer.WriteLine(line);
+                writtenBytes += lineBytes;
+                count++;
                 if (count % 256 == 0) writer.Flush();
             }
             if (Hash(input) != before) throw new IOException("INPUT_CHANGED");
-            writer.WriteLine(JsonSerializer.Serialize(new { type = "footer", protocol = Protocol,
+            string footer = JsonSerializer.Serialize(new { type = "footer", protocol = Protocol,
                 rows = count, status = limited ? "TRUNCATED" : "DECODED",
                 truncation_reason = truncationReason,
                 decoder_reported_lost_events = log.EventsLost, capture_loss = (int?)null,
-                scope = "TRACELOG_PROJECTION_NOT_PROOF_OF_COMPLETE_CAPTURE" }, Json));
+                scope = "TRACELOG_PROJECTION_NOT_PROOF_OF_COMPLETE_CAPTURE" }, Json);
+            if (writtenBytes + Encoding.UTF8.GetByteCount(footer) + Encoding.UTF8.GetByteCount(writer.NewLine) > MaxOutput)
+                throw new InvalidDataException("OUTPUT_FOOTER_BUDGET");
+            writer.WriteLine(footer);
             return 0;
         }
         catch (Exception ex)

@@ -334,9 +334,14 @@ class OverviewInspectorPanel(QWidget):
             self._last_request = None
             self.elevate_button.hide()
 
-    def request_investigation_elevation(self):
-        """Keep the exact-target scope explanation and real UAC in its original owner."""
-        self._elevate()
+    def request_investigation_elevation(self, *, expected_tag=None):
+        """Keep consent in its owner and never substitute another pending step."""
+        if expected_tag is not None:
+            request = self._last_request
+            if (not request or request.get("tag") != expected_tag
+                    or not self._execution_allowed(request.get("execution_guard"))):
+                return False
+        return self._elevate()
 
     def _build_stack_frames(self, layout):
         self.stack_source_label = _plain_label()
@@ -787,7 +792,8 @@ class OverviewInspectorPanel(QWidget):
             owned = ({"native_owner_run_id": request["native_owner_run_id"],
                       "expected_context": deepcopy(request.get("expected_context")),
                       "expected_target": deepcopy(request.get("expected_target")), "tag": request.get("tag", "")}
-                     if request.get("native_owner_run_id") is not None else {})
+                     if request.get("native_owner_run_id") is not None else
+                     {"tag": request.get("tag", "")} if request.get("execution_guard") is not None else {})
             if not dispatch(operations, **owned):
                 self._pending_retry = None
 

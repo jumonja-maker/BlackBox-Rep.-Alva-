@@ -6,7 +6,10 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import time
 from uuid import uuid4
+
+MAX_CDB_LOG_BYTES = 64 * 1024**2
 
 
 def symbol_identity(path):
@@ -61,10 +64,28 @@ def inspect_dump(dump,output_folder,symbol_folder=None):
     with output.open("xb") as log:
         process=subprocess.Popen(args,stdout=log,stderr=log,env=env,
             creationflags=getattr(subprocess,"CREATE_NO_WINDOW",0))
-        try:process.wait(timeout=60)
-        except subprocess.TimeoutExpired:
-            process.kill();process.wait(timeout=5);raise OSError("STACK_ANALYSIS_TIMEOUT") from None
+        deadline=time.monotonic()+60
+        try:
+            while True:
+                if os.fstat(log.fileno()).st_size>MAX_CDB_LOG_BYTES:
+                    raise OSError("STACK_ANALYSIS_OUTPUT_BUDGET_EXCEEDED")
+                remaining=deadline-time.monotonic()
+                if remaining<=0:raise OSError("STACK_ANALYSIS_TIMEOUT")
+                try:
+                    process.wait(timeout=min(.1,remaining))
+                    break
+                except subprocess.TimeoutExpired:
+                    pass
+            if os.fstat(log.fileno()).st_size>MAX_CDB_LOG_BYTES:
+                raise OSError("STACK_ANALYSIS_OUTPUT_BUDGET_EXCEEDED")
+        except BaseException:
+            # Only this actual debugger child is stopped. Its outer optional
+            # worker retains its existing Job Object/process-group boundary.
+            if process.poll() is None:
+                process.kill();process.wait(timeout=5)
+            raise
     with output.open("rb") as stream:preview=stream.read(8192).decode("utf-8",errors="replace")
     return {"source":"CDB_OFFLINE_DUMP","path":output.name,"exit_code":process.returncode,
         "status":"DEBUGGER_OUTPUT" if process.returncode==0 else "DEBUGGER_FAILED",
-        "preview":preview,"symbols_fully_resolved":None,"root_cause_proven":False}
+        "preview":preview,"symbols_fully_resolved":None,"root_cause_proven":False,
+        "output_budget_bytes":MAX_CDB_LOG_BYTES,"output_budget_enforcement":"POLLED_SOFT_LIMIT_NOT_FILESYSTEM_QUOTA"}

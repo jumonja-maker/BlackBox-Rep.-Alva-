@@ -49,7 +49,7 @@ using System.Runtime.InteropServices;
 
 public sealed class BlackBoxEvents {
   [DllImport("kernel32.dll")] static extern uint GetCurrentThreadId();
-  readonly string path, token; readonly object sync = new object(); long seq;
+  readonly string path, token; readonly object sync = new object(); long seq, dropped;
   public BlackBoxEvents(string configPath) {
     using var config = JsonDocument.Parse(File.ReadAllText(configPath));
     path = config.RootElement.GetProperty("path").GetString();
@@ -63,12 +63,12 @@ public sealed class BlackBoxEvents {
         source_clock = "DOTNET_STOPWATCH", source_ns =
           (long)((decimal)Stopwatch.GetTimestamp()*1000000000m/Stopwatch.Frequency),
         operation_id = operationId, parent_id = (string)null,
-        attributes = attributes ?? new {}, client_dropped = 0 };
+        attributes = attributes ?? new {}, client_dropped = dropped };
       var bytes = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(value)+"\n");
-      if (bytes.Length>8192 || (File.Exists(path) && new FileInfo(path).Length+bytes.Length>67108864)) return false;
+      if (bytes.Length>8192 || (File.Exists(path) && new FileInfo(path).Length+bytes.Length>67108864)) { dropped++; return false; }
       using var output = new FileStream(path, FileMode.Append, FileAccess.Write, FileShare.ReadWrite);
       output.Write(bytes,0,bytes.Length); output.Flush(); return true;
-    } catch (Exception e) when (e is IOException || e is UnauthorizedAccessException || e is ArgumentException) { return false; } }
+    } catch (Exception e) when (e is IOException || e is UnauthorizedAccessException || e is ArgumentException || e is JsonException || e is NotSupportedException || e is InvalidOperationException) { dropped++; return false; } }
   }
 }
 '''
@@ -80,7 +80,7 @@ public sealed class BlackBoxEvents {
 #include <mutex>
 // Windows C++17 client. Path/token come from blackbox-config.json.
 class BlackBoxEvents {
-  std::wstring path; std::string token; unsigned long long seq=0; std::mutex mutex;
+  std::wstring path; std::string token; unsigned long long seq=0,dropped=0; std::mutex mutex;
   static std::string quote(const std::string& s) {
     std::string out="\""; const char* hex="0123456789abcdef";
     for (unsigned char c:s) { if (c=='"'||c=='\\') { out+='\\';out+=c; }
@@ -95,13 +95,14 @@ public:
       ",\"pid\":"+std::to_string(GetCurrentProcessId())+",\"tid\":"+std::to_string(GetCurrentThreadId())+
       ",\"seq\":"+std::to_string(++seq)+",\"kind\":"+quote(kind)+
       ",\"source_clock\":\"WIN32_GETTICKCOUNT64\",\"source_ns\":"+std::to_string(GetTickCount64()*1000000ULL)+
-      ",\"operation_id\":"+quote(operation)+",\"attributes\":{},\"client_dropped\":0}\n";
-    if(line.size()>8192)return false;
+      ",\"operation_id\":"+quote(operation)+",\"attributes\":{},\"client_dropped\":"+std::to_string(dropped)+"}\n";
+    if(line.size()>8192){++dropped;return false;}
     HANDLE f=CreateFileW(path.c_str(),FILE_APPEND_DATA,FILE_SHARE_READ|FILE_SHARE_WRITE,nullptr,OPEN_ALWAYS,FILE_ATTRIBUTE_NORMAL,nullptr);
-    if(f==INVALID_HANDLE_VALUE)return false;
+    if(f==INVALID_HANDLE_VALUE){++dropped;return false;}
     LARGE_INTEGER size; bool ok=GetFileSizeEx(f,&size) && size.QuadPart+line.size()<=67108864;
     DWORD written=0; if(ok)ok=WriteFile(f,line.data(),(DWORD)line.size(),&written,nullptr) && written==line.size();
-    CloseHandle(f);return ok;
+    if(!CloseHandle(f))ok=false;
+    if(!ok)++dropped;return ok;
   }
 };
 '''
@@ -153,6 +154,7 @@ module.exports={BlackBoxEvents};
         "6. Add operation.begin / operation.end using the same operation_id.\n"
         "7. Native names: keep matching PDB files with the EXACT binaries; use a local debugger to analyse a captured dump.\n"
         "8. Event clocks retain their source identity; receipt time is not execution time.\n"
+        "9. client_dropped is cumulative known failed client Emit calls, not independently measured OS loss.\n"
         "Скопируйте клиент для своего языка и конфигурацию в проект. Отправьте blackbox.ready из выбранного процесса.\n"
         "Готовность подтверждается только после получения события. События приложения не являются доверенным подтверждением ОС.\n"
         "These files do not execute commands or modify your project automatically.\n")

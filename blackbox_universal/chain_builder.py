@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from decimal import Decimal
 import json
+import math
 from pathlib import Path
 from uuid import uuid4
 
@@ -106,6 +108,13 @@ PARAMETER_LABELS = {
 }
 
 
+def _number_decimals(value):
+    """Keep imported finite fractions when Qt rebuilds a typed numeric form."""
+    if type(value) is float and math.isfinite(value):
+        return max(2, min(15, -Decimal(str(value)).as_tuple().exponent))
+    return 2
+
+
 def _object_schema(tool, key):
     """Typed presentation for existing bounded service parameter objects."""
     integer = lambda **values: {"type": "integer", **values}
@@ -200,6 +209,7 @@ class ObjectParameterEditor(QWidget):
                     widget.setValue(current)
             elif kind == "number":
                 widget = QDoubleSpinBox()
+                widget.setDecimals(_number_decimals(current))
                 widget.setRange(spec.get("min", 0), spec.get("max", 21600))
                 if current is not None:
                     widget.setValue(current)
@@ -421,6 +431,8 @@ class ConditionParameterEditor(QWidget):
                 value = int(row["raw"].text(), 0)
             elif kind == "number":
                 value = float(row["raw"].text())
+                if not math.isfinite(value):
+                    raise ValueError("FINITE_CONDITION_VALUE_REQUIRED")
             else:
                 value = None if kind == "null" else row["raw"].text()
             if path in ("has_evidence", "sufficient"):
@@ -554,6 +566,9 @@ class WorkflowCanvas(QGraphicsView):
         return STATE_NAMES.get(state, (state, state))[1 if self.language == "RU" else 0]
 
     def set_graph(self, document, catalog, controls):
+        self.pending_port = None
+        self._drag_start = {}
+        self._stop_pan(release_space=True)
         graph_identity = (document.get("workflow_id"), tuple(node["node_id"] for node in document["nodes"]))
         if graph_identity != self._graph_identity:
             self._navigation_rect = None
@@ -627,10 +642,13 @@ class WorkflowCanvas(QGraphicsView):
     def selected_node_ids(self):
         return [item.node_id for item in self.scene().selectedItems() if isinstance(item, WorkflowNodeItem)]
 
+    def selected_edge_ids(self):
+        return [item.data(0)[1] for item in self.scene().selectedItems()
+                if isinstance(item.data(0),(tuple,list)) and item.data(0)[0]=="edge"]
+
     def _selected(self):
         selected = self.selected_node_ids()
-        if selected:
-            self.node_selected.emit(selected[0])
+        self.node_selected.emit(selected[0] if selected else "")
 
     def port_at(self, position):
         item = self.itemAt(position)
@@ -709,7 +727,7 @@ class WorkflowCanvas(QGraphicsView):
         if self.pending_port is not None:
             target, first = self.port_at(event.pos()), self.pending_port
             self.pending_port = None
-            if target and target != first:
+            if self.editable and target and target != first:
                 if first[1] == "inputs":
                     first, target = target, first
                 if first[1] == "outputs" and target[1] == "inputs":
@@ -719,7 +737,8 @@ class WorkflowCanvas(QGraphicsView):
             return
         super().mouseReleaseEvent(event)
         moved = {key: [item.x(), item.y()] for key, item in self.items_by_id.items()
-                 if self._drag_start.get(key) != item.pos()}
+                 if key in self._drag_start and self._drag_start[key] != item.pos()}
+        self._drag_start = {}
         if moved and self.editable:
             self.positions_changed.emit(moved)
 
@@ -761,9 +780,7 @@ class WorkflowCanvas(QGraphicsView):
             self.pending_port = None
             self.scene().clearSelection()
         elif key == Qt.Key.Key_Delete and self.editable:
-            edges = [item.data(0)[1] for item in self.scene().selectedItems()
-                     if isinstance(item.data(0), (tuple, list)) and item.data(0)[0] == "edge"]
-            self.delete_requested.emit(self.selected_node_ids(), edges)
+            self.delete_requested.emit(self.selected_node_ids(), self.selected_edge_ids())
         elif key in (Qt.Key.Key_Left, Qt.Key.Key_Right, Qt.Key.Key_Up, Qt.Key.Key_Down) and self.editable:
             delta = {Qt.Key.Key_Left: (-10, 0), Qt.Key.Key_Right: (10, 0),
                      Qt.Key.Key_Up: (0, -10), Qt.Key.Key_Down: (0, 10)}[key]
@@ -807,7 +824,18 @@ class WorkflowCanvas(QGraphicsView):
 
     def dropEvent(self, event):
         if self.editable and event.mimeData().hasFormat(MIME):
-            tool = bytes(event.mimeData().data(MIME)).decode("utf-8")[:128]
+            raw = event.mimeData().data(MIME)
+            if len(raw) > 512:
+                event.ignore()
+                return
+            try:
+                tool = bytes(raw).decode("utf-8")
+            except UnicodeError:
+                event.ignore()
+                return
+            if not tool or len(tool) > 128:
+                event.ignore()
+                return
             point = self.mapToScene(event.position().toPoint())
             self.tool_dropped.emit(tool, [point.x(), point.y()])
             event.acceptProposedAction()
@@ -909,6 +937,7 @@ class ChainBuilderPanel(QWidget):
         self._tooltips = []
         self._folder, self._loading, self._run_active = None, False, False
         self._human_pending = False
+        self._snapshot_definition = None
         self.document = {"schema": "blackbox.workflow-definition/1", "schema_version": 1,
             "workflow_id": uuid4().hex, "title": "My diagnostic chain", "revision": 1,
             "description": "", "mode": "USER_CONTROLLED", "nodes": [], "edges": [],
@@ -1083,7 +1112,8 @@ class ChainBuilderPanel(QWidget):
         self.inspector_tabs.addTab(self.details, "Details")
         inspector_layout.addWidget(self.inspector_tabs)
         self.apply_button = self._button("chainApplyParameters", "Apply node parameters", "Применить параметры узла", self.apply_parameters)
-        self.delete_button = self._button("chainDeleteNode", "Delete selection", "Удалить выбранное", lambda: self.delete_nodes(self.canvas.selected_node_ids(), []))
+        self.delete_button = self._button("chainDeleteNode", "Delete selection", "Удалить выбранное",
+            lambda: self.delete_nodes(self.canvas.selected_node_ids(), self.canvas.selected_edge_ids()))
         inspector_layout.addWidget(self.apply_button)
         inspector_layout.addWidget(self.delete_button)
         split.addWidget(inspector)
@@ -1183,10 +1213,21 @@ class ChainBuilderPanel(QWidget):
     def _mark_changed(self):
         self.document["revision"] += 1
         self.validation = {}
+        self.effective.clear()
+        for item in self.canvas.items_by_id.values():
+            item.state = ""
+            item.update()
+        node = next((n for n in self.document["nodes"] if n["node_id"] == self._selected), None)
+        if node is not None:
+            self._show_node_details(node)
         self.status.setText(self.tr2("Changed. Validate before starting.", "Изменено. Проверьте перед запуском."))
 
+    def _snapshot_matches_definition(self):
+        return self._snapshot_definition == self.document
+
     def _title_changed(self):
-        if not self._loading and self.title.text().strip():
+        if (not self._loading and self.title.text().strip()
+                and self.title.text().strip() != self.document["title"]):
             self.document["title"] = self.title.text().strip()
             self._mark_changed()
 
@@ -1194,6 +1235,7 @@ class ChainBuilderPanel(QWidget):
         if self._loading:
             return
         profile = self.document["profile"]
+        previous = deepcopy(profile)
         selected = self.profile.currentData()
         if self.profile.currentText() != self.profile.itemText(self.profile.currentIndex()):
             selected = self.profile.currentText().strip()
@@ -1203,17 +1245,19 @@ class ChainBuilderPanel(QWidget):
             profile["inherits"] = parent
         else:
             profile.pop("inherits", None)
-        self._mark_changed()
+        if profile != previous:self._mark_changed()
 
     def _budget_changed(self):
         if self._loading:
             return
+        previous = deepcopy(self.document["budget"])
         self.document["budget"].update(seconds=self.budget_seconds.value(), max_workers=self.parallel.value())
-        self._mark_changed()
+        if self.document["budget"] != previous:self._mark_changed()
 
     def _overrides_changed(self, *_):
         if self._loading:
             return
+        previous = deepcopy(self.document["profile"])
         overrides = self.document["profile"].setdefault("overrides", {})
         if self.override_tools.isChecked():
             overrides["allowed_tools"] = [self.allowed_tools.item(i).data(Qt.ItemDataRole.UserRole)
@@ -1224,7 +1268,8 @@ class ChainBuilderPanel(QWidget):
             overrides["max_seconds"] = self.profile_seconds.value()
         else:
             overrides.pop("max_seconds", None)
-        overrides["allow_effectful"] = self.allow_effectful.isChecked()
+        if self.allow_effectful.isChecked() or "allow_effectful" in overrides:
+            overrides["allow_effectful"] = self.allow_effectful.isChecked()
         source_ids = [value.strip() for value in self.source_ids.text().split(",") if value.strip()]
         if source_ids:
             overrides["source_ids"] = source_ids
@@ -1235,11 +1280,12 @@ class ChainBuilderPanel(QWidget):
                 for i in range(self.allowed_nodes.count()) if self.allowed_nodes.item(i).checkState() == Qt.CheckState.Checked]
         else:
             overrides.pop("allowed_node_ids", None)
-        self._mark_changed()
+        if not overrides and "overrides" not in previous:self.document["profile"].pop("overrides",None)
+        if self.document["profile"] != previous:self._mark_changed()
 
     def _render(self):
         self.canvas.set_graph(self.document, self.catalog, self.controls)
-        records = self.snapshot.get("nodes", [])
+        records = self.snapshot.get("nodes", []) if self._snapshot_matches_definition() else []
         if isinstance(records, dict):
             records = [dict(value, node_id=key) for key, value in records.items()]
         for record in records:
@@ -1313,17 +1359,21 @@ class ChainBuilderPanel(QWidget):
         self.select_node(node["node_id"])
 
     def _positions_changed(self, positions):
+        changed = False
         for node in self.document["nodes"]:
-            if node["node_id"] in positions:
+            if node["node_id"] in positions and node["position"] != positions[node["node_id"]]:
                 node["position"] = positions[node["node_id"]]
-        self._mark_changed()
+                changed = True
+        if changed:self._mark_changed()
 
     def delete_nodes(self, node_ids, edge_ids):
         if self.bridge.busy:
             return
-        self.document["nodes"] = [n for n in self.document["nodes"] if n["node_id"] not in node_ids]
-        self.document["edges"] = [e for e in self.document["edges"] if e["edge_id"] not in edge_ids
+        nodes = [n for n in self.document["nodes"] if n["node_id"] not in node_ids]
+        edges = [e for e in self.document["edges"] if e["edge_id"] not in edge_ids
                                   and e["source_node"] not in node_ids and e["target_node"] not in node_ids]
+        if nodes == self.document["nodes"] and edges == self.document["edges"]:return
+        self.document["nodes"],self.document["edges"] = nodes,edges
         self._selected = None
         self._mark_changed()
         self._render()
@@ -1352,11 +1402,15 @@ class ChainBuilderPanel(QWidget):
         self._fields = {}
         node = next((n for n in self.document["nodes"] if n["node_id"] == node_id), None)
         if node is None:
+            self._selected = None
+            self.details.clear()
+            self.apply_button.setEnabled(False)
             return
         title = QLineEdit(node.get("title", ""))
         title.setMaxLength(256)
         self._form_row("_title", self.tr2("Node name", "Название узла"), title)
         budget = QDoubleSpinBox()
+        budget.setDecimals(_number_decimals(node.get("budget_seconds", 60)))
         budget.setRange(.01, 21600)
         budget.setValue(node.get("budget_seconds", 60))
         self._form_row("_budget", self.tr2("Budget, s", "Бюджет, с"), budget)
@@ -1405,6 +1459,7 @@ class ChainBuilderPanel(QWidget):
                     widget.setValue(int(value))
             elif kind in ("float", "number"):
                 widget = QDoubleSpinBox()
+                widget.setDecimals(_number_decimals(value))
                 widget.setRange(float(spec.get("min", 0)), float(spec.get("max", 21600)))
                 if value is not None:
                     widget.setValue(float(value))
@@ -1437,6 +1492,7 @@ class ChainBuilderPanel(QWidget):
             count.setRange(1, 4096)
             count.setValue(node["repeat_count"])
             interval = QDoubleSpinBox()
+            interval.setDecimals(_number_decimals(node.get("repeat_interval_seconds", 0)))
             interval.setRange(0, 3600)
             interval.setValue(node.get("repeat_interval_seconds", 0))
             self._form_row("_repeat", self.tr2("Maximum repetitions", "Максимум повторов"), count)
@@ -1467,6 +1523,7 @@ class ChainBuilderPanel(QWidget):
         node = next((n for n in self.document["nodes"] if n["node_id"] == self._selected), None)
         if node is None:
             return
+        previous = deepcopy(node)
         parameters = {}
         for key, widget in self._fields.items():
             if key.startswith("_"):
@@ -1504,6 +1561,7 @@ class ChainBuilderPanel(QWidget):
                     allow_partial_inputs=self._fields["_allow_partial"].isChecked(), parameters=parameters)
         if "_repeat" in self._fields:
             node.update(repeat_count=self._fields["_repeat"].value(), repeat_interval_seconds=self._fields["_interval"].value())
+        if node == previous:return
         self._mark_changed()
         self._render()
         self.select_node(node["node_id"])
@@ -1558,11 +1616,12 @@ class ChainBuilderPanel(QWidget):
             item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, not busy)
         for widget in (self.open_button, self.save_button, self.validate_button, self.start_button, self.profile,
                        self.profile_parent, self.profile_open, self.profile_save, self.add_button, self.add_repeat,
-                       self.apply_button, self.delete_button, self.connect_button, self.title, self.parameter_page,
+                       self.delete_button, self.connect_button, self.title, self.parameter_page,
                        self.override_tools, self.allowed_tools, self.override_seconds, self.profile_seconds,
                        self.budget_seconds, self.parallel, self.allow_effectful, self.source_ids,
                        self.override_nodes, self.allowed_nodes):
             widget.setEnabled(not busy)
+        self.apply_button.setEnabled(not busy and self._selected is not None and bool(self._fields))
         self.pause_button.setEnabled(self._run_active)
         self.cancel_button.setEnabled(self._run_active or self.bridge._paused_run is not None)
         self.resume_button.setEnabled(self._human_pending or not busy and self.snapshot.get("state") == "WAITING_FOR_HUMAN")
@@ -1581,14 +1640,19 @@ class ChainBuilderPanel(QWidget):
             self.status.setText(self.canvas.state_name(packet.get("state", "WAITING_FOR_HUMAN")) + " · " + str(packet.get("reason", packet.get("operation", ""))))
 
     def _snapshot(self, snapshot):
+        if snapshot.get("run_id") != self.snapshot.get("run_id"):
+            self._snapshot_definition = deepcopy(self.document)
         self.snapshot = snapshot
         self._folder = snapshot.get("folder") or snapshot.get("output_folder") or self._folder
         state = snapshot.get("state", "UNKNOWN")
+        if state in ("COMPLETED", "PARTIAL", "FAILED", "CANCELLED", "RECOVERY_UNCONFIRMED"):
+            self._human_pending = False
+            self.grant_button.setEnabled(False)
         self.status.setText(self.canvas.state_name(state) + " · " + str(snapshot.get("run_id", "")))
         rows = snapshot.get("nodes", [])
         if isinstance(rows, dict):
             rows = [dict(value, node_id=key) for key, value in rows.items()]
-        for row in rows:
+        for row in (rows if self._snapshot_matches_definition() else []):
             item = self.canvas.items_by_id.get(row.get("node_id"))
             if item is not None:
                 item.state = row.get("state", row.get("status", "UNKNOWN"))
@@ -1610,7 +1674,11 @@ class ChainBuilderPanel(QWidget):
                  self.tr2("Exclusive resources", "Эксклюзивные ресурсы") + ": " + ", ".join(spec.get("resources", []))]
         if not spec.get("available", True):
             lines.append(self.tr2("Unavailable", "Недоступно") + ": " + str(spec.get("unavailable_reason")))
-        rows = self.snapshot.get("nodes", [])
+        matches = self._snapshot_matches_definition()
+        if self.snapshot and not matches:
+            lines.append(self.tr2("Saved results belong to an earlier definition; reopen that run to inspect them.",
+                                  "Сохранённые результаты относятся к прежней схеме; откройте тот запуск для просмотра."))
+        rows = self.snapshot.get("nodes", []) if matches else []
         if isinstance(rows, dict):
             rows = [dict(value, node_id=key) for key, value in rows.items()]
         record = next((r for r in rows if r.get("node_id") == node["node_id"]), None)
@@ -1632,15 +1700,24 @@ class ChainBuilderPanel(QWidget):
             self._populate_palette()
         elif operation in ("open", "open_run", "connect", "open_profile"):
             self.document = result["definition"]
+            self.validation = {}
+            self.effective.clear()
+            if operation == "open":
+                self.snapshot, self._folder, self._snapshot_definition = {}, None, None
+                self._human_pending = False
+                self.grant_button.setEnabled(False)
+            elif operation == "open_run":
+                self._snapshot_definition = deepcopy(self.document)
             self._load_controls()
             self._render()
+            if operation in ("open", "open_run"):
+                self.select_node(self._selected or "")
             if operation == "connect":
                 self._mark_changed()
             if operation == "open_run":
                 self._folder = result["folder"]
                 self._snapshot(result["snapshot"])
             elif operation == "open":
-                self.snapshot, self._folder = {}, None
                 self.status.setText(self.tr2("Opened. No tools were started.", "Открыто. Инструменты не запускались."))
         if isinstance(result, dict) and "validation" in result:
             self.validation = result["validation"]
@@ -1658,11 +1735,13 @@ class ChainBuilderPanel(QWidget):
             self.profile.addItem(profile_id, profile_id)
         self.profile.setCurrentIndex(self.profile.findData(profile_id))
         self.profile_parent.setCurrentIndex(max(0, self.profile_parent.findData(profile.get("inherits", ""))))
+        self.budget_seconds.setDecimals(_number_decimals(budget.get("seconds", 1800)))
         self.budget_seconds.setValue(budget.get("seconds", 1800))
         self.parallel.setValue(budget.get("max_workers", 2))
         overrides = profile.get("overrides", {})
         self.override_tools.setChecked("allowed_tools" in overrides)
         self.override_seconds.setChecked("max_seconds" in overrides)
+        self.profile_seconds.setDecimals(_number_decimals(overrides.get("max_seconds", 1800)))
         self.profile_seconds.setValue(overrides.get("max_seconds", 1800))
         self.allow_effectful.setChecked(bool(overrides.get("allow_effectful", False)))
         self.source_ids.setText(", ".join(overrides.get("source_ids", [])))
@@ -1828,10 +1907,12 @@ class ChainHistoryPanel(QWidget):
         layout.addWidget(self.status)
         self.bridge.result_ready.connect(self._received)
         self.bridge.busy_changed.connect(self._busy)
+        self.table.itemSelectionChanged.connect(lambda: self._busy(self.bridge.busy))
         self.retranslate()
 
     def selected(self):
-        row = self.table.currentRow()
+        selected = self.table.selectionModel().selectedRows()
+        row = selected[0].row() if selected else -1
         return self.rows[row] if 0 <= row < len(self.rows) else None
 
     def open_selected(self):
@@ -1849,8 +1930,26 @@ class ChainHistoryPanel(QWidget):
             self.bridge.submit("export", folder=row["folder"], path=path, format=format)
 
     def _busy(self, busy):
-        for widget in (self.refresh, self.open, self.export_json, self.export_html):
-            widget.setEnabled(not busy)
+        self.refresh.setEnabled(not busy)
+        for widget in (self.open, self.export_json, self.export_html):
+            widget.setEnabled(not busy and self.selected() is not None)
+
+    def _render_history(self):
+        selected = self.selected()
+        selected_id = selected.get("run_id") if selected else None
+        self.table.blockSignals(True)
+        self.table.setRowCount(len(self.rows))
+        self.table.clearSelection()
+        self.table.setCurrentItem(None)
+        for index, row in enumerate(self.rows):
+            for column, value in enumerate((row["title"], row["run_id"], self.builder.canvas.state_name(row["state"]))):
+                self.table.setItem(index, column, QTableWidgetItem(str(value)))
+        if selected_id is not None:
+            index = next((i for i, row in enumerate(self.rows) if row.get("run_id") == selected_id), None)
+            if index is not None:
+                self.table.selectRow(index)
+        self.table.blockSignals(False)
+        self._busy(self.bridge.busy)
 
     def _received(self, operation, result, error):
         if operation not in ("history", "export"):
@@ -1859,11 +1958,15 @@ class ChainHistoryPanel(QWidget):
             self.status.setText(error)
             return
         if operation == "history":
+            selected = self.selected()
+            selected_id = selected.get("run_id") if selected else None
             self.rows = result
-            self.table.setRowCount(len(result))
-            for index, row in enumerate(result):
-                for column, value in enumerate((row["title"], row["run_id"], self.builder.canvas.state_name(row["state"]))):
-                    self.table.setItem(index, column, QTableWidgetItem(str(value)))
+            self.table.clearSelection()
+            self._render_history()
+            if selected_id is not None:
+                index = next((i for i, row in enumerate(self.rows) if row.get("run_id") == selected_id), None)
+                if index is not None:
+                    self.table.selectRow(index)
             self.status.setText(self.builder.tr2("Open history to inspect it; continuation is a separate action.",
                                                 "Открытие показывает историю; продолжение запускается отдельным действием."))
         else:
@@ -1878,3 +1981,4 @@ class ChainHistoryPanel(QWidget):
             widget.setText(tr(en, ru))
             widget.setAccessibleName(widget.text())
         self.table.setHorizontalHeaderLabels([tr("Chain", "Цепочка"), "Run ID", tr("State", "Состояние")])
+        self._render_history()

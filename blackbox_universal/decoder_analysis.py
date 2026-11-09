@@ -12,6 +12,10 @@ from blackbox_core.decoder_calltree import build_calltree
 from blackbox_core.decoder_native_symbols import resolve_event_stack
 
 
+def _qt_text(value):
+    return str(value).encode('utf-8', errors='backslashreplace').decode('utf-8')
+
+
 def _dump_stamp(path):
     info = Path(path).stat()
     return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
@@ -108,7 +112,7 @@ class DiagnosticReportDialog(QDialog):
             else:
                 text += (f'\nШирина интервала смещения QPC: {width / 1e6:,.6f} мс.' if ru else
                          f'\nQPC offset interval width: {width / 1e6:,.6f} ms.')
-        notice = QLabel(text + '\n' + str(report.get('status', 'UNKNOWN')))
+        notice = QLabel(text + '\n' + _qt_text(report.get('status', 'UNKNOWN')))
         notice.setObjectName('diagnosticEvidenceSummary')
         notice.setTextFormat(Qt.TextFormat.PlainText)
         notice.setWordWrap(True)
@@ -128,13 +132,13 @@ class DiagnosticReportDialog(QDialog):
                 for j, key in enumerate(('pid', 'tid', 'start_ms', 'end_ms', 'off_cpu_ms',
                                           'ready_delay_ms', 'wait_reason', 'quality')):
                     value = row.get(key)
-                    cell = QTableWidgetItem('—' if value is None else str(round(value, 6) if type(value) is float else value))
-                    cell.setToolTip('<pre>' + escape(str(row.get('explanation', ''))) + '</pre>')
+                    cell = QTableWidgetItem('—' if value is None else _qt_text(round(value, 6) if type(value) is float else value))
+                    cell.setToolTip('<pre>' + escape(_qt_text(row.get('explanation', ''))) + '</pre>')
                     table.setItem(i, j, cell)
             layout.addWidget(table, 2)
         evidence = QPlainTextEdit()
         evidence.setReadOnly(True)
-        evidence.setPlainText(json.dumps(report, ensure_ascii=False, indent=2))
+        evidence.setPlainText(json.dumps(report, ensure_ascii=True, indent=2))
         layout.addWidget(evidence, 1)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
         buttons.rejected.connect(self.close)
@@ -155,7 +159,7 @@ class CallTreeDialog(QDialog):
             'Отсутствующие и обрезанные стеки показаны явно. ' if ru else
             'Counts are recorded samples, NOT CPU% or time. Missing and clipped stacks remain explicit. '
         ) + json.dumps({"status": report.get("status"), "filters": report["filters"],
-                       "coverage": coverage}, ensure_ascii=False))
+                       "coverage": coverage}, ensure_ascii=True))
         notice.setWordWrap(True); layout.addWidget(notice)
         symbols = report.get("symbolization", {})
         if symbols.get("status") == "LOCAL_PAIR_REVIEWED":
@@ -170,12 +174,13 @@ class CallTreeDialog(QDialog):
         tree.setColumnWidth(0, 620)
         items = {}
         for node in report['nodes']:
-            item = QTreeWidgetItem([node['label'],str(node['inclusive_samples']),str(node['self_samples'])])
+            label = _qt_text(node['label'])
+            item = QTreeWidgetItem([label,str(node['inclusive_samples']),str(node['self_samples'])])
             # QTreeWidget text is plain text, never render imported symbol names as HTML.
             item.setData(0, Qt.ItemDataRole.UserRole, node['id'])
             if node.get('frame'):
                 item.setToolTip(0, "<pre>" + escape(json.dumps({"raw_frame": node['frame'],
-                    "derived_symbol": node.get('derived_symbol')}, ensure_ascii=False, indent=2)) + "</pre>")
+                    "derived_symbol": node.get('derived_symbol')}, ensure_ascii=True, indent=2)) + "</pre>")
             if node['parent_id'] is None:tree.addTopLevelItem(item)
             else:items[node['parent_id']].addChild(item)
             items[node['id']] = item

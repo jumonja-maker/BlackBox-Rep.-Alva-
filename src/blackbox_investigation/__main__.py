@@ -44,10 +44,16 @@ def _commit_export(targets: dict, contents: dict) -> None:
             # Atomic no-overwrite publication on filesystems supporting hardlinks.
             # If hardlinks are forbidden, do not downgrade to a partial direct copy.
             os.link(staged[kind], target)
-            created.append(target)
+            created.append((staged[kind], target))
     except BaseException:
-        for target in reversed(created):
-            target.unlink(missing_ok=True)
+        for source, target in reversed(created):
+            try:
+                # A competing publisher may have replaced our exclusive link.
+                # Roll back only the inode still owned by this staging file.
+                if os.path.samestat(source.stat(), target.lstat()):
+                    target.unlink()
+            except OSError:
+                pass  # Retain the primary publication failure.
         raise
     finally:
         for temporary in staged.values():

@@ -196,13 +196,22 @@ def _links(definition, records):
     return rows
 
 
+def _journal_head(records):
+    require(type(records) is list and bool(records), "WORKFLOW_REPORT_HISTORY_EMPTY")
+    return [records[-1]["sequence"], records[-1]["record_sha256"]]
+
+
 def _document(store, cancel, deadline):
     _check(cancel, deadline)
     journal = Path(store.folder) / "journal" / "deep-inspection.sqlite3"
     before = fingerprint_file(journal, cancel=cancel, deadline=deadline, max_bytes=128 * 1024**2)
     records = store.read_events()
     require(type(records) is list and len(records) <= MAX_EVENTS, "WORKFLOW_REPORT_EVENT_BUDGET")
-    snapshot = store.load_state()
+    # Hydrate exactly the verified SQL/WAL snapshot already captured above.
+    # A second load_state() read can otherwise describe a newer generation
+    # while the event list still belongs to the first one.
+    snapshot = store._state_from_events(records)
+    head = _journal_head(records)
     _check(cancel, deadline)
     after = fingerprint_file(journal, cancel=cancel, deadline=deadline, max_bytes=128 * 1024**2)
     require(before == after, "WORKFLOW_REPORT_RUN_CHANGED_DURING_READ")
@@ -214,7 +223,7 @@ def _document(store, cancel, deadline):
             "raw_memory_or_dump_bytes_included": False, "runtime_authority_included": False,
             "private_navigation_included": False, "known_paths_and_urls": "REDACTED",
             "arbitrary_free_text_secret_detection": False},
-        "verification": {"journal_sha256": before["sha256"],
+        "verification": {"journal_sha256": before["sha256"], "journal_head": head,
             "scope": "LOCAL_HASHCHAIN_AND_SIDECAR_INTEGRITY_NOT_AUTHENTICATED_PROVENANCE"}})
     require(document["run"].get("run_id") == store.run_id and
             document["run"].get("definition_sha256") == store.definition.fingerprint,
@@ -282,6 +291,10 @@ def export_workflow_run(store, destination, *, format="json", cancel=None):
         # generations of the same run, even when individual records are valid.
         require(fingerprint_file(Path(store.folder) / "journal" / "deep-inspection.sqlite3",
                     cancel=cancel, deadline=deadline, max_bytes=128 * 1024**2) == original_journal,
+                "WORKFLOW_REPORT_RUN_CHANGED_BEFORE_PUBLICATION")
+        # SQLite commits may exist only in WAL; the main database hash is not
+        # a sufficient generation check. Verify the actual hash-chain head.
+        require(_journal_head(store.read_events()) == document["verification"]["journal_head"],
                 "WORKFLOW_REPORT_RUN_CHANGED_BEFORE_PUBLICATION")
         transaction.publish()
     try:

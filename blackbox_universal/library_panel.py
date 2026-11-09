@@ -7,7 +7,7 @@ from __future__ import annotations
 from datetime import datetime
 import json
 from pathlib import Path
-from PySide6.QtCore import Qt,QTimer,Signal
+from PySide6.QtCore import Qt,QTimer,Signal,QItemSelectionModel
 from PySide6.QtWidgets import (QWidget,QVBoxLayout,QHBoxLayout,QGridLayout,QLabel,QLineEdit,
     QComboBox,QPushButton,QTableWidget,QTableWidgetItem,QHeaderView,QAbstractItemView,
     QPlainTextEdit,QFileDialog,QMessageBox,QSpinBox,QDialog,QDialogButtonBox,QInputDialog)
@@ -185,6 +185,8 @@ class LibraryPanel(QWidget):
             'FINALIZATION_UNCONFIRMED':'Завершение не подтверждено','TRASH':'Корзина','MOVING_TO_TRASH':'Перенос в корзину','RESTORING':'Восстановление'}
         return ru.get(value,value) if self.window.language=='RU' else value
     def render_rows(self,rows):
+        selected_ids={self.table.item(index.row(),0).data(Qt.ItemDataRole.UserRole)
+            for index in self.table.selectionModel().selectedRows() if self.table.item(index.row(),0) is not None}
         self.table.blockSignals(True);self.table.setRowCount(len(rows))
         for i,r in enumerate(rows):
             try:stamp=datetime.fromtimestamp(r['started_ns']/1e9).astimezone().strftime('%Y-%m-%d %H:%M:%S %z')
@@ -192,8 +194,16 @@ class LibraryPanel(QWidget):
             values=(stamp,r['target_name'],r['scenario'],r['scenario_version'],r['target_version'],
                 '—' if r['completed_runs'] is None else r['completed_runs'],self.state_text(r['state']))
             for j,value in enumerate(values):
-                item=QTableWidgetItem(str(value or '—'));item.setToolTip(str(value or '—')+(' · '+r['state'] if j==6 else ''));self.table.setItem(i,j,item)
-        self.table.clearSelection();self.table.blockSignals(False);self.selection_changed()
+                text=str(value if value is not None and value!='' else '—')
+                item=QTableWidgetItem(text);item.setToolTip(text+(' · '+r['state'] if j==6 else ''))
+                item.setData(Qt.ItemDataRole.UserRole,r['entry_id']);self.table.setItem(i,j,item)
+        self.table.clearSelection();self.table.setCurrentItem(None)
+        for i,row in enumerate(rows):
+            if row['entry_id'] in selected_ids:
+                self.table.selectionModel().select(self.table.model().index(i,0),
+                    QItemSelectionModel.SelectionFlag.Select|QItemSelectionModel.SelectionFlag.Rows)
+        if selected_ids and not self.table.selectionModel().selectedRows():self.details.clear()
+        self.table.blockSignals(False);self.selection_changed()
     def open_selected(self):
         rows=self.selected()
         if len(rows)==1 and self.open_button.isEnabled():self.send('library_open',entry_id=rows[0]['entry_id'])

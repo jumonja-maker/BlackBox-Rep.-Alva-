@@ -52,6 +52,10 @@ class ControlledIntervalReader(QObject):
         self.finished.emit()
 
 
+class CommandReplies(QObject):
+    command_result = Signal(str,str,object,str)
+
+
 class ControlledResearchQueue(ResearchBridge):
     """Real send/shutdown protocol against a process-free writable Qt facade."""
     def __init__(self, parent=None):
@@ -418,6 +422,29 @@ class ExpertNavigationTests(unittest.TestCase):
         self.assertEqual(window.probe.pid, 98765)
         self.assertFalse(window.probe.active)
 
+    def test_report_comparison_cache_accepts_only_its_exact_command_reply(self):
+        window = self.window
+        replies = CommandReplies(window)
+        replies.command_result.connect(window._research_command_result)
+        own = {"TEST_ONLY_MAIN_COMPARE": {"unknown":None,"zero":0}}
+        foreign = {"TEST_ONLY_RESEARCH_COMPARE": True}
+        with patch.object(window,"_isolated",True), \
+             patch.object(window.probe,"pending",False,create=True), \
+             patch.object(window.probe,"command_result",replies.command_result,create=True), \
+             patch.object(window.probe,"send",return_value="MAIN_REQUEST",create=True), \
+             patch("blackbox_universal.window.QFileDialog.getExistingDirectory",side_effect=[str(self.source_a),str(self.source_b)]):
+            window._compare_sessions()
+            replies.command_result.emit("RESEARCH_REQUEST","compare",foreign,"")
+            window._research_result("compare",foreign,"")
+            self.assertEqual(window._comparison_state,"loading")
+            self.assertIsNone(window._comparison_preview)
+            replies.command_result.emit("MAIN_REQUEST","compare",own,"")
+            self.assertEqual(window._comparison_preview,own)
+            self.assertEqual(window._comparison_sources,(str(self.source_a),str(self.source_b)))
+            replies.command_result.emit("RESEARCH_REQUEST","compare",foreign,"")
+            window._research_result("compare",foreign,"")
+            self.assertEqual(json.loads(window.report_preview.toPlainText()),own)
+
     def test_helper_exit_releases_loading_comparison_without_replacing_selected_live_snapshot(self):
         window = self.window
         window.probe.pid = 98765
@@ -506,6 +533,44 @@ class ExpertNavigationTests(unittest.TestCase):
                  patch("blackbox_universal.window.QMessageBox.warning") as warning:
                 handler()
                 warning.assert_called_once()
+
+    def test_async_start_and_stop_errors_restore_cached_state_without_claiming_success(self):
+        window = self.window
+        for operation, active, report, folder, research_state, expected in (
+                ("start", False, None, None, "NO_SESSION", "unavailable"),
+                ("start", False, {"saved":True}, self.source_a, "COMPLETED", "saved"),
+                ("stop", True, None, self.source_a, "RECORDING", "recording"),
+                ("stop", False, {"saved": True}, self.source_a, "FINALIZATION_UNCONFIRMED", "unavailable")):
+            with self.subTest(operation=operation, active=active, research_state=research_state), \
+                 patch.object(window.probe, "active", active), \
+                 patch.object(window.probe, "report_result", report), \
+                 patch.object(window.probe, "session_folder", folder), \
+                 patch.object(window.probe, "data", {"research_state": research_state}, create=True), \
+                 patch.object(window.probe, "start") as start, patch.object(window.probe, "stop") as stop, \
+                 patch.object(window, "_update_all"):
+                window._report_state = "recording" if operation == "start" else "saving"
+                window._research_result(operation, None, "TEST_ONLY_ASYNC_RECORDING_FAILURE")
+                self.assertEqual(window._report_state, expected)
+                self.assertEqual(window.probe.active, active)
+                self.assertIs(window.probe.report_result,report)
+                start.assert_not_called();stop.assert_not_called()
+                self.assertIn("TEST_ONLY_ASYNC_RECORDING_FAILURE", window.recent_messages.toPlainText())
+
+    def test_language_switch_does_not_restore_empty_labels_over_controller_errors(self):
+        window = self.window
+        window.capture_settings.receive("capture_policy",None,"TEST_ONLY_POLICY_FAILURE")
+        window.recovery_panel.busy = True
+        window.recovery_panel.receive("export_recovery_scan",None,"TEST_ONLY_RECOVERY_FAILURE")
+        window.marker_panel.receive("user_marker",None,"TEST_ONLY_MARKER_FAILURE")
+        window.chain_builder_panel._received("validate",None,"TEST_ONLY_CHAIN_FAILURE")
+        window.library_panel._busy.add("library_query")
+        window.library_panel.receive("library_query",None,"TEST_ONLY_LIBRARY_FAILURE")
+        for language in ("RU","EN"):
+            window._set_language(language)
+            for panel, marker in ((window.capture_settings,"POLICY"),(window.recovery_panel,"RECOVERY"),
+                                  (window.marker_panel,"MARKER"),(window.chain_builder_panel,"CHAIN"),
+                                  (window.library_panel,"LIBRARY")):
+                self.assertIn("TEST_ONLY_"+marker+"_FAILURE",panel.status.text())
 
     def test_queue_full_quit_submission_preserves_unknown_owner_and_can_retry(self):
         bridge = ControlledResearchQueue(self.window)

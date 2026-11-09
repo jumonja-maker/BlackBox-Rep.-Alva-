@@ -178,6 +178,8 @@ class _ChainTask(QThread):
                         self.engine = WorkflowEngine(definition, catalog=catalog, store=store, runtime=runtime)
                     else:
                         store = WorkflowRunStore.open(args["folder"])
+                        if operation == "resume" and definition.fingerprint != store.definition.fingerprint:
+                            raise ValueError("WORKFLOW_DEFINITION_CHANGED_REOPEN_SAVED_RUN")
                         self.engine = WorkflowEngine.restore(store, catalog=catalog, runtime=runtime)
                     if self.cancel_event.is_set() or operation == "cancel_saved_run":
                         self.engine.request_cancel()

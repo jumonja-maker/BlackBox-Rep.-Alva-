@@ -82,6 +82,11 @@ jobs:
           python -m pip install --no-build-isolation --no-deps -e .
       - name: Early owned native fixture compiler lifecycle preflight
         run: python tools/qa_decoder_noise_fixture.py --build-fixture --output decoder-compiler-preflight --source-sha "${{ github.event.pull_request.head.sha || github.sha }}"
+      - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
+        with:
+          dotnet-version: '10.0.x'
+      - name: Actual source-generated CSharp and Cpp client failed-Emit recovery
+        run: python tools/qa_sdk_clients.py --output sdk-source-clients --source-sha "${{ github.event.pull_request.head.sha || github.sha }}"
       - name: Real Qt offscreen startup smoke
         run: python app.py --smoke
       - name: Real Qt isolated research end-to-end
@@ -273,6 +278,8 @@ jobs:
         run: python tools/qa_deep_inspection.py --output deep-frozen-premerge-qa --helper dist/BLACK.BOX-Universal/diagnostic/BLACK.BOX-Diagnostic.exe
       - name: Verify real embedded research modules before startup
         run: python tools/verify_frozen_research.py "dist/BLACK.BOX-Universal/BLACK.BOX-Universal.exe"
+      - name: Actual frozen-generated CSharp and Cpp client failed-Emit recovery
+        run: python tools/qa_sdk_clients.py --exe dist/BLACK.BOX-Universal/BLACK.BOX-Universal.exe --output sdk-frozen-clients --source-sha "${{ github.event.pull_request.head.sha || github.sha }}"
       - name: Verify Explorer icon is the same as the taskbar icon for both EXEs
         shell: pwsh
         run: |

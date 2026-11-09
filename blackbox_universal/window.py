@@ -123,6 +123,11 @@ class UniversalWindow(QMainWindow):
 
     def __init__(self, *, isolated=False, output_root=None, allow_update_check=False):
         super().__init__()
+        # Embedders can construct the shell before choosing the application
+        # theme. Offscreen Windows still needs its installed Cyrillic fonts
+        # registered before Qt computes native-style control minimum widths.
+        from .theme import _load_windows_offscreen_fonts
+        _load_windows_offscreen_fonts(QApplication.instance())
         self.setWindowTitle("BLACK.BOX Universal | Retro Workstation")
         self.setMinimumSize(1020, 690)
         self.resize(1330, 850)
@@ -144,6 +149,7 @@ class UniversalWindow(QMainWindow):
         self._comparison_preview = None
         self._comparison_sources = None
         self._comparison_state = "idle"
+        self._comparison_request_id = None
         self._available_release = None
         self._maintenance_launching = False
         self._pending_update_stage = None
@@ -191,6 +197,8 @@ class UniversalWindow(QMainWindow):
             self.probe.updated.connect(self._research_updated)
             self.probe.terminated.connect(self._research_terminated)
             self.probe.result_ready.connect(self._research_result)
+            if hasattr(self.probe,"command_result"):
+                self.probe.command_result.connect(self._research_command_result)
         self._refresh_process_list()
         self._update_all()
         self._navigate("dashboard")
@@ -1184,9 +1192,14 @@ class UniversalWindow(QMainWindow):
         changing.add(self.thread_detail_status)
         changing.add(self.window_capture_status)
         changing.update((self.report_context, self.report_preview_source))
+        managed_labels = tuple(getattr(self, name, None) for name in (
+            "research_panel", "library_panel", "capture_settings", "recovery_panel",
+            "measurement_help", "marker_panel", "analysis_panel", "events_panel",
+            "deep_inspector_panel", "chain_builder_panel", "chain_history_panel", "decoder_panel"))
         from PySide6.QtWidgets import QLabel
         for label in self.findChildren(QLabel):
-            if label in changing or label.objectName() == "metricValue":
+            if (label in changing or label.objectName() == "metricValue"
+                    or any(panel is not None and panel.isAncestorOf(label) for panel in managed_labels)):
                 continue
             original = label.property("bb_english")
             if original is None:
@@ -2811,8 +2824,9 @@ class UniversalWindow(QMainWindow):
         self._comparison_preview = None
         if self._isolated:
             try:
-                self.probe.send("compare", before=first, after=second)
+                self._comparison_request_id = self.probe.send("compare", before=first, after=second)
             except (OSError, RuntimeError, ValueError):
+                self._comparison_request_id = None
                 self._comparison_state = "failed"
             self._show_expert_section("technical")
             self._refresh_expert_context()
@@ -3145,6 +3159,7 @@ class UniversalWindow(QMainWindow):
 
     def _research_terminated(self) -> None:
         if self._comparison_state == "loading":
+            self._comparison_request_id = None
             self._comparison_state = "failed"
             self._comparison_preview = None
             self._update_report_preview()
@@ -3153,7 +3168,12 @@ class UniversalWindow(QMainWindow):
             self._pending_close = False
             QTimer.singleShot(0, self.close)
 
-    def _research_result(self, op: str, payload: object, error: str) -> None:
+    def _research_command_result(self, ident: str, op: str, payload: object, error: str) -> None:
+        if op == "compare" and ident == self._comparison_request_id:
+            self._comparison_request_id = None
+            self._research_result(op,payload,error,comparison_owned=True)
+
+    def _research_result(self, op: str, payload: object, error: str, *, comparison_owned=False) -> None:
         if op == 'quit' and (error or not isinstance(payload, dict) or payload.get('cleanup_required') is not False):
             self._pending_close = False
             self._timer.start()
@@ -3165,12 +3185,26 @@ class UniversalWindow(QMainWindow):
             QMessageBox.warning(self, 'BLACK.BOX — RECOVERY_UNCONFIRMED', message)
             return
         if op == "compare":
+            if self._isolated and not comparison_owned:
+                if hasattr(self.probe,"command_result") or self._comparison_state != "loading":
+                    return
+            self._comparison_request_id = None
             self._comparison_preview = payload if not error and isinstance(payload, dict) else None
             self._comparison_state = "ready" if self._comparison_preview is not None else "failed"
             self._update_report_preview()
             self._refresh_expert_context()
             return
         if error:
+            if op in ("start", "stop"):
+                cached = getattr(self.probe, "data", {})
+                state = ("recording" if self.probe.active else "saved" if
+                         self.probe.session_folder is not None and self.probe.report_result is not None
+                         and cached.get("research_state") not in
+                         ("INCOMPLETE", "FINALIZATION_UNCONFIRMED") else "unavailable")
+                self._set_report_status(state)
+                self._update_all()
+                from .research_messages import explain
+                self.recent_messages.appendPlainText(explain(error, self.language))
             return
         if op == "processes" and isinstance(payload, list):
             self._process_rows = payload

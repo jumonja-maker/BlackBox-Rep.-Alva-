@@ -289,8 +289,77 @@ def _unwind_image(kernel, module):
         yield handle
 
 
+def _release_live_stack_owner(owner):
+    """Keep DbgHelp's borrowed clone/images alive until exact release ACKs."""
+    from .deep_native import _DBGHELP_LOCK
+    if owner.get("release_unconfirmed"):
+        return owner["release_unconfirmed"]
+    owner["winerror"] = None
+    if owner.get("initialized"):
+        if not _DBGHELP_LOCK.acquire(timeout=5):
+            return "LIVE_STACK_DBGHELP_CLEANUP_BUSY"
+        try:
+            try:
+                confirmed = owner["cleanup"](owner["clone"])
+            except BaseException:
+                owner["release_unconfirmed"] = "LIVE_STACK_SYM_CLEANUP_EXCEPTION_RESTART_REQUIRED"
+                return owner["release_unconfirmed"]
+            if not confirmed:
+                owner["winerror"] = getattr(C, "get_last_error", lambda: None)()
+                return "LIVE_STACK_SYM_CLEANUP_NOT_ACKNOWLEDGED"
+            owner["initialized"] = False
+            owner.pop("callbacks", None)
+        finally:
+            _DBGHELP_LOCK.release()
+    try:
+        owner["images"].close()
+    except BaseException:
+        # ExitStack consumes attempted closers. Repeating a numeric close after
+        # an ambiguous outcome could release an unrelated reused handle.
+        owner["release_unconfirmed"] = "LIVE_STACK_PINNED_IMAGE_RELEASE_UNCONFIRMED_RESTART_REQUIRED"
+        return owner["release_unconfirmed"]
+    for key, api, arguments in (("marker", "marker_free", lambda value: (value,)),
+                                ("snapshot", "free", lambda value: (owner["kernel"].current_process(), value))):
+        value = owner.get(key)
+        if not value:
+            continue
+        try:
+            error = owner[api](*arguments(value))
+        except BaseException:
+            owner["release_unconfirmed"] = "LIVE_STACK_" + key.upper() + "_RELEASE_EXCEPTION_RESTART_REQUIRED"
+            return owner["release_unconfirmed"]
+        if error:
+            owner["winerror"] = int(error)
+            if error == 6:
+                owner["release_unconfirmed"] = "LIVE_STACK_" + key.upper() + "_OWNERSHIP_LOST_RESTART_REQUIRED"
+                return owner["release_unconfirmed"]
+            return "LIVE_STACK_" + key.upper() + "_RELEASE_NOT_ACKNOWLEDGED"
+        owner[key] = None
+    return None
+
+
+def _track_live_stack_owner(inspector, owner):
+    from .deep_native import _QUERY_CLEANUP
+    resource = {"kind": "LIVE_PSS_DBGHELP_CONTEXT", "closed": False}
+    def release():
+        reason = _release_live_stack_owner(owner)
+        resource.update(reason=reason, release_winerror=owner.get("winerror"))
+        if owner.get("release_unconfirmed"):
+            resource["retry_close_allowed"] = False
+        return reason is None
+    resource["release"] = release
+    inspector._owned_native_handles.append(resource)
+    scope = getattr(_QUERY_CLEANUP, "current", None)
+    if scope is not None and scope.inspector is inspector:
+        scope.register(resource)
+    return resource
+
+
 def collect_stacks(inspector, params, deadline, cancel):
-    from .deep_native import NativeError, _check, _integer, _os_error, _DBGHELP_LOCK
+    from .deep_native import NativeError, _check, _integer, _os_error, _DBGHELP_LOCK, _close_native_resource
+    if any(row["kind"] == "LIVE_PSS_DBGHELP_CONTEXT" and not row["closed"]
+           for row in inspector._owned_native_handles):
+        raise NativeError("RECOVERY_UNCONFIRMED", "PREVIOUS_LIVE_STACK_OWNER_REQUIRES_EXPLICIT_CLEANUP")
     limit = _integer(params.get("limit", 16), "limit", 1, 64)
     frame_limit = _integer(params.get("max_frames", 64), "max_frames", 1, 128)
     requested_tid = params.get("tid")
@@ -335,10 +404,14 @@ def collect_stacks(inspector, params, deadline, cancel):
         # Module/symbol preparation may consume the deadline. Never begin a
         # new process snapshot (which may briefly pause threads) after that.
         _check(deadline, cancel)
-        error = capture(process, 0x1 | 0x80 | 0x100, 0x00100003, C.byref(snapshot))
-        if error:
-            raise _os_error("PSS_CAPTURE_SNAPSHOT_FAILED", error)
+        owner = {"kernel": kernel, "snapshot": snapshot, "clone": clone,
+                 "marker": marker, "free": free, "marker_free": marker_free,
+                 "images": ExitStack(), "initialized": False}
+        resource = _track_live_stack_owner(inspector, owner)
         try:
+            error = capture(process, 0x1 | 0x80 | 0x100, 0x00100003, C.byref(snapshot))
+            if error:
+                raise _os_error("PSS_CAPTURE_SNAPSHOT_FAILED", error)
             _check(deadline, cancel)
             error = query(snapshot, 1, C.byref(clone), C.sizeof(clone))
             if error or not clone:
@@ -409,12 +482,12 @@ def collect_stacks(inspector, params, deadline, cancel):
                 # local PDB names/lines are parsed independently above.
                 set_options(0x4 | 0x80 | 0x100 | 0x200 | 0x400 | 0x1000 |
                             0x20000 | 0x40000 | 0x80000 | 0x200000 | 0x2000000)
-                initialized = False
-                image_owners = ExitStack()
+                owner.update(cleanup=cleanup, library=dbg, callbacks=(read_clone,))
+                image_owners = owner["images"]
                 try:
                     if not initialize(clone, "", False):
                         raise _os_error("SYM_INITIALIZE_FAILED")
-                    initialized = True
+                    owner["initialized"] = True
                     for module in modules:
                         _check(deadline, cancel)
                         try:
@@ -494,18 +567,16 @@ def collect_stacks(inspector, params, deadline, cancel):
                             row["reason"] = "ONLY_CAPTURED_CONTEXT_NO_UNWOUND_CALLER"
                         rows.append(row)
                 finally:
-                    if initialized:
-                        cleanup(clone)
-                    image_owners.close()
                     set_options(previous_options)
             finally:
                 _DBGHELP_LOCK.release()
         finally:
-            if marker:
-                marker_free(marker)
-            cleanup_error = free(kernel.current_process(), snapshot)
-            if cleanup_error:
-                raise NativeError("RECOVERY_UNCONFIRMED", "PSS_FREE_SNAPSHOT_FAILED", cleanup_error)
+            if _close_native_resource(resource):
+                inspector._owned_native_handles.remove(resource)
+                cleanup_error = 0
+            else:
+                raise NativeError("RECOVERY_UNCONFIRMED", resource.get("reason") or
+                                  "LIVE_STACK_CLEANUP_NOT_ACKNOWLEDGED", resource.get("winerror"))
     if requested_tid is not None and not rows:
         raise NativeError("PROCESS_CHANGED", "REQUESTED_THREAD_NOT_CAPTURED")
     incomplete = not rows or omitted or module_mismatches or unwind_withheld or any(

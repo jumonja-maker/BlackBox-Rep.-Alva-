@@ -2,6 +2,7 @@
 from __future__ import annotations
 import argparse
 import json
+import sqlite3
 from pathlib import Path
 import sys
 from .contracts import ObserverError
@@ -16,7 +17,7 @@ def main(argv: list[str] | None = None) -> int:
         from .research_cli import main as research_main
         try:
             return research_main(actual[1:])
-        except (OSError, ValueError, ObserverError) as exc:
+        except (OSError, ValueError, RuntimeError, sqlite3.Error, ObserverError) as exc:
             print(json.dumps({"status":"error","code":str(exc)[:512],"stage":"research"}))
             return 2
     p = argparse.ArgumentParser(prog="blackbox-rep")

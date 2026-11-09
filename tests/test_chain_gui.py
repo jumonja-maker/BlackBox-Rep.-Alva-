@@ -224,6 +224,24 @@ class ChainEditorTests(unittest.TestCase):
         self.assertEqual(self.panel.snapshot, snapshot)
         self.assertEqual(self.panel.document["nodes"], [])
 
+    def test_resume_refuses_edited_definition_before_restoring_saved_execution(self):
+        node = self.add("CHECKPOINT")
+        self.panel.start_button.click()
+        self.wait_idle()
+        saved = deepcopy(self.panel.snapshot)
+        self.assertEqual(saved["state"], "WAITING_FOR_HUMAN")
+        self.panel._fields["message"].setText("TEST_ONLY_CHANGED_DEFINITION")
+        self.panel.apply_parameters()
+        with patch("blackbox_core.chain_engine.WorkflowEngine.restore") as restore:
+            self.panel.resume()
+            self.wait_idle()
+            restore.assert_not_called()
+        self.assertIn("WORKFLOW_DEFINITION_CHANGED_REOPEN_SAVED_RUN", self.results[-1][2])
+        self.assertEqual(self.panel.snapshot, saved)
+        self.assertEqual(self.panel.bridge._paused_run["run_id"], saved["run_id"])
+        self.assertFalse(self.window.probe.active)
+        self.assertFalse(self.window.deep_inspector_panel.bridge.has_session)
+
     def test_typed_numeric_and_or_conditions_survive_language_change(self):
         node = self.add("CONDITION")
         editor = self.panel._fields["condition"]

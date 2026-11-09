@@ -716,6 +716,13 @@ class DecoderPanel(QWidget):
             self.prev_button.setEnabled(len(self.cursors) > 1)
             self.details.setPlainText(json.dumps(page["summary"], ensure_ascii=False, indent=2))
         except Exception as exc:
+            self.rows=[]
+            self.table.clearContents()
+            self.table.setRowCount(0)
+            self.details.clear()
+            self.next_cursor=0
+            for button in (self.prev_button,self.next_button,self.resolve_stack_button):
+                button.setEnabled(False)
             self.state, self.error = "error", type(exc).__name__ + ": " + str(exc)
             self.render_status()
 
@@ -947,6 +954,18 @@ class DecoderPanel(QWidget):
             self.state, self.error = "error", "STOP_RECORDING_BEFORE_OFFLINE_ANALYSIS"
             self.render_status(); return
         self._close_calltree()
+        if kind == "minidump":
+            previous = self.index
+            self.index, self.summary, self.rows = None, None, []
+            self.clock_review = self.pdb_review = self.alignment_report = None
+            self._index_navigation_generation += 1
+            self._pending_index_navigation = self._navigation_first_page = None
+            self.cursors, self.next_cursor = [0], 0
+            self.table.clearContents()
+            self.table.setRowCount(0)
+            for button in (self.prev_button,self.next_button,self.export_button):
+                button.setEnabled(False)
+            self._remove_cached_index(previous)
         if kind == "minidump_memory":
             self._dump_generation += 1
             self.dump_memory_view.clear()
@@ -1041,14 +1060,15 @@ class DecoderPanel(QWidget):
             self.render_status()
 
     def export_index(self):
-        if not self.index:
+        if not self.index or self.worker is not None:
             return
+        selected = self.index
         name, _ = QFileDialog.getSaveFileName(self, self.tr2("Save decoded index (contains trace data)",
                         "Сохранить индекс (содержит данные трассы)"), "decoded-trace.sqlite3", "SQLite (*.sqlite3)")
-        if not name:
+        if not name or self.index != selected or self.worker is not None:
             return
         try:
-            export_index_copy(self.index, Path(name))
+            export_index_copy(selected, Path(name))
         except (OSError, ValueError) as exc:
             self.state, self.error = "error", type(exc).__name__ + ": " + str(exc)
             self.render_status()

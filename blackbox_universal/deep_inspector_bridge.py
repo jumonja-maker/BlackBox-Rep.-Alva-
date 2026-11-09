@@ -365,6 +365,34 @@ class DeepInspectorBridge(QObject):
         if self.worker is not None:
             self.worker.cancel()
 
+    def cancel_request(self, tag, generation, target):
+        """Cancel only an exact caller request, retaining foreign/shared owners.
+
+        A queued action may sit behind the administrative heartbeat. Removing
+        that queued packet must not cancel the heartbeat or a chain's worker.
+        This only requests cancellation; it never confirms cleanup.
+        """
+        if type(tag) is not str or not tag or type(generation) is not int:
+            return False
+        if type(target) is not tuple or len(target) != 2:
+            return False
+
+        def matches(command):
+            return (isinstance(command, dict) and command.get("tag") == tag
+                    and command.get("generation") == generation
+                    and command.get("target") == target)
+
+        matched = False
+        if matches(self._queued_command):
+            self._queued_command = None
+            matched = True
+            self.busy_changed.emit(bool(self.busy))
+        task = self.worker
+        if task is not None and matches(task.command):
+            task.cancel()
+            matched = True
+        return matched
+
     def retry_cleanup(self):
         if self.worker is not None or not self.cleanup_required or self._service is None:
             return False

@@ -221,6 +221,7 @@ def _pdb_msf7_info(stream, size):
 
 def inspect_local_identity(path, kind):
     """Bounded open; changes/reparse points reject the result rather than certify."""
+    _require(type(kind) is str and kind in ("pe","pdb"), "UNSUPPORTED_LOCAL_IDENTITY_KIND")
     target, before = _local_file(path)
     with target.open("rb") as stream:
         opened = os.fstat(stream.fileno())

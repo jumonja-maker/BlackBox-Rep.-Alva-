@@ -57,6 +57,31 @@ class NativeFixtureTests(unittest.TestCase):
             finally:
                 if capture.active:capture.cancel()
 
+    def test_real_exact_named_wpr_absence_is_an_explicit_recovery_ack(self):
+        from blackbox_core.trace_cleanup import terminal_cleanup_proven
+        from blackbox_core.trace_recovery import recover
+        from blackbox_core.windows_research import wpr_tool,WPR_NO_ACTIVE_PROFILES
+        if not wpr_tool() or privilege()['mode']!='ADMINISTRATOR':
+            self.skipTest('WPR or administrator token unavailable: named absence unverified')
+        with tempfile.TemporaryDirectory() as temp:
+            folder=Path(temp);artifacts=folder/'artifacts';artifacts.mkdir()
+            # This random named instance was never started. The existing WPR
+            # invocation still addresses only this exact unique instance.
+            instance=WprCapture(artifacts).instance;path=artifacts/(instance+'.trace.json')
+            path.write_text(json.dumps({'instance':instance,'state':'COMPLETED',
+                'consent':'EXPLICIT_USER_COMMAND','owner_pid':0,'guardian_pid':0}))
+            retained=artifacts/'retained.etl';retained.write_bytes(b'RECOVERY_MUST_NOT_DELETE')
+            class Catalog:
+                def entry(self,entry_id):return {'origin':'LOCAL_APP_MARKED','state':'COMPLETED'}
+                def _folder(self,row):return folder
+                def _marker(self,*args):pass
+            result=recover(Catalog(),'native-fixture',path.name,confirmed=True)
+            self.assertEqual(result['resource_cleanup']['observation'],'NAMED_INSTANCE_ABSENT_CONFIRMED')
+            self.assertEqual(result['resource_cleanup']['wpr_returncode'],WPR_NO_ACTIVE_PROFILES)
+            self.assertTrue(terminal_cleanup_proven(json.loads(path.read_text()),journal=path.name))
+            self.assertEqual(retained.read_bytes(),b'RECOVERY_MUST_NOT_DELETE')
+            self.assertFalse(result['capture_complete']);self.assertFalse(result['target_terminated'])
+
 
 @unittest.skipUnless(os.name=="nt" and shutil.which("dotnet"),"Windows .NET SDK required")
 class DotnetClientTests(unittest.TestCase):
@@ -70,7 +95,8 @@ class DotnetClientTests(unittest.TestCase):
             major=max(majors)
             (folder/"Client.csproj").write_text(f'<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net{major}.0</TargetFramework><EnableDefaultCompileItems>true</EnableDefaultCompileItems></PropertyGroup></Project>')
             (folder/"NuGet.Config").write_text('<configuration><packageSources><clear /></packageSources></configuration>')
-            (folder/"Program.cs").write_text('class Program { static int Main() { var bb=new BlackBoxEvents("blackbox-config.json"); return bb.Emit("blackbox.ready") ? 0 : 1; } }')
+            from tools.qa_sdk_clients import CS_FAILURE_PROGRAM
+            (folder/"Program.cs").write_text(CS_FAILURE_PROGRAM)
             env={**os.environ,"DOTNET_CLI_TELEMETRY_OPTOUT":"1","DOTNET_SKIP_FIRST_TIME_EXPERIENCE":"1"}
             build=subprocess.run(["dotnet","build","Client.csproj","--configuration","Release","--output","out","--verbosity","quiet"],cwd=folder,env=env,capture_output=True,text=True,timeout=90)
             self.assertEqual(build.returncode,0,build.stdout[-4000:]+build.stderr[-4000:])
@@ -78,6 +104,8 @@ class DotnetClientTests(unittest.TestCase):
             self.assertEqual(child.wait(timeout=15),0)
             tail=EventTail(event,"a"*32,child.pid);rows=tail.poll()
             self.assertTrue(tail.ready);self.assertEqual(rows[0]["source_clock"],"DOTNET_STOPWATCH")
+            self.assertEqual(rows[0]['seq'],3);self.assertEqual(rows[0]['client_dropped'],2)
+            self.assertEqual(tail.client_dropped,2)
 
 
 @unittest.skipUnless(os.name=="nt","Windows C++ compiler client acceptance")
@@ -93,14 +121,16 @@ class NativeClientTests(unittest.TestCase):
             folder=Path(temp)/"client";event=Path(temp)/"event.jsonl"
             write_preparation(folder,event,"a"*32)
             # All literal paths are controlled test paths; always quote cmd paths.
-            filename=str(event).replace("\\","\\\\")
-            source='#include "BlackBoxEvents.hpp"\nint main(){ BlackBoxEvents bb(L"'+filename+'", "'+'a'*32+'"); return bb.emit("blackbox.ready") ? 0 : 1; }\n'
+            from tools.qa_sdk_clients import cpp_failure_program
+            source=cpp_failure_program(event,'a'*32)
             (folder/"main.cpp").write_text(source)
             (folder/"build.cmd").write_text('@echo off\ncall "'+str(dev)+'" -no_logo -arch=x64\nif errorlevel 1 exit /b 1\ncl /nologo /EHsc /Zi /Fd:compile.pdb /std:c++17 main.cpp /Fe:client.exe /link /DEBUG /PDB:client.pdb\n',encoding="utf-8")
             build=subprocess.run(["cmd","/c","build.cmd"],cwd=folder,capture_output=True,text=True,timeout=90)
             self.assertEqual(build.returncode,0,build.stdout[-4000:]+build.stderr[-4000:])
             child=subprocess.Popen([str(folder/"client.exe")],cwd=folder);self.assertEqual(child.wait(timeout=15),0)
-            tail=EventTail(event,"a"*32,child.pid);tail.poll();self.assertTrue(tail.ready)
+            tail=EventTail(event,"a"*32,child.pid);rows=tail.poll();self.assertTrue(tail.ready)
+            self.assertEqual(rows[0]['seq'],3);self.assertEqual(rows[0]['client_dropped'],2)
+            self.assertEqual(tail.client_dropped,2)
             from blackbox_core.symbols import verify_symbols
             self.assertEqual(verify_symbols(folder/"client.exe",folder/"client.pdb")["status"],"MATCH")
 

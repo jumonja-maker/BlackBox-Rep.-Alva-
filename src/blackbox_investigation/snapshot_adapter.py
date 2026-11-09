@@ -24,12 +24,12 @@ def analyze_snapshot(snapshot: dict, *, policy: Policy | None = None,
             raise InvestigationError("INVALID_SAMPLE")
         seconds = sample.get("seconds")
         rss_mb = sample.get("rss_mb")
-        if (type(seconds) not in (int, float) or not math.isfinite(seconds) or
-                seconds < 0 or seconds > 30 * 24 * 3600):
+        if (type(seconds) not in (int, float) or seconds < 0 or
+                seconds > 30 * 24 * 3600 or not math.isfinite(seconds)):
             raise InvestigationError("INVALID_ELAPSED_MS")
         if (rss_mb is not None and
-                (type(rss_mb) not in (int, float) or not math.isfinite(rss_mb) or
-                 rss_mb < 0 or rss_mb > (2**63 - 1) / 1048576)):
+                (type(rss_mb) not in (int, float) or rss_mb < 0 or
+                 rss_mb > (2**63 - 1) / 1048576 or not math.isfinite(rss_mb))):
             raise InvestigationError("INVALID_RSS_BYTES")
         count = sample.get("process_count")
         if count is not None and (type(count) is not int or count < 1):

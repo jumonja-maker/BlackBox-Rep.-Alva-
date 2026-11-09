@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 import re
 import sqlite3
+import stat
 import time
 
 from blackbox_core.decoder_index import read_index
@@ -31,7 +32,7 @@ def navigation_filters(*, process_instance=None, pid=None, tid=None,
     for name in ("start_ms", "end_ms"):
         value = values[name]
         if value is not None and (type(value) not in (int, float) or
-                                  not math.isfinite(value) or abs(value) >= 1e15):
+                                  abs(value) >= 1e15 or not math.isfinite(value)):
             raise ValueError("INVALID_DECODER_NAVIGATION_TIME")
     if start_ms is not None and end_ms is not None and start_ms >= end_ms:
         raise ValueError("INVALID_DECODER_NAVIGATION_INTERVAL")
@@ -71,7 +72,7 @@ def copy_navigation_index(source, output, *, expected_trace_sha256=None,
     binds the SQLite file itself. Neither one authenticates imported claims.
     """
     if (type(timeout_seconds) not in (int, float) or
-            not math.isfinite(timeout_seconds) or not 1 <= timeout_seconds <= 120):
+            not 1 <= timeout_seconds <= 120 or not math.isfinite(timeout_seconds)):
         raise ValueError("INVALID_DECODER_NAVIGATION_DEADLINE")
     for digest in (expected_trace_sha256, expected_index_sha256):
         if digest is not None and (type(digest) is not str or
@@ -87,7 +88,11 @@ def copy_navigation_index(source, output, *, expected_trace_sha256=None,
             raise TimeoutError("DECODER_INDEX_NAVIGATION_TIMEOUT")
 
     check()
-    source, output = safe_path(source), Path(output)
+    source, output = safe_path(source), safe_path(output)
+    for suffix in ("", "-wal", "-shm", "-journal"):
+        candidate = safe_path(Path(str(output)+suffix))
+        if candidate.exists() or candidate.is_symlink():
+            raise ValueError("DECODER_NAVIGATION_DESTINATION_NOT_NEW")
     before = source.stat()
     if not source.is_file() or not 16 <= before.st_size <= MAX_INDEX_BYTES:
         raise ValueError("DECODER_NAVIGATION_INDEX_SIZE_BUDGET")
@@ -102,10 +107,13 @@ def copy_navigation_index(source, output, *, expected_trace_sha256=None,
 
     require_closed_source()
     created = False
+    created_identity = None
     try:
         digest, count = hashlib.sha256(), 0
         with source.open("rb") as original, output.open("xb") as target:
             created = True
+            opened_output = os.fstat(target.fileno())
+            created_identity = (opened_output.st_dev,opened_output.st_ino)
             if _identity(os.fstat(original.fileno())) != _identity(before):
                 raise ValueError("DECODER_NAVIGATION_SOURCE_CHANGED")
             while True:
@@ -164,6 +172,13 @@ def copy_navigation_index(source, output, *, expected_trace_sha256=None,
                 "selection_clock": "TRACE_RELATIVE_MS", "live_identity_binding": "NOT_ESTABLISHED"}
     except BaseException:
         if created:
-            for suffix in ("", "-wal", "-shm", "-journal"):
-                Path(str(output) + suffix).unlink(missing_ok=True)
+            # A basename is not ownership of a sidecar or a replacement file.
+            # SQLite connections are closed above; preserve unknown auxiliaries.
+            try:
+                current = output.lstat()
+            except FileNotFoundError:
+                pass
+            else:
+                if stat.S_ISREG(current.st_mode) and (current.st_dev,current.st_ino)==created_identity:
+                    output.unlink()
         raise

@@ -149,6 +149,28 @@ class GraphExportOracleTests(unittest.TestCase):
                     with self.assertRaisesRegex(AssertionError, 'RECORDED_IDENTITIES_CHANGED'):
                         self.read_json(changed)
 
+    def test_matching_exports_cannot_change_recorded_clock_coverage_or_receipt_scalar_types(self):
+        self.expected['nodes'][0]['time_bounds'] = {'start': 100, 'end': 200, 'unit': 'ns'}
+        self.expected['sources'][0]['coverage'] = {'complete': False, 'samples': 1}
+        self.expected['critical_path']['totals'] = {'observed_ms': 1}
+        changes = (
+            lambda q: q['nodes'][0]['time_bounds'].update(start=100.0),
+            lambda q: q['sources'][0]['coverage'].update(complete=0),
+            lambda q: q['sources'][0]['coverage'].update(samples=True),
+            lambda q: q['critical_path']['totals'].update(observed_ms=True),
+            lambda q: q['run_receipt']['target'].update(verified=0),
+        )
+        parsed, _ = self.read_json()
+        self.read_html(reference=parsed)
+        for change in changes:
+            with self.subTest(change=change):
+                changed = deepcopy(self.expected)
+                change(changed)
+                with self.assertRaisesRegex(AssertionError, 'RECORDED_IDENTITIES_CHANGED'):
+                    self.read_json(changed)
+                with self.assertRaisesRegex(AssertionError, 'RECORDED_IDENTITIES_CHANGED'):
+                    self.read_html(graph_html(changed), reference=changed)
+
     def test_source_hash_role_size_and_process_birth_changes_are_detected(self):
         changes = (
             lambda q: q['sources'][0].update(source_sha256='b' * 64),

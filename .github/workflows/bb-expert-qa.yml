@@ -52,7 +52,22 @@ jobs:
           python -m pip install --require-hashes -r ${{ matrix.lock }}
           python -m pip install --no-build-isolation --no-deps -e .
       - name: Undefined names and syntax gate
-        run: python tools/check_undefined_names.py --report expert-static.json
+        run: python tools/check_undefined_names.py src blackbox_universal tools tests app.py maintenance_entry.py diagnostic_entry.py --report expert-static.json
+      - name: Require every declared contract pattern to discover a real source file
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import re
+          text = Path('.github/workflows/bb-expert-qa.yml').read_text(encoding='utf-8')
+          patterns = re.findall(r"\bdiscover\s+-s\s+tests\s+-p\s+'([^']+)'", text)
+          missing = [pattern for pattern in patterns if not any(Path('tests').glob(pattern))]
+          if not patterns or missing:
+              raise SystemExit('FOCUSED_CONTRACT_SOURCE_MISSING: ' + repr(missing))
+          print('FOCUSED_CONTRACT_SOURCE_PATTERNS ' + str(len(patterns)))
+          PY
+      - name: Actual static inspection refuses syntax and undefined binding fixtures
+        run: python -m unittest discover -s tests -p 'test_audit_undefined_gate_20261028.py' -v
       - name: Real Qt navigation and evidence presentation contracts
         run: python -m unittest discover -s tests -p 'test_expert*.py' -v
       - name: Recorded process selection and historic child regressions
@@ -69,6 +84,66 @@ jobs:
         run: python -m unittest discover -s tests -p 'test_crash_and_trace_decode.py' -v
       - name: Imported storage identity and bounded source validation regressions
         run: python -m unittest discover -s tests -p 'test_storage_import_boundaries.py' -v
+      - name: Sticky research QA failure regressions
+        run: python -m unittest discover -s tests -p 'test_qa_failure_truthfulness.py' -v
+      - name: Explicit Chain acceptance scope regressions
+        run: python -m unittest discover -s tests -p 'test_chain_acceptance_scope.py' -v
+      - name: Generated native SDK client compile and failed-Emit recovery contracts
+        run: python -m unittest discover -s tests -p 'test_research_native.py' -v
+      - name: Chain Observe persisted identity stop and readback regressions
+        run: python -m unittest discover -s tests -p 'test_chain_observe.py' -v
+      - name: Chain adapter hash and integrity deadline regressions
+        run: python -m unittest discover -s tests -p 'test_chain_adapter_budgets.py' -v
+      - name: Native audit journal and bounded offline symbol regressions
+        run: python -m unittest discover -s tests -p 'test_native_audit_boundaries.py' -v
+      - name: Actual saved Detailed-series coverage and long-run admission contracts
+        run: python -m unittest discover -s tests -p 'test_deep_endurance_coverage.py' -v
+      - name: Exact-source full-CI and fixed-profile endurance receipt contracts
+        run: python -m unittest discover -s tests -p 'test_program_endurance_scope.py' -v
+      - name: Long GUI harness sticky callback failure and cleanup contracts
+        run: python -m unittest discover -s tests -p 'test_production_qa_failure_guard.py' -v
+      - name: Archive metadata preallocation and bounded extraction contracts
+        run: python -m unittest discover -s tests -p 'test_archive_policy.py' -v
+      - name: Research CLI cleanup preservation contracts
+        run: python -m unittest discover -s tests -p 'test_research_cli_cleanup.py' -v
+      - name: Chain report cohort and unknown-clock contracts
+        run: python -m unittest discover -s tests -p 'test_chain_report_cohort.py' -v
+      - name: Checked Windows unlink handle-close acknowledgement contracts
+        run: python -m unittest discover -s tests -p 'test_owned_unlink_cleanup.py' -v
+      - name: Analysis imported identity and read-only source boundary contracts
+        run: python -m unittest discover -s tests -p 'test_analysis_import_boundaries.py' -v
+      - name: Chain typed contracts and parameter admission audit
+        run: python -m unittest discover -s tests -p 'test_chain_contract_audit.py' -v
+      - name: Chain persisted engine writer-head and recovery audit
+        run: python -m unittest discover -s tests -p 'test_chain_engine_audit.py' -v
+      - name: Chain actual graph and restored-state integration audit
+        run: python -m unittest discover -s tests -p 'test_chain_graph_integration.py' -v
+      - name: Chain bounded import and source-file I/O audit
+        run: python -m unittest discover -s tests -p 'test_chain_io_audit.py' -v
+      - name: Chain editor state identity and controller audit
+        run: python -m unittest discover -s tests -p 'test_chain_ui_audit.py' -v
+      - name: Decoder typed source and analysis contract audit
+        run: python -m unittest discover -s tests -p 'test_decoder_contract_audit.py' -v
+      - name: Recording admission and retained trace-owner resource audit
+        run: python -m unittest discover -s tests -p 'test_recording_resource_audit.py' -v
+      - name: Shared GUI controller source generation and stale result audit
+        run: python -m unittest discover -s tests -p 'test_ui_controller_audit.py' -v
+      - name: Independent graph export identity and JSON scalar-type oracle regressions
+        run: python -m unittest discover -s tests -p 'test_wave02_export_oracles.py' -v
+      - name: Independent recorded comparison export and receipt oracle regressions
+        run: python -m unittest discover -s tests -p 'test_wave02_comparison_oracles.py' -v
+      - name: Storage bounded-reader and source-function audit
+        run: python -m unittest discover -s tests -p 'test_storage_function_audit.py' -v
+      - name: Trace consumer normalization and source-function audit
+        run: python -m unittest discover -s tests -p 'test_trace_consumer_audit.py' -v
+      - name: Trace owner cleanup proof and policy audit
+        run: python -m unittest discover -s tests -p 'test_trace_cleanup_policy.py' -v
+      - name: Decoder presentation and stale-source audit
+        run: python -m unittest discover -s tests -p 'test_decoder_presentation_audit.py' -v
+      - name: Event stream bounded-source audit
+        run: python -m unittest discover -s tests -p 'test_event_stream_audit.py' -v
+      - name: Investigation imported-source audit
+        run: python -m unittest discover -s tests -p 'test_investigation_import_audit.py' -v
 
   source-workflow:
     name: Actual Qt workflow RU EN / scale ${{ matrix.scale }}
@@ -120,8 +195,9 @@ jobs:
               'status': 'PASS' if passed else 'FAIL', 'source_sha': os.environ['EXPERT_SOURCE_SHA'],
               'gates': gates, 'full_source_and_portable_gate': 'SEPARATE_FINAL_PR_SHELL_QA_REQUIRED',
               'physical_dpi': 'NOT_TESTED', 'secure_desktop': 'NOT_TESTED',
-              'full_5h30_endurance': 'NOT_RERUN_BASE_SAMPLER_AND_PERSISTED_SCHEDULER_UNCHANGED',
-              'targeted_owner_failure_paths': 'BRIDGE_QUIT_RETRY_OPTIONAL_JOBS_AND_TRANSACTIONAL_TRACERPT_STAGING',
+              'full_5h30_endurance': 'SEPARATE_FULL_R60_EXACT_HEAD_GATE_REQUIRED',
+              'base_program_endurance': 'SEPARATE_STANDARD_19800_DETAILED_3600_EXACT_HEAD_GATE_REQUIRED',
+              'targeted_owner_failure_paths': 'WORKFLOW_WRITER_HEAD_BINDING_BRIDGE_QUIT_RETRY_OPTIONAL_JOBS_AND_TRANSACTIONAL_TRACERPT_STAGING',
               'published_release': False}, sort_keys=True))
           raise SystemExit(0 if passed else 1)
           PY

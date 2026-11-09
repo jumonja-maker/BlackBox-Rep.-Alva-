@@ -91,10 +91,11 @@ def execute(packet):
         elif op=='library_apply_purge':result=catalog.apply_purge(a['confirmation_token'])
         elif op=='library_trace_scan':
             from .trace_recovery import scan
-            result=scan(catalog,a['entry_id'])
+            result=scan(catalog,a['entry_id'],_owned=packet.get('_owned_trace_recovery',()))
         elif op=='library_trace_recover':
             from .trace_recovery import recover
-            result=recover(catalog,a['entry_id'],a['journal'],confirmed=a.get('confirmed',False))
+            result=recover(catalog,a['entry_id'],a['journal'],confirmed=a.get('confirmed',False),
+                _owned=packet.get('_owned_trace_recovery'))
     elif op=='export_recovery_scan':
         from .export_recovery import scan_exports
         result=scan_exports(a['folder'])

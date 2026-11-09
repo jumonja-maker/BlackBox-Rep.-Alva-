@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import base64
 import json
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -14,6 +15,63 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT), str(ROOT / "src")]
 
 from blackbox_core.chain_qa import file_hash, read_json, require, save, source_proof
+
+
+def acceptance_plan(event, selected_scope="full"):
+    """Explicit manual technical coverage never changes full candidate gates."""
+    require(event in ("pull_request", "workflow_dispatch"), "R60_CANDIDATE_SCOPE_EVENT_INVALID")
+    require(selected_scope in ("full", "technical-audit", "base-program-endurance"), "R60_CANDIDATE_SCOPE_INVALID")
+    require(selected_scope == "full" or event == "workflow_dispatch", "R60_BOUNDED_SCOPE_REQUIRES_EXPLICIT_DISPATCH")
+    technical = selected_scope == "technical-audit"
+    base = selected_scope == "base-program-endurance"
+    return {"contracts": not base, "native": not base, "gui_only": False, "medium_only": False,
+            "workspace_only": False, "lifecycle": not technical and not base, "technical_audit": technical,
+            "base_program_endurance": base}
+
+
+def program_dispatch_identity(source_sha, requested_sha, run_id):
+    require(re.fullmatch(r'[0-9a-f]{40}', source_sha or '') and requested_sha == source_sha and
+            type(run_id) is str and re.fullmatch(r'[0-9]{1,20}', run_id) and int(run_id) > 0,
+            'BASE_PROGRAM_DISPATCH_EXACT_SOURCE_AND_FULL_CI_RUN_REQUIRED')
+    return int(run_id)
+
+
+def emit_acceptance_plan(argv):
+    """Configure existing jobs after checking the actual source, without Qt."""
+    parser = argparse.ArgumentParser(description="Select explicit hosted R60 acceptance coverage")
+    parser.add_argument("--emit-acceptance-scope", action="store_true")
+    parser.add_argument("--event", choices=("pull_request", "workflow_dispatch"), required=True)
+    parser.add_argument("--acceptance-scope", choices=("full", "technical-audit", "base-program-endurance"), default="full")
+    parser.add_argument("--source-sha", required=True)
+    parser.add_argument("--program-expected-sha", default='')
+    parser.add_argument("--full-ci-run-id", default='')
+    args = parser.parse_args(argv)
+    require(os.environ.get("GITHUB_ACTIONS") == "true" and
+            os.environ.get("RUNNER_ENVIRONMENT") == "github-hosted", "R60_SCOPE_REQUIRES_HOSTED_CI")
+    from blackbox_universal.provenance import source_identity
+    identity = source_identity(args.source_sha)
+    require(identity.get("source_identity_status") == "VERIFIED_EXPECTED_HEAD", "R60_SCOPE_SOURCE_MISMATCH")
+    plan = acceptance_plan(args.event, args.acceptance_scope)
+    if plan['base_program_endurance']:
+        program_dispatch_identity(args.source_sha, args.program_expected_sha, args.full_ci_run_id)
+    with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as stream:
+        stream.write("".join(key + "=" + str(value).lower() + "\n" for key, value in plan.items()))
+    scope = ("FULL_FUNCTIONAL_NATIVE_SOURCE_FROZEN_NO_LIFECYCLE_ACCEPTANCE" if plan["technical_audit"] else
+             "BASE_GUI_RECORDING_ONLY_NO_R60_SCHEDULER_ACCEPTANCE" if plan["base_program_endurance"] else
+             "FULL_CANDIDATE_REQUIRES_ACTUAL_5H30_LIFECYCLE")
+    proof = {"scope": scope, "source_sha": args.source_sha, "source_identity": identity,
+             "event": args.event, "plan": plan, "publication": False}
+    print("R60_ACCEPTANCE_SCOPE " + json.dumps(proof, sort_keys=True), flush=True)
+    with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a", encoding="utf-8") as stream:
+        stream.write("R60 scope: " + scope + "\nSource: " + args.source_sha + "\n")
+        if plan["technical_audit"]:
+            stream.write("Explicit technical audit: complete existing functional/native/source/frozen/medium/DPI jobs. "
+                         "5h30 lifecycle NOT_RUN; complete R60 candidate acceptance NOT_ESTABLISHED. "
+                         "The caller must select full scope if owner/scheduler changes require lifecycle validation.\n")
+        if plan['base_program_endurance']:
+            stream.write('Separate base GUI Standard19800/Detailed3600 recording only. '
+                         'All R60 functional/scheduler gates NOT_RUN in this dispatch; full R60 remains separately required.\n')
+    return 0
 
 
 def _guard_stamp(path):
@@ -428,4 +486,4 @@ def main():
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(emit_acceptance_plan(sys.argv[1:]) if "--emit-acceptance-scope" in sys.argv else main())

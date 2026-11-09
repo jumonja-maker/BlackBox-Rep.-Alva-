@@ -7,8 +7,9 @@ from pathlib import Path, PurePosixPath
 import re
 import stat
 import zipfile
+from blackbox_core import __version__
 
-VERSION = '0.6.0'
+VERSION = __version__
 PREFIX = 'BLACK.BOX-Universal/'
 MAX_UNCOMPRESSED = 2 * 1024**3
 REQUIRED = (

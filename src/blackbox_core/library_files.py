@@ -4,6 +4,7 @@ import ctypes
 import errno
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import time
@@ -17,9 +18,15 @@ def checked(path):
 
 
 def read_json(path, limit=16384):
+    if type(limit) is not int or not 1<=limit<=8*1024**2:raise ValueError('LIBRARY_INVALID_MARKER_LIMIT')
     path=checked(path)
     if not path.is_file() or path.stat().st_size>limit:raise ValueError('LIBRARY_INVALID_MARKER')
-    data=json.loads(path.read_text(encoding='utf-8'))
+    # The source may grow after stat(). Bound the actual read, not only its
+    # earlier metadata, before parsing an imported marker/journal.
+    with path.open('rb') as stream:raw=stream.read(limit+1)
+    if len(raw)>limit:raise ValueError('LIBRARY_INVALID_MARKER')
+    try:data=json.loads(raw)
+    except (UnicodeError,RecursionError) as error:raise ValueError('LIBRARY_INVALID_MARKER') from error
     if not isinstance(data,dict):raise ValueError('LIBRARY_INVALID_MARKER')
     return data
 
@@ -65,6 +72,10 @@ def identity(path):
 
 def tree_summary(folder,*,max_files=10000,max_seconds=.5):
     """Bounded metadata-only estimate. Unknown size is never zero bytes."""
+    if (type(max_files) is not int or not 1<=max_files<=100000 or
+            type(max_seconds) not in (int,float) or not 0<max_seconds<=30 or
+            not math.isfinite(max_seconds)):
+        raise ValueError('LIBRARY_INVALID_SUMMARY_BUDGET')
     folder=checked(folder);start=time.monotonic();files=0;size=0;digest=hashlib.sha256()
     stack=[(folder,0)]
     while stack:

@@ -32,7 +32,7 @@ _IDENTITY_OWNERS = []
 _IDENTITY_OPENING = 0
 _MAX_IDENTITY_OWNERS = 1024
 QUERY_CLEANUP_OPERATIONS = frozenset({"processes", "modules", "threads", "handles", "memory_map",
-    "memory_read", "wait_chains", "network", "disk", "snapshot", "capabilities"})
+    "memory_read", "wait_chains", "network", "disk", "snapshot", "capabilities", "thread_stacks"})
 
 
 class _QueryCleanup:
@@ -100,7 +100,7 @@ def _close_native_resource(resource):
     try:
         closed = bool(resource["release"]() if "release" in resource else
                       resource["kernel"].close(resource["handle"]))
-        error = None if closed else getattr(C, "get_last_error", lambda: None)()
+        error = None if closed else resource.get("release_winerror", getattr(C, "get_last_error", lambda: None)())
     except Exception as exc:
         closed, error = False, getattr(exc, "winerror", None)
         resource["reason"] = type(exc).__name__ + ": " + str(exc)[:160]

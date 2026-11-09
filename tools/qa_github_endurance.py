@@ -59,6 +59,13 @@ def _evidence(root: Path, profile: str, requested: int, expected_sha: str):
     result = _read_json(output / "result.json")
     if result.get("state") != "COMPLETED":
         raise RuntimeError("QA_HARNESS_NOT_COMPLETED")
+    cleanup = result.get("cleanup", {})
+    if (cleanup.get("status") != "COMPLETED" or cleanup.get("helper_alive") is not False or
+            cleanup.get("window_visible") is not False or type(cleanup.get("running_qthreads")) is not int or
+            cleanup["running_qthreads"] != 0):
+        raise RuntimeError("QA_GUI_OWNER_CLEANUP_NOT_CONFIRMED")
+    if result.get("unhandled_python_failure"):
+        raise RuntimeError("QA_UNHANDLED_CALLBACK_RECORDED")
     source = result.get("source") or {}
     if (source.get("actual_source_sha") != expected_sha or
             source.get("source_identity_status") != "VERIFIED_EXPECTED_HEAD"):
@@ -68,7 +75,7 @@ def _evidence(root: Path, profile: str, requested: int, expected_sha: str):
         raise RuntimeError("QA_UNEXPECTED_PHASES")
     phase = phases[0]
     seconds = phase.get("actual_seconds")
-    if type(seconds) not in (int, float) or seconds < requested:
+    if type(seconds) not in (int, float) or not math.isfinite(seconds) or seconds < requested:
         raise RuntimeError("QA_FULL_REQUESTED_DURATION_NOT_MET")
     if phase.get("recording_state") != "COMPLETED":
         raise RuntimeError("QA_PRIMARY_RECORDING_NOT_COMPLETED")
@@ -117,9 +124,30 @@ def _evidence(root: Path, profile: str, requested: int, expected_sha: str):
             FROM (SELECT monotonic_ns-LAG(monotonic_ns) OVER(ORDER BY series_seq) gap
                   FROM samples WHERE series='STANDARD')
         """).fetchone()
+        detail_coverage = None
+        if profile == "DETAILED":
+            detail_count, detail_first, detail_last = db.execute(
+                "SELECT COUNT(*),MIN(monotonic_ns),MAX(monotonic_ns) FROM samples "
+                "WHERE series='DETAILED' AND instance_id=1").fetchone()
+            detail_gap, detail_nonpositive = db.execute("""
+                SELECT MAX(gap),COALESCE(SUM(CASE WHEN gap<=0 THEN 1 ELSE 0 END),0)
+                FROM (SELECT monotonic_ns-LAG(monotonic_ns) OVER(ORDER BY series_seq) gap
+                      FROM samples WHERE series='DETAILED' AND instance_id=1)
+            """).fetchone()
+            span = ((detail_last - detail_first) / 1e9 if
+                    type(detail_first) is int and type(detail_last) is int else 0)
+            detail_coverage = verify_sampling_coverage(count=detail_count, span_seconds=span,
+                max_gap_seconds=(detail_gap or 0) / 1e9, nonpositive_gaps=detail_nonpositive,
+                requested_seconds=requested, boundary_tolerance_seconds=10,
+                maximum_gap_seconds=30, minimum_count_interval_seconds=10, label="QA_DETAILED")
     with closing(sqlite3.connect(research_path.as_uri() + "?mode=ro", uri=True)) as db:
         row = db.execute("SELECT data FROM context WHERE key='state'").fetchone()
         research_state = json.loads(row[0]) if row else None
+        row = db.execute("SELECT data FROM context WHERE key='capture_health'").fetchone()
+        capture_health = json.loads(row[0]) if row else None
+    if (type(capture_health) is not dict or capture_health.get('recording_resources_closed') is not True or
+            capture_health.get('finalization_errors') != []):
+        raise RuntimeError("QA_RECORDING_RESOURCE_FINALIZATION_NOT_CONFIRMED")
     if (len(original) != 1 or original[0][0] != 1 or
             original[0][2] != "COMPLETED" or
             len(normalized) != 1 or normalized[0] !=
@@ -175,6 +203,9 @@ def _evidence(root: Path, profile: str, requested: int, expected_sha: str):
         "actual_seconds": seconds,
         "v1_base_samples": n, "v2_standard_samples": mirrored,
         "persisted_recording_coverage": sampling,
+        "detailed_recording_coverage": detail_coverage,
+        "gui_cleanup": cleanup,
+        "recording_capture_health": capture_health,
         "invalid_source_links": mislinked, "schema2_writer_errors": errors,
         "research_state": research_state,
         "primary_exit_code": original[0][2],

@@ -3,10 +3,11 @@ from __future__ import annotations
 
 from collections import deque
 from pathlib import Path
+import math
 import re
 
-from .chain_contracts import (MAX_DEPTH, MAX_INVOCATIONS, Artifact, NodeDefinition, PortSpec,
-    WorkflowDefinition, WorkflowError, control_ports, json_data, number, require)
+from .chain_contracts import (MAX_DEPTH, MAX_INVOCATIONS, MAX_NODE_PARAMETERS_BYTES, Artifact, NodeDefinition, PortSpec,
+    WorkflowDefinition, WorkflowError, canonical, control_ports, json_data, number, require)
 from .chain_profiles import effective_profile
 
 
@@ -34,7 +35,7 @@ def validate_parameters(adapter, parameters):
             require(not spec.get("required", False) or "default" in spec, "WORKFLOW_REQUIRED_PARAMETER_MISSING")
             if "default" not in spec:
                 continue
-        value = parameters.get(name, spec.get("default"))
+        value = json_data(parameters.get(name, spec.get("default")), configuration=True)
         kind = spec.get("type", "string")
         if kind in ("string", "path", "choice"):
             require(type(value) is str and len(value) <= spec.get("max_length", 8192), "WORKFLOW_INVALID_TEXT_PARAMETER")
@@ -55,6 +56,8 @@ def validate_parameters(adapter, parameters):
         result[name] = value
     if adapter.validate_parameters is not None:
         adapter.validate_parameters(result)
+    result = json_data(result, configuration=True)
+    require(len(canonical(result).encode()) <= MAX_NODE_PARAMETERS_BYTES, "WORKFLOW_PARAMETER_BUDGET")
     return result
 
 
@@ -73,7 +76,8 @@ def validate_condition(condition, *, depth=0):
     require(set(condition) <= {"field", "op", "value", "status", "has_evidence", "sufficient"},
             "INVALID_WORKFLOW_CONDITION_FIELDS")
     if "status" in condition:
-        require(set(condition) == {"status"} and type(condition["status"]) is str, "INVALID_WORKFLOW_STATUS_CONDITION")
+        require(set(condition) == {"status"} and type(condition["status"]) is str and
+                0 < len(condition["status"]) <= 128, "INVALID_WORKFLOW_STATUS_CONDITION")
         return
     if "has_evidence" in condition or "sufficient" in condition:
         key = "has_evidence" if "has_evidence" in condition else "sufficient"
@@ -85,8 +89,11 @@ def validate_condition(condition, *, depth=0):
             condition.get("op", "EQ") in ("EQ", "NE", "EXISTS", "GT", "GE", "LT", "LE"),
             "WORKFLOW_CONDITION_FIELD_OR_OPERATOR")
     if condition.get("op", "EQ") != "EXISTS":
+        require("value" in condition, "WORKFLOW_CONDITION_VALUE_REQUIRED")
         value = condition.get("value")
         require(value is None or type(value) in (str, bool, int, float), "WORKFLOW_CONDITION_SCALAR_REQUIRED")
+        if type(value) is float:
+            require(math.isfinite(value), "WORKFLOW_NONFINITE_NUMBER")
         if condition.get("op") in ("GT", "GE", "LT", "LE"):
             number(value, -1e18, 1e18, "WORKFLOW_NUMERIC_CONDITION_REQUIRED")
 
@@ -94,6 +101,8 @@ def validate_condition(condition, *, depth=0):
 def evaluate_condition(condition, receipt):
     """Three-valued conditions: absent evidence never becomes truthy success."""
     validate_condition(condition)
+    if type(receipt) is not dict:
+        return None
     if "all" in condition or "any" in condition:
         key = "all" if "all" in condition else "any"
         values = [evaluate_condition(item, receipt) for item in condition[key]]
@@ -104,13 +113,18 @@ def evaluate_condition(condition, receipt):
         return None if type(receipt.get("status")) is not str else receipt["status"] == condition["status"]
     if "has_evidence" in condition:
         references = receipt.get("result_references")
-        verified = receipt.get("source", {}).get("verified") is True
-        useful = (type(references) is list and any(type(row) is dict and row.get("kind") not in (None, "operation")
-                                                 for row in references))
+        source = receipt.get("source")
+        if type(references) is not list or any(type(row) is not dict or
+                type(row.get("kind")) is not str or not row["kind"] for row in references):
+            return None
+        verified = type(source) is dict and source.get("verified") is True
+        useful = any(row["kind"] != "operation" for row in references)
         observed = useful if verified and receipt.get("execution_started") is True else None
         return None if observed is None else observed is condition["has_evidence"]
     if "sufficient" in condition:
         coverage = receipt.get("coverage", {})
+        if type(coverage) is not dict:
+            return None
         completeness = coverage.get("completeness", coverage.get("evidence_completeness"))
         if completeness not in ("REPORTED_COMPLETE_FOR_REQUEST", "COMPLETE", "PARTIAL", "INCOMPLETE_EVIDENCE"):
             return None
@@ -124,6 +138,8 @@ def evaluate_condition(condition, receipt):
     if condition.get("op") == "EXISTS":
         return value is not None
     if value is None:
+        return None
+    if type(value) not in (str, bool, int, float) or type(value) is float and not math.isfinite(value):
         return None
     expected = condition.get("value")
     if condition.get("op") in ("GT", "GE", "LT", "LE"):
@@ -148,6 +164,7 @@ def validate_workflow(definition, catalog, *, runtime=None):
         result["effective_profile"] = profile
         indexed = {node.node_id: node for node in definition.nodes}
         require(len(indexed) == len(definition.nodes), "WORKFLOW_DUPLICATE_NODE_ID")
+        require(all(key in indexed for key in profile["allowed_node_ids"]), "WORKFLOW_PROFILE_NODE_MISSING")
         require(len({edge.edge_id for edge in definition.edges}) == len(definition.edges), "WORKFLOW_DUPLICATE_EDGE_ID")
         degrees = {key: 0 for key in indexed}
         children, incoming, unique = {key: [] for key in indexed}, {}, set()
@@ -158,6 +175,8 @@ def validate_workflow(definition, catalog, *, runtime=None):
             target = get_ports(indexed[edge.target_node], catalog)[0]
             require(edge.source_port in source and edge.target_port in target, "WORKFLOW_PORT_MISSING")
             require(set(source[edge.source_port].types) <= set(target[edge.target_port].types), "WORKFLOW_PORT_TYPE_MISMATCH")
+            require(not source[edge.source_port].many or target[edge.target_port].many,
+                    "WORKFLOW_PORT_CARDINALITY_MISMATCH")
             endpoint = (edge.source_node, edge.source_port, edge.target_node, edge.target_port)
             require(endpoint not in unique, "WORKFLOW_DUPLICATE_CONNECTION")
             unique.add(endpoint)
@@ -184,12 +203,18 @@ def validate_workflow(definition, catalog, *, runtime=None):
                 if type(cap) in (int, float):
                     require(node.budget_seconds <= cap, "WORKFLOW_EXISTING_TOOL_BUDGET_EXCEEDED", node_id=node.node_id)
                 if node.tool_id == "load_source" and parameters.get("path"):
-                    require(Path(parameters["path"]).exists(), "WORKFLOW_SOURCE_MISSING", node_id=node.node_id)
+                    from .session_v2 import safe_path
+                    path = safe_path(Path(parameters["path"]))
+                    require(path.exists(), "WORKFLOW_SOURCE_MISSING", node_id=node.node_id)
+                    require(path.is_file() or parameters.get("kind")=="SESSION" and path.is_dir(),
+                            "WORKFLOW_SOURCE_TYPE_MISMATCH", node_id=node.node_id)
                 rights.add(adapter.descriptor.required_rights)
                 resources.update(adapter.resources)
                 if adapter.confirmation_required:
                     result["warnings"].append({"node_id": node.node_id, "code": "FRESH_RUNTIME_CONFIRMATION_REQUIRED"})
             elif node.kind == "CONDITION":
+                require("condition" not in node.parameters or set(node.parameters)=={"condition"},
+                        "INVALID_WORKFLOW_CONDITION_FIELDS", node_id=node.node_id)
                 validate_condition(node.parameters.get("condition", node.parameters or {"status": "COMPLETED"}))
             elif node.kind == "JOIN":
                 require(set(node.parameters) <= {"mode", "allow_partial"} and
@@ -220,7 +245,7 @@ def validate_workflow(definition, catalog, *, runtime=None):
                 "measured_duration": None, "global_seconds": profile["max_seconds"],
                 "max_workers": profile["max_workers"], "max_invocations": invocations,
                 "note": "DECLARATIONS_NOT_OBSERVED_EXECUTION_TIME_OR_HARD_OS_COMPLETION_GUARANTEE"})
-    except (WorkflowError, ValueError, TypeError, KeyError, AttributeError, OSError) as error:
+    except (WorkflowError, ValueError, TypeError, KeyError, AttributeError, OSError, OverflowError, RecursionError) as error:
         result["errors"].append({"node_id": getattr(error, "node_id", None),
             "code": getattr(error, "code", "WORKFLOW_INVALID_DEFINITION_OR_SOURCE")})
     return result

@@ -18,7 +18,7 @@ import stat
 import tempfile
 from urllib import error, request
 from urllib.parse import quote
-import zipfile
+from blackbox_core.archive_policy import bounded_zip
 
 from . import __version__
 
@@ -172,7 +172,8 @@ def _extract_release(zip_path: Path, dest: Path) -> Path:
     # symlink planted between staging and extraction by another actor.
     if root.exists() or root.is_symlink():
         raise ValueError("STAGING_NOT_EMPTY")
-    with zipfile.ZipFile(zip_path) as archive:
+    with bounded_zip(zip_path, max_members=MAX_MEMBERS,
+                     max_total_bytes=MAX_UNCOMPRESSED_BYTES) as archive:
         members = archive.infolist()
         if len(members) > MAX_MEMBERS:
             raise ValueError("RELEASE_TOO_MANY_FILES")

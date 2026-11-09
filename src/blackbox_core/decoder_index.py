@@ -108,6 +108,13 @@ def validate_event(row, expected):
                 len(frame["name"]) > 2048 or type(frame.get("address")) is not str or
                 len(frame["address"]) > 128):
             raise ValueError("INVALID_FRAME")
+    if "stack_status" in row and (type(row["stack_status"]) is not str or len(row["stack_status"])>512):
+        raise ValueError("INVALID_STACK_STATUS")
+    if "bounded" in row and type(row["bounded"]) is not bool:
+        raise ValueError("INVALID_EVENT_BOUNDED_FLAG")
+    if "errors" in row and (type(row["errors"]) is not list or len(row["errors"])>256 or
+            any(type(value) is not str or len(value)>512 for value in row["errors"])):
+        raise ValueError("INVALID_EVENT_ERRORS")
     validate_cpu_sample(row)
     validate_schedule_event(row)
     validate_io_observation(row)
@@ -203,7 +210,7 @@ class GCAdapter:
 
     def accept(self, row):
         sem = row.get("semantic")
-        if not sem:
+        if sem is None:
             return []
         if type(sem) is not dict:
             raise ValueError("INVALID_SEMANTIC_RECORD")
@@ -358,8 +365,14 @@ def build_index(source, output, *, input_sha256, format_name, cancel=None,
             or format_name not in (".jsonl", ".etl", ".nettrace")):
         raise ValueError("INVALID_DECODER_SOURCE_IDENTITY")
     output = safe_path(output)
-    if output.exists() or output.is_symlink() or not output.parent.is_dir():
-        raise ValueError("INDEX_DESTINATION_MUST_BE_NEW")
+    def require_new_destination():
+        if not output.parent.is_dir():
+            raise ValueError("INDEX_DESTINATION_MUST_BE_NEW")
+        for suffix in ("","-wal","-shm","-journal"):
+            reserved = safe_path(Path(str(output)+suffix))
+            if reserved.exists() or reserved.is_symlink():
+                raise ValueError("INDEX_DESTINATION_MUST_BE_NEW")
+    require_new_destination()
     fd, part_name = tempfile.mkstemp(prefix=".decoder-building-", dir=output.parent)
     os.close(fd)
     part = Path(part_name)
@@ -510,6 +523,7 @@ def build_index(source, output, *, input_sha256, format_name, cancel=None,
         if before_publish is not None:
             before_publish()
         budget.check("PUBLISH")
+        require_new_destination()
         # Create-new atomically: unlike os.replace, never overwrite an existing file.
         os.link(part, output)
         return meta
@@ -552,6 +566,23 @@ def _saved_json(raw, *, summary=False):
 
 class _PageBytesLimit(ValueError):
     pass
+
+
+def require_index_tables(db, required):
+    required = set(required)
+    rows = db.execute("SELECT name,type,sql,rootpage FROM sqlite_schema WHERE name IN ("+
+                      ",".join("?" for _ in required)+")",tuple(required)).fetchall()
+    if (set(row[0] for row in rows)!=required or any(row[1]!="table" or type(row[2]) is not str or
+            type(row[3]) is not int or row[3]<=0 or
+            row[2].lstrip().upper().startswith("CREATE VIRTUAL") for row in rows)):
+        raise ValueError("INVALID_INDEX_TABLES")
+
+
+def read_index_summary(db):
+    row = db.execute("SELECT value FROM metadata WHERE key='summary'").fetchone()
+    if row is None:
+        raise ValueError("MISSING_INDEX_SUMMARY")
+    return _saved_json(row[0],summary=True)
 
 
 def read_index(path, *, after=0, mode="events", pid=0, limit=200, search=""):
@@ -618,23 +649,15 @@ def _read_index_page(path, *, after, mode, pid, limit, search, deadline):
                     "gc_profiles" if mode == "gc_summary" else "events"}
         # An imported view/virtual table must not masquerade as our ordinary
         # index tables. Only the selected mode is required for legacy readers.
-        tables = db.execute("SELECT name,type,sql FROM sqlite_schema WHERE name IN (" +
-                            ",".join("?" for _ in required) + ")", tuple(required)).fetchall()
-        if (set(row[0] for row in tables) != required or
-                any(row[1] != "table" or not isinstance(row[2], str) or
-                    row[2].lstrip().upper().startswith("CREATE VIRTUAL") for row in tables)):
-            raise ValueError("INVALID_INDEX_TABLES")
-        summary_row = db.execute("SELECT value FROM metadata WHERE key='summary'").fetchone()
-        if summary_row is None:
-            raise ValueError("MISSING_INDEX_SUMMARY")
-        summary = _saved_json(summary_row[0], summary=True)
+        require_index_tables(db,required)
+        summary = read_index_summary(db)
         if mode == "modules":
-            result = read_modules(db, after=after, pid=pid, limit=limit, search=search)
+            result = read_modules(db, after=after, pid=pid, limit=limit, search=search,max_events=summary['rows'])
             result["summary"] = summary
             return result
         if mode in ("cpu_stacks", "gc_summary"):
             result = read_profiles(db, mode=mode, after=after, pid=pid,
-                                   limit=limit, search=search)
+                                   limit=limit, search=search,max_events=summary['rows'])
             result["summary"] = summary
             return result
         table = "intervals" if mode == "gc" else "events"

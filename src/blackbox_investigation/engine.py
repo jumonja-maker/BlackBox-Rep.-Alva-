@@ -52,7 +52,7 @@ def analyze(samples: list[dict], *, markers: list[dict] | None = None, policy: P
             raise InvestigationError("INVALID_IDENTITY")
         creation = identity.get("creation_time")
         if creation is not None and (type(creation) not in (float, int) or creation <= 0 or
-                                     not math.isfinite(creation) or creation > 1e100):
+                                     creation > 1e100 or not math.isfinite(creation)):
             raise InvestigationError("INVALID_IDENTITY")
         # Do not trust or forward arbitrary keys (paths, usernames, commands, secrets).
         ident = {"pid": identity["pid"], "creation_time": creation}
@@ -171,7 +171,7 @@ def analyze(samples: list[dict], *, markers: list[dict] | None = None, policy: P
                          "source_stack": "NOT_OBSERVED", "etw": "NOT_OBSERVED", "wct": "NOT_OBSERVED"},
               "provenance": {"sample_source": "APP_SUPPLIED_UNAUTHENTICATED", "os_proof": "NOT_ATTESTED",
                              "digest_is_attestation": False, "input_contract_version": 2,
-                             "pid_creation_verified": ident is not None and ident["creation_time"] is not None},
+                             "pid_creation_verified": False},
               "warnings": (["NO_OBSERVATIONS"] if not rows else []) +
                           (["FINDING_LIMIT_REACHED"] if truncated else []) +
                           (["UNSAMPLED_USER_MARKER"] if any(
@@ -206,7 +206,8 @@ def compare_reports(first: dict, second: dict) -> dict:
             if type(metric["count"]) is not int or metric["count"] < 0:
                 raise InvestigationError("INVALID_COMPARISON")
             mid = metric["median"]
-            if mid is not None and (type(mid) not in (int, float) or not math.isfinite(mid) or mid < 0):
+            if mid is not None and (type(mid) not in (int, float) or mid < 0 or
+                                    mid > 1e100 or not math.isfinite(mid)):
                 raise InvestigationError("INVALID_COMPARISON")
             if (metric["count"] == 0) != (mid is None):
                 raise InvestigationError("INVALID_COMPARISON")

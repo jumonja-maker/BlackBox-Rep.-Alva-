@@ -8,10 +8,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import json
+import math
 import os
 from pathlib import Path
 import sqlite3
 import time
+import threading
+from types import SimpleNamespace
 from typing import Callable
 from uuid import uuid4
 
@@ -121,11 +124,12 @@ def _verify(artifact, ctx):
     return verify_artifact(artifact, cancel=ctx.cancel, deadline=ctx.deadline, owner_run_id=ctx.run_id)
 
 
-def _file(kind, path, *, metadata=None, sources=(), coverage=None, clocks=()):
+def _file(kind, path, *, metadata=None, sources=(), coverage=None, clocks=(), ctx=None):
     from .chain_io import make_file_artifact
     return make_file_artifact(kind, path, metadata=metadata, sources=sources,
                               coverage=coverage or {"evidence_completeness": "UNKNOWN"},
-                              clock_domains=clocks)
+                              clock_domains=clocks, cancel=ctx.cancel if ctx is not None else None,
+                              deadline=ctx.deadline if ctx is not None else None)
 
 
 def _output(ctx, name):
@@ -284,7 +288,7 @@ def _case_artifact(ctx, case, path, *, upstream=()):
     domains = tuple(sorted({str(row["time_domain"]) for row in case.get("nodes", []) if row.get("time_domain")}))
     return _file("CASE", path, metadata={"case_id": case["case_id"], "schema": case["schema"],
                  "upstream_artifacts": _links(upstream)},
-                 sources=tuple(case.get("sources", [])), coverage=case.get("coverage", {}), clocks=domains)
+                 sources=tuple(case.get("sources", [])), coverage=case.get("coverage", {}), clocks=domains, ctx=ctx)
 
 
 def _source_specs(artifacts):
@@ -339,7 +343,7 @@ def _load_case(ctx, artifact):
 def _load_source(ctx, inputs, parameters):
     kind = parameters["kind"]
     require(kind in _SOURCE_KINDS, "WORKFLOW_UNSUPPORTED_SOURCE_KIND")
-    artifact = _file(kind, parameters["path"], metadata={"selection": parameters.get("selection", {})})
+    artifact = _file(kind, parameters["path"], metadata={"selection": parameters.get("selection", {})}, ctx=ctx)
     from dataclasses import replace
     artifact = replace(artifact, sources=({"source_id": artifact.value["sha256"], "kind": kind,
         "verification": "UNVERIFIED_IMPORT", "identity_scope": "REFERENCED_BYTE_FINGERPRINT_NOT_PRODUCER_AUTHENTICATION"},))
@@ -405,8 +409,60 @@ def _direct_observe(owner, identity, policy, duration, ctx):
     return {"folder": (started or {}).get("folder") or str(session.probe.session_folder),
             "start_result": started, "stop_result": stopped, "snapshot": snapshot,
             "execution_status": ("CANCELLED" if ctx.cancel.is_set() or isinstance(failure, InterruptedError) else
-                "TIMED_OUT" if isinstance(failure, TimeoutError) else "OPERATION_FAILED" if failure else None),
+                "TIMED_OUT" if isinstance(failure, TimeoutError) or time.monotonic() >= ctx.deadline else
+                "OPERATION_FAILED" if failure else None),
             "reason_code": (getattr(failure, "code", type(failure).__name__) if failure else None)}
+
+
+def _recording_binding(folder, persisted, snapshot, identity, readback):
+    """Compare recorded identities, never turn float birth time into FILETIME."""
+    from .session_view import SessionView
+    expected_birth=(identity.created_100ns-116444736000000000)/10_000_000
+    require(expected_birth>0, "WORKFLOW_RECORDED_TARGET_BIRTH_REQUIRED")
+    tolerances=[]
+    def match(pid,created):
+        require(type(pid) is int and pid==identity.pid, "WORKFLOW_RECORDED_TARGET_IDENTITY_MISMATCH")
+        try:known=type(created) in (int,float) and created>0 and math.isfinite(created)
+        except OverflowError:known=False
+        require(known, "WORKFLOW_RECORDED_TARGET_BIRTH_REQUIRED")
+        tolerance=max(.000001,4*math.ulp(created),4*math.ulp(expected_birth))
+        require(abs(created-expected_birth)<=tolerance, "WORKFLOW_RECORDED_TARGET_IDENTITY_MISMATCH")
+        tolerances.append(tolerance)
+    target=persisted.get("target")
+    require(type(target) is dict, "WORKFLOW_RECORDED_TARGET_IDENTITY_REQUIRED")
+    match(target.get("pid"),target.get("created"))
+    observed=snapshot.get("observed_process")
+    require(type(observed) is dict, "WORKFLOW_RECORDED_TARGET_SNAPSHOT_REQUIRED")
+    match(observed.get("pid"),snapshot.get("pid_creation_time"))
+    if "pid" in snapshot:
+        require(type(snapshot["pid"]) is int and snapshot["pid"]==identity.pid,
+                "WORKFLOW_RECORDED_TARGET_IDENTITY_MISMATCH")
+    require(type(snapshot.get("session_folder")) is str and
+            Path(snapshot["session_folder"]).absolute()==folder.absolute(),
+            "WORKFLOW_RECORDED_SESSION_SNAPSHOT_MISMATCH")
+    remaining=readback.deadline-time.monotonic()
+    require(remaining>0, "WORKFLOW_RECORDING_REFERENCE_DEADLINE")
+    with SessionView.open(folder,cancel=readback.cancel.is_set,timeout_s=remaining) as view:
+        require(view.is_v2, "WORKFLOW_RECORDED_TARGET_BIRTH_REQUIRED")
+        match(view.metadata.get("pid"),view.metadata.get("creation_time"))
+        recorded={"pid":view.metadata["pid"],"created_unix_seconds":view.metadata["creation_time"]}
+    experiment=persisted.get("experiment")
+    run=experiment.get("run_identity") if type(experiment) is dict else None
+    exact=run.get("process_identity") if type(run) is dict else None
+    mode="RECORDED_PID_AND_FLOAT_BIRTH_COMPATIBLE_NOT_EXACT_FILETIME"
+    if type(run) is dict and (run.get("identity_status")=="OS_OBSERVED_EXACT_FILETIME" or
+                             type(exact) is dict and "created_100ns" in exact):
+        require(type(exact) is dict and type(exact.get("pid")) is int and exact["pid"]==identity.pid and
+                type(exact.get("created_100ns")) is int and exact["created_100ns"]==identity.created_100ns,
+                "WORKFLOW_RECORDED_TARGET_IDENTITY_MISMATCH")
+        recorded["created_100ns"]=exact["created_100ns"]
+        mode="RECORDED_EXACT_FILETIME_FIELDS_MATCH_SOURCE_NOT_AUTHENTICATED"
+    elif type(exact) is dict and "created_unix_seconds" in exact:
+        match(exact.get("pid"),exact["created_unix_seconds"])
+    return {"requested_target":{"pid":identity.pid,"created_100ns":identity.created_100ns},
+        "recorded_target":recorded,"comparison":mode,
+        "float_birth_tolerance_seconds":max(tolerances),"producer_authentication":"NOT_ESTABLISHED",
+        "float_birth_precision":"UNIX_FLOAT_SECONDS_CANNOT_ATTEST_EXACT_WINDOWS_FILETIME"}
 
 
 def _observe(runtime):
@@ -422,9 +478,7 @@ def _observe(runtime):
                 "WORKFLOW_RECORDING_RESULT_REFERENCE_REQUIRED")
         folder = Path(packet["folder"])
         stopped, snapshot = packet.get("stop_result", {}), packet.get("snapshot", {})
-        persisted = context(folder)
-        capture_health = persisted.get("capture_health")
-        capture_health = capture_health if type(capture_health) is dict else {}
+        require(type(stopped) is dict and type(snapshot) is dict, "WORKFLOW_RECORDING_FINALIZATION_RESULT_REQUIRED")
         # ResearchSession returns the ReadOnlyProbe snapshot contract. The GUI
         # adds an `active` convenience key, but headless recording owners do
         # not. Require the authoritative field in both paths; a stale GUI key
@@ -437,23 +491,52 @@ def _observe(runtime):
             "stop_errors_count": len(stopped_errors) if type(stopped_errors) is list else None,
             "observation_active_at_export": observed_boolean(snapshot.get("observation_active_at_export")),
             "gui_active": observed_boolean(snapshot.get("active")),
-            "persisted_recording_resources_closed": observed_boolean(capture_health.get("recording_resources_closed")),
+            "persisted_recording_resources_closed": None,
         }
-        confirmed = (stopped.get("cleanup_required") is False and type(stopped_errors) is list and
+        stop_confirmed = (stopped.get("cleanup_required") is False and type(stopped_errors) is list and
             not stopped_errors and snapshot.get("observation_active_at_export") is False and
-            ("active" not in snapshot or snapshot["active"] is False) and
-            capture_health.get("recording_resources_closed") is True)
+            ("active" not in snapshot or snapshot["active"] is False))
         status = packet.get("execution_status") or stopped.get("state", "FINALIZATION_UNCONFIRMED")
+        # Stop must finish even after execution cancellation. Its subsequent
+        # evidence readback has a separate finite read-only budget; it cannot
+        # start or restart any recorder/native action, or claim that this I/O
+        # completed within the original execution deadline.
+        separate=ctx.cancel.is_set() or time.monotonic()>=ctx.deadline
+        if separate and status in ("COMPLETED","STOPPED","CLOSED","READY"):
+            status="CANCELLED" if ctx.cancel.is_set() else "TIMED_OUT"
+        readback=SimpleNamespace(cancel=threading.Event() if separate else ctx.cancel,
+            deadline=time.monotonic()+5 if separate else min(ctx.deadline,time.monotonic()+5))
+        started=packet.get("start_result")
+        start_ack_bound=(type(started) is dict and type(started.get("folder")) is str and
+                         Path(started["folder"]).absolute()==folder.absolute())
+        confirmed=False;references={};failure=None;binding=None
+        try:
+            persisted=context(folder)
+            capture_health=persisted.get("capture_health")
+            capture_health=capture_health if type(capture_health) is dict else {}
+            finalization["persisted_recording_resources_closed"]=observed_boolean(capture_health.get("recording_resources_closed"))
+            confirmed=stop_confirmed and capture_health.get("recording_resources_closed") is True
+            if not confirmed:status="RECOVERY_UNCONFIRMED"
+            if started is not None:
+                require(start_ack_bound,"WORKFLOW_RECORDED_SESSION_START_ACK_MISMATCH")
+            binding=_recording_binding(folder,persisted,snapshot,identity,readback)
+            artifact=_file("SESSION",folder,metadata={"recording_state":status,**binding},
+                coverage={"evidence_completeness":"UNKNOWN_CAPTURE_COMPLETENESS","recording_state":status},ctx=readback)
+            references["session"]=artifact
+        except Exception as error:
+            failure="WORKFLOW_RECORDING_REFERENCE_FAILED:"+str(getattr(error,"code",None) or str(error) or type(error).__name__)[:200]
+            if status not in ("CANCELLED","TIMED_OUT"):
+                status="CANCELLED" if isinstance(error,InterruptedError) else "TIMED_OUT" if isinstance(error,TimeoutError) else "OPERATION_FAILED"
         if not confirmed:
             status = "RECOVERY_UNCONFIRMED"
-        artifact = _file("SESSION", folder, metadata={"recording_state": status,
-            "recorded_target": identity.to_dict()}, coverage={"evidence_completeness": "UNKNOWN_CAPTURE_COMPLETENESS",
-                "recording_state": status})
-        return NodeOutcome(status, {"session": artifact}, cleanup={"status": "CONFIRMED" if confirmed else
+        return NodeOutcome(status, references, cleanup={"status": "CONFIRMED" if confirmed else
             "RECOVERY_UNCONFIRMED", "confirmed": confirmed, "owner_retained": not confirmed,
             "scope": "EXISTING_RESEARCH_RECORDING_OWNER_FINALIZATION", "stop_result": stopped,
-            "recording_finalization": finalization},
-            execution_started=packet.get("start_result") is not None, reason_code=packet.get("reason_code"))
+            "recording_finalization": finalization,"completion_evidence_readback":{
+                "max_seconds":5,"separate_from_execution_deadline":separate,"collection_allowed":False,
+                "status":"REFERENCE_AVAILABLE" if references else "REFERENCE_UNAVAILABLE"}},
+            execution_started=True if start_ack_bound else None,
+            reason_code=failure or packet.get("reason_code"))
     return execute
 
 
@@ -478,7 +561,7 @@ def _decode(ctx, inputs, parameters):
             "selection": selection, "upstream_artifacts": _links((inputs["trace"],))},
             sources=tuple(answer.get("run_receipt", {}).get("source", {}).get("sources", ())),
             coverage=answer.get("run_receipt", {}).get("coverage", {}),
-            clocks=("TRACE_RECORDED:" + str(answer.get("input_sha256")),))
+            clocks=("TRACE_RECORDED:" + str(answer.get("input_sha256")),), ctx=ctx)
         return {"index": artifact}
     return _materialize_result(answer, outputs)
 
@@ -507,7 +590,7 @@ def _critical_path(ctx, inputs, parameters):
     path = _save_metadata(ctx, report, "critical-path")
     output = _file("REPORT", path, metadata={"report_type": "CRITICAL_PATH", "_case_path": str(_path(artifact)),
                    "upstream_artifacts": _links((artifact,))},
-                   sources=artifact.sources, coverage=artifact.coverage, clocks=artifact.clock_domains)
+                   sources=artifact.sources, coverage=artifact.coverage, clocks=artifact.clock_domains, ctx=ctx)
     return NodeOutcome(report.get("status", "COMPLETED"), {"report": output, "case": artifact},
                        cleanup=dict(_CLEAN_FILES), execution_started=True)
 
@@ -526,7 +609,7 @@ def _trace_analysis(kind):
         output = _file("REPORT", path, metadata={"report_type": kind.upper(), "_index_path": str(_path(index)),
                        "upstream_artifacts": _links((index,))},
                        sources=index.sources, coverage={**index.coverage, "analysis_status": report.get("status")},
-                       clocks=index.clock_domains)
+                       clocks=index.clock_domains, ctx=ctx)
         return NodeOutcome(report.get("status", "COMPLETED"), {"report": output, "index": index},
                            cleanup=dict(_CLEAN_FILES), execution_started=True)
     return execute
@@ -558,7 +641,7 @@ def _incident(ctx, inputs, parameters):
         "_session_path": str(_path(session)), "selection": selected,
         "upstream_artifacts": _links((session,))}, sources=session.sources,
         coverage={**session.coverage, "post_context_complete": report.get("post_context_complete")},
-        clocks=session.clock_domains)
+        clocks=session.clock_domains, ctx=ctx)
     case, graph = _make_case(ctx, (artifact,))
     return _receipt_outcome(case, {"incident": artifact, "case": graph})
 
@@ -580,7 +663,7 @@ def _compare(ctx, inputs, parameters):
         "comparison_status": answer.get("comparison_status", answer.get("status", "UNKNOWN")),
         "upstream_artifacts": _links((first, second))},
         sources=_sources((first, second)), coverage={"completeness": "UNKNOWN", "causal_link_proven": False},
-        clocks=_clocks((first, second)))
+        clocks=_clocks((first, second)), ctx=ctx)
     if "run_receipt" in answer:
         return _receipt_outcome(answer, {"comparison": artifact})
     return NodeOutcome("COMPLETED", {"comparison": artifact}, cleanup=dict(_CLEAN_FILES), execution_started=True)
@@ -613,7 +696,7 @@ def _export_report(ctx, inputs, parameters):
     def outputs():
         artifact = _file("REPORT", path, metadata={"format": format_name,
             "readback_verified": answer.get("readback_verified"), "upstream_artifacts": _links((source,))},
-            sources=source.sources, coverage=source.coverage, clocks=source.clock_domains)
+            sources=source.sources, coverage=source.coverage, clocks=source.clock_domains, ctx=ctx)
         return {"report": artifact}
     outcome = _materialize_result(answer, outputs)
     if plain_analysis:
@@ -641,7 +724,15 @@ def _snapshot_journal(ctx, owner, answer):
             pass
         copy = sqlite3.connect(destination)
         original.backup(copy, pages=128, sleep=.01, progress=lambda *_: ctx.check())
-        require(copy.execute("PRAGMA integrity_check").fetchone() == ("ok",), "WORKFLOW_DEEP_SNAPSHOT_INTEGRITY")
+        ctx.check()
+        copy.set_progress_handler(lambda: int(ctx.cancel.is_set() or time.monotonic() >= ctx.deadline), 1000)
+        try:
+            integrity = copy.execute("PRAGMA integrity_check").fetchone()
+        except sqlite3.OperationalError:
+            ctx.check()
+            raise
+        ctx.check()
+        require(integrity == ("ok",), "WORKFLOW_DEEP_SNAPSHOT_INTEGRITY")
     finally:
         if copy is not None:
             copy.close()
@@ -705,7 +796,7 @@ def _deep(operation, runtime):
                     "selection": selection,
                     "journal_scope": "ACTION_PID_AND_RECORDED_TIME_FILTER; SNAPSHOTS_KEEP_RECORDED_IDENTITIES"},
                     sources=process.sources, coverage=receipt.get("coverage", {}),
-                    clocks=("NATIVE_CAPTURE:" + str(receipt.get("run_id")),))
+                    clocks=("NATIVE_CAPTURE:" + str(receipt.get("run_id")),), ctx=ctx)
             else:
                 # No sensitive result body crosses the workflow boundary. A
                 # receipt without its journal is usable for control only.
@@ -717,7 +808,7 @@ def _deep(operation, runtime):
             if destination and (answer.get("data") or {}).get("saved_verified") is True:
                 kind, port = ("DUMP", "dump") if operation == "dump" else ("TRACE", "trace")
                 references[port] = _file(kind, destination, metadata={"native_operation": operation},
-                    sources=process.sources, coverage=receipt.get("coverage", {}), clocks=process.clock_domains)
+                    sources=process.sources, coverage=receipt.get("coverage", {}), clocks=process.clock_domains, ctx=ctx)
             return references
         return _materialize_result(answer, outputs)
     return execute
