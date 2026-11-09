@@ -715,7 +715,7 @@ class ExpertNavigationTests(unittest.TestCase):
         self.app.processEvents()
         # A selected source may wrap across several lines. The controlled
         # reader keeps this presentation test independent of path access.
-        source = self.root / ("recorded-source-" * 12) / ("selected-source-" * 12)
+        source = self.root / ("recorded source " * 12).strip() / ("selected source " * 12).strip()
         window._load_session_interval(source)
         window._interval_worker.complete(recorded_interval(source))
         self.assertTrue(window.report_context.wordWrap())
@@ -734,10 +734,10 @@ class ExpertNavigationTests(unittest.TestCase):
             window.library_toggle.setChecked(expanded)
             window.library_panel.storage_toggle.setChecked(expanded)
             for language in ("EN", "RU", "EN"):
-                for width in (1440, 1020, 1280, 1440):
-                    with self.subTest(expanded=expanded, language=language, width=width):
+                for width, height in ((1440, 1000), (1020, 850), (1280, 850), (1440, 1000)):
+                    with self.subTest(expanded=expanded, language=language, width=width, height=height):
                         window._set_language(language)
-                        window.resize(width, 850)
+                        window.resize(width, height)
                         scroll = window.stack.currentWidget()
                         self.app.processEvents()
                         scroll.verticalScrollBar().setValue(0)
@@ -746,6 +746,8 @@ class ExpertNavigationTests(unittest.TestCase):
                         for panel in (window.research_panel, window.library_panel):
                             if panel.isVisible():
                                 self.assertLessEqual(panel.width(), available)
+                        self.assertGreaterEqual(workspace.minimumHeight(),
+                                                workspace.layout().totalHeightForWidth(workspace.width()))
                         self.assertGreaterEqual(window.report_context.height(),
                                                 window.report_context.heightForWidth(window.report_context.width()))
                         self.assertGreaterEqual(len({button.y() for button in buttons}), 2)
@@ -760,6 +762,48 @@ class ExpertNavigationTests(unittest.TestCase):
                             for other in buttons[index + 1:]:
                                 self.assertFalse(button.geometry().intersects(other.geometry()),
                                                  (button.text(), other.text()))
+
+        # Text changes can alter the required height without a resize. The
+        # current source determines the floor; a previous long path must not
+        # leave a permanently enlarged workspace after selecting a shorter one.
+        window._set_language("EN")
+        window.resize(1020, 850)
+        self.app.processEvents()
+        long_height = workspace.minimumHeight()
+        window._load_session_interval(self.source_a)
+        window._interval_worker.complete(recorded_interval(self.source_a))
+        self.app.processEvents()
+        self.app.processEvents()
+        self.assertLess(workspace.minimumHeight(), long_height)
+        short_height = workspace.minimumHeight()
+        self.assertGreaterEqual(workspace.minimumHeight(),
+                                workspace.layout().totalHeightForWidth(workspace.width()))
+        self.assertGreaterEqual(window.report_context.height(),
+                                window.report_context.heightForWidth(window.report_context.width()))
+        for button in buttons:
+            self.assertTrue(workspace.rect().contains(button.geometry()))
+        window._load_session_interval(source)
+        window._interval_worker.complete(recorded_interval(source))
+        self.app.processEvents()
+        self.app.processEvents()
+        self.assertGreater(workspace.minimumHeight(), short_height)
+        original_style = window.report_context.styleSheet()
+        original_height = workspace.minimumHeight()
+        window.report_context.setStyleSheet("font-size: 20px;")
+        self.app.processEvents()
+        self.app.processEvents()
+        enlarged_height = workspace.minimumHeight()
+        self.assertGreater(enlarged_height, original_height)
+        self.assertGreaterEqual(window.report_context.height(),
+                                window.report_context.heightForWidth(window.report_context.width()))
+        self.assertGreaterEqual(workspace.minimumHeight(),
+                                workspace.layout().totalHeightForWidth(workspace.width()))
+        window.report_context.setStyleSheet(original_style)
+        self.app.processEvents()
+        self.app.processEvents()
+        self.assertLess(workspace.minimumHeight(), enlarged_height)
+        self.assertGreaterEqual(workspace.minimumHeight(),
+                                workspace.layout().totalHeightForWidth(workspace.width()))
 
     def test_modal_and_closing_shortcuts_cannot_change_page_or_review(self):
         window = self.window

@@ -23,7 +23,7 @@ from blackbox_investigation import InvestigationError
 from blackbox_core.contracts import ObserverError
 from blackbox_core.report import compare as compare_sessions
 from blackbox_core.sampling_health import BusyTickTracker
-from PySide6.QtCore import Qt, QTimer, QThread, Signal, QSettings, QUrl, QStandardPaths, QPoint
+from PySide6.QtCore import Qt, QTimer, QThread, Signal, QSettings, QUrl, QStandardPaths, QPoint, QEvent
 from PySide6.QtGui import QAction, QDesktopServices, QIcon, QKeySequence
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QSpinBox, QFileDialog, QFrame,
@@ -82,6 +82,41 @@ def _page() -> tuple[QWidget, QVBoxLayout]:
     content.setSpacing(17)
     content.setAlignment(Qt.AlignmentFlag.AlignTop)
     return widget, content
+
+
+class _AnalysisWorkspace(QFrame):
+    """Keep the complete wrapped caption and action rows in the scroll page.
+
+    The outer box layout can otherwise shrink this widget to its unconstrained
+    minimum, even though its nested layout requires more height at this width.
+    """
+
+    def _sync_minimum_height(self):
+        if getattr(self, "_syncing_height", False) or self.layout() is None:
+            return
+        layout = self.layout()
+        required = max(layout.totalMinimumSize().height(),
+                       layout.totalHeightForWidth(self.width()))
+        if required == self.minimumHeight():
+            return
+        self._syncing_height = True
+        try:
+            self.setMinimumHeight(required)
+        finally:
+            self._syncing_height = False
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._sync_minimum_height()
+
+    def event(self, event):
+        handled = super().event(event)
+        if event.type() in (QEvent.Type.LayoutRequest, QEvent.Type.FontChange,
+                            QEvent.Type.StyleChange, QEvent.Type.Show):
+            if event.type() in (QEvent.Type.FontChange, QEvent.Type.StyleChange) and self.layout() is not None:
+                self.layout().invalidate()
+            self._sync_minimum_height()
+        return handled
 
 
 class _UpdateWorker(QThread):
@@ -902,7 +937,7 @@ class UniversalWindow(QMainWindow):
             "actions": self.research_toggle,
             "technical": technical_toggle,
         }
-        workspace = QFrame()
+        workspace = _AnalysisWorkspace()
         workspace.setObjectName("expertAnalysisWorkspace")
         workspace_layout = QVBoxLayout(workspace)
         workspace_layout.setContentsMargins(0, 0, 0, 0)
