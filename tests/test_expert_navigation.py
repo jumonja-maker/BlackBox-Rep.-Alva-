@@ -13,6 +13,7 @@ from pathlib import Path
 import sys
 import tempfile
 import traceback
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -287,6 +288,66 @@ class ExpertNavigationTests(unittest.TestCase):
                 self.assertNotIn("TEST_ONLY_STALE_THREADS", window.thread_detail_status.text())
                 self.assertNotEqual(window.thread_detail_table.item(0, 0).text(), "1122")
 
+    def test_late_export_receipt_or_error_does_not_replace_new_source_child_or_range_summary(self):
+        window = self.window
+        receipt = {"manifest": str(self.root/"TEST_ONLY_EXPORT_A.manifest.json")}
+        for selection in ("folder", "child", "range"):
+            for error in ("", "TEST_ONLY_EXPORT_ERROR_A"):
+                with self.subTest(selection=selection, error=error):
+                    exported = self.load_recorded_a()["interval"]
+                    owner = SimpleNamespace(folder=self.source_a, options={
+                        "instance_id": 1, "interval": tuple(exported["selected_interval_ns"])})
+                    selected_folder = self.source_b if selection == "folder" else self.source_a
+                    selected_instance = 7 if selection == "child" else 1
+                    value = recorded_interval(selected_folder, instance=selected_instance)
+                    if selection == "range":
+                        value["interval"]["selected_interval_ns"] = [
+                            bound+100_000_000 for bound in exported["selected_interval_ns"]]
+                    with patch.object(window, "_interval_export_worker", owner):
+                        window._load_session_interval(selected_folder,
+                            value["interval"]["selected_interval_ns"], instance_id=selected_instance)
+                        window._interval_worker.complete(value)
+                        summary = window.interval_summary.text()
+                        window._session_export_ready(receipt if not error else None, error)
+                        self.assertEqual(window._interval_export_result,
+                                         {"error": error} if error else receipt)
+                        self.assertEqual(window.interval_summary.text(), summary)
+
+    def test_export_receipts_stay_cached_without_overwriting_loading_or_queued_context(self):
+        window = self.window
+        exported = self.load_recorded_a()["interval"]
+        owner = SimpleNamespace(folder=self.source_a, options={
+            "instance_id": 1, "interval": tuple(exported["selected_interval_ns"])})
+        receipt = {"manifest": str(self.root/"TEST_ONLY_EXPORT_A.manifest.json")}
+        with patch.object(window, "_interval_export_worker", owner):
+            window._load_session_interval(self.source_a)
+            reader = window._interval_worker
+            summary = window.interval_summary.text()
+            window._session_export_ready(receipt, "")
+            self.assertIs(window._interval_export_result, receipt)
+            self.assertEqual(window.interval_summary.text(), summary)
+            window._load_session_interval(self.source_b)
+            queued_summary = window.interval_summary.text()
+            window._session_export_ready(None, "TEST_ONLY_EXPORT_ERROR_A")
+            self.assertEqual(window._interval_export_result, {"error": "TEST_ONLY_EXPORT_ERROR_A"})
+            self.assertEqual(window.interval_summary.text(), queued_summary)
+            reader.complete(recorded_interval(self.source_a))
+            window._interval_worker.complete(recorded_interval(self.source_b))
+
+    def test_matching_export_receipt_and_error_update_current_summary_and_remain_cached(self):
+        window = self.window
+        exported = self.load_recorded_a()["interval"]
+        owner = SimpleNamespace(folder=self.source_a, options={
+            "instance_id": 1, "interval": tuple(exported["selected_interval_ns"])})
+        receipt = {"manifest": str(self.root/"TEST_ONLY_CURRENT_EXPORT.manifest.json")}
+        with patch.object(window, "_interval_export_worker", owner):
+            window._session_export_ready(receipt, "")
+            self.assertIs(window._interval_export_result, receipt)
+            self.assertIn(receipt["manifest"], window.interval_summary.text())
+            window._session_export_ready(None, "TEST_ONLY_CURRENT_EXPORT_ERROR")
+            self.assertEqual(window._interval_export_result, {"error": "TEST_ONLY_CURRENT_EXPORT_ERROR"})
+            self.assertIn("TEST_ONLY_CURRENT_EXPORT_ERROR", window.interval_summary.text())
+
     def test_comparison_survives_navigation_language_and_explicit_live_switch(self):
         window = self.window
         comparison = {"TEST_ONLY_COMPARISON": {"zero": 0, "unknown": None, "false": False}}
@@ -332,6 +393,37 @@ class ExpertNavigationTests(unittest.TestCase):
             window.last_comparison_button.click()
             self.assertEqual(json.loads(window.report_preview.toPlainText()), comparison)
             self.assertTrue(window.compare_sessions_button.isEnabled())
+        self.assertEqual(window.probe.pid, 98765)
+        self.assertFalse(window.probe.active)
+
+    def test_helper_exit_releases_loading_comparison_without_replacing_selected_live_snapshot(self):
+        window = self.window
+        window.probe.pid = 98765
+        snapshot = {"pid": 98765, "recent_samples": [], "recent_events": [],
+                    "TEST_ONLY_LIVE_AFTER_HELPER_EXIT": {"unknown": None, "zero": 0}}
+        for live_selected in (False, True):
+            with self.subTest(live_selected=live_selected), \
+                 patch.object(window, "_isolated", True), \
+                 patch.object(window.probe, "pending", False, create=True), \
+                 patch.object(window.probe, "send", create=True), \
+                 patch.object(window.probe, "snapshot", side_effect=lambda: deepcopy(snapshot)), \
+                 patch("blackbox_universal.window.QFileDialog.getExistingDirectory",
+                       side_effect=[str(self.source_a), str(self.source_b)]):
+                window._compare_sessions()
+                loading_text = window.report_preview.toPlainText()
+                self.assertFalse(window.compare_sessions_button.isEnabled())
+                if live_selected:
+                    window.live_snapshot_button.click()
+                    self.assertEqual(json.loads(window.report_preview.toPlainText()), snapshot)
+                window._research_terminated()
+                self.assertEqual(window._comparison_state, "failed")
+                self.assertIsNone(window._comparison_preview)
+                self.assertTrue(window.compare_sessions_button.isEnabled())
+                self.assertFalse(window.last_comparison_button.isEnabled())
+                if live_selected:
+                    self.assertEqual(json.loads(window.report_preview.toPlainText()), snapshot)
+                else:
+                    self.assertNotEqual(window.report_preview.toPlainText(), loading_text)
         self.assertEqual(window.probe.pid, 98765)
         self.assertFalse(window.probe.active)
 

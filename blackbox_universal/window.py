@@ -2121,6 +2121,28 @@ class UniversalWindow(QMainWindow):
 
     def _session_export_ready(self,packet,error):
         self._interval_export_result=packet if not error else {"error":error}
+        worker=self._interval_export_worker
+        selected=self._interval_packet
+        if (worker is None or self._interval_worker is not None
+                or self._interval_pending is not None or self._interval_read_error
+                or self._pending_close or not isinstance(selected,dict)):
+            return
+        interval=selected.get("interval")
+        if not isinstance(interval,dict):
+            return
+        options=worker.options
+        bounds=interval.get("selected_interval_ns")
+        exported_bounds=options.get("interval")
+        # The receipt belongs to the exporting selection. Keep it cached even
+        # after navigation, but do not replace another selection's summary.
+        if (selected.get("folder")!=str(self._interval_folder)
+                or str(worker.folder)!=str(self._interval_folder)
+                or interval.get("instance_id")!=self._interval_process
+                or options.get("instance_id")!=self._interval_process
+                or not isinstance(bounds,(tuple,list)) or len(bounds)!=2
+                or not isinstance(exported_bounds,(tuple,list)) or len(exported_bounds)!=2
+                or tuple(bounds)!=tuple(exported_bounds)):
+            return
         if error:
             self.interval_summary.setText(error+" · "+self._t("Source files were not changed."))
         else:
@@ -3039,6 +3061,11 @@ class UniversalWindow(QMainWindow):
         self._update_all()
 
     def _research_terminated(self) -> None:
+        if self._comparison_state == "loading":
+            self._comparison_state = "failed"
+            self._comparison_preview = None
+            self._update_report_preview()
+            self._refresh_expert_context()
         if self._pending_close:
             self._pending_close = False
             QTimer.singleShot(0, self.close)

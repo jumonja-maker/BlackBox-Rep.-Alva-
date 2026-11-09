@@ -58,9 +58,9 @@ Default session files are under `%USERPROFILE%\Documents\BLACK.BOX Universal\ses
 
 ### 5. Review a specific saved context
 
-After Stop/finalization, use **Open recording result** in Overview to open the most recent live recording as read-only saved evidence in Reports. This is an explicit action; stopping does not switch pages automatically. **Open Saved Session** chooses another recording without changing the live PID.
+After Stop/finalization, use **RESULT** in Overview or **Ctrl+Shift+R** to open the most recent live recording as read-only saved evidence in Reports. The tooltip/accessibility name is **Open recording result**. This is an explicit action; stopping does not switch pages automatically. **Open Saved Session** chooses another recording without changing the live PID.
 
-The compact Reports context shows the actual loaded folder and selected range. Its section controls navigate to the timeline, findings, library, capture actions and technical data within Reports. **Copy analysis context** copies context to the local clipboard without exporting or uploading it. The folder/context can be sensitive; review before sharing.
+The compact Reports context shows the actual loaded folder and selected range. Its section controls are **Timeline**, **Findings**, **Library**, **Actions / SDK** and **Snapshot / compare**; they navigate within Reports. **Copy analysis context** copies context to the local clipboard without exporting or uploading it. The folder/context can be sensitive; review before sharing.
 
 Before interpreting a finding, check:
 
@@ -74,7 +74,7 @@ Use the common timeline to select a range, zoom/pan and compare A/B positions. G
 
 ## Keyboard and evidence detail
 
-**Ctrl+1…6** navigates Overview, Processes, Event Log, Reports, Settings and Trace Decoder in that order. Decoder navigation applies when that page is present; the legacy five-page embedding keeps its existing page contract. **Ctrl+L** opens Processes and focuses the process search. These shortcuts navigate; they do not start a recording or diagnostic action.
+**Ctrl+1…6** navigates Overview, Processes, Event Log, Reports, Settings and Trace Decoder in that order. Decoder navigation applies when that page is present; the legacy five-page embedding keeps its existing page contract. **Ctrl+L** opens Processes and focuses the process search. **Ctrl+Shift+R** opens the latest stopped recording when finalization is complete. These shortcuts navigate; they do not start a recording or diagnostic action.
 
 Findings present a readable RU/EN summary and the measured facts/limits needed to assess it. Full technical evidence remains available through the technical view. A translated label or readable value does not change the source identity, trust, status or measurement meaning.
 
@@ -99,7 +99,9 @@ Keep the application/workload, process identity, profile, interval and relevant 
 
 The local library uses an index; search does not walk recording folders. Discovery of older folders is explicit. Open/compare/export and local comments are available; comments stay in the index, do not alter the recording and are omitted from share export.
 
-Use the export that matches the intended artifact: current JSON snapshot, selected interval, session/share copy, separate investigation JSON/HTML, decoder output, or diagnostic/chain history. These represent different scopes. Verify source identity, range and coverage in the result. Export does not upload anything.
+In **Snapshot / compare**, **Live snapshot** and **Last comparison** select separate labelled previews. The live snapshot/live JSON use the current observation source; **Latest recording HTML** uses the latest live recording folder. Opening a different saved session for analysis does not change these sources. A comparison names its own two folders and does not overwrite the saved-analysis context or live target.
+
+Use the export that matches the intended artifact: live observation JSON, selected saved interval, session/share copy, separate investigation JSON/HTML, decoder output, or diagnostic/chain history. These represent different scopes. Verify source identity, range and coverage in the result. Export does not upload anything.
 
 Default share export creates redacted copies and preserves originals. Raw traces/dumps require separate inclusion. Memory, ETL and free-text notes may contain secrets; known-field redaction cannot guarantee their removal. Review before sharing. Checksums prove byte identity, not trusted origin.
 

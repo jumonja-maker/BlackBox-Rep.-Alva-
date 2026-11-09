@@ -12,7 +12,7 @@ This document describes the cumulative v0.6.0 source/development candidate acros
 - **R40 — расследование аварий.** Сохранённые minidump, PE/PDB, стеки AMD64 и исходные строки там, где они доступны и проверены.
 - **R50 — инциденты и сравнения.** IncidentCapture, Standard и Incident Burst, сохранённые эксперименты и явные результаты COMPARABLE/NOT_COMPARABLE/INCONCLUSIVE.
 - **R60 — Chain Builder.** Управляемые пользователем диагностические цепочки с типизированными узлами, профилями, графом, условными ветками, контролем прав и ресурсов, сохранением/продолжением, отчётами и реальными адаптерами инструментов. Цепочки не запускаются автоматически при открытии.
-- **Рабочий процесс специалиста.** Явный переход «Открыть результат записи» после завершения; папка/диапазон открытого анализа и переходы к разделам в «Отчётах»; копирование контекста в локальный буфер; навигация Ctrl+1…6 и поиск Ctrl+L. Существующие инструменты и полные технические свидетельства сохранены.
+- **Рабочий процесс специалиста.** Явный переход «РЕЗУЛЬТАТ» («Открыть результат записи», Ctrl+Shift+R) после завершения; папка/диапазон открытого анализа и переходы к разделам в «Отчётах»; копирование контекста в локальный буфер; навигация Ctrl+1…6 и поиск Ctrl+L. Существующие инструменты и полные технические свидетельства сохранены.
 - **Только локальная работа и осознанный контроль.** Никакого скрытого сбора, обязательного облачного сервиса или автоматического вмешательства в выбранные процессы.
 
 ## English
@@ -23,7 +23,7 @@ This document describes the cumulative v0.6.0 source/development candidate acros
 - **R40:** Saved minidump, PE/PDB, AMD64 stack and bounded symbol/source-line analysis.
 - **R50:** IncidentCapture, structured comparisons and saved experiment evidence.
 - **R60:** Chain Builder: typed diagnostic DAG editor, real adapters to existing engines, profiles, guarded actions, bounded scheduling, checkpoint/recovery, export and independent read-back.
-- **Expert workflow patch:** Explicit post-recording result navigation, visible analysis folder/range, Reports section navigation, local context copy, Ctrl+1…6 page navigation and Ctrl+L process search. Existing tools and full technical evidence remain available.
+- **Expert workflow patch:** Explicit post-recording RESULT action (Open recording result, Ctrl+Shift+R), visible analysis folder/range, Reports section navigation, local context copy, Ctrl+1…6 page navigation and Ctrl+L process search. Existing tools and full technical evidence remain available.
 
 ## Intended package and verification gates
 
