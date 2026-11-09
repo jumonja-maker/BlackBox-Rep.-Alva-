@@ -101,8 +101,8 @@ class EvidencePanel(QWidget):
   if self.events and scope==0:scope_text=self.tr('All process instances','Все экземпляры процессов')
   elif type(scope) is int:scope_text=self.tr('Recorded instance ID ','ID записанного экземпляра ')+str(scope)
   else:scope_text=self.tr('not loaded / unknown','не загружен / неизвестен')
-  text=self.tr('Recording: ','Запись: ')+folder+'\n'+self.tr('Selected range: ','Выбранный интервал: ')+selected+'\n'+
-   self.tr('Event process scope: ' if self.events else 'Counter/thread scope: ','Процессы событий: ' if self.events else 'Процесс счётчиков и потоков: ')+scope_text
+  text=(self.tr('Recording: ','Запись: ')+folder+'\n'+self.tr('Selected range: ','Выбранный интервал: ')+selected+'\n'+
+   self.tr('Event process scope: ' if self.events else 'Counter/thread scope: ','Процессы событий: ' if self.events else 'Процесс счётчиков и потоков: ')+scope_text)
   if not self.events:text+='\n'+self.tr('Incidents, markers and source errors retain their source scope.','Инциденты, маркеры и ошибки источников сохраняют область своего источника.')
   self.source_context.setText(text)
  def clear_evidence(self):
