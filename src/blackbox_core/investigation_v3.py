@@ -6,6 +6,7 @@ Native experiments remain explicit steps through BB-DEEP-001.
 from __future__ import annotations
 
 from copy import deepcopy
+from dataclasses import replace
 import json
 from pathlib import Path
 from .investigation_graph_contracts import InvestigationError, canonical_json, stable_id, use_budget
@@ -17,6 +18,18 @@ def _context(value, name):
     if type(value) is not dict or len(canonical_json(value)) > 16384:
         raise InvestigationError("INVALID_INVESTIGATION_" + name)
     return value
+
+
+def _composed_graph_budget(budget):
+    """Bound the displayed graph before adding required path and run receipts.
+
+    A graph that consumes the entire caller result cap leaves no space for
+    source-linked critical-path and execution evidence. Preserve the caller's
+    source/event/node ceilings, cancellation and deadline. Only the derived
+    graph *view* receives the smaller byte ceiling; the builder reports every
+    dropped display node/edge and never edits original source facts.
+    """
+    return replace(budget, max_result_bytes=max(1024, budget.max_result_bytes * 2 // 3))
 
 
 def create_investigation(sources, *, target_identity=None, selection=None, scenario=None,
@@ -51,7 +64,7 @@ def _create_investigation(sources, *, target_identity=None, selection=None, scen
         normalized = normalize_sources(sources, selection=selected, budget=budget)
     with budget.stage("BUILD_GRAPH"):
         case = build_graph(normalized, target_identity=target_identity, scenario=scenario,
-                           app_identity=app_identity, budget=budget)
+                           app_identity=app_identity, budget=_composed_graph_budget(budget))
     # Each independent projection consumes the same validated base graph.
     # Passing previously derived displays to another algorithm only duplicates
     # metadata in its input budget; it supplies no additional recorded facts.
