@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="406" viewBox="0 0 1280 406" role="img" aria-labelledby="t d">
+<title id="t">BLACK.BOX R10: observation versus separately authorized diagnostic action</title>
+<desc id="d">Bilingual chart showing OBSERVE without UAC, and a separate explicitly consented Deep Inspection action through a time-bounded helper and receipt. A diagram, not a screenshot.</desc>
+<defs>
+<marker id="ar" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 Z" fill="#415c71"/></marker>
+<style>text{font-family:Segoe UI,Arial,sans-serif;fill:#253647} .title{font-size:24px;font-weight:800} .step{font-size:20px;font-weight:700} .small{font-size:15px;fill:#566d79} .cap{font-size:14px;fill:#5e6b76} .n{stroke:#5c7c8b;stroke-width:1.8;fill:#fffdfa} .ln{fill:none;stroke:#45697b;stroke-width:3;marker-end:url(#ar)}</style>
+</defs>
+<rect width="1279" height="405" x="0.5" y="0.5" rx="17" fill="#f7f2e8" stroke="#acc0be"/>
+<path d="M17 1 H1262 Q1279 1 1279 18 V86 H1 V18 Q1 1 17 1" fill="#0b8884"/>
+<text x="37" y="39" style="fill:#ffffff;font-size:24px;font-weight:800">R10 · НАБЛЮДЕНИЕ ≠ ВМЕШАТЕЛЬСТВО</text>
+<text x="37" y="65" style="fill:#d8f3ed;font-size:16px">OBSERVE is passive. Every Deep action requires fresh target-specific consent.</text>
+<rect x="35" y="115" width="128" height="34" rx="9" fill="#d7ebe4"/><text x="99" y="137" text-anchor="middle" style="font-size:15px;font-weight:700;fill:#267466">OBSERVE</text>
+<path class="ln" d="M290 169 H367"/><path class="ln" d="M657 169 H736"/>
+<rect class="n" x="171" y="127" width="119" height="85" rx="10"/><text class="step" x="186" y="158">PID</text><text class="small" x="186" y="183">+ start time</text>
+<rect class="n" x="367" y="127" width="290" height="85" rx="10"/><text class="step" x="383" y="160">Start → Stop</text><text class="small" x="383" y="186">Обычная запись / No UAC</text>
+<rect class="n" x="736" y="127" width="498" height="85" rx="10"/><text class="step" x="752" y="159">Saved session / Отчёт</text><text class="small" x="752" y="185">Local SQLite · JSON · HTML</text>
+<rect x="35" y="258" width="128" height="34" rx="9" fill="#f8ded0"/><text x="99" y="280" text-anchor="middle" style="font-size:15px;font-weight:700;fill:#a45b35">DEEP</text>
+<path class="ln" d="M293 310 H332"/><path class="ln" d="M567 310 H602"/><path class="ln" d="M862 310 H898"/>
+<rect class="n" x="171" y="269" width="122" height="85" rx="10"/><text class="step" x="186" y="304">Target</text><text class="small" x="186" y="327">PID + FILETIME</text>
+<rect class="n" x="332" y="269" width="235" height="85" rx="10"/><text class="step" x="348" y="302">Approve action</text><text class="small" x="348" y="328">Подтвердить отдельно</text>
+<rect class="n" x="602" y="269" width="260" height="85" rx="10"/><text class="step" x="618" y="302">Scoped Helper</text><text class="small" x="618" y="328">UAC when required · ≤900 s</text>
+<rect class="n" x="898" y="269" width="336" height="85" rx="10"/><text class="step" x="914" y="302">Receipt + cleanup</text><text class="small" x="914" y="328">Квитанция и очистка</text>
+<text x="39" y="384" class="cap">Учебная схема / Instructional diagram. No automatic UAC, no silent retries, unknown outcomes remain unknown.</text>
+</svg>
