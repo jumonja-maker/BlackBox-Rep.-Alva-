@@ -1058,7 +1058,7 @@ class ChainBuilderPanel(QWidget):
         self.palette.itemDoubleClicked.connect(lambda _: self.add_selected_tool())
         palette_layout.addWidget(self.palette)
         self.add_button = self._button("chainAddNode", "Add selected tool", "Добавить инструмент", self.add_selected_tool)
-        self.add_repeat = self._button("chainAddRepeat", "Add bounded repeat", "Добавить ограниченный повтор", lambda: self.add_selected_tool(repeat=True))
+        self.add_repeat = self._button("chainAddRepeat", "Add bounded repeat", "Добавить повтор", lambda: self.add_selected_tool(repeat=True))
         self.choose_process = self._button("chainChooseProcess", "Choose process…", "Выбрать процесс…", lambda: self.window._navigate("processes"))
         for button in (self.add_button, self.add_repeat, self.choose_process):
             palette_layout.addWidget(button)
@@ -1839,6 +1839,11 @@ class ChainBuilderPanel(QWidget):
         for widget, en, ru in self._tooltips:
             widget.setToolTip(self.tr2(en, ru))
             widget.setAccessibleName(self.tr2(en, ru))
+        repeat_help = self.tr2(
+            "Add the selected tool as a repeat bounded by count and time limits.",
+            "Добавить выбранный инструмент как повтор с ограничением числа выполнений и времени.")
+        self.add_repeat.setToolTip(repeat_help)
+        self.add_repeat.setAccessibleDescription(repeat_help)
         self.canvas.language = self.window.language
         self.canvas.setAccessibleDescription(self.navigation_hint.text())
         self.source_ids.setToolTip(self.tr2(
