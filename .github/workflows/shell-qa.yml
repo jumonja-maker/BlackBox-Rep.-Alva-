@@ -131,7 +131,7 @@ jobs:
   linux-tests:
     if: github.event_name != 'pull_request' || (github.head_ref != 'patch/bb-deep-001' && github.head_ref != 'patch/bb-inv-003')
     name: Linux compatibility check (independent of Windows release)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # The same full deep suite took 19m06s in exact-SHA acceptance.
     timeout-minutes: 40
     env:

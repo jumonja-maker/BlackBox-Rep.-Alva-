@@ -21,6 +21,8 @@ R60/base run conclusions завершены 9 ноября UTC; повторна
 
 Последний UI delta не меняет sampler, recording/native/helper/resource ownership или persisted scheduler. Поэтому применяется правило AGENTS.md: «No mandatory repeat of 5h30 unless actual recording/sampler/helper/resource ownership changes require it». Fresh exact-child source/frozen/portable и R60 technical-audit обязательны; technical-audit сам сохраняет lifecycle NOT_RUN/candidate NOT_ESTABLISHED и не становится full-R60 receipt. Итоговый external DOCX должен отдельно назвать accepted child SHA/tree, его свежие runs и f3 как фактически long-tested parent; полной long-приёмки child SHA здесь не заявлено.
 
+Первый UI child `9a25cc7` встретил отдельный infrastructure failure: `ubuntu-latest` сменился на Ubuntu26.04/image20261111.196.1, для которого `setup-python` не нашёл закреплённый Python3.11.14. Linux focused/full/R60 jobs отказали **до dependencies и tests**, без product/native verdict. Следующий CI-only delta закрепляет эти Linux jobs на `ubuntu-24.04`, сохраняя Python/locks/core. Его свежие exact-source результаты обязательны; прежние failures сохраняются историей. Два selection modes этого child — оба Windows (offscreen/native),6 contracts+5GUI cases каждый PASS, а не две разные ОС.
+
 ## Область и способ проверки
 
 Исходная задача — полноценный рабочий путь опытного пользователя: выбор процесса → запись → Stop → явное открытие результата → анализ сохранённого источника. В том же PR пользователь расширил задачу до технической инспекции программы, включая Chain Builder, Deep Inspection и Investigation Engine 2/3. Сохранены шесть production-страниц и прежний пятистраничный embedding API. Новые коллекторы, новые виды native-действий или обход подтверждений не добавлены.
