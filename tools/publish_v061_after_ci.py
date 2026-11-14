@@ -154,7 +154,10 @@ def authorize(client, repo, sha, upstream):
 
     prs = client(f"repos/{repo}/pulls?state=closed&head=jumonja-maker:{BRANCH}&per_page=100")
     require(isinstance(prs, list) and len(prs) == 1, "V061_RELEASE_PR_NOT_UNIQUE")
-    pr = prs[0]
+    listed = prs[0]
+    require(type(listed.get("number")) is int, "V061_RELEASE_PR_NUMBER_INVALID")
+    pr = client(f"repos/{repo}/pulls/{listed['number']}")
+    require(pr.get("number") == listed["number"], "V061_RELEASE_PR_DETAIL_CHANGED")
     require(type(pr.get("number")) is int and pr.get("merged_at") and
             pr.get("merge_commit_sha") == sha and pr.get("changed_files") == len(PR_FILES) and
             (pr.get("head") or {}).get("sha") == parents[1]["sha"] and
