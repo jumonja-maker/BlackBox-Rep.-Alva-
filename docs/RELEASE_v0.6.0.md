@@ -1,8 +1,8 @@
-# BLACK.BOX Universal v0.6.0 — UNPUBLISHED DEVELOPMENT CANDIDATE
+# BLACK.BOX Universal v0.6.0 — OFFICIAL PUBLIC RELEASE (2026-11-09)
 
-This document describes the cumulative v0.6.0 source/development candidate across R10–R60 and the expert workflow patch. It is not a published Release, a publication authorization or evidence that every acceptance gate below passed. The latest published GitHub Release verified for this patch is v0.5.4; no published v0.6.0 package was found. The intermediate v0.5.5 was not published. Candidate/source version numbers do not determine updater availability.
+This document describes the cumulative v0.6.0 source/development candidate across R10–R60 and the expert workflow patch. Official v0.6.0 was published November 9, 2026 from GitHub tag `v0.6.0`, source `b922491ffeb866d24e3948a2f27a88549e5ad9d7`, with the Windows ZIP and SHA-256 sidecar. The v0.5.5 intermediate was not published. These initial notes were written before release. PR #49 expert workflow changes entered main only later, and are NOT present in the public v0.6.0 ZIP. GitHub Releases remains authoritative.
 
-**Статус: неопубликованный кандидат разработки.** Ни список возможностей, ни план проверок ниже не подтверждают публикацию v0.6.0. Точные результаты текущего патча должны сопровождаться SHA и ссылками на фактический CI в отдельном отчёте; опубликованный комплект определяется только GitHub Releases.
+**Статус: официально опубликован 9 ноября 2026 года.** [Проверенный GitHub Release v0.6.0](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/releases/tag/v0.6.0), SHA `b922491ffeb866d24e3948a2f27a88549e5ad9d7`. Дальнейший экспертный патч PR #49 и кандидат v0.6.1 не входят в этот ZIP. Исторические QA-квитанции и ограничения сохраняют свои исходные SHA.
 
 ## Русский
 
