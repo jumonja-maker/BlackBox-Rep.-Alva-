@@ -392,7 +392,7 @@ jobs:
           if (-not (Test-Path "$output\INVESTIGATION-LICENSE.txt")) { throw 'Investigation license missing' }
           if (-not (Test-Path "$output\LICENSE")) { throw "Missing public application license" }
           if (-not (Test-Path "$output\README.ru.md")) { throw "Russian README missing from Windows release" }
-          Copy-Item -LiteralPath "docs\RELEASE_v0.6.0.md" -Destination "$output\RELEASE-NOTES.md" -Force
+          Copy-Item -LiteralPath "docs\RELEASE_v0.6.1.md" -Destination "$output\RELEASE-NOTES.md" -Force
           Copy-Item -LiteralPath "docs\R10_RU.md" -Destination "$output\R10-ADMIN-RU.md" -Force
           Copy-Item -LiteralPath "docs\specifications\R10.md" -Destination "$output\R10-SPECIFICATION.md" -Force
           Copy-Item docs/BB_INV_003_RU.md "$output/INVESTIGATION-ENGINE-3-RU.md" -Force
@@ -404,11 +404,11 @@ jobs:
         run: |
           Compress-Archive -LiteralPath "dist\BLACK.BOX-Universal" -DestinationPath "BLACK.BOX-Universal-Windows.zip" -Force
           if (-not (Test-Path "BLACK.BOX-Universal-Windows.zip")) { throw "ZIP missing" }
-      - name: Native official v0.5.4 to unpublished candidate update and full portable uninstall
+      - name: Native official v0.6.0 to unpublished v0.6.1 candidate update and full portable uninstall
         shell: pwsh
         timeout-minutes: 16
         run: |
-          python tools/qa_windows_maintenance_e2e.py --built-zip "BLACK.BOX-Universal-Windows.zip" --expected-sha "${{ github.event.pull_request.head.sha || github.sha }}" --evidence "portable-maintenance-e2e" --baseline-release v0.5.4
+          python tools/qa_windows_maintenance_e2e.py --built-zip "BLACK.BOX-Universal-Windows.zip" --expected-sha "${{ github.event.pull_request.head.sha || github.sha }}" --evidence "portable-maintenance-e2e" --baseline-release v0.6.0
           if ($LASTEXITCODE -ne 0) { throw 'Real portable update/uninstall acceptance failed' }
       - name: Verify final unpublished ZIP against exact source tree and complete binary inventory
         shell: pwsh
