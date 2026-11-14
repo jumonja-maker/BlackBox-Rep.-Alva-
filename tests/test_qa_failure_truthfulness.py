@@ -1,8 +1,11 @@
 """Cleanup and debugger success cannot erase an actual earlier QA failure."""
+from contextlib import contextmanager
 from pathlib import Path
 import sys
 import tempfile
+from types import ModuleType
 import unittest
+from unittest.mock import Mock
 
 from blackbox_universal.research_e2e import finalized_proof
 from tools.qa_linux_unit_gdb import UNIT_CODE, child_result, debugger_command
@@ -77,6 +80,73 @@ class LinuxNativeChildExitTruthfulnessTests(unittest.TestCase):
             self.assertTrue(Path(command[command.index('-x') + 1]).is_file())
             self.assertNotIn('-c', command)
             self.assertTrue(all('\n' not in argument for argument in command))
+
+
+class LinuxUnitDriverSafetyTests(unittest.TestCase):
+    @contextmanager
+    def controlled_driver(self, *, environment=None, main_failure=None):
+        events = []
+        faults = ModuleType('faulthandler')
+        faults.enable = Mock(side_effect=lambda **_kwargs: events.append('fatal_enabled'))
+        faults.dump_traceback_later = Mock(side_effect=AssertionError('PERIODIC_WATCHDOG_FORBIDDEN'))
+        faults.cancel_dump_traceback_later = Mock(side_effect=AssertionError('PERIODIC_WATCHDOG_FORBIDDEN'))
+        suite = ModuleType('unittest')
+
+        def main(*_args, **_kwargs):
+            events.append('full_suite_requested')
+            if main_failure is not None:
+                raise main_failure
+
+        suite.main = Mock(side_effect=main)
+        if environment is None:
+            environment = {'GITHUB_ACTIONS': 'true', 'RUNNER_ENVIRONMENT': 'github-hosted'}
+        runner = ModuleType('os')
+        runner.environ = dict(environment)
+        modules = {'faulthandler': faults, 'os': runner, 'unittest': suite}
+
+        def import_module(name, _globals=None, _locals=None, _fromlist=(), level=0):
+            if level or name not in modules:
+                raise AssertionError('UNEXPECTED_UNIT_DRIVER_IMPORT:' + name)
+            return modules[name]
+
+        namespace = {'__builtins__': {'__import__': import_module, 'SystemExit': SystemExit}}
+        yield namespace, events, faults, suite
+
+    def assert_driver_calls(self, events, faults, suite):
+        self.assertEqual(events, ['fatal_enabled', 'full_suite_requested'])
+        faults.enable.assert_called_once_with(all_threads=True)
+        faults.dump_traceback_later.assert_not_called()
+        faults.cancel_dump_traceback_later.assert_not_called()
+        suite.main.assert_called_once_with(module=None, argv=['unittest', 'discover', '-s', 'tests', '-v'])
+
+    def test_actual_unit_driver_keeps_fatal_reporting_and_exact_full_suite_without_watchdog(self):
+        with self.controlled_driver() as (namespace, events, faults, suite):
+            exec(UNIT_CODE, namespace)
+            self.assert_driver_calls(events, faults, suite)
+
+    def test_actual_unit_driver_rejects_non_hosted_execution_before_diagnostics_or_suite(self):
+        for environment in ({}, {'GITHUB_ACTIONS': 'true'}, {'RUNNER_ENVIRONMENT': 'github-hosted'},
+                            {'GITHUB_ACTIONS': 'false', 'RUNNER_ENVIRONMENT': 'github-hosted'},
+                            {'GITHUB_ACTIONS': 'true', 'RUNNER_ENVIRONMENT': 'self-hosted'}):
+            with self.subTest(environment=environment), \
+                    self.controlled_driver(environment=environment) as (namespace, events, faults, suite):
+                with self.assertRaises(SystemExit) as failure:
+                    exec(UNIT_CODE, namespace)
+                self.assertEqual(str(failure.exception), 'FULL_LINUX_UNIT_SUITE_REQUIRES_GITHUB_HOSTED_RUNNER')
+                self.assertEqual(events, [])
+                faults.enable.assert_not_called()
+                faults.dump_traceback_later.assert_not_called()
+                faults.cancel_dump_traceback_later.assert_not_called()
+                suite.main.assert_not_called()
+
+    def test_actual_unit_driver_propagates_suite_exit_and_python_failure(self):
+        for failure in (SystemExit(0), SystemExit(7), RuntimeError('CONTROLLED_SUITE_FAILURE')):
+            with self.subTest(failure=repr(failure)), \
+                    self.controlled_driver(main_failure=failure) as (namespace, events, faults, suite):
+                with self.assertRaises(type(failure)) as caught:
+                    exec(UNIT_CODE, namespace)
+                self.assertIs(caught.exception, failure)
+                self.assert_driver_calls(events, faults, suite)
 
 
 if __name__ == '__main__':

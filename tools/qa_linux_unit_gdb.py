@@ -17,11 +17,7 @@ UNIT_CODE = '''import faulthandler, os, unittest
 if os.environ.get('GITHUB_ACTIONS') != 'true' or os.environ.get('RUNNER_ENVIRONMENT') != 'github-hosted':
     raise SystemExit('FULL_LINUX_UNIT_SUITE_REQUIRES_GITHUB_HOSTED_RUNNER')
 faulthandler.enable(all_threads=True)
-faulthandler.dump_traceback_later(120, repeat=True)
-try:
-    unittest.main(module=None, argv=['unittest', 'discover', '-s', 'tests', '-v'])
-finally:
-    faulthandler.cancel_dump_traceback_later()
+unittest.main(module=None, argv=['unittest', 'discover', '-s', 'tests', '-v'])
 '''
 
 
@@ -141,8 +137,13 @@ def main(argv=None):
     identity = source_identity(args.source_sha)
     if identity.get('source_identity_status') != 'VERIFIED_EXPECTED_HEAD':
         raise SystemExit('FULL_LINUX_UNIT_SUITE_CHECKOUT_MISMATCH')
+    # The hosted full suite faulted in faulthandler_thread while periodically
+    # dumping live Python frames. Retain fatal reporting and GDB signal proof
+    # without starting that background diagnostic watchdog.
     print('LINUX_UNIT_GDB_BEGIN ' + json.dumps({'source_identity': identity,
-          'suite': "unittest discover -s tests -v", 'periodic_dump_seconds': 120,
+          'suite': "unittest discover -s tests -v", 'fatal_faulthandler_all_threads': True,
+          'periodic_dump_enabled': False, 'periodic_dump_seconds': None,
+          'periodic_dump_reason': 'DISABLED_AFTER_OBSERVED_WATCHDOG_SIGSEGV',
           'native_backtrace_frames_per_thread': 30}), flush=True)
     with tempfile.TemporaryDirectory(prefix='blackbox-linux-gdb-', dir=os.environ.get('RUNNER_TEMP')) as owned:
         command, result_path = debugger_command(owned, args.source_sha)
