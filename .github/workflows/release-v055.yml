@@ -18,7 +18,8 @@ jobs:
       github.event.workflow_run.conclusion == 'success' &&
       github.event.workflow_run.event == 'push' &&
       github.event.workflow_run.head_branch == 'main' &&
-      github.event.workflow_run.head_repository.full_name == github.repository
+      github.event.workflow_run.head_repository.full_name == github.repository &&
+      github.event.workflow_run.head_sha == 'b922491ffeb866d24e3948a2f27a88549e5ad9d7'
     runs-on: ubuntu-latest
     timeout-minutes: 8
     outputs:
@@ -33,6 +34,7 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          PYTHONPATH: 'src:.'
         run: python -m tools.publish_v055_after_ci --authorize-only
 
   package-and-release:

@@ -39,7 +39,7 @@ class ExpertFrozenModuleGateTests(unittest.TestCase):
 class ProductVersionProvenanceTests(unittest.TestCase):
     def test_core_gui_project_installed_package_and_archive_agree(self):
         project = tomllib.loads((Path(__file__).resolve().parents[1] / 'pyproject.toml').read_text(encoding='utf-8'))
-        self.assertEqual(core_version, '0.6.0')
+        self.assertEqual(core_version, '0.6.1')
         self.assertEqual(gui_version, core_version)
         self.assertEqual(VERSION, core_version)
         self.assertEqual(project['project']['version'], core_version)

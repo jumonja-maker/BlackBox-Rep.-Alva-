@@ -270,3 +270,7 @@ Root-reviewed и QA-frozen следующий batch меняет только di
 - CPU/RSS/I/O, совпадение по времени, BLOCKED, WCT, successful diagnostic action не доказывают root cause/lock owner/leak/speedup. GC elapsed не равен stop-the-world pause, CPU samples не равны CPU time/percent, disk request timing не равен application API latency.
 
 [Рабочий процесс](EXPERT_WORKFLOW_PATCH_RU.md) · [Руководство RU](USER_GUIDE_RU.md) · [Guide EN](USER_GUIDE_EN.md) · [Обслуживание](UPDATES_FEEDBACK_UNINSTALL.md)
+
+
+## Актуализация факта публикации (2026-11-14)
+Ранние формулировки этого аудита о неопубликованной v0.6.0 являются историческим состоянием до 9 ноября. Официальная v0.6.0 опубликована 2026-11-09 с tag/source `b922491ffeb866d24e3948a2f27a88549e5ad9d7`. PR #49 интегрирован в main 2026-11-14 коммитом `d930e774d1b52b3c56ab3164cd940d84acb29808`, его собственный post-main CI #43543933152 завершён 11/11 SUCCESS. Дополнения PR #49 отсутствуют в публичном v0.6.0 ZIP. Кандидат v0.6.1 и его отдельная релизная проверка не переименовывают старые квитанции f3/d48/e338 и не доказывают проверки физического ПК или 8 ч стабильности.

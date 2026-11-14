@@ -1,6 +1,6 @@
 # Updates and portable maintenance
 
-**Current source/development candidate: v0.6.0, unpublished. Latest published release verified for this patch: v0.5.4.** The [official GitHub Release](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/releases/latest) determines downloadable updates. A source version, a development branch or green CI does not publish a new release.
+**Current source/development candidate: v0.6.1. Latest published official release: v0.6.0 (2026-11-09).** The [official GitHub Release](https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/releases/latest) determines downloadable updates. A source version, a development branch or green CI does not publish a new release.
 
 The built-in updater checks the official latest GitHub Release for a strictly newer semantic version and the named portable ZIP asset with SHA-256 digest and expected byte size. User confirmation is required to download and install. Downloading and verifying staging data does not replace the running installation. The Maintenance EXE waits for the running application to exit before proceeding. A development build reporting no newer verified official version does not establish that its own version has been published.
 
@@ -19,11 +19,11 @@ The built-in updater checks the official latest GitHub Release for a strictly ne
 
 ## Verification scope
 
-The current `.github/workflows/shell-qa.yml` configures Windows/Linux integration tests, rollback/hardening tests, frozen EXE smoke and native portable update/uninstall QA from the immutable published **v0.5.4** baseline. The native harness is `tools/qa_windows_maintenance_e2e.py --baseline-release v0.5.4`; it checks the pinned old release, the exact new candidate, restart, preserved evidence, shortcut/settings removal and helper cleanup on disposable GitHub-hosted Windows.
+The current `.github/workflows/shell-qa.yml` configures Windows/Linux integration tests, rollback/hardening tests, frozen EXE smoke and native portable update/uninstall QA from the immutable published **v0.6.0** baseline. The native harness is `tools/qa_windows_maintenance_e2e.py --baseline-release v0.6.0`; it checks the pinned old release, the exact new candidate, restart, preserved evidence, shortcut/settings removal and helper cleanup on disposable GitHub-hosted Windows.
 
-These are configured checks, not a claim that the final candidate has passed. They must complete on the exact final candidate before the corresponding behavior is called CI-verified. A locally supplied unpublished candidate in this harness does not verify public discovery of a v0.6.0 Release. Use the patch's actual run links, source SHA and results for current acceptance.
+These are configured checks, not a claim that the final candidate has passed. They must complete on the exact final candidate before the corresponding behavior is called CI-verified. A locally supplied v0.6.1 candidate in this harness does not establish a public v0.6.1 Release. Use the patch's actual run links, source SHA and results for current acceptance.
 
-Earlier versions of this document described the v0.4.0 development milestone and an old-v0.3.6-to-v0.4.0 scenario. That is historical scope, not evidence for the current v0.6.0 candidate or the current v0.5.4 baseline gate.
+Earlier versions of this document described the v0.4.0 development milestone and an old-v0.3.6-to-v0.4.0 scenario. That is historical scope, not evidence for the current v0.6.1 candidate or the current v0.6.0 baseline gate.
 
 A live in-use update, OneDrive redirection, antivirus locks, physical 100–200% DPI, and screen reader acceptance remain separate manual checks and are not guaranteed by hosted CI. Executables remain unsigned. Required access to the portable parent, temporary directory and user-data folder is still subject to Windows policy.
 
