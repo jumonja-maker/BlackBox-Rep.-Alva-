@@ -24,7 +24,7 @@ def _run_workspace_child(case_name):
     from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, Qt
     from PySide6.QtGui import QWheelEvent
     from PySide6.QtTest import QTest
-    from PySide6.QtWidgets import QApplication, QPushButton, QScrollArea, QWidget
+    from PySide6.QtWidgets import QApplication, QPushButton, QScrollArea, QStyle, QStyleOptionButton, QWidget
     from blackbox_universal.action_grid import ActionGrid
     from blackbox_universal.theme import set_retro_theme
     from blackbox_universal.decoder_window import DecoderWindow
@@ -154,6 +154,7 @@ def _run_workspace_child(case_name):
 
         def test_canvas_dominates_supported_ru_en_workspace_without_oversized_actions(self):
             self.populate_graph()
+            localized_repeat_help = {}
             for width, height in ((1600, 1000), (1280, 800)):
                 for language in ("RU", "EN"):
                     with self.subTest(width=width, height=height, language=language):
@@ -179,6 +180,56 @@ def _run_workspace_child(case_name):
                                     "visible_rect": list(self.visible_rect(control).getRect())}
                                     for control in (self.panel.inspector_tabs, self.panel.apply_button,
                                                     self.panel.delete_button, self.panel.connect_button)}}
+                            for button in (self.panel.add_button, self.panel.add_repeat, self.panel.choose_process):
+                                option = QStyleOptionButton()
+                                button.initStyleOption(option)
+                                contents = button.style().subElementRect(
+                                    QStyle.SubElement.SE_PushButtonContents, option, button)
+                                text_rect = button.style().itemTextRect(option.fontMetrics, contents,
+                                    Qt.AlignmentFlag.AlignCenter.value | Qt.TextFlag.TextShowMnemonic.value,
+                                    button.isEnabled(), option.text)
+                                caption = {"text": option.text, "contents_rect": list(contents.getRect()),
+                                    "text_rect": list(text_rect.getRect()), "fits": contents.contains(text_rect)}
+                                measured["controls"][button.objectName()] = {
+                                    "size": [button.width(), button.height()],
+                                    "visible_rect": list(self.visible_rect(button).getRect()), "caption": caption}
+                                self.assertFalse(contents.isEmpty(), measured)
+                                self.assertFalse(text_rect.isEmpty(), measured)
+                                self.assertTrue(contents.contains(text_rect), measured)
+                                self.assertEqual(self.visible_rect(button).size(), button.size(), measured)
+                                if ((width, height, language, tool) == (1600, 1000, "RU", "load_source")
+                                        and button is self.panel.add_repeat):
+                                    original_text, original_size = button.text(), button.size()
+                                    try:
+                                        # Deliberately overflow the actual font/content width without
+                                        # changing its geometry; prove this oracle does not clip
+                                        # its own measured text bounds into the available rectangle.
+                                        copies = contents.width() // max(1,
+                                            option.fontMetrics.horizontalAdvance(original_text)) + 2
+                                        button.setText(" ".join([original_text] * copies))
+                                        overflow = QStyleOptionButton()
+                                        button.initStyleOption(overflow)
+                                        overflow_contents = button.style().subElementRect(
+                                            QStyle.SubElement.SE_PushButtonContents, overflow, button)
+                                        overflow_text = button.style().itemTextRect(overflow.fontMetrics,
+                                            overflow_contents,
+                                            Qt.AlignmentFlag.AlignCenter.value | Qt.TextFlag.TextShowMnemonic.value,
+                                            button.isEnabled(), overflow.text)
+                                        measured["palette_caption_negative_control"] = {
+                                            "text": overflow.text, "contents_rect": list(overflow_contents.getRect()),
+                                            "text_rect": list(overflow_text.getRect()),
+                                            "fits": overflow_contents.contains(overflow_text)}
+                                        self.assertEqual(button.size(), original_size, measured)
+                                        self.assertGreater(overflow.fontMetrics.horizontalAdvance(overflow.text),
+                                            overflow_contents.width(), measured)
+                                        self.assertFalse(overflow_contents.contains(overflow_text), measured)
+                                    finally:
+                                        button.setText(original_text)
+                            self.assertTrue(self.panel.add_repeat.toolTip())
+                            self.assertEqual(self.panel.add_repeat.accessibleDescription(), self.panel.add_repeat.toolTip())
+                            self.assertEqual(self.panel.add_repeat.accessibleName(), self.panel.add_repeat.text())
+                            self.assertEqual(self.panel.add_repeat.toolTip(),
+                                localized_repeat_help.setdefault(language, self.panel.add_repeat.toolTip()))
                             print("R60_COMPACT_WORKSPACE_GEOMETRY " + json.dumps(measured, sort_keys=True), flush=True)
                             self.assertEqual([self.window.width(), self.window.height()], [width, height], measured)
                             self.assertGreaterEqual(ratio, .55, measured)
@@ -244,6 +295,7 @@ def _run_workspace_child(case_name):
                         for control in (self.panel.canvas, self.panel.apply_button, self.panel.delete_button,
                                         self.panel.connect_button):
                             self.assertEqual(self.visible_rect(control).size(), control.size(), measured_round_trip)
+            self.assertNotEqual(localized_repeat_help["RU"], localized_repeat_help["EN"])
 
         def test_middle_and_space_panning_and_plain_wheel_preserve_saved_nodes_and_cursor_anchor(self):
             self.populate_graph()

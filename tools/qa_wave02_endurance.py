@@ -99,6 +99,54 @@ def actual_progress(folder):
             'span_seconds': (last - first) / 1000 if count else 0.}
 
 
+def poll_owned_progress(watch, *, profile, pid, source_sha, now):
+    """A missed progress-file snapshot never acknowledges persisted advance.
+
+    The next ordinary five-second parent poll may retry an unavailable file.
+    Neither this read nor a child heartbeat extends the original watchdogs.
+    Final result/evidence reads continue to use strict read_json directly.
+    """
+    def require_progress():
+        if watch['count']:
+            require(now-watch['last_advance'] <= 30,
+                    'WAVE02_ENDURANCE_PERSISTED_PROGRESS_FROZEN_' + profile)
+        else:
+            require(now-watch['launched'] <= 90,
+                    'WAVE02_ENDURANCE_CHILD_NOT_STARTED_' + profile)
+
+    root = watch['root']
+    try:
+        progress = read_json(root / 'progress.json', maximum=8192)
+    except (PermissionError, FileNotFoundError) as read_error:
+        # A Windows sharing race or not-yet-published progress file is not a
+        # new recording fact. Preserve the watch and let the existing startup
+        # or persisted-progress deadline fail, with this read error as cause.
+        try:
+            require_progress()
+        except AssertionError as failure:
+            raise failure from read_error
+        return None
+    # A late readable heartbeat cannot revive an already expired watch.
+    require_progress()
+    require(progress.get('source_sha') == source_sha and
+            progress.get('profile') == profile and progress.get('pid') == pid,
+            'WAVE02_ENDURANCE_PROGRESS_IDENTITY_MISMATCH')
+    folder = Path(progress['session']).resolve(strict=True)
+    require(folder.is_relative_to((root / 'sessions').resolve()),
+            'WAVE02_ENDURANCE_PROGRESS_PATH_OUTSIDE_ROOT')
+    if watch['session'] is None:
+        watch['session'] = str(folder)
+    require(str(folder) == watch['session'], 'WAVE02_ENDURANCE_SESSION_SWITCHED')
+    # Independently read the saved rows: a heartbeat cannot fake progress.
+    current = actual_progress(folder)
+    require(current['count'] >= watch['count'], 'WAVE02_ENDURANCE_SAMPLE_COUNT_REGRESSED')
+    if current['count'] > watch['count']:
+        watch['count'] = current['count']; watch['last_advance'] = now
+    require_progress()
+    watch['span_seconds'] = current['span_seconds']
+    return current
+
+
 def artifactless_profile_facts(result):
     """Project finite observed facts, never child paths or arbitrary payloads.
 
@@ -712,29 +760,8 @@ def run_parent(args):
                 if now >= next_check:
                     require((output / (profile.lower()+'.log')).stat().st_size <= MAX_PROFILE_LOG_BYTES,
                             'WAVE02_ENDURANCE_PROFILE_LOG_BUDGET')
-                    path = root / 'progress.json'
-                    if path.is_file():
-                        progress = read_json(path, maximum=8192)
-                        require(progress.get('source_sha') == args.source_sha and
-                                progress.get('profile') == profile and progress.get('pid') == owner.process.pid,
-                                'WAVE02_ENDURANCE_PROGRESS_IDENTITY_MISMATCH')
-                        folder = Path(progress['session']).resolve(strict=True)
-                        require(folder.is_relative_to((root / 'sessions').resolve()),
-                                'WAVE02_ENDURANCE_PROGRESS_PATH_OUTSIDE_ROOT')
-                        if watch['session'] is None:
-                            watch['session'] = str(folder)
-                        require(str(folder) == watch['session'], 'WAVE02_ENDURANCE_SESSION_SWITCHED')
-                        # Read persisted rows ourselves: rewriting a heartbeat cannot fake progress.
-                        current = actual_progress(folder)
-                        require(current['count'] >= watch['count'], 'WAVE02_ENDURANCE_SAMPLE_COUNT_REGRESSED')
-                        if current['count'] > watch['count']:
-                            watch['count'] = current['count']; watch['last_advance'] = now
-                        require(now-watch['last_advance'] <= 30,
-                                'WAVE02_ENDURANCE_PERSISTED_PROGRESS_FROZEN_' + profile)
-                        watch['span_seconds'] = current['span_seconds']
-                    else:
-                        require(now-watch['launched'] <= 90,
-                                'WAVE02_ENDURANCE_CHILD_NOT_STARTED_' + profile)
+                    poll_owned_progress(watch, profile=profile, pid=owner.process.pid,
+                                        source_sha=args.source_sha, now=now)
             if now >= next_check:
                 next_check = now+5
             if now >= next_log:

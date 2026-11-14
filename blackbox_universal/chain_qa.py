@@ -250,6 +250,7 @@ def run_chain_gui(app, window, output, evidence_root, source_sha, *, failure_gua
                 "fully_visible": widget.isVisible() and shown == full}
 
     def prepare_workspace_capture():
+        from PySide6.QtWidgets import QStyle, QStyleOptionButton
         # These are the actual page's scroll bars, not an edited/cropped image.
         # Keep the title, controls and workspace together at the top of the page.
         ancestor = panel.parentWidget()
@@ -263,11 +264,24 @@ def run_chain_gui(app, window, output, evidence_root, source_sha, *, failure_gua
                     "open": panel.open_button, "save": panel.save_button,
                     "canvas": panel.canvas, "inspector": panel.inspector_tabs,
                     "apply": panel.apply_button, "delete": panel.delete_button,
-                    "connect": panel.connect_button}
+                    "connect": panel.connect_button,
+                    "add_tool": panel.add_button, "add_repeat": panel.add_repeat,
+                    "choose_process": panel.choose_process}
         geometry = {name: workspace_geometry(widget) for name, widget in controls.items()}
-        require(all(geometry[name]["fully_visible"] for name in
-                    ("notice", "start", "validate", "open", "save", "canvas", "inspector", "apply", "delete", "connect")),
+        require(all(item["fully_visible"] for item in geometry.values()),
                 "R60_GUI_WORKSPACE_HEADER_OR_TOOLBAR_CLIPPED:" + json.dumps(geometry, sort_keys=True))
+        for name in ("add_tool", "add_repeat", "choose_process"):
+            button = controls[name]
+            option = QStyleOptionButton()
+            button.initStyleOption(option)
+            contents = button.style().subElementRect(QStyle.SubElement.SE_PushButtonContents, option, button)
+            text_rect = button.style().itemTextRect(option.fontMetrics, contents,
+                Qt.AlignmentFlag.AlignCenter.value | Qt.TextFlag.TextShowMnemonic.value,
+                button.isEnabled(), option.text)
+            geometry[name]["caption"] = {"text": option.text, "contents_rect": list(contents.getRect()),
+                "text_rect": list(text_rect.getRect()), "fits": contents.contains(text_rect)}
+            require(not contents.isEmpty() and not text_rect.isEmpty() and contents.contains(text_rect),
+                    "R60_GUI_PALETTE_CAPTION_CLIPPED:" + name + ":" + json.dumps(geometry[name], sort_keys=True))
         for name in ("canvas", "inspector"):
             rect = geometry[name]["visible_logical_rect"]
             require(rect[2] >= (300 if name == "canvas" else 240) and rect[3] >= 180,

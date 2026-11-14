@@ -1,10 +1,11 @@
 """Explicit, one-use, resumable purge of finalized app-marked Trash only."""
 from contextlib import closing
-import hashlib,json,os,re,time
+import hashlib,json,math,os,re,time
 from pathlib import Path
 from uuid import uuid4
 from .library_files import checked,read_json,atomic_json
 from .owned_unlink import file_identity,remove_entry
+from .trace_cleanup import terminal_cleanup_proven
 def inventory(root):
  root=checked(root);rows=[];stack=[root];deadline=time.monotonic()+10
  while stack:
@@ -18,11 +19,20 @@ def inventory(root):
  return sorted(rows,key=lambda r:(len(Path(r['relative']).parts),r['relative']),reverse=True)
 def fingerprint(rows):
  return hashlib.sha256(json.dumps(rows,sort_keys=True,separators=(',',':')).encode()).hexdigest()
+def _known_birth(value):
+ if type(value) not in (int,float) or value<=0:return False
+ try:return math.isfinite(value)
+ except OverflowError:return False
 def _alive(journal):
  import psutil
- try:return abs(psutil.Process(journal['owner_pid']).create_time()-journal['owner_created'])<.000001
- except (psutil.NoSuchProcess,KeyError,TypeError):return False
- except psutil.AccessDenied:return True
+ pid=journal.get('owner_pid');created=journal.get('owner_created')
+ if type(pid) is not int or pid<=0:return True
+ try:
+  actual=psutil.Process(pid).create_time()
+ except psutil.NoSuchProcess:return False
+ except (psutil.Error,OSError,ValueError,OverflowError):return True
+ if not _known_birth(created) or not _known_birth(actual):return True
+ return abs(actual-created)<.000001
 def _paths(catalog,row):
  if row['origin']!='LOCAL_APP_MARKED' or row['state'] not in ('TRASH','PURGING','PURGE_PARTIAL'):raise ValueError('PURGE_REQUIRES_OWNED_TRASH')
  if not re.fullmatch('[0-9a-f]{32}',row.get('trash_name') or ''):raise ValueError('PURGE_INVALID_TRASH_ID')
@@ -41,13 +51,14 @@ def _review(catalog,row):
   if marker.get('lifecycle')!='FINALIZED':raise ValueError('LIBRARY_FINALIZATION_UNCONFIRMED')
   from .library_catalog import recording_metadata,TERMINAL
   if recording_metadata(payload)['state'] not in TERMINAL:raise ValueError('LIBRARY_FINALIZATION_UNCONFIRMED')
-  artifacts=payload/'artifacts'
-  if artifacts.exists():
-   for journal in artifacts.glob('*.trace.json'):
-    if read_json(journal,65536).get('state') not in ('COMPLETED','FAILED','RECOVERED_NAMED_CANCEL','RECOVERED_OWNED_TOOL_STOP'):raise ValueError('LIBRARY_TRACE_STILL_ACTIVE')
   manifest={'kind':'BLACKBOX_PURGE_MANIFEST','schema_version':1,'entry_id':row['entry_id'],'marker_uid':row['marker_uid'],
    'root_id':catalog._owner()['root_id'],'payload_identity':file_identity(payload),'entries':inventory(payload)}
   atomic_json(path,manifest,exclusive=True,max_bytes=8*1024**2)
+ artifacts=payload/'artifacts'
+ if artifacts.exists():
+  for count,journal in enumerate(artifacts.glob('*.trace.json')):
+   if count>=64:raise ValueError('LIBRARY_TRACE_JOURNAL_BUDGET')
+   if not terminal_cleanup_proven(read_json(journal,65536),journal=journal.name):raise ValueError('LIBRARY_TRACE_STILL_ACTIVE')
  if payload.exists():
   if file_identity(payload)!=manifest['payload_identity']:raise ValueError('PURGE_PAYLOAD_CHANGED')
   actual=inventory(payload);known={r['relative']:r for r in manifest['entries']}

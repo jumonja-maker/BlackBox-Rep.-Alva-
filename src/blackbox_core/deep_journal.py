@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 import hashlib
 import json
 import os
@@ -23,6 +23,25 @@ _SENSITIVE.update({"command_line", "commandline", "cmdline", "environment", "env
 _SENSITIVE.update({"secret", "secrets", "api_key", "apikey", "access_token", "refresh_token",
                    "client_secret", "authorization", "credentials", "credential", "passwd",
                    "private_key", "cookie", "set-cookie", "source_file_handle", "recovery_handle"})
+
+_JOURNAL_APPLICATION_ID = 0x42424431
+_JOURNAL_SQL = {
+    "actions": """CREATE TABLE actions (
+        sequence INTEGER PRIMARY KEY AUTOINCREMENT, operation_id TEXT NOT NULL UNIQUE,
+        timestamp_utc TEXT NOT NULL, monotonic_ns INTEGER NOT NULL, record_json TEXT NOT NULL,
+        previous_sha256 TEXT NOT NULL, record_sha256 TEXT NOT NULL)""",
+    "snapshots": """CREATE TABLE snapshots (
+        snapshot_id TEXT PRIMARY KEY, identity_json TEXT NOT NULL,
+        timestamp_utc TEXT NOT NULL, data_json TEXT NOT NULL)""",
+}
+_JOURNAL_COLUMNS = {
+    "actions": (("sequence", "INTEGER", 0, 1), ("operation_id", "TEXT", 1, 0),
+                ("timestamp_utc", "TEXT", 1, 0), ("monotonic_ns", "INTEGER", 1, 0),
+                ("record_json", "TEXT", 1, 0), ("previous_sha256", "TEXT", 1, 0),
+                ("record_sha256", "TEXT", 1, 0)),
+    "snapshots": (("snapshot_id", "TEXT", 0, 1), ("identity_json", "TEXT", 1, 0),
+                  ("timestamp_utc", "TEXT", 1, 0), ("data_json", "TEXT", 1, 0)),
+}
 
 
 def journal_metadata(value, *, depth=0):
@@ -55,15 +74,27 @@ def journal_metadata(value, *, depth=0):
 
 class EvidenceJournal:
     def __init__(self, directory: str | Path):
-        self.directory = Path(directory)
+        from .session_v2 import safe_path
+        self.directory = safe_path(Path(directory))
         self.directory.mkdir(parents=True, exist_ok=True)
         self.path = self.directory / "deep-inspection.sqlite3"
         if self.path.is_symlink():
             raise ValueError("JOURNAL_SYMLINK_REFUSED")
         self._lock = threading.RLock()
-        with self._connect() as db:
+        try:
+            descriptor=os.open(self.path,os.O_CREAT|os.O_EXCL|os.O_WRONLY,0o600)
+        except FileExistsError:
+            # Validate legacy journals read-only, before any CREATE or PRAGMA
+            # which could mutate a same-named foreign database. Structural
+            # compatibility does not authenticate its saved producer claims.
+            self._validate_existing()
+            return
+        else:
+            os.close(descriptor)
+        with self._connect(initialize=True) as db:
             db.executescript("""
-                CREATE TABLE IF NOT EXISTS actions (
+                BEGIN IMMEDIATE;
+                CREATE TABLE actions (
                     sequence INTEGER PRIMARY KEY AUTOINCREMENT,
                     operation_id TEXT NOT NULL UNIQUE,
                     timestamp_utc TEXT NOT NULL,
@@ -71,16 +102,55 @@ class EvidenceJournal:
                     record_json TEXT NOT NULL,
                     previous_sha256 TEXT NOT NULL,
                     record_sha256 TEXT NOT NULL);
-                CREATE TABLE IF NOT EXISTS snapshots (
+                CREATE TABLE snapshots (
                     snapshot_id TEXT PRIMARY KEY, identity_json TEXT NOT NULL,
                     timestamp_utc TEXT NOT NULL, data_json TEXT NOT NULL);
             """)
+            db.execute("PRAGMA application_id="+str(_JOURNAL_APPLICATION_ID))
+
+    @staticmethod
+    def _validate_schema(db):
+        if db.execute("PRAGMA application_id").fetchone()[0] not in (0,_JOURNAL_APPLICATION_ID):
+            raise ValueError("JOURNAL_UNOWNED_OR_INVALID_SCHEMA")
+        objects=db.execute("SELECT type,name,sql FROM sqlite_schema WHERE lower(substr(name,1,7)) != 'sqlite_' LIMIT 33").fetchall()
+        if (len(objects)!=len(_JOURNAL_SQL) or {name for kind,name,_sql in objects if kind=='table'} != set(_JOURNAL_SQL) or
+                any(kind!='table' or type(sql) is not str or
+                    ''.join(sql.split()).casefold()!=''.join(_JOURNAL_SQL[name].split()).casefold()
+                    for kind,name,sql in objects)):
+            raise ValueError("JOURNAL_UNOWNED_OR_INVALID_SCHEMA")
+        for table,expected in _JOURNAL_COLUMNS.items():
+            info=db.execute('PRAGMA table_xinfo("'+table+'")').fetchall()
+            if any(row[6] != 0 for row in info):raise ValueError("JOURNAL_UNOWNED_OR_INVALID_SCHEMA")
+            columns=tuple((row[1],row[2].upper(),row[3],row[5]) for row in info)
+            if columns!=expected:raise ValueError("JOURNAL_UNOWNED_OR_INVALID_SCHEMA")
+        for table,unique in (("actions",("operation_id",)),("snapshots",("snapshot_id",))):
+            indexes=db.execute('PRAGMA index_list("'+table+'")').fetchall()
+            if not any(row[2] and not row[4] and tuple(info[2] for info in db.execute(
+                    'PRAGMA index_info("'+str(row[1]).replace('"','""')+'")'))==unique for row in indexes):
+                raise ValueError("JOURNAL_UNOWNED_OR_INVALID_SCHEMA")
+
+    def _validate_existing(self):
+        if not self.path.is_file():raise ValueError("JOURNAL_UNOWNED_OR_INVALID_SCHEMA")
+        try:
+            with closing(sqlite3.connect(self.path.as_uri()+"?mode=ro",uri=True,timeout=5)) as db:
+                db.execute("PRAGMA query_only=ON");db.execute("PRAGMA trusted_schema=OFF")
+                db.setlimit(sqlite3.SQLITE_LIMIT_LENGTH,2*1024**2)
+                deadline=time.monotonic()+5
+                db.set_progress_handler(lambda:int(time.monotonic()>=deadline),1000)
+                self._validate_schema(db)
+        except sqlite3.Error:
+            raise ValueError("JOURNAL_UNOWNED_OR_INVALID_SCHEMA") from None
 
     @contextmanager
-    def _connect(self):
-        db = sqlite3.connect(self.path, timeout=5)
+    def _connect(self, *, initialize=False):
+        from .session_v2 import safe_path
+        safe_path(self.path)
+        db = sqlite3.connect(self.path.as_uri()+"?mode=rw",uri=True,timeout=5)
         try:
             db.execute("PRAGMA busy_timeout=5000")
+            db.execute("PRAGMA trusted_schema=OFF")
+            db.setlimit(sqlite3.SQLITE_LIMIT_LENGTH,2*1024**2)
+            if not initialize:self._validate_schema(db)
             with db:
                 yield db
         finally:

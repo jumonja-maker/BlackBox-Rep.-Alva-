@@ -113,6 +113,7 @@ class ResearchQuitContracts(unittest.TestCase):
                 self.jobs=FakeJobs(); self.probe=SimpleNamespace(active=False); self.book=None
             def snapshot(self):return {'optional_jobs':{'cleanup_required':self.jobs.busy}}
             def poll_optional(self):return []
+            def cancel_optional(self):return self.jobs.cancel()
             def command(self, command):
                 seen.append(command['id'])
                 pending=outcomes[min(len(seen)-1,len(outcomes)-1)]

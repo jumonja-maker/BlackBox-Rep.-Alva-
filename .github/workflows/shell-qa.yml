@@ -82,6 +82,11 @@ jobs:
           python -m pip install --no-build-isolation --no-deps -e .
       - name: Early owned native fixture compiler lifecycle preflight
         run: python tools/qa_decoder_noise_fixture.py --build-fixture --output decoder-compiler-preflight --source-sha "${{ github.event.pull_request.head.sha || github.sha }}"
+      - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
+        with:
+          dotnet-version: '10.0.x'
+      - name: Actual source-generated CSharp and Cpp client failed-Emit recovery
+        run: python tools/qa_sdk_clients.py --output sdk-source-clients --source-sha "${{ github.event.pull_request.head.sha || github.sha }}"
       - name: Real Qt offscreen startup smoke
         run: python app.py --smoke
       - name: Real Qt isolated research end-to-end
@@ -126,7 +131,7 @@ jobs:
   linux-tests:
     if: github.event_name != 'pull_request' || (github.head_ref != 'patch/bb-deep-001' && github.head_ref != 'patch/bb-inv-003')
     name: Linux compatibility check (independent of Windows release)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # The same full deep suite took 19m06s in exact-SHA acceptance.
     timeout-minutes: 40
     env:
@@ -143,7 +148,7 @@ jobs:
       - name: Install Linux Qt shared-library prerequisites
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y libegl1 libopengl0 libxcb-cursor0 libxkbcommon-x11-0
+          sudo apt-get install -y libegl1 libopengl0 libxcb-cursor0 libxkbcommon-x11-0 gdb
       - name: Install integrated shell and observer core
         run: |
           python -m pip install --require-hashes -r requirements/ci-linux-py311.lock
@@ -151,7 +156,8 @@ jobs:
       - name: Undefined name gate
         run: python tools/check_undefined_names.py --report undefined-names-linux.json
       - name: Qt offscreen unit checks
-        run: python -m unittest discover -s tests -v
+        shell: bash
+        run: python tools/qa_linux_unit_gdb.py --source-sha "${{ github.event.pull_request.head.sha || github.sha }}"
       - name: Qt offscreen startup smoke
         run: python app.py --smoke
       - name: Real Qt isolated research end-to-end
@@ -167,7 +173,7 @@ jobs:
     if: github.event_name != 'pull_request' || (github.head_ref != 'patch/bb-deep-001' && github.head_ref != 'patch/bb-inv-003')
     name: Windows portable exe
     # Exact-SHA native decoder acceptance accompanies the release candidate.
-    # Publication still requires *all* three jobs green.
+    # This workflow verifies an unpublished candidate and never publishes.
     runs-on: windows-latest
     outputs:
       wave02_endurance_required: ${{ steps.wave02-scope.outputs.endurance_required }}
@@ -196,6 +202,37 @@ jobs:
           dotnet-version: '10.0.x'
       - name: Build bundled self-contained Microsoft TraceEvent decoder
         run: python tools/build_decoder.py --rid win-x64
+      - name: Actual built native host rejects invalid paths without publishing output
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          python - <<'PY'
+          import hashlib, json, os
+          from pathlib import Path
+          import sys, unittest
+          if os.environ.get('GITHUB_ACTIONS') != 'true' or os.environ.get('RUNNER_ENVIRONMENT') != 'github-hosted':
+              raise SystemExit('NATIVE_PATH_GUARD_REQUIRES_GITHUB_HOSTED_RUNNER')
+          from blackbox_core.decoder_service import helper_path
+          from blackbox_universal.provenance import source_identity
+          identity = source_identity(os.environ['SOURCE_SHA'])
+          if identity.get('source_identity_status') != 'VERIFIED_EXPECTED_HEAD':
+              raise SystemExit('NATIVE_PATH_GUARD_SOURCE_MISMATCH')
+          helper = helper_path().resolve(strict=True)
+          if helper != Path('decoder/BLACK.BOX-Decoder.exe').resolve(strict=True):
+              raise SystemExit('NATIVE_PATH_GUARD_BUILT_HELPER_MISMATCH')
+          sys.path.insert(0, str(Path('tests').resolve()))
+          suite = unittest.defaultTestLoader.loadTestsFromName(
+              'test_decoder_contract_audit.DecoderContractAuditTests.test_native_host_invalid_paths_report_failure_without_publishing')
+          result = unittest.TextTestRunner(verbosity=2).run(suite)
+          passed = result.testsRun == 1 and not result.skipped and result.wasSuccessful()
+          with helper.open('rb') as stream:
+              digest = hashlib.file_digest(stream, 'sha256').hexdigest()
+          print('NATIVE_INVALID_PATH_GATE ' + json.dumps({'status': 'PASS' if passed else 'FAIL',
+              'source_identity': identity, 'helper_sha256': digest, 'tests_run': result.testsRun,
+              'skipped': len(result.skipped), 'source_mode_native_helper': True, 'publication': False}, sort_keys=True))
+          raise SystemExit(0 if passed else 1)
+          PY
       - name: Install pinned Microsoft dotnet-trace for owned EventPipe QA
         shell: pwsh
         run: |
@@ -273,6 +310,8 @@ jobs:
         run: python tools/qa_deep_inspection.py --output deep-frozen-premerge-qa --helper dist/BLACK.BOX-Universal/diagnostic/BLACK.BOX-Diagnostic.exe
       - name: Verify real embedded research modules before startup
         run: python tools/verify_frozen_research.py "dist/BLACK.BOX-Universal/BLACK.BOX-Universal.exe"
+      - name: Actual frozen-generated CSharp and Cpp client failed-Emit recovery
+        run: python tools/qa_sdk_clients.py --exe dist/BLACK.BOX-Universal/BLACK.BOX-Universal.exe --output sdk-frozen-clients --source-sha "${{ github.event.pull_request.head.sha || github.sha }}"
       - name: Verify Explorer icon is the same as the taskbar icon for both EXEs
         shell: pwsh
         run: |
@@ -301,6 +340,16 @@ jobs:
           if ($job.ExitCode -ne 0) { throw "Frozen research E2E failed: $($job.ExitCode)" }
           $proof = Get-Content (Join-Path $evidence 'e2e.json') -Raw | ConvertFrom-Json
           if ($proof.status -ne 'PASS' -or $proof.helper_pid -eq $proof.gui_pid) { throw 'Missing isolated research proof' }
+      - name: Expert saved-recording workflow in the exact frozen EXE RU EN at 100-200 percent
+        timeout-minutes: 12
+        shell: pwsh
+        run: |
+          foreach ($scale in @('1', '1.25', '1.5', '2')) {
+            $env:QT_SCALE_FACTOR = $scale
+            python tools/qa_expert_workflow.py --exe dist/BLACK.BOX-Universal/BLACK.BOX-Universal.exe --output "expert-frozen-$scale" --source-sha '${{ github.event.pull_request.head.sha || github.sha }}'
+            if ($LASTEXITCODE -ne 0) { throw "Frozen expert workflow failed at Qt scale $scale" }
+          }
+          Remove-Item Env:\QT_SCALE_FACTOR -ErrorAction SilentlyContinue
       - name: Frozen research with administrator SID and privileges removed
         run: python tools/qa_standard_token.py "dist/BLACK.BOX-Universal/BLACK.BOX-Universal.exe" "frozen-standard-token-e2e"
       - name: Deep test actual frozen EXE without Python on PATH or source working directory
@@ -343,7 +392,7 @@ jobs:
           if (-not (Test-Path "$output\INVESTIGATION-LICENSE.txt")) { throw 'Investigation license missing' }
           if (-not (Test-Path "$output\LICENSE")) { throw "Missing public application license" }
           if (-not (Test-Path "$output\README.ru.md")) { throw "Russian README missing from Windows release" }
-          Copy-Item -LiteralPath "docs\RELEASE_v0.5.5.md" -Destination "$output\RELEASE-NOTES.md" -Force
+          Copy-Item -LiteralPath "docs\RELEASE_v0.6.0.md" -Destination "$output\RELEASE-NOTES.md" -Force
           Copy-Item -LiteralPath "docs\R10_RU.md" -Destination "$output\R10-ADMIN-RU.md" -Force
           Copy-Item -LiteralPath "docs\specifications\R10.md" -Destination "$output\R10-SPECIFICATION.md" -Force
           Copy-Item docs/BB_INV_003_RU.md "$output/INVESTIGATION-ENGINE-3-RU.md" -Force
@@ -355,15 +404,23 @@ jobs:
         run: |
           Compress-Archive -LiteralPath "dist\BLACK.BOX-Universal" -DestinationPath "BLACK.BOX-Universal-Windows.zip" -Force
           if (-not (Test-Path "BLACK.BOX-Universal-Windows.zip")) { throw "ZIP missing" }
-      - name: Native official v0.5.4 to v0.5.5 update and full portable uninstall
+      - name: Native official v0.5.4 to unpublished candidate update and full portable uninstall
         shell: pwsh
         timeout-minutes: 16
         run: |
           python tools/qa_windows_maintenance_e2e.py --built-zip "BLACK.BOX-Universal-Windows.zip" --expected-sha "${{ github.event.pull_request.head.sha || github.sha }}" --evidence "portable-maintenance-e2e" --baseline-release v0.5.4
           if ($LASTEXITCODE -ne 0) { throw 'Real portable update/uninstall acceptance failed' }
+      - name: Verify final unpublished ZIP against exact source tree and complete binary inventory
+        shell: pwsh
+        run: |
+          $tree = (git rev-parse 'HEAD^{tree}').Trim()
+          if ($LASTEXITCODE -ne 0) { throw 'Could not read candidate source tree' }
+          python tools/release_gate.py --archive "BLACK.BOX-Universal-Windows.zip" --source-sha "${{ github.event.pull_request.head.sha || github.sha }}" --source-tree $tree --report "candidate-archive-verification.json"
+          if ($LASTEXITCODE -ne 0) { throw 'Final unpublished archive verification failed' }
+          Get-Content -LiteralPath "candidate-archive-verification.json" -Raw
 
-# Publication v0.5.5 occurs only in separate release-v055.yml after green exact-main hosted QA.
-# No GitHub Actions Artifacts or cache are required for v0.5.5.
+# Publication remains separately authorized and guarded by the release workflows.
+# This QA workflow publishes no release, Actions artifacts, or cache.
 
   exact-main-acceptance:
     name: Exact-main complete QA gate (artifactless)

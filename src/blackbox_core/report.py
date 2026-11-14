@@ -6,18 +6,27 @@ from contextlib import closing
 import json
 import os
 import tempfile
+import time
 from pathlib import Path
 import sqlite3
-from .contracts import ObserverError, bounded
+from .contracts import MAX_EVENT_BYTES, ObserverError, bounded
 from .experiments import ExperimentAccumulator
 from .detailed_capture import summarize_detail
 from .detail_analysis import analyze_detail_threads
-from .storage import _open_ro
+from .storage import REPORT_READ_SECONDS, _open_ro
+
+MAX_REPORT_EVENTS = 250_000
+MAX_REPORT_ERROR_CODES = 128
+
+
+def _invalid_json_constant(_value):
+    raise ValueError("NONFINITE_IMPORTED_EVENT")
 
 
 def summarize(folder: Path) -> dict:
     try:
         with closing(_open_ro(Path(folder))) as db:
+            deadline = time.monotonic() + REPORT_READ_SECONDS
             row = db.execute("SELECT * FROM metadata LIMIT 1").fetchone()
             if row is None or row["schema_version"] != 1:
                 raise ObserverError("UNSUPPORTED_SCHEMA", "report")
@@ -50,8 +59,13 @@ def summarize(folder: Path) -> dict:
             truncated_busy_episodes = 0
             extended_sample_spacing, largest_spacing, invalid_spacing = 0, None, 0
             worker_health, invalid_worker_health = None, 0
-            for entry in db.execute("SELECT data FROM events ORDER BY seq"):
-                record = json.loads(entry["data"])
+            for number, entry in enumerate(db.execute("SELECT data FROM events ORDER BY seq"), 1):
+                if number > MAX_REPORT_EVENTS or time.monotonic() > deadline:
+                    raise ObserverError("INVALID_DATA", "report")
+                raw = entry["data"]
+                if type(raw) is not str or len(raw.encode("utf-8")) > MAX_EVENT_BYTES:
+                    raise ObserverError("INVALID_DATA", "report")
+                record = json.loads(raw, parse_constant=_invalid_json_constant)
                 if type(record) is not dict:
                     raise ObserverError("INVALID_DATA", "report")
                 experiments.observe(record)
@@ -142,6 +156,8 @@ def summarize(folder: Path) -> dict:
                     code = record.get("code", "UNKNOWN")
                     if type(code) is not str or len(code) > 64:
                         raise ObserverError("INVALID_DATA", "report")
+                    if code not in counts and len(counts) >= MAX_REPORT_ERROR_CODES:
+                        raise ObserverError("INVALID_DATA", "report")
                     counts[code] = counts.get(code, 0) + 1
             result = {
                 "schema_version": 1,
@@ -189,7 +205,7 @@ def summarize(folder: Path) -> dict:
             }
             bounded(result, max_bytes=65536)
             return result
-    except (sqlite3.Error, ValueError, KeyError, TypeError, json.JSONDecodeError):
+    except (sqlite3.Error, ValueError, KeyError, TypeError, RecursionError, OverflowError):
         raise ObserverError("INVALID_DATA", "report") from None
 
 
@@ -454,11 +470,14 @@ def write_report(folder: Path) -> dict:
         # Staging files are on the same volume. JSON remains the last marker.
         for source, target in ((staged[1], html_path), (staged[0], json_path)):
             os.link(source, target)
-            published.append(target)
+            published.append((source, target))
     except OSError:
-        for target in reversed(published):
+        for source, target in reversed(published):
             try:
-                target.unlink(missing_ok=True)
+                # The exclusive link may have been replaced by another writer.
+                # Roll back only our own published inode, never its replacement.
+                if os.path.samestat(source.stat(), target.lstat()):
+                    target.unlink()
             except OSError:
                 pass  # Preserve the first failure; warn caller of incomplete publish.
         raise ObserverError("STORAGE_ERROR", "storage") from None

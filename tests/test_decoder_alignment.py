@@ -678,7 +678,8 @@ class DecoderAlignmentTests(unittest.TestCase):
         # Non-decimal frequency verifies floor/ceil outward rounding and a
         # billion-second counter without floating-point precision loss.
         ticks=3_000_000_001
-        model={"status":ALIGNED,"frequency_hz":3,"offset_lower_ns":-7,
+        from blackbox_core.decoder_alignment import QPC_MODEL
+        model={"status":ALIGNED,"clock_model":QPC_MODEL,"frequency_hz":3,"offset_lower_ns":-7,
                "offset_upper_ns":11,"session_origin_ns":1,
                "valid_qpc_min_ticks":ticks-1,"valid_qpc_max_ticks":ticks+1,
                "session_uuid":str(uuid4()),"source_trace_sha256":SHA}

@@ -127,16 +127,21 @@ def read_session_clock(path, *, cancel=None):
         if not db.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
                           "AND name='clock_evidence'").fetchone():
             raise ValueError("SESSION_CLOCK_NOT_RECORDED")
+        from .decoder_index import require_index_tables
+        require_index_tables(db,("sessions","clock_evidence"))
         rows = db.execute("SELECT " + ",".join(_SESSION_COLUMNS) +
                           ",ended_monotonic_ns FROM sessions LIMIT 2").fetchall()
         if len(rows) != 1:
             raise ValueError("SESSION_IDENTITY_AMBIGUOUS")
         session = dict(zip((*_SESSION_COLUMNS, "ended_monotonic_ns"), rows[0]))
-        raw = db.execute("SELECT evidence_json FROM clock_evidence WHERE schema=?",
-                         (SESSION_CLOCK_SCHEMA,)).fetchone()
-        if raw is None:
+        records = db.execute("SELECT evidence_json FROM clock_evidence WHERE schema=? LIMIT 2",
+                             (SESSION_CLOCK_SCHEMA,)).fetchall()
+        if not records:
             raise ValueError("SESSION_CLOCK_NOT_RECORDED")
-        record = json.loads(raw[0])
+        if len(records)!=1:
+            raise ValueError("SESSION_CLOCK_IDENTITY_AMBIGUOUS")
+        from .decoder_index import _saved_json
+        record = _saved_json(records[0][0])
     _cancel(cancel)
     if (not isinstance(record, dict) or record.get("schema") != SESSION_CLOCK_SCHEMA or
             not _uuid(session["session_uuid"]) or
@@ -408,7 +413,7 @@ def project_event_time(alignment, row):
             raise ValueError("INVALID_ALIGNMENT_MODEL")
         if not minimum <= ticks <= maximum:
             return {"status": "NOT_ESTABLISHED", "reason": "EVENT_OUTSIDE_CAPTURE_WINDOW"}
-        model = alignment.get("clock_model", QPC_MODEL)
+        model = alignment.get("clock_model")
         if model == ORDER_MODEL:
             if (alignment.get("monotonic_implementation") != "GetTickCount64()" or
                     type(alignment.get("qpc_ordering_margin_ticks")) is not int or

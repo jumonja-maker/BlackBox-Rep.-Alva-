@@ -17,7 +17,8 @@ import sqlite3
 import tempfile
 import time
 
-from .decoder_index import APP_ID, validate_event
+from .decoder_index import APP_ID, _saved_json, read_index_summary, require_index_tables, validate_event
+from .decoder_limits import checked_index_path
 from .decoder_modules import validate_module_frame, integer, number
 from .decoder_cpu import CPU_SOURCES, classify_cpu_sample
 from .decoder_native_symbols import load_native_symbols, resolve_bound_frame
@@ -25,6 +26,7 @@ from .session_v2 import safe_path
 
 MAX_TREE_NODES = 20000
 MAX_TREE_EVENTS = 250000
+MAX_TREE_METADATA_BYTES = 16 * 1024**2
 
 
 def parse_calltree_filters(*, source="dotnet", pid=0, instance_text="",
@@ -80,9 +82,7 @@ def build_calltree(index_path, *, source="dotnet", pid=0, process_instance=None,
                       start_ms=start_ms, end_ms=end_ms, max_nodes=max_nodes)
     if (binary_path is None) != (pdb_path is None):
         raise ValueError("CALLTREE_SYMBOL_PAIR_REQUIRED")
-    path = safe_path(index_path)
-    if not path.is_file():
-        raise ValueError("INVALID_INDEX_FILE")
+    path = checked_index_path(index_path)
     deadline = time.monotonic()+30
 
     def check():
@@ -107,6 +107,7 @@ def build_calltree(index_path, *, source="dotnet", pid=0, process_instance=None,
     edges = {}; selected = missing = clipped = omitted = represented = unknown = 0
     scanned = in_scope = nonprocess = attribution_unknown = unclassified = 0
     symbol_frames = symbol_resolved = 0; symbol_reasons = {}; symbol_cache = {}
+    retained_metadata = omitted_metadata = 0
     try:
         with closing(sqlite3.connect(path.resolve().as_uri()+"?mode=ro", uri=True, timeout=1)) as db:
             db.execute("PRAGMA query_only=ON"); db.execute("PRAGMA trusted_schema=OFF")
@@ -117,7 +118,8 @@ def build_calltree(index_path, *, source="dotnet", pid=0, process_instance=None,
                     db.execute("PRAGMA user_version").fetchone()[0] not in (1, 2, 3, 4)):
                 raise ValueError("INVALID_INDEX_SCHEMA")
             db.execute("BEGIN")
-            summary = json.loads(db.execute("SELECT value FROM metadata WHERE key='summary'").fetchone()[0])
+            require_index_tables(db,("metadata","events"))
+            summary = read_index_summary(db)
             sql = "SELECT id,pid,time_ms,data FROM events WHERE provider=? AND name=?"
             values = [provider, event_name]
             if pid:
@@ -130,7 +132,7 @@ def build_calltree(index_path, *, source="dotnet", pid=0, process_instance=None,
                 check(); scanned += 1
                 if scanned > MAX_TREE_EVENTS:
                     raise ValueError("CALLTREE_EVENT_BUDGET")
-                row = json.loads(raw)
+                row = _saved_json(raw)
                 validate_event(row, event_id)
                 if (row["pid"] != stored_pid or row["time_ms"] != stored_ms or
                         row["provider"] != provider or row["name"] != event_name):
@@ -196,6 +198,11 @@ def build_calltree(index_path, *, source="dotnet", pid=0, process_instance=None,
                     path_ids.append(found); parent = found
                 if len(nodes)+(len(labels)-first_new) > max_nodes:
                     omitted += 1; continue
+                new_metadata = sum(len(json.dumps([label,frame,derived],ensure_ascii=True,allow_nan=False,
+                    separators=(",", ":"))) for _,label,frame,derived in labels[first_new:])
+                if retained_metadata+new_metadata>MAX_TREE_METADATA_BYTES:
+                    omitted_metadata += 1; continue
+                retained_metadata += new_metadata
                 for key, label, frame, derived in labels[first_new:]:
                     identifier = len(nodes); nodes.append(node(identifier, parent, label, frame, derived))
                     edges[(parent, key)] = identifier; parent = identifier; path_ids.append(identifier)
@@ -219,6 +226,10 @@ def build_calltree(index_path, *, source="dotnet", pid=0, process_instance=None,
                         "tid": tid, "start_ms_inclusive": start_ms, "end_ms_exclusive": end_ms},
             "coverage": {"candidates_in_scope": in_scope, "samples_selected": selected,
                          "samples_represented": represented, "samples_omitted_node_budget": omitted,
+                         "samples_omitted_metadata_budget": omitted_metadata,
+                         "retained_frame_metadata_bytes": retained_metadata,
+                         "retained_metadata_byte_budget": MAX_TREE_METADATA_BYTES,
+                         "retained_byte_measurement": "ENCODED_NODE_METADATA_NOT_PROCESS_RSS",
                          "samples_without_stack": missing, "samples_with_truncated_stack": clipped,
                          "samples_without_process_identity": unknown,
                          "samples_excluded_dpc_isr": nonprocess,
@@ -261,7 +272,7 @@ def calltree_html(report):
         parts.append(f'<g><title>{label} | inclusive samples: {n["inclusive_samples"]}; self: {n["self_samples"]}</title>'
                      f'<rect x="{x:.3f}" y="{y}" width="{max(0,w-1):.3f}" height="24" rx="2"/>'
                      f'<text x="{x+3:.3f}" y="{y+16}">{escape(n["label"][:max(0, int(w//7)-1)])}</text></g>')
-    return ('<!doctype html><html><head><meta charset="utf-8">'
+    content = ('<!doctype html><html><head><meta charset="utf-8">'
             '<meta http-equiv="Content-Security-Policy" content="default-src \'none\'; style-src \'unsafe-inline\'">'
             '<title>BLACK.BOX recorded CPU samples</title><style>'
             'body{font:15px sans-serif;margin:24px}svg{max-width:100%;height:auto}rect{fill:#d8c8a0;stroke:#555}'
@@ -275,6 +286,7 @@ def calltree_html(report):
                 "source_trace_sha256": report.get("source_trace_sha256")}, indent=2))+'</pre>'
             f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}" role="img" '
             'aria-label="Call tree of recorded samples">'+''.join(parts)+'</svg></body></html>')
+    return content.encode('utf-8',errors='backslashreplace').decode('utf-8')
 
 
 def export_analysis(report, destination, *, html=False):
@@ -282,7 +294,7 @@ def export_analysis(report, destination, *, html=False):
     path = safe_path(destination)
     if path.exists() or path.is_symlink():
         raise ValueError("OUTPUT_EXISTS")
-    content = calltree_html(report) if html else json.dumps(report, ensure_ascii=False, allow_nan=False, indent=2)
+    content = calltree_html(report) if html else json.dumps(report, ensure_ascii=True, allow_nan=False, indent=2)
     data = content.encode("utf-8")
     if len(data) > 64*1024**2:
         raise ValueError("ANALYSIS_EXPORT_BUDGET")

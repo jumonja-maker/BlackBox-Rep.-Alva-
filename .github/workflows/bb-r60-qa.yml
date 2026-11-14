@@ -6,12 +6,25 @@ on:
   pull_request:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      acceptance_scope:
+        description: Full candidate, or explicit functional audit after owner/scheduler review
+        type: choice
+        options: [full, technical-audit, base-program-endurance]
+        default: full
+      expected_sha:
+        description: Required only for base-program-endurance; must match this dispatch ref
+        type: string
+      full_ci_run_id:
+        description: Required only for base-program-endurance; successful exact-source full shell QA run
+        type: string
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
-  group: bb-r60-${{ github.event.pull_request.number || github.ref }}-${{ github.event.pull_request.head.sha || github.sha }}
+  group: bb-r60-${{ github.event.pull_request.number || github.ref }}-${{ github.event.pull_request.head.sha || github.sha }}-${{ inputs.acceptance_scope || 'full' }}
   cancel-in-progress: false
 
 jobs:
@@ -29,19 +42,27 @@ jobs:
       medium_only: ${{ steps.scope.outputs.medium_only }}
       workspace_only: ${{ steps.scope.outputs.workspace_only }}
       lifecycle: ${{ steps.scope.outputs.lifecycle }}
+      technical_audit: ${{ steps.scope.outputs.technical_audit }}
+      base_program_endurance: ${{ steps.scope.outputs.base_program_endurance }}
     steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
       - id: scope
         name: Select bounded development checks or complete candidate acceptance
         env:
           EVENT: ${{ github.event_name }}
           MESSAGE: ${{ github.event.head_commit.message }}
           SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          ACCEPTANCE_SCOPE: ${{ inputs.acceptance_scope || 'full' }}
+          PROGRAM_EXPECTED_SHA: ${{ inputs.expected_sha }}
+          PROGRAM_FULL_CI_RUN_ID: ${{ inputs.full_ci_run_id }}
         shell: bash
         run: |
           set -euo pipefail
           if [[ "$EVENT" == pull_request || "$EVENT" == workflow_dispatch ]]; then
-            printf '%s\n' 'contracts=true' 'native=true' 'gui_only=false' 'medium_only=false' 'workspace_only=false' 'lifecycle=true' >> "$GITHUB_OUTPUT"
-            printf '%s\n' 'Full R60 candidate: contracts, actual native source/frozen/UI, real 5h30 lifecycle.' >> "$GITHUB_STEP_SUMMARY"
+            python tools/qa_chain_builder.py --emit-acceptance-scope --event "$EVENT" --acceptance-scope "$ACCEPTANCE_SCOPE" --source-sha "$SOURCE_SHA" --program-expected-sha "$PROGRAM_EXPECTED_SHA" --full-ci-run-id "$PROGRAM_FULL_CI_RUN_ID"
           else
             contracts=false
             native=false
@@ -59,7 +80,7 @@ jobs:
             if [[ "$MESSAGE" == *'[r60-workspace]'* ]]; then
               contracts=true; native=true; gui_only=true; medium_only=false; workspace_only=true
             fi
-            printf 'contracts=%s\nnative=%s\ngui_only=%s\nmedium_only=%s\nworkspace_only=%s\nlifecycle=false\n' "$contracts" "$native" "$gui_only" "$medium_only" "$workspace_only" >> "$GITHUB_OUTPUT"
+            printf 'contracts=%s\nnative=%s\ngui_only=%s\nmedium_only=%s\nworkspace_only=%s\nlifecycle=false\ntechnical_audit=false\nbase_program_endurance=false\n' "$contracts" "$native" "$gui_only" "$medium_only" "$workspace_only" >> "$GITHUB_OUTPUT"
             printf '%s\n' 'Targeted development checks only; full candidate acceptance is not established.' >> "$GITHUB_STEP_SUMMARY"
             if [[ "$medium_only" == true ]]; then
               printf '%s\n' 'SOURCE_MEDIUM_DIAGNOSTIC: actual Standard medium-token source chain over full real Wave02 evidence. Full native/frozen/DPI/lifecycle acceptance: NOT_RUN. Complete candidate acceptance: NOT_ESTABLISHED.' >> "$GITHUB_STEP_SUMMARY"
@@ -72,6 +93,15 @@ jobs:
           fi
           printf 'Source SHA: %s\nRun: %s attempt %s\n' "$SOURCE_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" >> "$GITHUB_STEP_SUMMARY"
 
+  base-program-endurance:
+    needs: scope
+    if: needs.scope.outputs.base_program_endurance == 'true'
+    name: Separate base GUI Standard and Detailed recording acceptance
+    uses: ./.github/workflows/bb-program-endurance-qa.yml
+    with:
+      expected_sha: ${{ inputs.expected_sha }}
+      full_ci_run_id: ${{ inputs.full_ci_run_id }}
+
   contracts:
     needs: scope
     if: needs.scope.outputs.contracts == 'true'
@@ -81,7 +111,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          - os: ubuntu-24.04
             python: 3.11.14
             lock: requirements/ci-linux-py311.lock
           - os: windows-latest
@@ -419,3 +449,26 @@ jobs:
             exit 1
           fi
           printf '%s\n' 'R60 new gates passed. Existing full Windows/Linux/native/portable and one-hour Standard/Incident Burst workflows remain independently mandatory.' >> "$GITHUB_STEP_SUMMARY"
+
+  technical-acceptance:
+    needs: [scope, contracts, native, lifecycle]
+    if: always() && needs.scope.outputs.technical_audit == 'true'
+    name: R60 explicit functional technical audit (no lifecycle acceptance)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      CONTRACTS: ${{ needs.contracts.result }}
+      NATIVE: ${{ needs.native.result }}
+      LIFECYCLE: ${{ needs.lifecycle.result }}
+      SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - name: Require unchanged full functional witnesses and identify omitted lifecycle honestly
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$CONTRACTS" != success || "$NATIVE" != success || "$LIFECYCLE" != skipped ]]; then
+            echo '::error::Explicit technical audit needs successful full contracts/native/source/frozen/medium/DPI and a visibly omitted lifecycle job.'
+            exit 1
+          fi
+          printf 'R60_TECHNICAL_ACCEPTANCE {"source_sha":"%s","status":"PASS","scope":"FULL_FUNCTIONAL_NATIVE_SOURCE_FROZEN_NO_LIFECYCLE_ACCEPTANCE","lifecycle":"NOT_RUN","complete_candidate_acceptance":"NOT_ESTABLISHED","published_release":false}\n' "$SOURCE_SHA"
+          printf 'Exact source: %s\nFull functional/native/source/frozen/medium/DPI: SUCCESS\n5h30 lifecycle: NOT_RUN\nComplete R60 candidate acceptance: NOT_ESTABLISHED\nExisting full-project and one-hour gates remain independently required.\n' "$SOURCE_SHA" >> "$GITHUB_STEP_SUMMARY"

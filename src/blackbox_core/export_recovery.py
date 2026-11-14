@@ -3,7 +3,7 @@ Recovery requires explicit confirmation, a dead owner, native identities and
 SHA-256. Original recordings are never edited; unknown staged files are kept.
 """
 from contextlib import contextmanager
-import hashlib,os,re,time
+import hashlib,math,os,re,time
 from pathlib import Path
 from uuid import uuid4
 from .library_files import checked,atomic_json,read_json,move_no_replace
@@ -16,11 +16,22 @@ def digest(path):
  return h.hexdigest()
 def same(a,b):
  return isinstance(a,dict) and isinstance(b,dict) and a.get('identity')==b.get('identity') and a.get('directory')==b.get('directory')
+def _known_birth(value):
+ if type(value) not in (int,float) or value<=0:return False
+ try:return math.isfinite(value)
+ except OverflowError:return False
 def owner_alive(data):
  import psutil
- try:return abs(psutil.Process(data['owner_pid']).create_time()-data['owner_created'])<.000001
- except (psutil.NoSuchProcess,KeyError,TypeError,ValueError):return False
- except psutil.AccessDenied:return True
+ pid=data.get('owner_pid');created=data.get('owner_created')
+ # Missing/corrupt identity does not prove an exporter has exited. Only a
+ # nonexistent PID or a valid different birth time can release ownership.
+ if type(pid) is not int or pid<=0:return True
+ try:
+  actual=psutil.Process(pid).create_time()
+ except psutil.NoSuchProcess:return False
+ except (psutil.Error,OSError,ValueError,OverflowError):return True
+ if not _known_birth(created) or not _known_birth(actual):return True
+ return abs(actual-created)<.000001
 def validate(output,stage,data,*,ready):
  if data.get('kind')!='BLACKBOX_EXPORT_TRANSACTION' or data.get('schema_version')!=1 or not re.fullmatch('[0-9a-f]{32}',str(data.get('uid'))):raise ValueError('EXPORT_INVALID_JOURNAL')
  if stage.parent!=output or stage.name!='.bb-export-'+data['uid'] or file_identity(stage)!=data.get('stage_identity') or file_identity(output)!=data.get('output_identity'):raise ValueError('EXPORT_RECOVERY_IDENTITY_CHANGED')

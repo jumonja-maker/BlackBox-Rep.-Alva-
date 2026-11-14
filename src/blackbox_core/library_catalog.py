@@ -19,6 +19,7 @@ import time
 from uuid import uuid4
 
 from .library_files import checked,read_json,atomic_json,identity,tree_summary,move_no_replace
+from .trace_cleanup import terminal_cleanup_proven
 
 APP_ID=0x42424C31
 OWNER='blackbox-library-owner.json'
@@ -71,6 +72,7 @@ def recording_metadata(folder):
         rows=db.execute('SELECT * FROM metadata LIMIT 2').fetchall()
         if len(rows)!=1 or rows[0]['schema_version']!=1:raise ValueError('LIBRARY_UNSUPPORTED_RECORDING')
         row=dict(rows[0]);aggregate=db.execute('SELECT count(*),max(elapsed_ms) FROM samples').fetchone()
+    if type(row.get('started_utc')) is not str:raise ValueError('LIBRARY_INVALID_RECORDING_CLOCK')
     try:stamp=int(datetime.fromisoformat(row['started_utc'].replace('Z','+00:00')).timestamp()*1e9)
     except (TypeError,ValueError,OverflowError):raise ValueError('LIBRARY_INVALID_RECORDING_CLOCK') from None
     if not 0<=stamp<=2**63-1:raise ValueError('LIBRARY_INVALID_RECORDING_CLOCK')
@@ -175,7 +177,9 @@ class LibraryCatalog:
             'owner_created':meta.get('owner_created'),'configuration_changed':int(bool(meta.get('configuration_changed')))}
         for key in ('interval_ms','samples','completed_runs','owner_pid'):
             if values[key] is not None and (type(values[key]) is not int or not 0<=values[key]<=2**63-1):values[key]=None
-        if type(values['owner_created']) not in (int,float) or not math.isfinite(values['owner_created']) or values['owner_created']<0:values['owner_created']=None
+        try:known_birth=type(values['owner_created']) in (int,float) and math.isfinite(values['owner_created']) and values['owner_created']>0
+        except OverflowError:known_birth=False
+        if not known_birth:values['owner_created']=None
         columns=tuple(values);update=','.join(k+'=excluded.'+k for k in columns if k not in ('entry_id','locator'))
         db.execute('INSERT INTO entries('+','.join(columns)+') VALUES('+','.join('?' for _ in columns)+') '
             'ON CONFLICT(locator) DO UPDATE SET '+update,tuple(values.values()));db.commit()
@@ -291,9 +295,19 @@ class LibraryCatalog:
             raise ValueError('LIBRARY_INVALID_SCAN')
         if not self.root.is_dir():return {'added':0,'errors':[],'has_more':False,'cursor':after}
         checked(self.root)
+        deadline=time.monotonic()+5
+        def bounded_names(entries):
+            # nsmallest bounds retained names, not directory enumeration.
+            # Refuse an incomplete enumeration before registering anything:
+            # advancing a sorted cursor could otherwise skip unseen names.
+            for count,entry in enumerate(entries,1):
+                if count>10000 or time.monotonic()>=deadline:
+                    raise ValueError('LIBRARY_SCAN_ENUMERATION_BUDGET')
+                if SESSION_NAME.fullmatch(entry.name) and entry.name>after:
+                    yield entry.name
         with os.scandir(self.root) as entries:
-            names=heapq.nsmallest(limit+1,(e.name for e in entries if SESSION_NAME.fullmatch(e.name) and e.name>after))
-        added=0;errors=[];cursor=after;deadline=time.monotonic()+5
+            names=heapq.nsmallest(limit+1,bounded_names(entries))
+        added=0;errors=[];cursor=after
         for name in names[:limit]:
             if time.monotonic()>deadline:break
             try:self.register(self.root/name);added+=1
@@ -357,7 +371,7 @@ class LibraryCatalog:
         if artifacts.exists():
             for n,journal in enumerate(artifacts.glob('*.trace.json')):
                 if n>=64:raise ValueError('LIBRARY_TRACE_JOURNAL_BUDGET')
-                if read_json(journal).get('state') not in ('COMPLETED','FAILED','RECOVERED_NAMED_CANCEL','RECOVERED_OWNED_TOOL_STOP'):raise ValueError('LIBRARY_TRACE_STILL_ACTIVE')
+                if not terminal_cleanup_proven(read_json(journal,65536),journal=journal.name):raise ValueError('LIBRARY_TRACE_STILL_ACTIVE')
         size=tree_summary(folder,max_seconds=2)
         if size['fingerprint'] is None:raise ValueError('LIBRARY_TREE_CHECK_INCOMPLETE')
         return folder,marker,size

@@ -357,7 +357,7 @@ def read_graph_export(path, *, format, expected_case, json_reference=None):
     path = Path(path)
     data, digest, stamp = _read_file(path, keep=True)
     value = _parse_graph(data, format)
-    _require(_identity_projection(value) == _identity_projection(expected_case),
+    _require(_same_json_metadata(_identity_projection(value), _identity_projection(expected_case)),
              'RECORDED_IDENTITIES_CHANGED')
     if format == 'html':
         _require(_same_json_metadata(value, json_reference), 'HTML_JSON_METADATA_DIFFER')

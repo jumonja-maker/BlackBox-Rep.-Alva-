@@ -24,16 +24,22 @@ def main(argv=None):
         if not 0<a.seconds<=7*86400 or not .1<=a.interval<=60:raise ValueError("INVALID_RECORDING_POLICY")
         from .research_worker import ResearchSession
         session=ResearchSession(a.output)
-        session.command({"op":"attach","args":{"pid":a.pid}})
-        session.command({"op":"configure","args":{"scenario":a.scenario}})
-        session.command({"op":"interval","args":{"milliseconds":int(a.interval*1000)}})
-        session.command({"op":"start"})
-        if a.detailed:session.command({"op":"detailed","args":{"enabled":True}})
-        end=time.monotonic()+a.seconds
         try:
+            # Setup can fail after a recording has already started (for
+            # example when enabling the requested optional detail source).
+            # Keep that partial owner inside the same finalization boundary.
+            session.command({"op":"attach","args":{"pid":a.pid}})
+            session.command({"op":"configure","args":{"scenario":a.scenario}})
+            session.command({"op":"interval","args":{"milliseconds":int(a.interval*1000)}})
+            session.command({"op":"start"})
+            if a.detailed:session.command({"op":"detailed","args":{"enabled":True}})
+            end=time.monotonic()+a.seconds
             while session.probe.active and time.monotonic()<end:
                 session.tick();time.sleep(min(a.interval,max(0,end-time.monotonic())))
-        finally:session.stop()
+        finally:
+            stopped=session.stop()
+            if type(stopped) is not dict or stopped.get('cleanup_required') is not False:
+                raise RuntimeError('RESEARCH_RESOURCE_CLEANUP_UNCONFIRMED')
         result={"folder":str(session.probe.session_folder),"state":session.research_state,
                 "base_recording_state":session.probe.session_state,"error":session.research_error,
                 "wall_seconds_requested":a.seconds,"samples":session.probe.total_samples}
@@ -44,7 +50,10 @@ def main(argv=None):
     else:
         from .research_fixtures import main as fixture
         return fixture(a.arguments)
-    print(json.dumps(result,ensure_ascii=False,indent=2));return 0
+    print(json.dumps(result,ensure_ascii=False,indent=2))
+    if a.command=='record' and (result['state'] in ('INCOMPLETE','FINALIZATION_UNCONFIRMED')
+                               or result.get('error') or stopped.get('errors')):return 2
+    return 0
 
 
 if __name__=="__main__":raise SystemExit(main())

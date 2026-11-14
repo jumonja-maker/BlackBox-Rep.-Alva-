@@ -4,9 +4,11 @@ from contextlib import closing
 import hashlib
 from html import escape
 import json
+import math
 import os
 from pathlib import Path
 import platform
+import re
 import sqlite3
 import tempfile
 import time
@@ -20,15 +22,30 @@ def compact(value):
     return json.dumps(value, ensure_ascii=True, allow_nan=False, separators=(",", ":"))
 
 
+def _finite_json_float(raw):
+    value=float(raw)
+    if not math.isfinite(value):raise ValueError('NONFINITE_RESEARCH_JSON_NUMBER')
+    return value
+
+
 def readonly(path):
     path = Path(path)
     if path.is_symlink() or not path.is_file():
         raise ValueError("INVALID_RESEARCH_PATH")
     db = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=2)
     db.row_factory = sqlite3.Row
-    db.execute("PRAGMA query_only=ON")
-    db.execute("PRAGMA trusted_schema=OFF")
-    db.setlimit(sqlite3.SQLITE_LIMIT_LENGTH, 1024*1024)
+    try:
+        db.execute("PRAGMA query_only=ON")
+        db.execute("PRAGMA trusted_schema=OFF")
+        db.setlimit(sqlite3.SQLITE_LIMIT_LENGTH, 1024*1024)
+        deadline=time.monotonic()+15
+        db.set_progress_handler(lambda:int(time.monotonic()>=deadline),1000)
+        # Counts, quantiles and pages on this connection share one SQL/WAL
+        # snapshot even if the recording owner appends between SELECTs.
+        db.execute("BEGIN")
+    except BaseException:
+        db.close()
+        raise
     return db
 
 
@@ -39,6 +56,12 @@ class CaseBook:
         fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
         os.close(fd)
         self.db = sqlite3.connect(self.path, timeout=2)
+        try:self._initialize(pid,created,context,on_evidence)
+        except BaseException:
+            self.db.close()
+            raise
+
+    def _initialize(self,pid,created,context,on_evidence):
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.execute("PRAGMA synchronous=FULL")
         self.db.executescript("""
@@ -75,6 +98,8 @@ class CaseBook:
         self.set_context("state", self.state)
 
     def set_context(self, key, value):
+        if type(key) is not str or not key or len(key.encode('utf-8'))>256:
+            raise ValueError('INVALID_RESEARCH_CONTEXT_KEY')
         data = compact(value)
         if len(data) > 65536:
             raise ValueError("CONTEXT_TOO_LARGE")
@@ -83,6 +108,10 @@ class CaseBook:
 
     def put(self, kind, payload, *, source="BLACKBOX", quality="OBSERVED",
             at_ns=None, tid=None, operation_id=None, mirror=True):
+        if (any(type(value) is not str or not value or len(value)>maximum
+                for value,maximum in ((kind,80),(source,80),(quality,256))) or
+                (operation_id is not None and (type(operation_id) is not str or len(operation_id)>256))):
+            raise ValueError('INVALID_RESEARCH_EVIDENCE_METADATA')
         data = compact(payload)
         if len(data) > 32768 or len(kind) > 80 or len(source) > 80:
             raise ValueError("EVIDENCE_TOO_LARGE")
@@ -154,35 +183,91 @@ class CaseBook:
 
 
 def context(folder):
+    # Native writers limit each JSON value to 64 KiB and keep a small set of
+    # keys. Apply an aggregate import budget before export/compare can retain
+    # an arbitrary context table in Python. Overflow is an error, never a
+    # silently truncated statement of the recording's conditions.
+    max_rows,max_bytes,max_value_bytes=128,2*1024**2,65536
+    result={};total=0;deadline=time.monotonic()+3
+    def pairs(items):
+        value={}
+        for key,item in items:
+            if key in value:raise ValueError('INVALID_RESEARCH_CONTEXT_DUPLICATE_KEY')
+            value[key]=item
+        return value
+    def constant(_):raise ValueError('INVALID_RESEARCH_CONTEXT_NONFINITE_JSON')
     with closing(readonly(Path(folder)/"research.sqlite3")) as db:
-        return {r[0]: json.loads(r[1]) for r in db.execute("SELECT key,data FROM context")}
+        db.set_progress_handler(lambda:int(time.monotonic()>=deadline),1000)
+        rows=db.execute("SELECT substr(key,1,257),substr(data,1,65537),"
+                        "length(CAST(key AS BLOB)),length(CAST(data AS BLOB)) "
+                        "FROM context LIMIT ?",(max_rows+1,))
+        for ordinal,row in enumerate(rows,1):
+            key,raw,key_bytes,value_bytes=row
+            if (ordinal>max_rows or type(key) is not str or not key or
+                    type(raw) is not str or type(key_bytes) is not int or not 1<=key_bytes<=256 or
+                    type(value_bytes) is not int or not 1<=value_bytes<=max_value_bytes):
+                raise ValueError('RESEARCH_CONTEXT_BUDGET_EXCEEDED')
+            total+=key_bytes+value_bytes
+            if total>max_bytes:raise ValueError('RESEARCH_CONTEXT_BUDGET_EXCEEDED')
+            if key in result:raise ValueError('INVALID_RESEARCH_CONTEXT_DUPLICATE_KEY')
+            result[key]=json.loads(raw,object_pairs_hook=pairs,parse_constant=constant,
+                                   parse_float=_finite_json_float)
+        return result
 
 
 def evidence_page(folder, *, start_ms=0, end_ms=2**63-1, after_id=0, before_id=None, limit=100):
     if not all(type(x) is int for x in (start_ms, end_ms, after_id, limit)) or not (
             -60000 <= start_ms <= end_ms <= 2**63-1 and after_id >= 0 and 1 <= limit <= 500):
         raise ValueError("INVALID_EVIDENCE_INTERVAL")
+    def constant(_):raise ValueError('INVALID_RESEARCH_EVIDENCE_JSON')
+    def pairs(values):
+        result={}
+        for key,value in values:
+            if key in result:raise ValueError('INVALID_RESEARCH_EVIDENCE_JSON')
+            result[key]=value
+        return result
+    columns='id,monotonic_ns,received_ns,elapsed_ms,pid,process_created,tid,source,quality,kind,operation_id,data'
     with closing(readonly(Path(folder)/"research.sqlite3")) as db:
         # id cursor retains deterministic paging for delayed source events.
         if before_id is not None:
             if type(before_id) is not int or before_id<1:raise ValueError("INVALID_EVIDENCE_CURSOR")
-            rows = db.execute("SELECT * FROM evidence WHERE elapsed_ms BETWEEN ? AND ? "
-                "AND id<? ORDER BY id DESC LIMIT ?",(start_ms,end_ms,before_id,limit+1)).fetchall()
+            rows = db.execute("SELECT "+columns+" FROM evidence WHERE elapsed_ms BETWEEN ? AND ? "
+                "AND id<? ORDER BY id DESC LIMIT ?",(start_ms,end_ms,before_id,limit+1))
         else:
-            rows = db.execute("SELECT * FROM evidence WHERE elapsed_ms BETWEEN ? AND ? "
-                              "AND id>? ORDER BY id LIMIT ?", (start_ms,end_ms,after_id,limit+1)).fetchall()
-        more = len(rows)>limit
-        rows=rows[:limit]
-        if before_id is not None:rows=list(reversed(rows))
-        result = []
+            rows = db.execute("SELECT "+columns+" FROM evidence WHERE elapsed_ms BETWEEN ? AND ? "
+                              "AND id>? ORDER BY id LIMIT ?", (start_ms,end_ms,after_id,limit+1))
+        result=[];size=0;more=False;byte_budget=2*1024**2
         for row in rows:
-            entry = dict(row); entry["data"] = json.loads(entry["data"])
+            if len(result)>=limit:
+                more=True;break
+            entry=dict(row);raw=entry.get('data')
+            if (type(raw) is not str or len(raw.encode('utf-8'))>32768 or
+                    type(entry['id']) is not int or entry['id']<1 or
+                    any(type(entry[key]) is not int or entry[key]<0 for key in ('monotonic_ns','received_ns')) or
+                    type(entry['elapsed_ms']) is not int or
+                    any(entry[key] is not None and (type(entry[key]) is not int or entry[key]<0)
+                        for key in ('pid','tid')) or
+                    (entry['process_created'] is not None and (type(entry['process_created']) not in (int,float) or
+                        not math.isfinite(entry['process_created']) or entry['process_created']<=0)) or
+                    any(type(entry.get(key)) is not str or len(entry[key])>maximum
+                        for key,maximum in (('kind',80),('source',80),('quality',256))) or
+                    (entry.get('operation_id') is not None and
+                     (type(entry['operation_id']) is not str or len(entry['operation_id'])>256))):
+                raise ValueError('INVALID_RESEARCH_EVIDENCE')
+            try:entry['data']=json.loads(raw,parse_constant=constant,object_pairs_hook=pairs,
+                                         parse_float=_finite_json_float)
+            except (RecursionError,UnicodeError) as error:raise ValueError('INVALID_RESEARCH_EVIDENCE_JSON') from error
             entry["evidence_ref"] = f"research.sqlite3:evidence:{entry['id']}"
-            result.append(entry)
+            entry_bytes=len(compact(entry).encode('ascii'))
+            if size+entry_bytes>byte_budget:
+                more=True;break
+            result.append(entry);size+=entry_bytes
+        if before_id is not None:result.reverse()
         return {"rows": result, "has_more": more,
                 "next_id": result[-1]["id"] if result else after_id,
                 "first_id":result[0]["id"] if result else None,
-                "range_ms": [start_ms,end_ms], "file_trust": "UNVERIFIED_IMPORT"}
+                "range_ms": [start_ms,end_ms], "file_trust": "UNVERIFIED_IMPORT",
+                "page_byte_budget":byte_budget}
 
 
 def episode(folder, start_ms, end_ms):
@@ -190,8 +275,14 @@ def episode(folder, start_ms, end_ms):
     with closing(readonly(Path(folder)/"session.sqlite3")) as db:
         r = db.execute("SELECT count(*) AS samples, max(cpu_percent) AS peak_cpu_percent, "
                        "max(rss_bytes) AS peak_rss_bytes, min(rss_bytes) AS min_rss_bytes "
+                       ",coalesce(sum(CASE WHEN typeof(elapsed_ms)!='integer' OR elapsed_ms<0 OR "
+                       "(rss_bytes IS NOT NULL AND (typeof(rss_bytes)!='integer' OR rss_bytes<0)) OR "
+                       "(cpu_percent IS NOT NULL AND (typeof(cpu_percent) NOT IN ('integer','real') OR "
+                       "cpu_percent<0 OR cpu_percent>1e308)) THEN 1 ELSE 0 END),0) AS invalid_rows "
                        "FROM samples WHERE elapsed_ms BETWEEN ? AND ?", (start_ms,end_ms)).fetchone()
+        if r['invalid_rows']:raise ValueError('INVALID_RESEARCH_SAMPLE_COUNTER')
         metrics = dict(r)
+        metrics.pop('invalid_rows')
         # Bounded chart data: SQL aggregation reads the selected interval only.
         width=max(1,(end_ms-start_ms)//300)
         bins=[dict(x) for x in db.execute("SELECT (elapsed_ms-?)/? AS bucket, "
@@ -256,6 +347,8 @@ def _compare_cases(first, second):
     a,b=context(first),context(second)
     required=("scenario","workload","profile","interval_ms")
     ca,cb=a.get("experiment",{}),b.get("experiment",{})
+    if any(type(value) is not dict for value in (ca,cb,a.get('capabilities',{}),b.get('capabilities',{}))):
+        raise ValueError('INVALID_RESEARCH_EXPERIMENT_CONTEXT')
     reasons=[k for k in required if not ca.get(k) or ca.get(k)!=cb.get(k)]
     if (ca.get("scenario_version") or cb.get("scenario_version")) and ca.get("scenario_version")!=cb.get("scenario_version"):
         reasons.append("scenario_version")
@@ -452,10 +545,17 @@ def load_comparison(path):
 
 def action_statistics(folder, *, warmup_count=None):
     """Exact SQLite quantiles; all runs remain stored, no Python history list."""
-    if warmup_count is None:warmup_count=context(folder).get("experiment",{}).get("warmup_count",0)
+    if warmup_count is None:
+        experiment=context(folder).get('experiment',{})
+        if type(experiment) is not dict:raise ValueError('INVALID_RESEARCH_EXPERIMENT_CONTEXT')
+        warmup_count=experiment.get("warmup_count",0)
     if type(warmup_count) is not int or not 0<=warmup_count<=10000:raise ValueError("INVALID_WARMUP_COUNT")
     with closing(readonly(Path(folder)/"research.sqlite3")) as db:
-        total=db.execute("SELECT count(*) FROM action_runs").fetchone()[0]
+        total,invalid=db.execute("SELECT count(*),coalesce(sum(CASE WHEN "
+            "typeof(duration_ns)!='integer' OR duration_ns<0 OR duration_ns>? OR "
+            "typeof(evidence_ref)!='integer' OR evidence_ref<0 THEN 1 ELSE 0 END),0) "
+            "FROM action_runs",(30*86400*10**9,)).fetchone()
+        if invalid:raise ValueError('INVALID_RESEARCH_ACTION_DURATION')
         warmup=min(warmup_count,total);n=total-warmup
         if not n:return {"repeats":0,"total_repeats":total,"warmups_excluded":warmup,"duration_ms":None}
         # TEMP views are unavailable on query_only; use a parameterized CTE.
@@ -497,12 +597,15 @@ def export_case(folder, destination, *, include_sensitive=False, cancel=None):
     folder,destination=Path(folder),Path(destination)
     _check_cancel(cancel)
     if include_sensitive:
+        from .trace_cleanup import terminal_cleanup_proven
         artifacts=Path(folder)/"artifacts"
         if artifacts.is_dir():
-            for journal in artifacts.glob("*.trace.json"):
+            for ordinal,journal in enumerate(artifacts.glob("*.trace.json")):
+                _check_cancel(cancel)
+                if ordinal>=64:raise ValueError("TRACE_JOURNAL_EXPORT_BUDGET")
                 if journal.is_symlink() or journal.stat().st_size>65536:raise ValueError("INVALID_TRACE_JOURNAL")
-                state=json.loads(journal.read_text(encoding="utf-8")).get("state")
-                if state not in ("COMPLETED","FAILED","RECOVERED_NAMED_CANCEL","RECOVERED_OWNED_TOOL_STOP"):
+                from .library_files import read_json
+                if not terminal_cleanup_proven(read_json(journal,65536),journal=journal.name):
                     raise ValueError("STOP_TRACE_BEFORE_SENSITIVE_EXPORT")
     if destination.exists() or destination.is_symlink():
         raise ValueError("EXPORT_DESTINATION_EXISTS")
@@ -635,7 +738,8 @@ def export_case(folder, destination, *, include_sensitive=False, cancel=None):
 
 def verify_package(path, *, max_total_bytes=4*1024**3):
     """Validate without extracting or executing any untrusted package member."""
-    with zipfile.ZipFile(path) as z:
+    from .archive_policy import bounded_zip
+    with bounded_zip(path,max_total_bytes=max_total_bytes) as z:
         infos=z.infolist();names=[i.filename for i in infos]
         if len(names)>10000 or len(set(names))!=len(names):raise ValueError("INVALID_PACKAGE_MEMBERS")
         if sum(i.file_size for i in infos)>max_total_bytes:raise ValueError("PACKAGE_SIZE_BUDGET_EXCEEDED")
@@ -643,9 +747,24 @@ def verify_package(path, *, max_total_bytes=4*1024**3):
             raise ValueError("INVALID_PACKAGE_PATH")
         if "manifest.json" not in names or z.getinfo("manifest.json").file_size>2*1024*1024:
             raise ValueError("INVALID_PACKAGE_MANIFEST")
-        m=json.loads(z.read("manifest.json"))
-        if m.get("kind")!="BLACKBOX_RESEARCH_PACKAGE" or type(m.get("files")) is not list:
+        def pairs(rows):
+            value={}
+            for key,item in rows:
+                if key in value:raise ValueError("INVALID_PACKAGE_MANIFEST_DUPLICATE_KEY")
+                value[key]=item
+            return value
+        def constant(_):raise ValueError("INVALID_PACKAGE_MANIFEST")
+        try:m=json.loads(z.read("manifest.json"),object_pairs_hook=pairs,parse_constant=constant,
+                         parse_float=_finite_json_float)
+        except (RecursionError,UnicodeError,TypeError) as error:raise ValueError("INVALID_PACKAGE_MANIFEST") from error
+        if type(m) is not dict or m.get("kind")!="BLACKBOX_RESEARCH_PACKAGE" or type(m.get("files")) is not list:
             raise ValueError("INVALID_PACKAGE_MANIFEST")
+        for row in m['files']:
+            if (type(row) is not dict or type(row.get('name')) is not str or
+                    type(row.get('size')) is not int or row['size']<0 or
+                    type(row.get('sha256')) is not str or
+                    not re.fullmatch('[0-9a-fA-F]{64}',row['sha256'])):
+                raise ValueError("INVALID_PACKAGE_MANIFEST")
         expected={r["name"] for r in m["files"]}
         if expected|{"manifest.json"} != set(names) or len(expected)!=len(m["files"]):
             raise ValueError("PACKAGE_MEMBER_MISMATCH")
@@ -655,22 +774,19 @@ def verify_package(path, *, max_total_bytes=4*1024**3):
             digest=hashlib.sha256()
             with z.open(info) as stream:
                 for data in iter(lambda:stream.read(1024*1024),b""):digest.update(data)
-            if digest.hexdigest()!=r["sha256"]:raise ValueError("PACKAGE_HASH_MISMATCH")
+            if digest.hexdigest()!=r["sha256"].lower():raise ValueError("PACKAGE_HASH_MISMATCH")
         return {"integrity":"VERIFIED","authenticity":"UNVERIFIED","manifest":m}
 
 
 def recover_case(folder,destination):
     """Copy committed observations; never alter the interrupted source."""
-    import psutil
     folder,destination=Path(folder),Path(destination)
     original=context(folder)
-    pid,created=original.get("worker_pid"),original.get("worker_created")
-    if original.get("state")=="RECORDING" and pid is not None:
-        try:
-            p=psutil.Process(pid)
-            if created is None or abs(p.create_time()-created)<.000001:
-                raise ValueError("RECORDING_OWNER_STILL_ACTIVE")
-        except psutil.NoSuchProcess:pass
+    if original.get("state")=="RECORDING":
+        from .export_recovery import owner_alive
+        if owner_alive({'owner_pid':original.get('worker_pid'),
+                        'owner_created':original.get('worker_created')}):
+            raise ValueError("RECORDING_OWNER_STILL_ACTIVE_OR_UNVERIFIED")
     destination.mkdir(exist_ok=False)
     for name in ("session.sqlite3","session-v2.sqlite3","research.sqlite3","detail-v2.sqlite3"):
         source=folder/name

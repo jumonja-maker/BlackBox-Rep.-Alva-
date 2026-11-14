@@ -18,8 +18,38 @@ from .library_files import replace_owned_status
 from .trace_clock_evidence import (capture_trace_clock_bracket,
                                    new_clock_order_samples, append_clock_order_sample)
 from .windows_research import WPR_PROFILES, SCOPED_WPR_PROFILE
+from .trace_cleanup import terminal_cleanup_proven
 
 MAX_JOURNAL_BYTES=65536
+_RECOVERY_ACK=object()  # Process-local authority; never a journal/IPC value.
+
+
+def _release_lease(process, *, clear=True):
+    stream=process.stdin
+    if stream is None:return
+    try:stream.close()
+    except (OSError,ValueError):
+        # Buffered close can report a broken pipe after releasing its FD.
+        # Retain a genuinely open lease for the next explicit Stop retry.
+        if stream.closed is not True:raise
+    if clear:process.stdin=None
+
+
+class _TraceCleanupProof:
+    def cleanup_confirmed(self):
+        return self._cleanup_confirmed is True and not (
+            self.process is not None and self.process.poll() is None)
+
+    def _accept_recovery(self, receipt, *, authority=None):
+        trace_id=getattr(self,'instance',None) or getattr(self,'uid',None)
+        if (authority is not _RECOVERY_ACK or type(receipt) is not dict or
+                receipt.get('journal')!=self.path.name or
+                type(receipt.get('resource_cleanup')) is not dict or
+                receipt['resource_cleanup'].get('scope')!='EXPLICIT_EXACT_NAMED_RECOVERY' or
+                receipt['resource_cleanup'].get('trace_id')!=trace_id or
+                receipt.get('resource_cleanup',{}).get('confirmed') is not True):
+            raise ValueError('TRACE_RECOVERY_ACKNOWLEDGEMENT_MISMATCH')
+        self._cleanup_confirmed=True
 
 
 def _read(path):
@@ -109,6 +139,10 @@ def run(journal, *, capture_factory=None, lease_lost=None):
             except BaseException as error:
                 data['state']='CLEANUP_REQUIRED';data['cleanup_error']=(type(error).__name__+': '+str(error))[:1000]
     finally:
+        # Artifact success and release of the exact named recording are
+        # separate facts. A failed hash/empty output can follow a real Stop.
+        data['resource_cleanup']={'confirmed':capture.active is False,
+            'scope':'EXACT_NAMED_WPR_INSTANCE','instance':capture.instance}
         data['ended_monotonic_ns']=time.monotonic_ns()
         if isinstance(data.get('clock_anchors'),dict):
             data['clock_anchors']['guardian_finally']=capture_trace_clock_bracket()
@@ -116,7 +150,7 @@ def run(journal, *, capture_factory=None, lease_lost=None):
     return 0 if data['state']=='COMPLETED' else 1
 
 
-class TraceSupervisor:
+class TraceSupervisor(_TraceCleanupProof):
     def __init__(self,folder,*,seconds=30,max_output_bytes=256*1024**2,target=None,profile="GeneralProfile.Light",session_path=None):
         if type(profile) is not str or profile not in (*WPR_PROFILES, SCOPED_WPR_PROFILE):
             raise ValueError("INVALID_WPR_PROFILE")
@@ -124,6 +158,7 @@ class TraceSupervisor:
         if type(max_output_bytes) is not int or not 1024**2<=max_output_bytes<=1024**3:raise ValueError('INVALID_TRACE_SIZE_POLICY')
         self.folder=Path(folder);self.instance='BLACKBOX_'+uuid4().hex
         self.path=self.folder/(self.instance+'.trace.json');self.process=None;self.reported=False;self._terminal_result=None
+        self._cleanup_confirmed=True  # No guardian/native ownership yet.
         self.data={'schema_version':1,'instance':self.instance,'state':'RESERVED',
             'consent':'EXPLICIT_USER_COMMAND','target':target,
             'scope':'SYSTEM_WIDE_MAY_INCLUDE_OTHER_PROCESSES',
@@ -146,11 +181,11 @@ class TraceSupervisor:
         args=[sys.executable,'--trace-owner',str(self.path)] if getattr(sys,'frozen',False) else [sys.executable,'-m','blackbox_core.trace_owner',str(self.path)]
         self.process=subprocess.Popen(args,stdin=subprocess.PIPE,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,
             creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
+        self._cleanup_confirmed=False
         return {'source':'ETW_WPR','status':'START_REQUESTED','instance':self.instance,
             'journal':self.path.name,**self.data['policy'],'lost_events':None}
     def request_stop(self):
-        if self.process is not None and self.process.stdin is not None:
-            self.process.stdin.close();self.process.stdin=None
+        if self.process is not None:_release_lease(self.process)
     def poll(self):
         if self.process is None:return None
         if self.reported:return None
@@ -168,8 +203,8 @@ class TraceSupervisor:
         if code is None:
             return ({'source':'ETW_WPR','status':'JOURNAL_UNAVAILABLE','lost_events':None}
                     if unavailable else None)
-        # A dead guardian cannot still be recording. Keep the original journal
-        # untouched: only explicit named-instance recovery can confirm cleanup.
+        # Guardian death alone says nothing about its named kernel recording.
+        # Keep the original journal untouched for explicit named recovery.
         # Cache the terminal observation because research_worker may consume
         # poll() before finalization later calls stop().
         self.request_stop()  # Release the dead child's remaining stdin pipe.
@@ -183,6 +218,9 @@ class TraceSupervisor:
             status,reason='CLEANUP_REQUIRED','GUARDIAN_ABNORMAL_EXIT'
         else:
             status=state
+        self._cleanup_confirmed=(not unavailable and state in ('COMPLETED','FAILED') and
+            not (state=='COMPLETED' and code!=0) and
+            terminal_cleanup_proven(self.data,journal=self.path.name))
         result={'source':'ETW_WPR','status':status,
             'journal':self.path.name,'instance':self.instance,'exit_code':code,
             'details':self.data,'lost_events':None}

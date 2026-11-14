@@ -29,6 +29,8 @@ MAX_SYMBOL_BYTES = 64 * 1024**2
 MAX_RECORDS = 500_000
 MAX_FUNCTIONS = 100_000
 MAX_MODULES = 8192
+MAX_INLINE_DEPTH = 64
+MAX_INLINE_PARENT_REFERENCES = 1_000_000
 
 
 class Budget:
@@ -214,6 +216,7 @@ def _pdb_symbols(msf, pe):
     line_strings = named_strings(msf)
     inline_names = None
     inline_unavailable = {}
+    inline_parent_references = 0
     at, limit, modules = 64, 64+lengths[0], 0
     while at < limit:
         modules += 1; msf.budget.check()
@@ -253,6 +256,7 @@ def _pdb_symbols(msf, pe):
                     inline_unavailable[reason] = inline_unavailable.get(reason, 0)+1
                     continue
                 start, end, parents = scope
+                _require(len(parents)<MAX_INLINE_DEPTH, "PDB_INLINE_DEPTH_BUDGET")
                 location = inlinees[inlinee]
                 try:
                     rows = inline_ranges(body[minimum:], procedure_start=start, procedure_end=end,
@@ -265,6 +269,8 @@ def _pdb_symbols(msf, pe):
                 identity = (modules, record_at)
                 scopes[record_at] = (start, end, (*parents, identity))
                 for lo, hi, location in rows:
+                    inline_parent_references += len(parents)
+                    _require(inline_parent_references<=MAX_INLINE_PARENT_REFERENCES, "PDB_INLINE_LINEAGE_BUDGET")
                     inline_sites.append((lo,hi,{"name":inline_names[inlinee], "inlinee_id":inlinee,
                         "site_id":list(identity), "parent_site_ids":[list(p) for p in parents],
                         "source_location":location}))

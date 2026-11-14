@@ -23,6 +23,16 @@ WPR_PROFILES = tuple(WPR_PROFILE_COMPONENTS)
 # Reserved for the diagnostic owner's protected immutable WPRP factory.
 # Generic WprCapture and TraceSupervisor.start() must reject this policy.
 SCOPED_WPR_PROFILE = "BLACKBOX.Deep.Light"
+WPR_NO_ACTIVE_PROFILES=0xC5583000
+
+
+class WprCommandError(OSError):
+    """Actual scoped tool failure; numeric HRESULT is distinct from text."""
+    def __init__(self,returncode,output,*,arguments,instance):
+        self.wpr_returncode=returncode
+        self.wpr_arguments=tuple(arguments)
+        self.wpr_instance=instance
+        super().__init__(f"WPR_COMMAND_FAILED_{returncode}: "+output[:1000])
 
 def _status(error):
     return "ACCESS_DENIED" if error==5 else "TIMEOUT" if error in (1460,258) else "NOT_OBSERVED"
@@ -241,7 +251,7 @@ class WprCapture:
             except subprocess.TimeoutExpired:
                 p.kill();p.wait(timeout=5);raise OSError("WPR_COMMAND_TIMEOUT") from None
             log.seek(0);output=log.read(16384).decode("utf-8",errors="replace")
-        if p.returncode:raise OSError(f"WPR_COMMAND_FAILED_{p.returncode}: "+output[:1000])
+        if p.returncode:raise WprCommandError(p.returncode,output,arguments=args,instance=self.instance)
         return output
 
     def start(self):

@@ -341,7 +341,7 @@ class InvestigationGraphPanel(QWidget):
         self.run_button = self._button(actions, "invRunAction", "2 · Confirm chosen action…", "2 · Подтвердить действие…", self.run_action)
         self.after_button = self._button(actions, "invCaptureAfter", "3 · Capture AFTER", "3 · Снять ПОСЛЕ", self.capture_after)
         self.compare_button = self._button(actions, "invCompare", "4 · Compare BEFORE / AFTER", "4 · Сравнить ДО / ПОСЛЕ", self.compare_measurements)
-        self.uac_button = self._button(actions, "invRequestPermissions", "Request scoped administrator permission…", "Запросить ограниченные права администратора…", self.deep_panel.request_investigation_elevation)
+        self.uac_button = self._button(actions, "invRequestPermissions", "Request scoped administrator permission…", "Запросить ограниченные права администратора…", self.request_native_permission)
         self.cancel_native_button = self._button(actions, "invCancelNative", "Cancel chosen diagnostic step", "Отменить диагностический шаг", self.cancel_native_step)
         verification_page.addLayout(actions)
         form = QFormLayout()
@@ -1311,12 +1311,34 @@ class InvestigationGraphPanel(QWidget):
         if token != (bridge.generation, bridge.target):
             return False
         self._live_token = token
-        self._pending_native = {"tag": "inv:bind:" + uuid4().hex, "phase": "bind", "token": token}
+        self._pending_native = {"tag": "inv:bind:" + uuid4().hex, "phase": "bind", "token": token,
+                                "generation": self.bridge.generation}
         return self._dispatch("capabilities", {}, self._pending_native["tag"])
 
+    def _native_pending_current(self, pending):
+        return bool(pending is not None and self._pending_native is pending
+                    and not self._closing and not pending.get("cancel_requested")
+                    and pending.get("generation") == self.bridge.generation
+                    and pending.get("token") == (self.deep_panel.bridge.generation, self.deep_panel.bridge.target))
+
+    def _native_permission_current(self):
+        pending = self._pending_native
+        request = getattr(self.deep_panel, "_last_request", None)
+        return bool(self._native_pending_current(pending) and pending.get("awaiting_uac")
+                    and isinstance(request, dict) and request.get("tag") == pending.get("tag"))
+
+    def request_native_permission(self):
+        if not self._native_permission_current() or self.deep_panel.bridge.busy:
+            return False
+        return self.deep_panel.request_investigation_elevation(expected_tag=self._pending_native["tag"])
+
     def _dispatch(self, operation, parameters, tag):
-        accepted = self.deep_panel.request_investigation_action(operation, parameters, tag=tag)
-        if not accepted:
+        pending = self._pending_native
+        if not self._native_pending_current(pending) or pending.get("tag") != tag:
+            return False
+        accepted = self.deep_panel.request_investigation_action(operation, parameters, tag=tag,
+            execution_guard=lambda: self._native_pending_current(pending))
+        if not accepted and self._pending_native is pending:
             self._pending_native = None
         self._controls()
         return accepted
@@ -1338,7 +1360,8 @@ class InvestigationGraphPanel(QWidget):
         if self._experiment.get("status") in ("RECOVERY_UNCONFIRMED", "EVIDENCE_COMMIT_FAILED", "STOPPED_AT_FAILED_STEP"):
             return False
         tag = "inv:" + self._experiment["experiment_id"] + ":" + phase
-        self._pending_native = {"tag": tag, "phase": phase, "token": self._live_token}
+        self._pending_native = {"tag": tag, "phase": phase, "token": self._live_token,
+                                "generation": self.bridge.generation}
         return self._dispatch(operation, parameters, tag)
 
     def capture_before(self):
@@ -1388,21 +1411,34 @@ class InvestigationGraphPanel(QWidget):
         pending = self._pending_native
         if not pending or self._closing:
             return
-        if pending["token"] != (self.deep_panel.bridge.generation, self.deep_panel.bridge.target):
+        if pending.get("generation") != self.bridge.generation:
+            self.deep_panel.release_investigation_guard(pending["tag"])
+            self._pending_native = None
+            self._controls()
             return
-        if result.get("request_kind") == "elevate" and pending.get("awaiting_uac"):
-            if result.get("status") != "COMPLETED":
-                self._pending_native = None
-                self._set_status("Permission was not granted; no automatic experiment retry. The recorded case remains available.",
-                                 "Права не предоставлены; автоматического повтора эксперимента нет. Записанное расследование доступно.")
-                self._controls()
+        if pending["token"] != (self.deep_panel.bridge.generation, self.deep_panel.bridge.target):
             return
         if result.get("request_tag") != pending["tag"]:
             return
-        phase = pending["phase"]
-        if result.get("request_kind") == "elevate":
+        if result.get("request_kind") in ("elevate", "authorize_target"):
+            if pending.get("cancel_requested"):
+                self._pending_native = None
+                self.deep_panel.release_investigation_guard(pending["tag"])
+                self._controls()
+                return
+            if pending.get("awaiting_uac") and result.get("status") != "COMPLETED":
+                self._pending_native = None
+                self.deep_panel.release_investigation_guard(pending["tag"])
+                self._set_status("Permission was not granted; no automatic experiment retry. The recorded case remains available.",
+                                 "Права не предоставлены; автоматического повтора эксперимента нет. Записанное расследование доступно.")
+                self._controls()
+            # Scope authorization is not the requested snapshot/action result.
+            # The existing Deep owner retries that exact guarded operation.
             return
-        if result.get("status") == "ADMIN_REQUIRED":
+        phase = pending["phase"]
+        if (result.get("status") == "ADMIN_REQUIRED" or
+                result.get("status") == "CONFIRMATION_REQUIRED" and
+                result.get("next_action") == "AUTHORIZE_TARGET_AND_OPERATION_SCOPE"):
             pending["awaiting_uac"] = True
             self._set_status("Administrator permission is required. Use the existing GRANT ADMINISTRATOR PERMISSION control; cancellation keeps this investigation.",
                              "Требуются права администратора. Используйте штатную кнопку ПРЕДОСТАВИТЬ ПРАВА; отмена сохраняет расследование.")
@@ -1478,13 +1514,30 @@ class InvestigationGraphPanel(QWidget):
             index_path=str(path), experiment=self.experiment_case is not None)
 
     def cancel_native_step(self):
-        if self.deep_panel.bridge.busy:
-            self.deep_panel.bridge.cancel()
-        elif self._pending_native and self._pending_native.get("awaiting_uac"):
+        pending = self._pending_native
+        if pending is None or pending.get("cancel_requested"):
+            return False
+        # Revoke only this attempt's late modal/UAC retry. An unrelated chain
+        # command on the shared bridge supplies no cancellation authority.
+        pending["cancel_requested"] = True
+        self.deep_panel.release_investigation_guard(pending["tag"])
+        bridge = self.deep_panel.bridge
+        cancel = getattr(bridge, "cancel_request", None)
+        if callable(cancel):
+            cancel(pending["tag"], pending["token"][0], pending["token"][1])
+        task = getattr(bridge, "worker", None)
+        command = getattr(task, "command", None)
+        running = (isinstance(command, dict) and command.get("tag") == pending["tag"]
+                   and command.get("generation") == pending["token"][0]
+                   and command.get("target") == pending["token"][1])
+        if not running:
             self._pending_native = None
-            self._set_status("Pending permission request cancelled. No diagnostic action was retried.",
-                             "Ожидание прав отменено. Диагностическое действие не повторялось.")
+        # A matching running request still owns its result and journal entry.
+        # Cancellation is not a cleanup ACK and does not release its owner.
+        self._set_status("Cancellation requested for this investigation step. Already issued work retains its actual completion and cleanup status.",
+                         "Запрошена отмена этого шага расследования. Уже выданная работа сохраняет фактические результат и статус очистки.")
         self._controls()
+        return True
 
     def _render_binding(self):
         self.binding_status.setText(self.tr2("New measurements target: ", "Цель новых измерений: ") +
@@ -1695,8 +1748,9 @@ class InvestigationGraphPanel(QWidget):
         self.run_button.setEnabled(phase_ready and action_implemented and bool(experiment.get("before_id")) and not experiment.get("action_result"))
         self.after_button.setEnabled(phase_ready and bool(experiment.get("action_result")) and not experiment.get("after_id") and experiment.get("status") != "RECOVERY_UNCONFIRMED")
         self.compare_button.setEnabled(phase_ready and bool(experiment.get("before_id")) and bool(experiment.get("after_id")) and not experiment.get("comparison"))
-        self.uac_button.setEnabled(not native_busy and bool((self._pending_native or {}).get("awaiting_uac")))
-        self.cancel_native_button.setEnabled(native_busy or self._pending_native is not None)
+        self.uac_button.setEnabled(not native_busy and self._native_permission_current())
+        self.cancel_native_button.setEnabled(self._pending_native is not None
+                                            and not self._pending_native.get("cancel_requested"))
         self.previous_button.setEnabled(active and self.nodes_model.offset > 0)
         self.next_button.setEnabled(active and self.nodes_model.offset + self.nodes_model.page_size < len(self.nodes_model.rows))
         for button in (self.related_button, self.thread_button, self.stack_button, self.module_button, self.decoder_button):

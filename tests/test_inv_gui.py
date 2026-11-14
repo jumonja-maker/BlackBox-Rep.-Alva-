@@ -58,12 +58,19 @@ class DeepPanelDouble(QWidget):
         super().__init__(window)
         self.bridge, self.calls = NativeBridgeDouble(), []
         self.elevation_calls = 0
+        self.execution_guards = []
+        self.release_investigation_guard = Mock()
 
-    def request_investigation_elevation(self):
+    def request_investigation_elevation(self, *, expected_tag=None):
+        if expected_tag is not None and (self._last_request or {}).get("tag") != expected_tag:
+            return False
         self.elevation_calls += 1
+        return True
 
-    def request_investigation_action(self, operation, parameters=None, *, tag=""):
+    def request_investigation_action(self, operation, parameters=None, *, tag="", execution_guard=None):
         self.calls.append((operation, deepcopy(parameters or {}), tag))
+        self.execution_guards.append(execution_guard)
+        self._last_request = {"tag": tag, "execution_guard": execution_guard}
         return True
 
 
@@ -512,10 +519,138 @@ class InvestigationGuiContracts(unittest.TestCase):
         self.assertEqual(len(self.deep.calls), 1)
         self.panel.uac_button.click()
         self.assertEqual(self.deep.elevation_calls, 1)
-        self.deep.bridge.result_ready.emit({"request_kind": "elevate", "status": "UAC_CANCELLED"})
+        self.deep.bridge.result_ready.emit({"request_kind": "elevate", "status": "UAC_CANCELLED",
+                                           "request_tag": self.panel._pending_native["tag"]})
         self.assertIsNone(self.panel._pending_native)
         self.assertIsNotNone(self.panel.case)
         self.assertEqual(len(self.deep.calls), 1)
+
+    def test_foreign_permission_result_and_request_do_not_replace_this_graph_step(self):
+        self.bind_fixture()
+        self.panel.capture_before()
+        self.result("before", status="ADMIN_REQUIRED")
+        pending = self.panel._pending_native
+        for kind in ("elevate", "authorize_target"):
+            self.deep.bridge.result_ready.emit({"request_kind": kind, "request_tag": "chain:foreign",
+                                               "status": "UAC_CANCELLED"})
+            self.assertIs(self.panel._pending_native, pending)
+        self.deep._last_request = {"tag": "chain:foreign"}
+        self.panel._controls()
+        self.assertFalse(self.panel.uac_button.isEnabled())
+        self.assertFalse(self.panel.request_native_permission())
+        self.assertEqual(self.deep.elevation_calls, 0)
+        self.assertEqual(len(self.deep.calls), 1)
+        self.deep._last_request = {"tag": pending["tag"]}
+        self.deep.bridge.generation += 1
+        self.panel._controls()
+        self.assertFalse(self.panel.uac_button.isEnabled())
+        self.assertFalse(self.panel.request_native_permission())
+        self.assertEqual(self.deep.elevation_calls, 0)
+
+    def test_existing_admin_scope_authorization_keeps_pending_until_actual_snapshot(self):
+        self.bind_fixture()
+        self.panel.capture_before()
+        pending = self.panel._pending_native
+        self.deep.bridge.result_ready.emit({"request_tag": pending["tag"], "operation": "snapshot",
+            "request_kind": "action", "status": "CONFIRMATION_REQUIRED",
+            "next_action": "AUTHORIZE_TARGET_AND_OPERATION_SCOPE", "data": {}})
+        self.assertIs(self.panel._pending_native, pending)
+        self.assertTrue(pending["awaiting_uac"])
+        self.assertTrue(self.panel.uac_button.isEnabled())
+        self.panel.uac_button.click()
+        self.assertEqual(self.deep.elevation_calls, 1)
+        self.deep.bridge.result_ready.emit({"request_kind": "authorize_target", "request_tag": pending["tag"],
+                                           "operation": "target.bind", "status": "COMPLETED", "data": {}})
+        self.assertIs(self.panel._pending_native, pending)
+        self.assertEqual(self.reader.calls, [], "Scope authorization is not a BEFORE snapshot")
+        self.result("before", data={"snapshot_id": "actual-before"})
+        self.assertIsNone(self.panel._pending_native)
+        self.assertEqual(self.panel._experiment["before_id"], "actual-before")
+        self.assertEqual(self.reader.calls[-1][1]["record"]["operation"], "snapshot")
+
+    def test_cancel_native_step_never_cancels_a_foreign_chain_worker(self):
+        foreign = SimpleNamespace(command={"tag": "chain:foreign:attempt", "generation": 1,
+                                         "target": self.deep.bridge.target}, cancel=Mock())
+        self.deep.bridge.worker = foreign
+        self.deep.bridge.busy = True
+        self.panel._controls()
+        self.assertFalse(self.panel.cancel_native_button.isEnabled())
+        self.assertFalse(self.panel.cancel_native_step())
+        self.deep.bridge.cancel.assert_not_called()
+        foreign.cancel.assert_not_called()
+        self.deep.release_investigation_guard.assert_not_called()
+
+    def test_cancel_waiting_permission_revokes_only_its_late_execution_guard(self):
+        self.bind_fixture()
+        self.panel.capture_before()
+        self.result("before", status="ADMIN_REQUIRED")
+        pending = self.panel._pending_native
+        guard = self.deep.execution_guards[-1]
+        self.assertTrue(guard())
+        foreign = SimpleNamespace(command={"tag": "chain:foreign:elevate", "generation": 1,
+                                         "target": self.deep.bridge.target}, cancel=Mock())
+        self.deep.bridge.worker = foreign
+        self.deep.bridge.cancel_request = Mock(return_value=False)
+        self.assertTrue(self.panel.cancel_native_step())
+        self.assertFalse(guard())
+        self.assertIsNone(self.panel._pending_native)
+        self.assertFalse(self.panel.uac_button.isEnabled())
+        self.deep.release_investigation_guard.assert_called_once_with(pending["tag"])
+        self.deep.bridge.cancel_request.assert_called_once_with(pending["tag"], *pending["token"])
+        self.deep.bridge.cancel.assert_not_called()
+        foreign.cancel.assert_not_called()
+        self.deep.bridge.result_ready.emit({"request_kind": "elevate", "status": "COMPLETED"})
+        self.assertEqual(len(self.deep.calls), 1, "Cancelled permission must not retry a graph action")
+
+    def test_cancelled_own_permission_completion_clears_pending_without_an_action_retry(self):
+        self.bind_fixture()
+        self.panel.capture_before()
+        self.result("before", status="ADMIN_REQUIRED")
+        pending = self.panel._pending_native
+        self.deep.bridge.worker = SimpleNamespace(command={"tag": pending["tag"],
+            "generation": pending["token"][0], "target": pending["token"][1], "kind": "elevate"}, cancel=Mock())
+        self.deep.bridge.cancel_request = Mock(return_value=True)
+        self.assertTrue(self.panel.cancel_native_step())
+        self.assertIs(self.panel._pending_native, pending)
+        self.deep.bridge.result_ready.emit({"request_kind": "elevate", "request_tag": pending["tag"],
+                                           "status": "COMPLETED", "data": {}})
+        self.assertIsNone(self.panel._pending_native)
+        self.assertFalse(self.deep.execution_guards[-1]())
+        self.assertEqual(len(self.deep.calls), 1)
+        self.assertEqual(self.reader.calls, [], "Permission completion is not an experiment action receipt")
+
+    def test_graph_generation_change_revokes_guard_and_drops_late_native_reply(self):
+        self.bind_fixture()
+        self.panel.capture_before()
+        pending = self.panel._pending_native
+        guard = self.deep.execution_guards[-1]
+        self.assertTrue(guard())
+        original = self.panel.case
+        self.panel.open_case_context([{"source_type": "SESSION", "path": "/SYNTHETIC/new-source"}])
+        self.assertFalse(guard())
+        self.deep.bridge.result_ready.emit({"request_tag": pending["tag"], "operation": "snapshot",
+            "status": "COMPLETED", "data": {"snapshot_id": "must-not-become-new-source"}})
+        self.assertIs(self.panel.case, original)
+        self.assertIsNone(self.panel._pending_native)
+        self.assertNotIn("before_id", self.panel._experiment)
+        self.assertEqual(self.reader.calls, [])
+        self.deep.release_investigation_guard.assert_called_once_with(pending["tag"])
+
+    def test_cancel_running_graph_request_keeps_pending_until_actual_result(self):
+        self.bind_fixture()
+        self.panel.capture_before()
+        pending = self.panel._pending_native
+        self.deep.bridge.worker = SimpleNamespace(command={"tag": pending["tag"],
+            "generation": pending["token"][0], "target": pending["token"][1]}, cancel=Mock())
+        self.deep.bridge.cancel_request = Mock(return_value=True)
+        self.assertTrue(self.panel.cancel_native_step())
+        self.assertIs(self.panel._pending_native, pending)
+        self.assertFalse(self.deep.execution_guards[-1]())
+        self.assertFalse(self.panel.cancel_native_button.isEnabled())
+        self.result("before", status="CANCELLED")
+        self.assertIsNone(self.panel._pending_native)
+        self.assertEqual(self.panel._experiment["status"], "STOPPED_AT_FAILED_STEP")
+        self.assertEqual(self.reader.calls[-1][1]["record"]["status"], "CANCELLED")
 
     def test_export_uses_new_experiment_case_with_original_provenance(self):
         self.bind_fixture()

@@ -448,7 +448,56 @@ def _parent_handle(parent: ProcessIdentity):
     return kernel, handle
 
 
-def _duplicate_parent_file(kernel, parent_handle, source_value):
+def _track_output_duplicate(inspector, kernel, handle):
+    """Retain only the actual authenticated duplicate until checked release."""
+    resource = {"kind": "DIAGNOSTIC_ARTIFACT_OUTPUT_DUPLICATE", "kernel": kernel,
+                "handle": handle, "closed": False}
+    def release():
+        try:
+            closed = bool(kernel.CloseHandle(handle))
+            code = None if closed else getattr(C, "get_last_error", lambda: None)()
+        except BaseException as error:
+            resource.update(retry_close_allowed=False, release_winerror=getattr(error, "winerror", None),
+                            reason="ARTIFACT_DUPLICATE_CLOSE_EXCEPTION_OWNERSHIP_UNCONFIRMED")
+            return False
+        resource.update(release_winerror=code, reason="ARTIFACT_DUPLICATE_CLOSE_NOT_ACKNOWLEDGED")
+        if not closed and code == 6:
+            resource["retry_close_allowed"] = False
+        return closed
+    resource["release"] = release
+    inspector._owned_native_handles.append(resource)
+    return resource
+
+
+def _release_output_duplicate(inspector, resource):
+    from .deep_native import _close_native_resource
+    closed = _close_native_resource(resource)
+    if closed:
+        inspector._owned_native_handles.remove(resource)
+    return {"confirmed": closed, "status": "CONFIRMED" if closed else "RECOVERY_UNCONFIRMED",
+            "scope": "AUTHENTICATED_HELPER_OUTPUT_DUPLICATE", "owner_retained": not closed,
+            "retry_allowed": resource.get("retry_close_allowed", True), "winerror": resource.get("winerror")}
+
+
+def _attach_output_cleanup(response, cleanup, *, recipient=None, managed=None):
+    if cleanup is None:
+        return response
+    response["borrowed_output_cleanup"] = cleanup
+    if cleanup["confirmed"] is not True:
+        response.setdefault("data", {}).update(owner_retained=True, retry_cleanup_required=True,
+            reported_operation_status=response.get("status"), reported_operation_reason=response.get("error"))
+        response.update(status="RECOVERY_UNCONFIRMED", error="HELPER_OUTPUT_DUPLICATE_RELEASE_UNCONFIRMED")
+        if isinstance(response.get("native_query_cleanup"), dict):
+            response["native_query_cleanup"].update(confirmed=False, status="RECOVERY_UNCONFIRMED",
+                                                   borrowed_output_cleanup=cleanup)
+        if recipient is not None:
+            recipient.retained_cleanup = response
+        if managed is not None:
+            managed.cleanup_required = True
+    return response
+
+
+def _duplicate_parent_file(kernel, parent_handle, source_value, *, owned_inspector=None):
     if type(source_value) is not int or not 0 < source_value < 2**64:
         raise ValueError("INVALID_GUI_FILE_HANDLE")
     kernel.GetCurrentProcess.restype = W.HANDLE
@@ -459,10 +508,20 @@ def _duplicate_parent_file(kernel, parent_handle, source_value):
     target = W.HANDLE()
     if not kernel.DuplicateHandle(parent_handle, source_value, kernel.GetCurrentProcess(), C.byref(target), 0, False, 2):
         raise OSError(C.get_last_error(), "GUI_FILE_HANDLE_DUPLICATION_FAILED")
-    if kernel.GetFileType(target) != 1:
-        kernel.CloseHandle(target)
-        raise ValueError("GUI_OUTPUT_MUST_BE_REGULAR_FILE_HANDLE")
-    return target.value
+    handle = target.value
+    resource = _track_output_duplicate(owned_inspector, kernel, handle) if owned_inspector is not None else None
+    try:
+        if kernel.GetFileType(target) != 1:
+            raise ValueError("GUI_OUTPUT_MUST_BE_REGULAR_FILE_HANDLE")
+    except BaseException as error:
+        if resource is not None:
+            cleanup = _release_output_duplicate(owned_inspector, resource)
+        else:
+            cleanup = None
+            kernel.CloseHandle(target)
+        error.borrowed_output_resource, error.borrowed_output_cleanup = resource, cleanup
+        raise
+    return (handle, resource) if owned_inspector is not None else handle
 
 
 def run_helper(pipe_name: str, nonce: str, parent: ProcessIdentity) -> int:
@@ -531,40 +590,54 @@ def run_helper(pipe_name: str, nonce: str, parent: ProcessIdentity) -> int:
         def execute_message(message, cancel):
             nonlocal fatal
             identifier = message.get("request_id")
+            output_resource = None
+            output_cleanup = None
+            recipient = None
             try:
                 req = ActionRequest.from_dict(message["request"])
                 validate_parameters(req.parameters)
+                owner = managed if managed is not None else engine
+                recipient = managed.engine if managed is not None else engine
                 output_handle = None
                 attachment = message.get("attachment")
                 if attachment is not None:
                     if (req.operation not in ("dump", "profile.etw") or not isinstance(attachment, dict)
                             or set(attachment) != {"source_file_handle"}):
                         raise ValueError("INVALID_DIAGNOSTIC_ATTACHMENT")
-                    output_handle = _duplicate_parent_file(kernel, parent_handle, attachment["source_file_handle"])
+                    if recipient is not None:
+                        output_handle, output_resource = _duplicate_parent_file(kernel, parent_handle,
+                            attachment["source_file_handle"], owned_inspector=recipient.inspector)
                 try:
-                    owner = managed if managed is not None else engine
                     response = owner.execute(req, cancel_event=cancel, file_handle=output_handle)
                 finally:
                     # The engine borrows this handle. Close exactly once even if
                     # target validation or the operation deadline failed early.
-                    if output_handle:
-                        kernel.CloseHandle(output_handle)
+                    if output_resource is not None:
+                        output_cleanup = _release_output_duplicate(recipient.inspector, output_resource)
                 response.setdefault("operation", req.operation)
                 if response.get("status") == "ACCESS_DENIED" and not elevated:
                     response.update(status="ADMIN_REQUIRED", next_action="REQUEST_UAC_FOR_THIS_OPERATION")
             except InterruptedError as exc:
+                if getattr(exc, "borrowed_output_resource", None) is not None:
+                    output_resource, output_cleanup = exc.borrowed_output_resource, exc.borrowed_output_cleanup
                 response = result("unknown", "CANCELLED", error=str(exc))
                 if managed is not None and managed.cleanup_required:
                     response = managed._retained("unknown", response)
             except TimeoutError as exc:
+                if getattr(exc, "borrowed_output_resource", None) is not None:
+                    output_resource, output_cleanup = exc.borrowed_output_resource, exc.borrowed_output_cleanup
                 response = result("unknown", "TIMED_OUT", error=str(exc))
                 if managed is not None and managed.cleanup_required:
                     response = managed._retained("unknown", response)
             except Exception as exc:
+                if getattr(exc, "borrowed_output_resource", None) is not None:
+                    output_resource = exc.borrowed_output_resource
+                    output_cleanup = exc.borrowed_output_cleanup
                 status = getattr(exc, "status", "OPERATION_FAILED")
                 response = result("unknown", status, error=str(exc)[:2000], winerror=getattr(exc, "winerror", None))
                 if managed is not None and managed.cleanup_required:
                     response = managed._retained("unknown", response)
+            response = _attach_output_cleanup(response, output_cleanup, recipient=recipient, managed=managed)
             if response.get("status") == "ACCESS_DENIED" and not elevated:
                 response.update(status="ADMIN_REQUIRED", next_action="REQUEST_UAC_FOR_THIS_OPERATION")
             try:
@@ -582,8 +655,10 @@ def run_helper(pipe_name: str, nonce: str, parent: ProcessIdentity) -> int:
             try:
                 bounded_json(response)
             except (ValueError, TypeError):
-                response = result(response.get("operation", "unknown"), "INCOMPLETE_EVIDENCE",
+                retained = response.get("data", {}).get("owner_retained") is True
+                response = result(response.get("operation", "unknown"), "RECOVERY_UNCONFIRMED" if retained else "INCOMPLETE_EVIDENCE",
                                   error="DIAGNOSTIC_RESULT_EXCEEDED_TRANSPORT_BUDGET",
+                                  data={"owner_retained": True, "retry_cleanup_required": True} if retained else {},
                                   limitations=["Operation may have executed; payload omitted. Review session cleanup before retrying."])
             try:
                 with send_lock:

@@ -4,10 +4,20 @@ Short runs are functional checks, never substitutes for 8h/1h or physical QA.
 No target mutation, automatic ETW/dump, downloads, or telemetry generation.
 """
 from __future__ import annotations
-import argparse,csv,json,os,platform,statistics,time
+import argparse,csv,json,os,platform,statistics,sys,time
 from pathlib import Path
 import psutil
 from blackbox_core.library_files import atomic_json
+
+def check_callback_guard(guard,*,cleanup=False):
+ if guard.failed and not cleanup:raise RuntimeError('QA_UNHANDLED_PYTHON_CALLBACK')
+
+def apply_callback_failure(result,guard):
+ if guard.failed:
+  result['state']='FAILED'
+  result.setdefault('error','QA_UNHANDLED_PYTHON_CALLBACK')
+  result['unhandled_python_failure']=guard.metadata()
+ return result
 
 def quantiles(values):
  values=sorted(v for v in values if type(v) in (int,float));n=len(values)
@@ -77,9 +87,15 @@ def run(mode,pid,output,*,phase_seconds=60,warmup_seconds=10,sample_seconds=.5,p
   'limitations':['OBSERVER_INCLUDES_GUI_OWNED_HELPERS_AND_MEASUREMENT_LOOP','RSS_TREE_SUM_CAN_DOUBLE_COUNT_SHARED_PAGES',
    'EXITED_HELPER_CPU_BETWEEN_SAMPLES_UNKNOWN','OFF_INCLUDES_IDLE_GUI_AND_SESSION_HELPER','SHORT_RUN_IS_NOT_ENDURANCE_OR_PHYSICAL_WINDOWS_QA'],
   'phases':phases,'acceptance':'NOT_ACCEPTED'}
+ from blackbox_core.chain_qa_guard import ChainQaFailureGuard
+ callback_guard=ChainQaFailureGuard(output/'unhandled-python-qa-error.json')
+ callback_guard.source_sha=expected_sha
+ previous_hook=callback_guard.install();cleaning_up=False
  def pump(seconds):
   until=time.monotonic()+seconds
-  while time.monotonic()<until:app.processEvents();time.sleep(min(.01,max(0,until-time.monotonic())))
+  while time.monotonic()<until:
+   app.processEvents();check_callback_guard(callback_guard,cleanup=cleaning_up)
+   time.sleep(min(.01,max(0,until-time.monotonic())))
  def wait(predicate,seconds=20):
   until=time.monotonic()+seconds
   while not predicate() and time.monotonic()<until:pump(.01)
@@ -131,13 +147,31 @@ def run(mode,pid,output,*,phase_seconds=60,warmup_seconds=10,sample_seconds=.5,p
  except BaseException as exc:
   result.update(state='FAILED',error=type(exc).__name__+': '+str(exc)[:500]);raise
  finally:
-  result['actual_total_seconds']=(time.monotonic_ns()-started)/1e9
-  write(output/'result.json',result)
-  window.close()
-  until=time.monotonic()+95
-  while bridge.alive and time.monotonic()<until:pump(.02)
-  if bridge.alive:raise RuntimeError('QA_GUI_HELPER_NOT_CLOSED')
-  window.deleteLater();app.processEvents()
+  primary_error=sys.exc_info()[1];cleaning_up=True
+  try:
+   from PySide6.QtCore import QThread
+   def owners_closed():
+    return not bridge.alive and not window.isVisible() and all(
+     not worker.isRunning() and worker.wait(0) for worker in window.findChildren(QThread))
+   window.close();until=time.monotonic()+95
+   while not owners_closed() and time.monotonic()<until:pump(.02)
+   result['cleanup']={'status':'COMPLETED' if owners_closed() else 'RECOVERY_UNCONFIRMED',
+    'helper_alive':bridge.alive,'window_visible':window.isVisible(),
+    'running_qthreads':sum(worker.isRunning() for worker in window.findChildren(QThread))}
+   if not owners_closed():raise RuntimeError('QA_GUI_OWNERS_NOT_CLOSED')
+   window.deleteLater();app.processEvents()
+  except BaseException as error:
+   result['state']='FAILED'
+   result.setdefault('error',type(error).__name__+': '+str(error)[:500])
+   result['cleanup']={**result.get('cleanup',{}),'status':'RECOVERY_UNCONFIRMED',
+    'helper_alive':bridge.alive,'error':type(error).__name__+': '+str(error)[:500]}
+   raise
+  finally:
+   apply_callback_failure(result,callback_guard)
+   result['actual_total_seconds']=(time.monotonic_ns()-started)/1e9
+   try:write(output/'result.json',result)
+   finally:sys.excepthook=previous_hook
+  if callback_guard.failed and primary_error is None:raise RuntimeError('QA_UNHANDLED_PYTHON_CALLBACK')
 
 def main(argv=None):
  p=argparse.ArgumentParser(description=__doc__);p.add_argument('mode',choices=('benchmark','endurance'));p.add_argument('--pid',type=int,required=True);p.add_argument('--output',type=Path,required=True)

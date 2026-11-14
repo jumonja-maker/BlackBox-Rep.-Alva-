@@ -5,6 +5,7 @@ Linux/Windows. They do not claim independent Windows process-identity/UAC proof.
 """
 from contextlib import closing
 from copy import deepcopy
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -43,8 +44,14 @@ class ChainObserveTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
         self.ctx = Context(self.root)
-        self.identity = ProcessIdentity(os.getpid(),
-            116444736000000000 + int(psutil.Process().create_time() * 10_000_000))
+        if os.name == "nt":
+            # Avoid manufacturing exact FILETIME from a rounded psutil float:
+            # the recorder also retains its actual native run identity.
+            from blackbox_core.deep_native import capture_identity
+            self.identity = capture_identity(os.getpid())
+        else:
+            self.identity = ProcessIdentity(os.getpid(),
+                116444736000000000 + int(psutil.Process().create_time() * 10_000_000))
         self.inputs = {"process": make_process_artifact(self.identity)}
         self.session = ResearchSession(output_root=self.root)
         self.session.probe.background_events = True
@@ -161,7 +168,85 @@ class ChainObserveTests(unittest.TestCase):
         self.assertTrue(outcome.cleanup["confirmed"])
         self.assertEqual(outcome.cleanup["stop_result"]["state"], "COMPLETED")
         self.assertTrue(outcome.execution_started)
+        self.assertTrue(outcome.cleanup["completion_evidence_readback"]["separate_from_execution_deadline"])
+        self.assertFalse(outcome.cleanup["completion_evidence_readback"]["collection_allowed"])
         self._assert_actual_finalization()
+
+    def test_recording_binding_keeps_float_birth_qualified_and_does_not_invent_filetime(self):
+        outcome = _observe(self.runtime)(self.ctx, self.inputs, {"duration_seconds": .05})
+        self.assertEqual(outcome.status, "COMPLETED")
+        metadata = outcome.outputs["session"].value
+        self.assertEqual(metadata["requested_target"]["created_100ns"], self.identity.created_100ns)
+        self.assertEqual(metadata["recorded_target"]["pid"], self.identity.pid)
+        if os.name == "nt":
+            self.assertEqual(metadata["recorded_target"]["created_100ns"], self.identity.created_100ns)
+            self.assertEqual(metadata["comparison"], "RECORDED_EXACT_FILETIME_FIELDS_MATCH_SOURCE_NOT_AUTHENTICATED")
+        else:
+            self.assertNotIn("created_100ns", metadata["recorded_target"])
+            self.assertEqual(metadata["comparison"], "RECORDED_PID_AND_FLOAT_BIRTH_COMPATIBLE_NOT_EXACT_FILETIME")
+        self.assertEqual(metadata["producer_authentication"], "NOT_ESTABLISHED")
+
+    def test_stale_callback_cannot_attribute_another_persisted_target_to_requested_identity(self):
+        original = _direct_observe(self.runtime, self.identity, {}, .05, self.ctx)
+        folder = self.session.probe.session_folder
+        other = type(self.identity)(self.identity.pid + 1000, self.identity.created_100ns)
+        wrong_inputs = {"process": make_process_artifact(other)}
+        before = {path.name: hashlib.sha256(path.read_bytes()).hexdigest() for path in folder.glob("*.sqlite3")}
+        result = _observe(ChainRuntime(observe_call=lambda *args: original))(self.ctx, wrong_inputs, {})
+        self.assertEqual(result.status, "OPERATION_FAILED")
+        self.assertEqual(result.outputs, {})
+        self.assertTrue(result.cleanup["confirmed"])
+        self.assertEqual(result.cleanup["stop_result"], original["stop_result"])
+        self.assertIn("WORKFLOW_RECORDED_TARGET_IDENTITY_MISMATCH", result.reason_code)
+        self.assertEqual({path.name: hashlib.sha256(path.read_bytes()).hexdigest() for path in folder.glob("*.sqlite3")}, before)
+
+    def test_recorded_exact_filetime_mismatch_vetoes_compatible_float_birth(self):
+        original = _direct_observe(self.runtime, self.identity, {}, .05, self.ctx)
+        folder = self.session.probe.session_folder
+        with closing(sqlite3.connect(folder / "research.sqlite3")) as db:
+            experiment = json.loads(db.execute("SELECT data FROM context WHERE key='experiment'").fetchone()[0])
+            experiment["run_identity"] = {"identity_status": "OS_OBSERVED_EXACT_FILETIME",
+                "process_identity": {"pid": self.identity.pid, "created_100ns": self.identity.created_100ns + 1}}
+            db.execute("UPDATE context SET data=? WHERE key='experiment'", (json.dumps(experiment),))
+            db.commit()
+        before = hashlib.sha256((folder / "research.sqlite3").read_bytes()).hexdigest()
+        result = _observe(ChainRuntime(observe_call=lambda *args: original))(self.ctx, self.inputs, {})
+        self.assertEqual(result.status, "OPERATION_FAILED")
+        self.assertEqual(result.outputs, {})
+        self.assertTrue(result.cleanup["confirmed"])
+        self.assertIn("WORKFLOW_RECORDED_TARGET_IDENTITY_MISMATCH", result.reason_code)
+        self.assertEqual(hashlib.sha256((folder / "research.sqlite3").read_bytes()).hexdigest(), before)
+
+    def test_late_reference_failure_preserves_actual_cancelled_stop_and_cleanup_proof(self):
+        original = _direct_observe(self.runtime, self.identity, {}, .05, self.ctx)
+        original["execution_status"] = "CANCELLED"
+        self.ctx.cancel.set()
+        with patch("blackbox_core.chain_adapters._file", side_effect=OSError("FIXTURE_REFERENCE_READBACK_FAILED")):
+            result = _observe(ChainRuntime(observe_call=lambda *args: original))(self.ctx, self.inputs, {})
+        self.assertEqual(result.status, "CANCELLED")
+        self.assertEqual(result.outputs, {})
+        self.assertTrue(result.cleanup["confirmed"])
+        self.assertEqual(result.cleanup["stop_result"], original["stop_result"])
+        self.assertTrue(result.execution_started)
+        self.assertIn("FIXTURE_REFERENCE_READBACK_FAILED", result.reason_code)
+        self.assertEqual(result.cleanup["completion_evidence_readback"]["status"], "REFERENCE_UNAVAILABLE")
+
+    def test_missing_start_ack_keeps_execution_unknown_and_conflicting_ack_has_no_artifact(self):
+        original = _direct_observe(self.runtime, self.identity, {}, .05, self.ctx)
+        missing = deepcopy(original)
+        missing["start_result"] = None
+        missing["execution_status"] = "TIMED_OUT"
+        result = _observe(ChainRuntime(observe_call=lambda *args: missing))(self.ctx, self.inputs, {})
+        self.assertIsNone(result.execution_started)
+        self.assertEqual(result.status, "TIMED_OUT")
+        self.assertTrue(result.cleanup["confirmed"])
+        wrong = deepcopy(original)
+        wrong["start_result"]["folder"] = str(self.root / "OTHER_RECORDING")
+        result = _observe(ChainRuntime(observe_call=lambda *args: wrong))(self.ctx, self.inputs, {})
+        self.assertEqual(result.status, "OPERATION_FAILED")
+        self.assertEqual(result.outputs, {})
+        self.assertTrue(result.cleanup["confirmed"])
+        self.assertIn("WORKFLOW_RECORDED_SESSION_START_ACK_MISMATCH", result.reason_code)
 
 
 if __name__ == "__main__":

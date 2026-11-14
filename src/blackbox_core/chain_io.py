@@ -26,6 +26,17 @@ def _stamp(value):
     return {"device": value.st_dev, "inode": value.st_ino, "size": value.st_size, "mtime_ns": value.st_mtime_ns}
 
 
+def _session_database_paths(folder, *, cancel=None, deadline=None):
+    paths=[]
+    for name in _SESSION_FILES:
+        check_cancel(cancel,deadline)
+        path=safe_path(folder/name)
+        if path.exists():
+            require(path.is_file(),"WORKFLOW_SESSION_DATABASE_TYPE")
+            paths.append(path)
+    return tuple(paths)
+
+
 def fingerprint_file(path, cancel=None, deadline=None, max_bytes=MAX_SOURCE_BYTES):
     path = safe_path(Path(path))
     check_cancel(cancel, deadline)
@@ -62,21 +73,27 @@ def _verify_file(reference, *, cancel=None, deadline=None):
     return actual
 
 
-def make_file_artifact(kind, path, *, metadata=None, sources=(), coverage=None, clock_domains=()):
+def make_file_artifact(kind, path, *, metadata=None, sources=(), coverage=None, clock_domains=(),
+                       cancel=None, deadline=None):
+    check_cancel(cancel,deadline)
     path = safe_path(Path(path))
     value = dict(metadata or {})
     if path.is_dir():
         require(kind == "SESSION", "WORKFLOW_DIRECTORY_ARTIFACT_TYPE")
-        files = [fingerprint_file(path / name) for name in _SESSION_FILES if (path / name).is_file()]
+        databases=_session_database_paths(path,cancel=cancel,deadline=deadline)
+        files = [fingerprint_file(database,cancel=cancel,deadline=deadline) for database in databases]
         require(bool(files), "WORKFLOW_SESSION_DATABASES_MISSING")
         for name in _SESSION_FILES:
+            check_cancel(cancel,deadline)
             wal = path / (name + "-wal")
             require(not wal.exists() or wal.stat().st_size == 0, "WORKFLOW_SESSION_STILL_WRITING")
+        require(_session_database_paths(path,cancel=cancel,deadline=deadline)==databases,
+                "WORKFLOW_SESSION_DATABASE_SET_CHANGED")
         value.update(_path=str(path), files=files,
                      sha256=hashlib.sha256(canonical(files).encode()).hexdigest(),
                      bytes=sum(row["bytes"] for row in files))
     else:
-        value.update(fingerprint_file(path))
+        value.update(fingerprint_file(path,cancel=cancel,deadline=deadline))
     return Artifact(kind, value, sources=tuple(sources), clock_domains=tuple(clock_domains),
                     coverage=coverage or {"evidence_completeness": "UNKNOWN_CAPTURE_COMPLETENESS"})
 
@@ -142,12 +159,18 @@ def verify_artifact(artifact, *, cancel=None, deadline=None, owner_run_id=None):
                     if reference.kind == "SESSION" and "files" in value:
                         require(path.is_dir() and type(value["files"]) is list and 0 < len(value["files"]) <= 16,
                                 "WORKFLOW_SESSION_SOURCE_REQUIRED")
+                        declared=tuple(Path(row["_path"]) for row in value["files"])
+                        actual_paths=_session_database_paths(path,cancel=cancel,deadline=deadline)
+                        require(len(set(declared))==len(declared) and set(declared)==set(actual_paths),
+                                "WORKFLOW_SESSION_DATABASE_SET_CHANGED")
                         for row in value["files"]:
                             require(Path(row["_path"]).parent == path, "WORKFLOW_SESSION_SOURCE_PATH_MISMATCH")
                             actual = _verify_file(row, cancel=cancel, deadline=deadline)
                             wal = Path(row["_path"] + "-wal")
                             require(not wal.exists() or wal.stat().st_size == 0, "WORKFLOW_SESSION_STILL_WRITING")
                             verified_paths.add(actual["_path"])
+                        require(_session_database_paths(path,cancel=cancel,deadline=deadline)==actual_paths,
+                                "WORKFLOW_SESSION_DATABASE_SET_CHANGED")
                         require(hashlib.sha256(canonical(value["files"]).encode()).hexdigest() == value.get("sha256"),
                                 "WORKFLOW_SESSION_FINGERPRINT_CHANGED")
                     else:

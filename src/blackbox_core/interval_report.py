@@ -47,6 +47,7 @@ def _redact_metadata(report,include_identifiers):
 
 
 def _safe_native_details(detail):
+    if not isinstance(detail,dict):return {}
     out={}
     methods={"EnumWindows","GetWindowThreadProcessId/OWNER_IDENTITY_CHECK",
              "SendMessageTimeoutW/WM_NULL/SMTO_BLOCK|ABORTIFHUNG|ERRORONEXIT",
@@ -57,17 +58,18 @@ def _safe_native_details(detail):
              "probe_omitted","deadline_ns","cleanup_duration_ns","reported_node_count",
              "pid","tid","hwnd","object_type","object_status","wait_time_raw","context_switches"}
     boolean={"visible","is_cycle","truncated","observer_deadline_exceeded"}
-    def record(value):
+    def record(value,depth=0):
         if not isinstance(value,dict):
             return {}
         item={k:v for k,v in value.items() if (k in numeric and (v is None or
             type(v) in (int,float) and math_isfinite(v))) or k in boolean and type(v) is bool}
         if "status" in value:
-            item["status"]=value["status"] if value["status"] in statuses else "UNKNOWN"
+            item["status"]=value["status"] if type(value["status"]) is str and value["status"] in statuses else "UNKNOWN"
         if "method" in value:
-            item["method"]=value["method"] if value["method"] in methods else "UNVERIFIED_METHOD"
+            item["method"]=value["method"] if type(value["method"]) is str and value["method"] in methods else "UNVERIFIED_METHOD"
         if isinstance(value.get("nodes"),list):
-            item["nodes"]=[record(n) for n in value["nodes"][:16]]
+            if depth>=4:item['export_detail_limit_reached']=True
+            else:item["nodes"]=[record(n,depth+1) for n in value["nodes"][:16]]
         return item
     for key in ("check","wct","window"):
         if key in detail:
@@ -215,7 +217,7 @@ def export_interval(folder: Path,output: Path,*,interval=None,series=None,instan
                         detail=event.pop("detail",{})
                         if event.get("source_kind") in ("WIN32","WCT"):
                             event["detail"]=_safe_native_details(detail)
-                        elif include_notes:
+                        elif include_notes and isinstance(detail,dict):
                             # Explicitly selected user notes, not arbitrary
                             # imported command lines, titles or environment.
                             event["detail"]={k:detail[k] for k in ("note","comment") if
@@ -274,4 +276,5 @@ def export_interval(folder: Path,output: Path,*,interval=None,series=None,instan
 def math_isfinite(value):
     # Keep raw JSON/CSV numeric contracts finite even for adversarial SQLite.
     import math
-    return math.isfinite(value) and value>=0
+    return (type(value) is int and value>=0 or
+            type(value) is float and math.isfinite(value) and value>=0)

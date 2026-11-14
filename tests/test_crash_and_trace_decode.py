@@ -65,6 +65,70 @@ class EtlDecodeContractTests(unittest.TestCase):
    p=Path(temp)/'attack.xml';p.write_bytes(('<!DOCTYPE Events [<!ENTITY x "bad">]><Events/>').encode('utf-16'))
    with self.assertRaisesRegex(ValueError,'UNSAFE'):parse_xml(p,target_pid=123)
    with self.assertRaises(ValueError):parse_xml(p,target_pid=123,max_rows=501)
+ def test_xml_node_depth_and_deadline_limits_do_not_depend_on_event_headers(self):
+  with tempfile.TemporaryDirectory() as temp:
+   p=Path(temp)/'TEST_ONLY_NON_EVENT_XML.xml'
+   p.write_text('<Noise>'+('<Unused/>'*10000)+'</Noise>')
+   with patch('blackbox_core.trace_decode.MAX_XML_NODES',256):
+    with self.assertRaisesRegex(ValueError,'XML_NODE_BUDGET'):parse_xml(p,target_pid=123)
+   p.write_text('<Noise>'*65+'</Noise>'*65)
+   with self.assertRaisesRegex(ValueError,'XML_DEPTH_BUDGET'):parse_xml(p,target_pid=123)
+   p.write_text('<Noise>'+('<Unused/>'*20)+'</Noise>')
+   calls=[]
+   def clock():
+    calls.append(None)
+    return 0 if len(calls)<5 else 11
+   with patch('blackbox_core.trace_decode.time.monotonic',side_effect=clock):
+    with self.assertRaisesRegex(TimeoutError,'PARSE_TIMEOUT'):parse_xml(p,target_pid=123)
+ def test_irrelevant_xml_and_event_payload_do_not_remove_actual_system_headers(self):
+  with tempfile.TemporaryDirectory() as temp:
+   p=Path(temp)/'TEST_ONLY_MIXED_XML.xml'
+   p.write_text('<Events>'+('<Unused><Child/></Unused>'*500)+xml(123)+
+    ('<Unused/>'*500)+xml(456)+xml(123)+'</Events>')
+   result=parse_xml(p,target_pid=123,max_rows=1)
+   self.assertEqual(result['scanned_events'],3)
+   self.assertEqual(result['recognized_header_events'],3)
+   self.assertEqual(result['matching_emitter_events'],2)
+   self.assertEqual(result['rows_omitted'],1)
+   self.assertEqual(result['rows'][0]['event_id'],'1000')
+   self.assertEqual(result['rows'][0]['thread_id'],'5')
+   self.assertNotIn('PRIVATE_PATH',json.dumps(result))
+ def test_unconfirmed_tracerpt_close_retains_staging_until_explicit_owner_cleanup(self):
+  from types import SimpleNamespace
+  from blackbox_core.optional_jobs import OwnedProcessCleanupUnconfirmed
+  class RetainedOwner:
+   def __init__(self):
+    self.process=SimpleNamespace(returncode=0,poll=lambda:0)
+    self.cleanup_required=False;self.resources=[];self.allow_cleanup=False
+   def close(self,*,kill):
+    if self.allow_cleanup:
+     for resource in self.resources:resource.cleanup()
+     self.cleanup_required=False
+     return
+    self.cleanup_required=True
+    raise OwnedProcessCleanupUnconfirmed(self,'TEST_ONLY_STOP_UNCONFIRMED')
+   def retain_cleanup_resource(self,resource):self.resources.append(resource)
+  owner=RetainedOwner()
+  with tempfile.TemporaryDirectory() as temp:
+   root=Path(temp);source=root/'TEST_ONLY_INPUT.etl';source.write_bytes(b'TEST_ONLY_NOT_REAL_ETL')
+   tool=root/'System32'/'tracerpt.exe';tool.parent.mkdir();tool.write_bytes(b'TEST_ONLY_NOT_EXECUTABLE')
+   def launch(command,**unused):
+    Path(command[3]).write_text('<Events>'+xml(123)+'</Events>')
+    return owner
+   try:
+    with patch('blackbox_core.trace_decode.os',SimpleNamespace(name='nt',environ={'SystemRoot':str(root)})),\
+     patch('blackbox_core.trace_decode.OwnedProcess',side_effect=launch):
+     with self.assertRaisesRegex(OwnedProcessCleanupUnconfirmed,'TEST_ONLY_STOP_UNCONFIRMED'):
+      decode(source,target_pid=123)
+    self.assertEqual(len(owner.resources),1)
+    stage=Path(owner.resources[0].name)
+    self.assertTrue((stage/'events.xml').is_file())
+    self.assertTrue((stage/'tool.log').is_file())
+    self.assertEqual(source.read_bytes(),b'TEST_ONLY_NOT_REAL_ETL')
+   finally:
+    owner.allow_cleanup=True;owner.close(kill=True)
+   self.assertFalse(stage.exists())
+   self.assertFalse(owner.cleanup_required)
  def test_opaque_file_is_never_called_decoded_on_non_windows(self):
   if os.name=='nt':self.skipTest('portable unavailability case')
   r=decode('opaque.etl',target_pid=123);self.assertFalse(r['decoded']);self.assertIsNone(r['lost_events'])

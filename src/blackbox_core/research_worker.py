@@ -41,6 +41,7 @@ class ResearchSession:
         self.jobs=OptionalJobs()
         self.sensors=None
         self._cancelled_operations=deque(maxlen=8)
+        self._trace_recovery_requests={}
         self.cancel=Event()
         self.interval_ms=1000;self.native_enabled=False;self.observer_budget=ObserverBudget();self._cpu_health_primed=False;self._overhead_notified=False
         self.context={"scenario":"","scenario_version":"","workload":"","target_version":"","profile":"STANDARD","interval_ms":1000,"warmup_count":0}
@@ -169,13 +170,82 @@ class ResearchSession:
         return (not self.jobs.busy and not p.active and p._store is None and
             not any(cap and cap.thread.is_alive() for cap in
                 (p._pending_detailed,p._pending_windows,p._pending_v2)) and
-            not (self.wpr and self.wpr.active) and
-            not (self.runtime_trace and self.runtime_trace.process is not None))
+            all(cap is None or (callable(getattr(cap,'cleanup_confirmed',None)) and
+                cap.cleanup_confirmed() is True) for cap in (self.wpr,self.runtime_trace)))
+
+    def _owned_trace_bindings(self,command):
+        """Bind only this inactive recording's retained native owners."""
+        if self.probe.active or self.book or self.probe.session_folder is None:return []
+        from .library_catalog import LibraryCatalog
+        from .trace_recovery import folder_for,journal_identity,alive,_birth
+        import psutil
+        a=command.get('args',{});entry_id=a.get('entry_id');command_id=command.get('id')
+        if type(command_id) is not str or not command_id:return []
+        try:
+            folder=folder_for(LibraryCatalog(self.probe.output_root),entry_id)
+            if folder!=self.probe.session_folder:return []
+            created=psutil.Process().create_time()
+            if not _birth(created):return []
+            bindings=[]
+            for cap in (self.wpr,self.runtime_trace):
+                if cap is None or cap.cleanup_confirmed():continue
+                if cap.process is not None and cap.process.poll() is None:continue
+                if cap.path.parent!=folder/'artifacts':continue
+                if command['op']=='library_trace_recover' and a.get('journal')!=cap.path.name:continue
+                from .library_files import read_json
+                data=read_json(cap.path,65536)
+                trace_id=getattr(cap,'instance',None) or getattr(cap,'uid',None)
+                if (data.get('instance',data.get('uid'))!=trace_id or
+                    data.get('owner_pid')!=os.getpid() or not _birth(data.get('owner_created')) or
+                    abs(data['owner_created']-created)>=.000001 or alive(data,'guardian')):continue
+                binding={'command_id':command_id,'entry_id':entry_id,'folder':str(folder),
+                    'journal':cap.path.name,'trace_id':trace_id,
+                    'owner':{'pid':os.getpid(),'created':created},'source':journal_identity(cap.path)}
+                bindings.append((cap,binding))
+            return bindings
+        except (OSError,ValueError,psutil.Error):return []
+
+    def _accept_trace_recovery(self,result):
+        command=result['command'];command_id=command.get('id')
+        if type(command_id) is not str:return
+        pending=self._trace_recovery_requests.pop(command_id,None)
+        if pending is None or result.get('error'):return
+        cap,binding=pending;value=result.get('result')
+        from .trace_recovery import journal_identity
+        from .trace_owner import _RECOVERY_ACK
+        try:
+            if (self.probe.active or self.book or str(self.probe.session_folder)!=binding['folder'] or
+                not any(cap is current for current in (self.wpr,self.runtime_trace)) or
+                cap.process is not None and cap.process.poll() is None or
+                type(value) is not dict or value.get('owner_binding')!=binding or
+                value.get('recording_id')!=binding['entry_id'] or value.get('journal')!=binding['journal'] or
+                value.get('status') not in ('RECOVERED_NAMED_CANCEL','RECOVERED_OWNED_TOOL_STOP') or
+                type(value.get('resource_cleanup')) is not dict or
+                value.get('resource_cleanup',{}).get('trace_id')!=binding['trace_id'] or
+                value.get('source_after')!=journal_identity(cap.path)):
+                raise ValueError('TRACE_RECOVERY_ACKNOWLEDGEMENT_MISMATCH')
+            cap._accept_recovery(value,authority=_RECOVERY_ACK)
+            # Release the local library lifecycle only after the real owner
+            # ACK; the incomplete capture/research state is retained.
+            if self._recording_resources_closed():self._index_recording(finalized=True)
+        except (OSError,ValueError):
+            result['result']=None;result['error']='TRACE_RECOVERY_ACKNOWLEDGEMENT_MISMATCH'
+
+    def cancel_optional(self):
+        results=self.jobs.cancel()
+        for result in results:
+            command_id=result['command'].get('id')
+            if type(command_id) is str:self._trace_recovery_requests.pop(command_id,None)
+        return results
 
     def _identity(self):
         import psutil
+        from .probe import _valid_birth
         core=self.probe._core
-        if core is None or abs(psutil.Process(self.probe.pid).create_time()-core.created)>0.000001:
+        if core is None or not _valid_birth(core.created):
+            raise ValueError("TARGET_INSTANCE_CHANGED")
+        actual=psutil.Process(self.probe.pid).create_time()
+        if not _valid_birth(actual) or abs(actual-core.created)>0.000001:
             raise ValueError("TARGET_INSTANCE_CHANGED")
 
     def _health(self):
@@ -416,7 +486,11 @@ class ResearchSession:
             "exact_process_identity":(self.context.get('run_identity',{}).get('process_identity')
                 if self.context.get('run_identity',{}).get('identity_status')=='OS_OBSERVED_EXACT_FILETIME' else None)}
         if op=="prepare_client":packet.update(event_path=str(self.tail.path),event_token=self.tail.token)
+        bindings=self._owned_trace_bindings(command) if op in ('library_trace_scan','library_trace_recover') else []
+        if bindings:
+            packet['_owned_trace_recovery']=([binding for _,binding in bindings] if op=='library_trace_scan' else bindings[0][1])
         self.jobs.submit(command, packet, seconds=300 if op in ("export","export_recover","library_export") else 120 if op in ("library_plan_trash","library_apply_trash","library_plan_purge","library_apply_purge","library_trace_recover") else 75 if op in ("inspect_dump","verify","recover","library_scan","library_compare","investigation","incident_card","events_query","decode_trace","compare_export","load_comparison") else 15)
+        if bindings and op=='library_trace_recover':self._trace_recovery_requests[command['id']]=bindings[0]
         if self.book:
             self.book.put("observer.operation_queued", {"op":op,"command_id":command.get("id"),
                 "issued_ns":command.get("issued_ns")}, source="BLACKBOX_COMMAND_OWNER")
@@ -426,6 +500,7 @@ class ResearchSession:
         results+=self.jobs.poll()
         for result in results:
             command=result["command"];op=command.get("op")
+            if op=='library_trace_recover':self._accept_trace_recovery(result)
             if not result.get("error") and op in TARGET_OPERATIONS:
                 try:self._identity()
                 except Exception:result["result"]=None;result["error"]="TARGET_INSTANCE_CHANGED_RESULT_NOT_COMMITTED"
@@ -481,7 +556,7 @@ class ResearchSession:
 
     def stop(self, reason="USER_STOPPED"):
         p=self.probe;errors=[]
-        self._cancelled_operations.extend(self.jobs.cancel())
+        self._cancelled_operations.extend(self.cancel_optional())
         if self.jobs.health().get('cleanup_required'):
             errors.append('OPTIONAL_RESOURCE_CLEANUP_UNCONFIRMED')
         if self.sensors:self.sensors.stop()
@@ -498,9 +573,11 @@ class ResearchSession:
         if self.book:self.book.on_evidence=None
         if p.active:p.stop(reason,defer_report=True)
         if self.runtime_trace:
-            result=self.runtime_trace.stop()
-            if result and self.book:self.book.put("eventpipe.stopped",result,source="EVENTPIPE_DOTNET_TRACE",quality=result["status"])
-            if result and result.get('status')!='COMPLETED':errors.append('EVENTPIPE_'+result.get('status','CLEANUP_UNCONFIRMED'))
+            try:
+                result=self.runtime_trace.stop()
+                if result and self.book:self.book.put("eventpipe.stopped",result,source="EVENTPIPE_DOTNET_TRACE",quality=result["status"])
+                if result and result.get('status')!='COMPLETED':errors.append('EVENTPIPE_'+result.get('status','CLEANUP_UNCONFIRMED'))
+            except (OSError,ValueError) as exc:errors.append('EVENTPIPE_STOP_UNCONFIRMED: '+str(exc)[:300])
         if self.wpr:
             try:
                 r=self.wpr.stop()
@@ -559,7 +636,8 @@ class ResearchSession:
                 evidence_ref='research.sqlite3:evidence:'+str(result['evidence_id']),verification='USER_DECLARED')
             return result
         if op=="attach":
-            if self.book:self.stop()
+            if self.book or self.probe.active:self.stop()
+            if not self._recording_resources_closed():raise ValueError('RECORDING_RESOURCE_CLEANUP_UNCONFIRMED')
             return self.probe.attach(int(a["pid"]))
         if op=="configure":
             if self.probe.active:raise ValueError("STOP_BEFORE_RECONFIGURING")
@@ -586,6 +664,8 @@ class ResearchSession:
                 self._changed_configuration()
             return n
         if op=="start":
+            if self.probe.active:return {'folder':str(self.probe.session_folder)}
+            if not self._recording_resources_closed():raise ValueError('RECORDING_RESOURCE_CLEANUP_UNCONFIRMED')
             self._capabilities=capabilities();self._capability_inventory=inventory(self._capabilities);self._optional_source_results={}
             self.observer_budget=ObserverBudget();self._cpu_health_primed=False;self._overhead_notified=False
             self.markers=UserMarkers();self._ui_seen=set();self._burst_until=None;self._library_budget=None
@@ -702,6 +782,7 @@ class ResearchSession:
             artifacts=self.probe.session_folder/"artifacts";artifacts.mkdir(exist_ok=True)
             if a.get("enabled"):
                 if self.wpr and self.wpr.active:raise ValueError("WPR_ALREADY_ACTIVE")
+                if self.wpr and not self.wpr.cleanup_confirmed():raise ValueError('RECORDING_RESOURCE_CLEANUP_UNCONFIRMED')
                 self._identity()
                 self.wpr=TraceSupervisor(artifacts,seconds=a.get("seconds",30),
                     max_output_bytes=a.get("max_output_bytes",self.capture_policy["max_trace_mb"]*1024**2),
@@ -718,6 +799,7 @@ class ResearchSession:
             if not self.book:raise ValueError("START_RECORDING_FIRST")
             self._identity()
             if self.runtime_trace and self.runtime_trace.process is not None:raise ValueError("EVENTPIPE_ALREADY_ACTIVE")
+            if self.runtime_trace and not self.runtime_trace.cleanup_confirmed():raise ValueError('RECORDING_RESOURCE_CLEANUP_UNCONFIRMED')
             artifacts=self.probe.session_folder/"artifacts";artifacts.mkdir(exist_ok=True)
             self.runtime_trace=DotnetTrace(artifacts,self.probe.pid,a.get("seconds",10),profile=a.get("profile","gc-collect"),max_bytes=self.capture_policy["max_trace_mb"]*1024**2)
             try:result=self.runtime_trace.start()
@@ -819,7 +901,7 @@ def main(output_root=None):
                         emit({"type":"snapshot","snapshot":session.snapshot()})
                         continue
                     if command.get("op") in ("attach","start","stop","quit"):
-                        for pending in session.jobs.cancel():
+                        for pending in session.cancel_optional():
                             acknowledge(pending["command"],None,pending["error"])
                     result=session.command(command)
                     quit_confirmed = (command.get('op') == 'quit' and
@@ -844,7 +926,7 @@ def main(output_root=None):
                 if next_tick<=now:next_tick+=((now-next_tick)//interval+1)*interval
                 emit({"type":"snapshot","snapshot":session.snapshot()})
     finally:
-        session.jobs.cancel()
+        session.cancel_optional()
         session.stop("UI_CLOSED")
     return 3 if not session._recording_resources_closed() else 0
 

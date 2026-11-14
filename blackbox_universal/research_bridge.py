@@ -158,7 +158,16 @@ class ResearchBridge(QObject):
 
     def shutdown(self):
         if self.alive and not self.closing:
-            self.closing=True;self.send("quit")
+            self.closing=True
+            try:
+                self.send("quit")
+            except (OSError,RuntimeError,ValueError):
+                # A rejected submission owns no quit ACK. Keep the current
+                # helper and uncertain recording state reachable for retry.
+                self.closing=False
+                if not self.last_error:self.last_error="HELPER_SHUTDOWN_NOT_SENT"
+                self.updated.emit()
+                raise
 
     def _check_deadline(self):
         if self._stop_deadline is not None and time.monotonic()>self._stop_deadline:

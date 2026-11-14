@@ -5,6 +5,7 @@ The SQLite reader never executes on the GUI main thread.
 from __future__ import annotations
 
 from pathlib import Path
+import sqlite3
 
 from PySide6.QtCore import QThread, Signal
 
@@ -30,5 +31,5 @@ class ThreadDetailWorker(QThread):
             self.result_ready.emit({
                 "folder": str(self.folder), "analysis": result,
             }, "")
-        except (OSError, ValueError, TypeError):
+        except (OSError, ValueError, TypeError, sqlite3.Error):
             self.result_ready.emit(None, "DETAIL_READ_UNAVAILABLE")

@@ -29,7 +29,7 @@ internal sealed class ModuleBindings
     public (object? Module, uint? Rva, string Status) Associate(TraceEvent e, TraceCodeAddress code)
     {
         var process = e.Process();
-        if (process == null || e.ProcessID <= 0 || (int)process.ProcessIndex < 0)
+        if (process == null || e.ProcessID <= 0 || process.ProcessID != e.ProcessID || (int)process.ProcessIndex < 0)
             return (null, null, "PROCESS_INSTANCE_UNAVAILABLE");
         if (code.Method != null && code.Method.MethodToken != 0)
             return (null, null, "MANAGED_CODE_NOT_NATIVE_RVA");

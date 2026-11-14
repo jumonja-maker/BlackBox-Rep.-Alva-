@@ -1,30 +1,39 @@
 """Human-first investigation and unified event controls, no SQLite on Qt."""
-import json
 from pathlib import Path
 from PySide6.QtCore import Qt,Signal,QTimer
-from PySide6.QtWidgets import QWidget,QVBoxLayout,QHBoxLayout,QGridLayout,QPushButton,QLabel,QComboBox,QLineEdit,QDoubleSpinBox,QTableWidget,QTableWidgetItem,QHeaderView,QPlainTextEdit,QCheckBox,QFileDialog
+from PySide6.QtWidgets import QApplication,QWidget,QVBoxLayout,QHBoxLayout,QGridLayout,QPushButton,QLabel,QComboBox,QLineEdit,QDoubleSpinBox,QTableWidget,QTableWidgetItem,QHeaderView,QPlainTextEdit,QCheckBox,QFileDialog
 from blackbox_core.investigation_v2 import QUESTIONS,SORTS
 from blackbox_core.event_stream import SOURCES,SEVERITIES
+from .evidence_presentation import detail_text,label as evidence_label,raw_json,scaled_text,seconds_text,time_text,title as evidence_title,valid_timestamp
 class EvidencePanel(QWidget):
  range_requested=Signal(str,object,object)
  investigate_requested=Signal(object)
  def __init__(self,window,*,events=False):
   super().__init__(window);self.window=window;self.bridge=window.probe;self.events=events
-  self.op='events_query' if events else 'investigation';self.folder=None;self.interval=None;self.origin=0
+  self.op='events_query' if events else 'investigation';self.folder=None;self.interval=None;self.origin=None
   self.packet=None;self.card_packet=None;self._generation=0;self._busy=False;self._dirty=False
+  self._active_op=None;self._active_generation=None;self._card_request=None;self._selected_key=None
+  self._request_id=None;self._active_query=None;self._accepted_query=None;self._shown_page_state=(None,[])
+  self.instance_id=None if events else 1;self._query_instance_id=None;self._packet_instance_id=None
+  self._suppress_reload=False;self._awaiting_interval=False
   self._cursor=None;self._history=[];self._next=None;self._more=False;self.labels=[]
   box=QVBoxLayout(self);row=QHBoxLayout();self.load=QPushButton();self.open=QPushButton()
   for b,en,ru,fn in ((self.load,'Load events' if events else 'Investigate selected interval','Показать события' if events else 'Расследовать выбранный интервал',self.refresh),
     (self.open,'Open recording…','Открыть запись…',self.choose)):
    self.label(b,en,ru);b.clicked.connect(fn);row.addWidget(b)
-  box.addLayout(row);filters=QGridLayout();self.question=QComboBox(self);self.sort=QComboBox(self);self.source=QComboBox(self);self.severity=QComboBox(self);self.target=QComboBox(self)
+  box.addLayout(row);self.source_context=QLabel();self.source_context.setObjectName('evidenceSourceContext')
+  self.source_context.setWordWrap(True);self.source_context.setTextFormat(Qt.TextFormat.PlainText)
+  self.source_context.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse);box.addWidget(self.source_context)
+  filters=QGridLayout();self.question=QComboBox(self);self.sort=QComboBox(self);self.source=QComboBox(self);self.severity=QComboBox(self);self.target=QComboBox(self)
   for v in QUESTIONS:self.question.addItem(v,v)
   for v in SORTS:self.sort.addItem(v,v)
   for v in SOURCES:self.source.addItem(v,v)
   for v in SEVERITIES:self.severity.addItem(v,v)
   self.target.addItem('ALL',0)
-  for i,w in enumerate((self.source,self.severity,self.target) if events else (self.question,self.sort)):
-   filters.addWidget(w,0,i);w.activated.connect(self.refresh)
+  filter_specs=((self.source,'Source group','Группа источника'),(self.severity,'Severity','Уровень'),(self.target,'Process instance','Экземпляр процесса')) if events else ((self.question,'Finding group','Группа находок'),(self.sort,'Order','Порядок'))
+  for i,(w,en,ru) in enumerate(filter_specs):
+   caption=QLabel();self.label(caption,en,ru);caption.setBuddy(w);filters.addWidget(caption,0,i)
+   filters.addWidget(w,1,i);w.activated.connect(self.refresh)
   self.start=QDoubleSpinBox(self);self.end=QDoubleSpinBox(self)
   for w in (self.start,self.end):w.setRange(0,604800);w.setDecimals(3);w.setSuffix(' s');w.editingFinished.connect(self.refresh)
   self.end.setValue(3600);self.search=QLineEdit(self);self.search.setMaxLength(256)
@@ -32,7 +41,10 @@ class EvidencePanel(QWidget):
   # layout still need a Qt owner, and explicit hiding preserves their old UI.
   for w in ((self.question,self.sort) if events else (self.source,self.severity,self.target,self.start,self.end,self.search)):w.hide()
   self.timer=QTimer(self);self.timer.setSingleShot(True);self.timer.setInterval(300);self.timer.timeout.connect(self.refresh);self.search.textChanged.connect(lambda:self.timer.start())
-  if events:filters.addWidget(self.start,1,0);filters.addWidget(self.end,1,1);filters.addWidget(self.search,2,0,1,3)
+  if events:
+   for i,(w,en,ru) in enumerate(((self.start,'Start from recording origin (s)','Начало (с от начала отсчёта)'),(self.end,'End from recording origin (s)','Конец (с от начала отсчёта)'))):
+    caption=QLabel();self.label(caption,en,ru);caption.setBuddy(w);filters.addWidget(caption,2,i);filters.addWidget(w,3,i)
+   filters.addWidget(self.search,4,0,1,3)
   box.addLayout(filters);self.summaries=[]
   if not events:
    for en,ru in (('What was observed','Что наблюдалось'),('Supporting measurements','Подтверждающие измерения'),('What cannot be established','Что нельзя установить')):
@@ -42,6 +54,7 @@ class EvidencePanel(QWidget):
   self.table.horizontalHeader().setSectionResizeMode(1,QHeaderView.ResizeMode.Stretch);self.table.setMinimumHeight(170)
   for column in (0,2,3):self.table.horizontalHeader().setSectionResizeMode(column,QHeaderView.ResizeMode.ResizeToContents)
   self.table.itemSelectionChanged.connect(self.selected);box.addWidget(self.table)
+  self.table.itemDoubleClicked.connect(lambda *_:self.show_interval())
   row=QGridLayout();self.previous=QPushButton();self.next=QPushButton();self.card=QPushButton();self.navigate=QPushButton()
   for i,(b,en,ru,fn) in enumerate(((self.previous,'Previous page','Предыдущая страница',self.back),(self.next,'Next page','Следующая страница',self.forward),
     (self.card,'Incident card','Карточка инцидента',self.open_card),(self.navigate,'Show interval','Показать интервал',self.show_interval))):
@@ -50,10 +63,14 @@ class EvidencePanel(QWidget):
   self.investigate=QPushButton();self.investigate.setObjectName('investigateSelectedProblem')
   self.label(self.investigate,'INVESTIGATE PROBLEM','ИССЛЕДОВАТЬ ПРОБЛЕМУ');self.investigate.clicked.connect(self.open_investigation)
   row.addWidget(self.investigate,2,0,1,2)
-  box.addLayout(row);self.raw=QCheckBox();self.label(self.raw,'Technical data','Технические данные');self.raw.toggled.connect(self.render_detail);box.addWidget(self.raw)
+  self.finding=QPushButton();self.label(self.finding,'Back to finding','Вернуться к находке');self.finding.clicked.connect(self.close_card);row.addWidget(self.finding,3,0)
+  self.copy=QPushButton();self.label(self.copy,'Copy displayed details','Копировать показанные сведения');self.copy.clicked.connect(self.copy_detail);row.addWidget(self.copy,3,1)
+  if events:self.finding.hide()
+  box.addLayout(row);self.raw=QCheckBox();self.raw.setObjectName('evidenceRawJson');self.label(self.raw,'Raw JSON — complete selected record','JSON — полная выбранная запись');self.raw.toggled.connect(self.render_detail);box.addWidget(self.raw)
   self.details=QPlainTextEdit();self.details.setReadOnly(True);self.details.setMaximumHeight(240);box.addWidget(self.details)
-  self.status=QLabel();self.status.setWordWrap(True);box.addWidget(self.status)
-  if hasattr(self.bridge,'result_ready'):self.bridge.result_ready.connect(self.receive)
+  self.status=QLabel();self.status.setWordWrap(True);self.status.setTextFormat(Qt.TextFormat.PlainText);box.addWidget(self.status)
+  if hasattr(self.bridge,'command_result'):self.bridge.command_result.connect(self.receive_command)
+  elif hasattr(self.bridge,'result_ready'):self.bridge.result_ready.connect(self.receive)
   else:self.setEnabled(False)
   self.retranslate();self.controls()
  def tr(self,en,ru):return ru if self.window.language=='RU' else en
@@ -64,39 +81,95 @@ class EvidencePanel(QWidget):
     (self.sort,{'TIME_ASC':('Earliest first','Сначала ранние'),'TIME_DESC':('Latest first','Сначала поздние'),'SEVERITY':('Severity first','Сначала важные')})):
    for i in range(combo.count()):
     en,ru=labels[combo.itemData(i)];combo.setItemText(i,self.tr(en,ru))
-  self.table.setHorizontalHeaderLabels((self.tr('Time (s)','Время (с)'),self.tr('Code','Код'),self.tr('Source / class','Источник / класс'),self.tr('Severity','Уровень')))
+  for combo in (self.source,self.severity):
+   for i in range(combo.count()):
+    code=combo.itemData(i);combo.setItemText(i,evidence_label(code,self.window.language));combo.setItemData(i,str(code),Qt.ItemDataRole.ToolTipRole)
+  self.target.setItemText(0,self.tr('All process instances','Все экземпляры процессов'))
+  self.table.setHorizontalHeaderLabels((self.tr('Recording time (s)','Время записи (с)'),self.tr('Event' if self.events else 'Finding','Событие' if self.events else 'Находка'),self.tr('Source group' if self.events else 'Evidence class','Группа источника' if self.events else 'Класс свидетельства'),self.tr('Severity','Уровень')))
+  self.table.setToolTip(self.tr('Select a row for facts, sources and limitations. Double-click to show its interval. Original codes are in tooltips and Raw JSON.',
+   'Выберите строку для просмотра фактов, источников и ограничений. Двойной щелчок покажет интервал. Исходные коды — в подсказках и JSON.'))
+  self.details.setPlaceholderText(self.tr('Load a recording to see findings and their evidence.','Откройте запись, чтобы увидеть находки и их свидетельства.'))
   self.search.setPlaceholderText(self.tr('Literal event code or note…','Код события или текст заметки…'))
+  self.render_source_context()
+  if self._awaiting_interval:self.status.setText(self.tr('Waiting for recording context…','Ожидание контекста записи…'))
   if self.packet:self.render()
- def apply_interval(self,folder,interval,*,origin=None,processes=()):
-  folder=Path(folder);changed=(folder,interval)!=(self.folder,self.interval);self.folder=folder;self.interval=interval
+ def render_source_context(self):
+  folder=str(self.folder) if self.folder is not None else self.tr('not selected','не выбрана')
+  interval=self.packet.get('selected_interval_ns') if self.packet else self.interval
+  if isinstance(interval,(tuple,list)) and len(interval)==2 and all(type(value) is int for value in interval):
+   selected=time_text({'start_ns':interval[0],'end_ns':interval[1]},self.origin,self.window.language)
+  else:selected=self.tr('not loaded / unknown','не загружен / неизвестен')
+  scope=self._packet_instance_id if self.packet else (self.target.currentData() if self.events else self.instance_id)
+  if self.events and scope==0:scope_text=self.tr('All process instances','Все экземпляры процессов')
+  elif type(scope) is int:scope_text=self.tr('Recorded instance ID ','ID записанного экземпляра ')+str(scope)
+  else:scope_text=self.tr('not loaded / unknown','не загружен / неизвестен')
+  text=(self.tr('Recording: ','Запись: ')+folder+'\n'+self.tr('Selected range: ','Выбранный интервал: ')+selected+'\n'+
+   self.tr('Event process scope: ' if self.events else 'Counter/thread scope: ','Процессы событий: ' if self.events else 'Процесс счётчиков и потоков: ')+scope_text)
+  if not self.events:text+='\n'+self.tr('Incidents, markers and source errors retain their source scope.','Инциденты, маркеры и ошибки источников сохраняют область своего источника.')
+  self.source_context.setText(text)
+ def clear_evidence(self):
+  self.packet=None;self.card_packet=None;self._selected_key=None;self._card_request=None;self._packet_instance_id=None
+  self._accepted_query=None;self._shown_page_state=(None,[])
+  self.table.blockSignals(True);self.table.setRowCount(0);self.table.blockSignals(False)
+  self._cursor=None;self._history=[];self._next=None;self._more=False;self.details.clear();self.status.clear()
+  for summary in self.summaries:summary.setText('—')
+ def invalidate_interval(self,folder):
+  """Forget source-bound evidence without starting or reviving a query.
+
+  An already-running operation keeps its busy lifecycle until its response is
+  drained. Its old packet and any scheduled reload cannot repopulate this view.
+  """
+  self.timer.stop();self._generation+=1;self._suppress_reload=True;self._dirty=False;self._awaiting_interval=True
+  self.folder=Path(folder) if folder is not None else None;self.interval=None;self.origin=None;self.instance_id=None;self._query_instance_id=None
+  self.clear_evidence();self.target.clear();self.target.addItem(self.tr('All process instances','Все экземпляры процессов'),0)
+  self.start.setValue(0);self.end.setValue(3600);self.render_source_context()
+  self.status.setText(self.tr('Waiting for recording context…','Ожидание контекста записи…'));self.controls()
+ def apply_interval(self,folder,interval,*,origin=None,processes=(),instance_id=1):
+  """Bind a recording; instance_id scopes findings, while events use target."""
+  if type(instance_id) is not int or not 1<=instance_id<2**63:raise ValueError('INVALID_PROCESS_INSTANCE')
+  if interval is not None and (not isinstance(interval,(list,tuple)) or len(interval)!=2 or
+    not all(valid_timestamp(value) for value in interval) or interval[0]>interval[1]):raise ValueError('INVALID_EVIDENCE_INTERVAL')
+  if origin is not None and not valid_timestamp(origin):raise ValueError('INVALID_EVIDENCE_CLOCK')
+  scope=None if self.events else instance_id
+  folder=Path(folder);folder_changed=folder!=self.folder;changed=(folder,interval,scope)!=(self.folder,self.interval,self.instance_id)
+  self.folder=folder;self.interval=interval;self.instance_id=scope;self._awaiting_interval=False
+  if folder_changed:self.origin=None
   if origin is not None:self.origin=origin
   if changed:
-   self._generation+=1;self.packet=None;self.card_packet=None;self.table.setRowCount(0);self._cursor=None;self._history=[];self._more=False;self.details.clear()
-   if interval:self.start.setValue(max(0,(interval[0]-self.origin)/1e9));self.end.setValue(max(0,(interval[1]-self.origin)/1e9))
-   if self._busy:self._dirty=True
+   self._generation+=1;self.clear_evidence()
+   if interval and valid_timestamp(self.origin):self.start.setValue(max(0,(interval[0]-self.origin)/1e9));self.end.setValue(max(0,(interval[1]-self.origin)/1e9))
+   if self._busy and not self._suppress_reload:self._dirty=True
+  elif self._suppress_reload:self.status.clear()
   selected=self.target.currentData();ids=[self.target.itemData(i) for i in range(self.target.count())]
   if ids!=[0]+[r['instance_id'] for r in processes]:
-   self.target.clear();self.target.addItem('ALL',0)
+   self.target.clear();self.target.addItem(self.tr('All process instances','Все экземпляры процессов'),0)
    for r in processes:self.target.addItem(f"PID {r['pid']} · {r['creation_time']}",r['instance_id'])
    self.target.setCurrentIndex(max(0,self.target.findData(selected)))
-  self.controls()
+  self.render_source_context();self.controls()
  def choose(self):
   folder=QFileDialog.getExistingDirectory(self,self.tr('Recording folder','Папка записи'))
   if folder:self.apply_interval(folder,None);self.refresh()
  def refresh(self,*_):
-  self.timer.stop();self._generation+=1;self._cursor=None;self._history=[];self._more=False;self.load_page()
+  self.timer.stop();self._suppress_reload=False;self._awaiting_interval=False;self._generation+=1;self._cursor=None;self._history=[];self._more=False;self.load_page()
  def load_page(self):
+  if self._suppress_reload:return
   if self._busy:self._dirty=True;return
   folder=self.folder or self.bridge.session_folder
   if not folder:return
+  if not self.events and self.instance_id is None:
+   self._awaiting_interval=True;self.status.setText(self.tr('Waiting for recording context…','Ожидание контекста записи…'));return
+  self.folder=Path(folder);self.render_source_context()
   args={'folder':str(folder),'after':self._cursor,'request_key':self._generation}
   if self.events:args.update(limit=100,source=self.source.currentData(),severity=self.severity.currentData(),instance_id=self.target.currentData() or 0,
     search=self.search.text(),start_ms=int(self.start.value()*1000),end_ms=int(self.end.value()*1000))
   else:
-   args.update(limit=50,question=self.question.currentData(),sort_order=self.sort.currentData())
+   args.update(limit=50,question=self.question.currentData(),sort_order=self.sort.currentData(),instance_id=self.instance_id)
    if self.interval:args.update(start_ns=self.interval[0],end_ns=self.interval[1])
-  try:self.bridge.send(self.op,**args);self._busy=True;self._dirty=False;self.controls()
-  except (RuntimeError,ValueError) as exc:self.status.setText(str(exc))
+  self._active_query={key:value for key,value in args.items() if key not in ('after','request_key')}
+  try:
+   self._request_id=self.bridge.send(self.op,**args);self._query_instance_id=args['instance_id'];self._busy=True;self._active_op=self.op;self._active_generation=self._generation;self._dirty=False
+   self.status.setText(self.tr('Loading evidence…','Загрузка свидетельств…'));self.controls()
+  except (RuntimeError,ValueError) as exc:self.query_failed(str(exc));self.controls()
  def back(self):
   if self._history and not self._busy:self._cursor=self._history.pop();self.load_page()
  def forward(self):
@@ -105,73 +178,135 @@ class EvidencePanel(QWidget):
   selected=self.table.selectionModel().selectedRows();index=selected[0].row() if selected else -1
   rows=self.packet.get('rows' if self.events else 'findings',[]) if self.packet else []
   return rows[index] if 0<=index<len(rows) else None
+ def row_key(self,row):
+  if not row:return None
+  if self.events:return (row.get('evidence_ref'),row.get('time_ns'),row.get('rank'),row.get('id'))
+  return row.get('finding_id') or (row.get('code'),row.get('start_ns'),row.get('end_ns'))
+ def incident_id(self,row):
+  detail=row.get('detail') if row else None
+  identity=detail.get('incident_id') if isinstance(detail,dict) else None
+  return identity if type(identity) is int and 1<=identity<2**63 else None
+ def selected_interval(self,row):
+  if not row:return None
+  lo=row.get('time_ns' if self.events else 'start_ns');hi=lo if self.events else row.get('end_ns')
+  if hi is None:hi=lo
+  return (lo,hi) if valid_timestamp(lo) and valid_timestamp(hi) and lo<=hi else None
  def controls(self):
   selected=self.selection();self.load.setEnabled(not self._busy);self.previous.setEnabled(bool(self._history) and not self._busy)
-  self.next.setEnabled(self._more and not self._busy);self.navigate.setEnabled(selected is not None and not self._busy)
-  self.card.setEnabled(bool(selected and selected.get('detail',{}).get('incident_id')) and not self._busy)
-  self.investigate.setEnabled(selected is not None and not self._busy)
+  has_time=self.selected_interval(selected) is not None
+  self.next.setEnabled(self._more and not self._busy);self.navigate.setEnabled(has_time and not self._busy)
+  self.card.setEnabled(bool(self.incident_id(selected)) and not self._busy)
+  self.investigate.setEnabled(has_time and not self._busy);self.finding.setEnabled(self.card_packet is not None);self.copy.setEnabled(bool(self.details.toPlainText()))
  def open_investigation(self):
   row=self.selection();folder=self.folder or self.bridge.session_folder
-  if row is None or folder is None:return
-  lo=row.get('time_ns') if self.events else row.get('start_ns');hi=row.get('time_ns') if self.events else row.get('end_ns') or lo
-  selection={'start_ns':lo,'end_ns':hi} if type(lo) is int and type(hi) is int else None
+  bounds=self.selected_interval(row)
+  if row is None or folder is None or bounds is None or self._busy:return
+  selection={'start_ns':bounds[0],'end_ns':bounds[1]}
   source={'source_type':'SESSION','path':str(folder)}
   if selection:source['selection']=selection
-  self.investigate_requested.emit({'sources':[source],'incident_id':row.get('detail',{}).get('incident_id'),'selection':selection})
- def selected(self):self.card_packet=None;self.render_detail();self.controls()
+  self.investigate_requested.emit({'sources':[source],'incident_id':self.incident_id(row),'selection':selection})
+ def selected(self):self._selected_key=self.row_key(self.selection());self.card_packet=None;self.render_detail();self.controls()
+ def close_card(self):self.card_packet=None;self.render_detail();self.controls()
+ def copy_detail(self):
+  if self.details.toPlainText():QApplication.clipboard().setText(self.details.toPlainText())
  def render_detail(self):
-  row=self.card_packet or self.selection()
-  if not row:self.details.clear();return
-  if self.raw.isChecked():text=json.dumps(row,ensure_ascii=False,indent=2)
-  elif self.card_packet:
-   text=self.tr('Incident observations; root cause UNKNOWN.','Наблюдения инцидента; причина UNKNOWN.')+'\n'
-   text+='\n'.join(name+': '+r['status']+' · '+str(r.get('values')) for name,r in row.get('snapshots',{}).items())
-   text+='\n'+self.tr('Post-context complete: ','Контекст после полный: ')+str(row.get('post_context_complete'))
-   text+='\n'+', '.join(row.get('next_actions',[]))
-  elif self.events:text=row['code']+'\n'+row['source']+' · UNVERIFIED_IMPORT\n'+json.dumps(row['detail'],ensure_ascii=False,indent=2)
-  else:text=row['code']+' · '+row['confidence_class']+'\n'+self.tr('Facts: ','Факты: ')+json.dumps(row['facts'],ensure_ascii=False,indent=2)+'\n'+self.tr('Alternatives: ','Альтернативы: ')+', '.join(row['alternative_explanations'])+'\n'+self.tr('Limitations: ','Ограничения: ')+', '.join(row['limitations'])+'\nRoot cause: UNKNOWN.'
+  row=self.card_packet if self.card_packet is not None else self.selection()
+  if row is None:self.details.clear();return
+  try:text=raw_json(row) if self.raw.isChecked() else detail_text(row,self.window.language,origin=self.origin,events=self.events,card=self.card_packet is not None)
+  except (TypeError,ValueError,OverflowError,RecursionError) as exc:
+   text=self.tr('Evidence cannot be represented as JSON: ','Свидетельство нельзя представить в JSON: ')+str(exc)[:512]+'\n'+self.tr('The original packet and source files were not changed.','Исходный пакет и файлы источника не изменены.')
   self.details.setPlainText(text)
  def open_card(self):
   row=self.selection()
-  if not row:return
-  try:self.bridge.send('incident_card',folder=str(self.folder or self.bridge.session_folder),incident_id=row['detail']['incident_id']);self._busy=True;self.controls()
+  if not row or not self.incident_id(row) or self._busy:return
+  try:
+   folder=str(self.folder or self.bridge.session_folder)
+   self._request_id=self.bridge.send('incident_card',folder=folder,incident_id=self.incident_id(row));self._busy=True;self._active_op='incident_card'
+   self._card_request=(self._generation,folder,self.row_key(row));self.controls()
   except (ValueError,RuntimeError) as exc:self.status.setText(str(exc))
  def show_interval(self):
   row=self.selection()
-  if row:
-   lo=row['time_ns']-2*10**9 if self.events else row['start_ns']-60*10**9
-   hi=row['time_ns']+2*10**9 if self.events else (row['end_ns'] or row['start_ns'])+20*10**9
-   self.range_requested.emit(str(self.folder or self.bridge.session_folder),max(0,lo),hi)
+  bounds=self.selected_interval(row)
+  if bounds is not None and not self._busy:
+   lo=bounds[0]-(2 if self.events else 60)*10**9;hi=bounds[1]+(2 if self.events else 20)*10**9
+   self.range_requested.emit(str(self.folder or self.bridge.session_folder),max(0,lo),min(2**63-1,hi))
  def render(self):
-  p=self.packet;rows=p['rows' if self.events else 'findings'];self.origin=p['monotonic_origin_ns'] if self.events else p['metadata']['monotonic_origin_ns']
-  self.table.blockSignals(True);self.table.setRowCount(len(rows))
+  p=self.packet;rows=p['rows' if self.events else 'findings'];metadata=p.get('metadata');metadata=metadata if isinstance(metadata,dict) else {}
+  self.origin=p.get('monotonic_origin_ns') if self.events else metadata.get('monotonic_origin_ns')
+  self.render_source_context()
+  selected=self._selected_key;self.table.blockSignals(True);self.table.setRowCount(len(rows))
   for i,row in enumerate(rows):
-   stamp=row['time_ns'] if self.events else row['start_ns']
-   for j,value in enumerate((f'{(stamp-self.origin)/1e9:.3f}',row['code'],row['source'] if self.events else row['confidence_class'],row['severity'])):
-    item=QTableWidgetItem(str(value));item.setToolTip(str(value));self.table.setItem(i,j,item)
-  self.table.clearSelection();self.table.blockSignals(False);self._more=p['has_more'];self._next=p['next_cursor']
-  total=p['total_matching' if self.events else 'findings_total'];self.status.setText(self.tr('Shown / matching: ','Показано / найдено: ')+f'{len(rows)} / {total} · UNVERIFIED_IMPORT')
+   stamp=row.get('time_ns' if self.events else 'start_ns');time=seconds_text(stamp-self.origin) if valid_timestamp(stamp) and valid_timestamp(self.origin) else '—'
+   raw_values=(stamp,row.get('code','UNKNOWN'),row.get('source' if self.events else 'confidence_class','UNKNOWN'),row.get('severity','UNKNOWN'))
+   values=(time,evidence_title(raw_values[1],self.window.language),evidence_label(raw_values[2],self.window.language),evidence_label(raw_values[3],self.window.language))
+   for j,value in enumerate(values):
+    item=QTableWidgetItem(str(value));original=str(raw_values[j]);item.setToolTip(original[:4096]+('… [Raw JSON]' if len(original)>4096 else ''));self.table.setItem(i,j,item)
+  self.table.clearSelection()
+  selected_index=next((i for i,row in enumerate(rows) if self.row_key(row)==selected),0 if rows else -1)
+  if selected_index>=0:self.table.selectRow(selected_index)
+  self._selected_key=self.row_key(rows[selected_index]) if selected_index>=0 else None
+  self.table.blockSignals(False);self._more=p.get('has_more',False);self._next=p.get('next_cursor');self.render_detail()
+  total=p.get('total_matching' if self.events else 'findings_total','UNKNOWN');self.status.setText(self.tr('Page ','Страница ')+str(len(self._history)+1)+self.tr(' · shown / matching: ',' · показано / найдено: ')+f'{len(rows)} / {total} · '+evidence_label(p.get('source_trust',p.get('file_trust','UNKNOWN')),self.window.language))
   if not self.events:
-   cov=p['coverage'];metrics=p['summary']['support']['metrics'];self.summaries[0].setText(self.tr('Samples / findings: ','Измерений / находок: ')+f"{cov['selected_samples']} / {total}")
-   cpu,rss=metrics['cpu_interval_percent']['max'],metrics['rss_bytes']['max'];unknown=self.tr('not observed','не наблюдалось')
-   self.summaries[1].setText(self.tr('Observed CPU peak: ','Наблюдавшийся пик CPU: ')+(f'{cpu:.2f}%'+self.tr(' of one CPU',' одного CPU') if cpu is not None else unknown)+
-    self.tr(' · RSS peak: ',' · Пик RSS: ')+(f'{rss/1048576:.2f} MiB' if rss is not None else unknown)+self.tr(' · gaps: ',' · разрывы: ')+str(cov['spacing_gap_pairs']))
+   cov=p.get('coverage');cov=cov if isinstance(cov,dict) else {};summary=p.get('summary');summary=summary if isinstance(summary,dict) else {}
+   support=summary.get('support');support=support if isinstance(support,dict) else {};metrics=support.get('metrics');metrics=metrics if isinstance(metrics,dict) else {}
+   self.summaries[0].setText(self.tr('Samples / findings: ','Измерений / находок: ')+f"{cov.get('selected_samples','UNKNOWN')} / {total}")
+   cpu=metrics.get('cpu_interval_percent');rss=metrics.get('rss_bytes');cpu=cpu.get('max') if isinstance(cpu,dict) else None;rss=rss.get('max') if isinstance(rss,dict) else None
+   self.summaries[1].setText(self.tr('Observed CPU peak: ','Наблюдавшийся пик CPU: ')+self.peak_text(cpu,percent=True)+
+    self.tr(' · RSS peak: ',' · Пик RSS: ')+self.peak_text(rss)+self.tr(' · gaps: ',' · разрывы: ')+str(cov.get('spacing_gap_pairs','UNKNOWN')))
    self.summaries[2].setText(self.tr('Root cause, memory leak and between-sample activity are not established. Imported source claims are not authenticated.',
     'Причина, утечка памяти и активность между опросами не установлены. Заявления источника в импортированном файле не удостоверяют его подлинность.'))
-   io=p.get('application_io_latency',{})
-   if io.get('groups'):
+   io=p.get('application_io_latency');groups=io.get('groups') if isinstance(io,dict) else None
+   if isinstance(groups,list) and groups:
     self.summaries[1].setText(self.summaries[1].text()+' · '+self.tr('App-reported I/O median / p95 (ns): ','I/O со слов приложения, медиана / p95 (нс): ')+
-     '; '.join(r['io_kind']+': '+str(r['median'])+' / '+str(r['p95']) for r in io['groups']))
+     '; '.join(str(r.get('io_kind','UNKNOWN'))+': '+str(r.get('median'))+' / '+str(r.get('p95')) for r in groups[:64] if isinstance(r,dict)))
   self.controls()
+ def peak_text(self,value,*,percent=False):
+  import math
+  if value is None:return self.tr('not observed','не наблюдалось')
+  if type(value) not in (int,float) or value<0 or type(value) is float and not math.isfinite(value):return self.tr('invalid recorded value','недопустимое сохранённое значение')
+  return scaled_text(value,1)+'%'+self.tr(' of one CPU',' одного CPU') if percent else scaled_text(value,1048576)+' MiB'
+ def query_failed(self,message):
+  retained=self.packet is not None and self._active_query==self._accepted_query
+  if retained:self._cursor,self._history=self._shown_page_state[0],list(self._shown_page_state[1])
+  else:self.clear_evidence();self.render_source_context()
+  self.status.setText(message+(self.tr(' · Previous page retained.',' · Предыдущая страница сохранена.') if retained else ''))
+ def receive_command(self,request_id,op,result,error):
+  if self._request_id is not None and str(request_id)==str(self._request_id):self.receive(op,result,error)
+ def load_pending(self):
+  if self._dirty and not self._busy:self.load_page()
+ def page_issue(self,result):
+  if not isinstance(result,dict) or type(result.get('request_key')) is not int or result.get('request_key')!=self._generation:return True
+  if 'schema_version' in result and (type(result['schema_version']) is not int or result['schema_version']!=2):return True
+  rows=result.get('rows' if self.events else 'findings')
+  if not isinstance(rows,list) or len(rows)>(200 if self.events else 100) or any(not isinstance(row,dict) for row in rows):return True
+  if type(result.get('has_more',False)) is not bool:return True
+  if result.get('has_more'):
+   cursor=result.get('next_cursor');length=3 if self.events or self.sort.currentData()=='SEVERITY' else 2
+   if not isinstance(cursor,(list,tuple)) or len(cursor)!=length:return True
+   if self.events:return any(not valid_timestamp(value) for value in cursor)
+   return any(type(value) is not int or not -2**63<value<2**63 for value in cursor[:-1]) or not isinstance(cursor[-1],str) or not 1<=len(cursor[-1])<=128
+  return False
  def receive(self,op,result,error):
-  if op not in ((self.op,'incident_card') if not self.events else (self.op,)) or not self._busy:return
-  self._busy=False
-  if error:
+  if op not in ((self.op,'incident_card') if not self.events else (self.op,)) or not self._busy or op!=self._active_op:return
+  self._busy=False;self._active_op=None;self._request_id=None
+  current_card=(self._generation,str(self.folder or self.bridge.session_folder),self.row_key(self.selection()))
+  stale_card=op=='incident_card' and self._card_request!=current_card
+  stale_query=op==self.op and self._active_generation!=self._generation
+  if self._suppress_reload:self._dirty=False
+  elif stale_card or stale_query:
+   if stale_query:self._dirty=True
+  elif error:
    from .research_messages import explain
-   self.status.setText(explain(error,self.window.language))
-  elif op=='incident_card':self.card_packet=result;self.render_detail()
-  elif result.get('request_key')==self._generation:self.packet=result;self.card_packet=None;self.render()
-  else:self._dirty=True
+   if op==self.op:self.query_failed(explain(error,self.window.language))
+   else:self.status.setText(explain(error,self.window.language))
+  elif op=='incident_card':
+   if isinstance(result,dict):self.card_packet=result;self.render_detail()
+   else:self.status.setText(self.tr('Invalid incident response.','Недопустимый ответ карточки инцидента.'))
+  elif self.page_issue(result):self.query_failed(self.tr('Invalid evidence response. Source files were not changed.','Недопустимый ответ свидетельств. Файлы источника не изменены.'))
+  else:
+   self.packet=result;self._packet_instance_id=self._query_instance_id;self.card_packet=None
+   self._accepted_query=self._active_query;self._shown_page_state=(self._cursor,list(self._history));self.render()
   self.controls()
-  if self._dirty:QTimer.singleShot(0,self.load_page)
+  if self._dirty:QTimer.singleShot(0,self.load_pending)
 

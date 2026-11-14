@@ -7,10 +7,15 @@ from blackbox_universal.provenance import source_identity
 from blackbox_universal import __version__
 
 
-if __name__=="__main__":
-    data=source_identity(sys.argv[1])
+def write_provenance(expected, path=Path(".qa-build/blackbox-build.json")):
+    data=source_identity(expected)
     if data["source_identity_status"]!="VERIFIED_EXPECTED_HEAD":raise RuntimeError("BUILD_CHECKOUT_NOT_VERIFIED")
-    path=Path(".qa-build/blackbox-build.json");path.parent.mkdir(exist_ok=True)
+    path=Path(path);path.parent.mkdir(parents=True,exist_ok=True)
     path.write_text(json.dumps({"schema_version":1,"source_sha":data["actual_source_sha"],
         "source_tree_sha":data["source_tree_sha"],"tracked_worktree_clean":True,"version":__version__}),encoding="utf-8")
     print("Build source:",data["actual_source_sha"],"tree:",data["source_tree_sha"])
+    return path
+
+
+if __name__=="__main__":
+    write_provenance(sys.argv[1])

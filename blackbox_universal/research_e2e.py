@@ -21,6 +21,16 @@ def _pages_match_build(window):
             and set(window._page_ids) == set(expected))
 
 
+def finalized_proof(proof, helper_exit_code, failure_reason=None):
+    """An earlier QA failure remains failed after a normal owner shutdown."""
+    failed = bool(failure_reason) or proof.get("status") == "FAIL" or helper_exit_code != 0
+    proof["status"] = "FAIL" if failed else "PASS"
+    proof["helper_exit_code"] = helper_exit_code
+    if failure_reason:
+        proof.setdefault("reason", failure_reason)
+    return proof
+
+
 def run_e2e(app,window,destination):
     destination=Path(destination);destination.mkdir(parents=True,exist_ok=False)
     bridge=window.probe
@@ -44,13 +54,13 @@ def run_e2e(app,window,destination):
     def finalized():
         if state.get("proof"):
             proof=state["proof"]
-            proof["status"]="PASS" if bridge.process.exitCode()==0 else "FAIL"
-            proof["helper_exit_code"]=bridge.process.exitCode()
+            finalized_proof(proof,bridge.process.exitCode(),state.get("failure_reason"))
             (destination/"e2e.json").write_text(json.dumps(proof),encoding="utf-8")
             if proof["status"]!="PASS":app.exit(1)
     bridge.terminated.connect(finalized)
     def fail(reason):
-        timer.stop();(destination/"e2e.json").write_text(json.dumps({"status":"FAIL","reason":reason}),encoding="utf-8")
+        state.setdefault("failure_reason",reason)
+        timer.stop();(destination/"e2e.json").write_text(json.dumps({"status":"FAIL","reason":state["failure_reason"]}),encoding="utf-8")
         bridge.shutdown();QTimer.singleShot(300,lambda:app.exit(1))
     def advance():
         (destination/"progress.json").write_text(json.dumps({"step":state["step"],"pending":bridge.pending,

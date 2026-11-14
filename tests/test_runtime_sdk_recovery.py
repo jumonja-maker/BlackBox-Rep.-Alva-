@@ -98,7 +98,10 @@ class RecoveryBoundaries(unittest.TestCase):
    data={'state':'RECORDING','instance':'BLACKBOX_'+'a'*32,'consent':'EXPLICIT_USER_COMMAND','owner_pid':0,'guardian_pid':0}
    c,name=self.fixture(temp,data);raw=Path(temp)/'artifacts'/'private.etl';raw.write_bytes(b'KEEP')
    names=[]
-   with patch('blackbox_core.windows_research.WprCapture.cancel',lambda cap:names.append(cap.instance)):
+   def confirmed_cancel(cap):
+    # This ownership fixture explicitly acknowledges the exact named cancel.
+    names.append(cap.instance);cap.active=False
+   with patch('blackbox_core.windows_research.WprCapture.cancel',confirmed_cancel):
     r=recover(c,'test',name,confirmed=True)
    self.assertEqual(names,[data['instance']]);self.assertFalse(r['capture_complete'])
    self.assertEqual(raw.read_bytes(),b'KEEP');self.assertIsNone(r['lost_events'])

@@ -6,6 +6,7 @@ base sampler or Qt. Paths are local explicit inputs, never shell commands.
 """
 from __future__ import annotations
 import json
+import math
 import os
 from pathlib import Path
 import sys
@@ -24,7 +25,17 @@ def validate_identity(pid, created):
     import psutil
     if type(pid) is not int or pid <= 0 or type(created) not in (int, float) or created <= 0:
         raise ValueError('INVALID_TARGET_IDENTITY')
-    if abs(psutil.Process(pid).create_time() - created) > .000001:
+    try:
+        if not math.isfinite(created):
+            raise ValueError('INVALID_TARGET_IDENTITY')
+    except OverflowError:
+        raise ValueError('INVALID_TARGET_IDENTITY') from None
+    actual=psutil.Process(pid).create_time()
+    try:
+        actual_valid=(type(actual) in (int,float) and actual>0 and math.isfinite(actual))
+    except OverflowError:
+        actual_valid=False
+    if not actual_valid or abs(actual - created) > .000001:
         raise ValueError('TARGET_INSTANCE_CHANGED')
 
 
@@ -80,10 +91,11 @@ def execute(packet):
         elif op=='library_apply_purge':result=catalog.apply_purge(a['confirmation_token'])
         elif op=='library_trace_scan':
             from .trace_recovery import scan
-            result=scan(catalog,a['entry_id'])
+            result=scan(catalog,a['entry_id'],_owned=packet.get('_owned_trace_recovery',()))
         elif op=='library_trace_recover':
             from .trace_recovery import recover
-            result=recover(catalog,a['entry_id'],a['journal'],confirmed=a.get('confirmed',False))
+            result=recover(catalog,a['entry_id'],a['journal'],confirmed=a.get('confirmed',False),
+                _owned=packet.get('_owned_trace_recovery'))
     elif op=='export_recovery_scan':
         from .export_recovery import scan_exports
         result=scan_exports(a['folder'])

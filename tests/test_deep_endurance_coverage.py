@@ -51,7 +51,8 @@ class DeepEnduranceCoverageContracts(unittest.TestCase):
         result = {"state": "COMPLETED", "source": {"actual_source_sha": "a" * 40,
                   "source_identity_status": "VERIFIED_EXPECTED_HEAD"}, "phases": [{"phase": "STANDARD",
                   "actual_seconds": 19800, "recording_state": "COMPLETED", "session": str(session),
-                  "recorded_samples": len(times_ns)}]}
+                  "recorded_samples": len(times_ns)}], "cleanup": {"status": "COMPLETED", "helper_alive": False,
+                  "window_visible": False, "running_qthreads": 0}}
         (self.root / "run/result.json").write_text(json.dumps(result), encoding="utf-8")
         with closing(sqlite3.connect(session / "session.sqlite3")) as db:
             db.executescript("CREATE TABLE metadata(schema_version INTEGER,pid INTEGER,exit_code TEXT);"
@@ -71,7 +72,68 @@ class DeepEnduranceCoverageContracts(unittest.TestCase):
         with closing(sqlite3.connect(session / "research.sqlite3")) as db:
             db.execute("CREATE TABLE context(key TEXT,data TEXT)")
             db.execute("INSERT INTO context VALUES('state',?)", (json.dumps("COMPLETED"),))
+            db.execute("INSERT INTO context VALUES('capture_health',?)", (json.dumps(
+                {'recording_resources_closed': True, 'finalization_errors': []}),))
             db.commit()
+        return session
+
+    def detailed_fixture(self, detail_times):
+        session = self.observer_fixture([i * 1_000_000_000 for i in range(91)])
+        result_path = self.root / 'run/result.json'
+        result = json.loads(result_path.read_text(encoding='utf-8'))
+        result['phases'][0]['phase'] = 'DETAILED'
+        result_path.write_text(json.dumps(result), encoding='utf-8')
+        with closing(sqlite3.connect(session / 'session-v2.sqlite3')) as db:
+            db.executemany("INSERT INTO samples VALUES(?,1,?,'DETAILED',?)",
+                           [(i+1, 'detail:'+str(i+1), stamp) for i, stamp in enumerate(detail_times)])
+            db.commit()
+
+    def test_detailed_label_with_only_base_rows_cannot_certify_detailed_endurance(self):
+        self.detailed_fixture([])
+        with self.assertRaisesRegex(RuntimeError, 'QA_DETAILED_PERSISTED_SPAN_TOO_SHORT'):
+            _evidence(self.root, 'DETAILED', 90, 'a'*40)
+
+    def test_completed_rows_cannot_hide_unconfirmed_gui_owner_or_callback_failure(self):
+        self.observer_fixture([i * 1_000_000_000 for i in range(91)])
+        result_path = self.root / 'run/result.json'
+        original = json.loads(result_path.read_text(encoding='utf-8'))
+        for key, value, reason in (('cleanup', {'status': 'RECOVERY_UNCONFIRMED', 'helper_alive': True},
+                                    'QA_GUI_OWNER_CLEANUP_NOT_CONFIRMED'),
+                                   ('unhandled_python_failure', {'count': 1}, 'QA_UNHANDLED_CALLBACK_RECORDED')):
+            result_path.write_text(json.dumps({**original, key: value}), encoding='utf-8')
+            with self.subTest(key=key), self.assertRaisesRegex(RuntimeError, reason):
+                _evidence(self.root, 'STANDARD', 90, 'a'*40)
+
+    def test_detailed_endpoints_do_not_hide_a_persisted_sampling_hole(self):
+        self.detailed_fixture([0, 90_000_000_000])
+        with self.assertRaisesRegex(RuntimeError, 'QA_DETAILED_PERSISTED_SAMPLE_GAP'):
+            _evidence(self.root, 'DETAILED', 90, 'a'*40)
+
+    def test_completed_states_cannot_hide_unconfirmed_recording_resource_finalization(self):
+        session = self.observer_fixture([i * 1_000_000_000 for i in range(91)])
+        for health in (None, {}, {'recording_resources_closed': False, 'finalization_errors': []},
+                       {'recording_resources_closed': 1, 'finalization_errors': []},
+                       {'recording_resources_closed': True, 'finalization_errors': ['WPR_STOP_UNCONFIRMED']}):
+            with closing(sqlite3.connect(session / 'research.sqlite3')) as db:
+                db.execute("UPDATE context SET data=? WHERE key='capture_health'", (json.dumps(health),))
+                db.commit()
+            with self.subTest(health=health), self.assertRaisesRegex(RuntimeError, 'QA_RECORDING_RESOURCE_FINALIZATION_NOT_CONFIRMED'):
+                _evidence(self.root, 'STANDARD', 90, 'a'*40)
+
+    def test_nonfinite_wall_clock_duration_cannot_certify_recording(self):
+        self.observer_fixture([i * 1_000_000_000 for i in range(91)])
+        path = self.root / 'run/result.json'
+        result = json.loads(path.read_text(encoding='utf-8'))
+        for duration in (float('nan'), float('inf')):
+            result['phases'][0]['actual_seconds'] = duration
+            path.write_text(json.dumps(result), encoding='utf-8')
+            with self.subTest(duration=duration), self.assertRaisesRegex(RuntimeError, 'QA_FULL_REQUESTED_DURATION_NOT_MET'):
+                _evidence(self.root, 'STANDARD', 90, 'a'*40)
+
+    def test_detailed_span_and_allowed_gaps_still_require_sample_density(self):
+        self.detailed_fixture([0, 30_000_000_000, 60_000_000_000, 90_000_000_000])
+        with self.assertRaisesRegex(RuntimeError, 'QA_DETAILED_PERSISTED_SAMPLE_COVERAGE_TOO_LOW'):
+            _evidence(self.root, 'DETAILED', 90, 'a'*40)
 
     def test_completed_long_wall_clock_cannot_certify_short_saved_recording(self):
         self.observer_fixture([i * 2_000_000_000 for i in range(5)])

@@ -23,7 +23,9 @@ def _text(data, at, *, basename=False):
     _require(at <= end <= at+4096, "INVALID_PDB_STRING")
     value = data[at:end].decode("utf-8", "strict")
     _require(value and not any(ord(c) < 32 for c in value), "INVALID_PDB_STRING")
-    return value.replace("\\", "/").rsplit("/", 1)[-1] if basename else value
+    value = value.replace("\\", "/").rsplit("/", 1)[-1] if basename else value
+    _require(bool(value), "INVALID_PDB_STRING")
+    return value
 
 
 def named_strings(msf):
@@ -225,6 +227,8 @@ def inline_ranges(annotations, *, procedure_start, procedure_end, location, file
     def emit(start, end, source):
         _require(0 <= start < end <= procedure_end-procedure_start and
                  0 < source['line'] < 0xf00000, "INLINE_RANGE_OUTSIDE_PROCEDURE")
+        _require(not source.get('column') or not source.get('end_column') or
+                 source['end_column']>=source['column'], "INVALID_INLINE_SOURCE_COLUMNS")
         ranges.append((procedure_start+start, procedure_start+end, dict(source)))
         _require(len(ranges) <= MAX_INLINE_RANGES, "PDB_INLINE_BUDGET")
     while at < len(annotations):

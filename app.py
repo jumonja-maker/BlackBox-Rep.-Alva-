@@ -21,6 +21,15 @@ if __name__=='__main__' and '--qa-production' in sys.argv:
     from blackbox_universal.production_qa import main as production_main
     raise SystemExit(production_main(sys.argv[sys.argv.index('--qa-production')+1:]))
 
+if __name__ == '__main__' and '--qa-sdk-prepare' in sys.argv:
+    from tools.qa_sdk_clients import prepare_main
+    try:
+        raise SystemExit(prepare_main(sys.argv[1:]))
+    except Exception:
+        import traceback
+        Path('blackbox-sdk-qa-error.txt').write_text(traceback.format_exc(), encoding='utf-8')
+        raise SystemExit(1)
+
 if __name__ == "__main__" and "--trace-owner" in sys.argv:
     from blackbox_core.trace_owner import run as trace_main
     raise SystemExit(trace_main(sys.argv[sys.argv.index("--trace-owner")+1]))
@@ -73,6 +82,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--deep-smoke",action="store_true",help="Run real Qt action/thread/incident/export QA")
     parser.add_argument("--r10-e2e", type=Path, help=argparse.SUPPRESS)
     parser.add_argument("--r10-probe", type=Path, help=argparse.SUPPRESS)
+    parser.add_argument("--expert-e2e", type=Path, help=argparse.SUPPRESS)
     parser.add_argument("--wave02-e2e", type=Path, help=argparse.SUPPRESS)
     parser.add_argument("--chain-e2e", type=Path, help=argparse.SUPPRESS)
     parser.add_argument("--chain-evidence", type=Path, help=argparse.SUPPRESS)
@@ -111,7 +121,7 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--r10-e2e requires --r10-probe")
     if options.wave02_e2e and (options.wave02_evidence is None or options.wave02_container is None):
         parser.error("--wave02-e2e requires --wave02-evidence and --wave02-container")
-    if options.smoke or options.deep_smoke or options.r10_e2e or options.wave02_e2e or options.chain_e2e:
+    if options.smoke or options.deep_smoke or options.r10_e2e or options.wave02_e2e or options.chain_e2e or options.expert_e2e:
         os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
         _qa_checkpoint("QT_START")
     app = QApplication.instance() or QApplication(sys.argv[:1])
@@ -119,11 +129,14 @@ def main(argv: list[str] | None = None) -> int:
     app.setOrganizationName("BlackBox")
     set_retro_theme(app)
     window = UniversalWindow(isolated=True,
-        output_root=(options.research_e2e or options.r10_e2e or options.wave02_e2e or options.chain_e2e or options.qa_output) / "sessions" if (options.research_e2e or options.deep_smoke or options.r10_e2e or options.wave02_e2e or options.chain_e2e) else None,
-        allow_update_check=not (options.smoke or options.research_e2e or options.deep_smoke or options.r10_e2e or options.wave02_e2e or options.chain_e2e))
+        output_root=(options.research_e2e or options.r10_e2e or options.wave02_e2e or options.chain_e2e or options.expert_e2e or options.qa_output) / "sessions" if (options.research_e2e or options.deep_smoke or options.r10_e2e or options.wave02_e2e or options.chain_e2e or options.expert_e2e) else None,
+        allow_update_check=not (options.smoke or options.research_e2e or options.deep_smoke or options.r10_e2e or options.wave02_e2e or options.chain_e2e or options.expert_e2e))
     # Native Windows starts maximized, while retaining the normal window frame,
     # minimize/restore and user resizing (not exclusive fullscreen mode).
     window.showMaximized()
+    if options.expert_e2e:
+        from tools.qa_expert_workflow import run_gui
+        return run_gui(app, window, options.expert_e2e, options.qa_commit_sha)
     if options.chain_e2e:
         from blackbox_universal.chain_qa import run_chain_gui
         try:
@@ -243,7 +256,7 @@ if __name__ == "__main__":
             _CHAIN_QA_GUARD.record(*sys.exc_info())
             code = 1
         raise SystemExit(_CHAIN_QA_GUARD.exit_code(code))
-    if any(flag in sys.argv for flag in ("--smoke", "--research-e2e", "--deep-smoke", "--r10-e2e")):
+    if any(flag in sys.argv for flag in ("--smoke", "--research-e2e", "--deep-smoke", "--r10-e2e", "--expert-e2e")):
         # A windowed PyInstaller failure otherwise opens a blocking error
         # dialog on the headless runner. QA must retain the real traceback and
         # return failure, never certify a hanging binary as a successful build.

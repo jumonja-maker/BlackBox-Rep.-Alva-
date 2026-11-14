@@ -90,6 +90,7 @@ _LEASE_LOCK = threading.RLock()
 _LEASES = {}  # exact run owner, active invocation, retained state; never persisted authority
 _RETAINED_WORKERS = {}
 _PAUSED_OWNERS = {}  # original live executors only; never reconstructed authority
+_DRIVING_RUNS = {}  # exact in-process driver; filesystem writer remains authoritative
 _MAX_PAUSED_OWNERS = 64
 _RESERVATION_PROOF_ORIGIN = object()
 
@@ -185,8 +186,17 @@ def _known_owner(cleanup):
     return cleanup.get("ownership_known") is True or (type(evidence) is dict and evidence.get("ownership_known") is True)
 
 
+def _journal_head(events):
+    return (events[-1]["sequence"],events[-1]["record_sha256"])
+
+
 class WorkflowEngine:
     def __init__(self, definition, *, catalog, store, runtime=None):
+        history=store.read_events()
+        require(len(history)==1 and history[0]["event"]=="run.created","WORKFLOW_HISTORY_ADVANCED")
+        self._initialize(definition,catalog=catalog,store=store,runtime=runtime,history=history)
+
+    def _initialize(self,definition,*,catalog,store,runtime,history):
         self.definition = WorkflowDefinition.from_dict(definition.to_dict())
         require(store.definition.fingerprint == self.definition.fingerprint, "WORKFLOW_STORE_DEFINITION_MISMATCH")
         self.catalog, self.store, self.runtime = dict(catalog), store, runtime
@@ -207,6 +217,21 @@ class WorkflowEngine:
         self._not_before = {}
         self._checkpoint = None
         self._cancel_at = None
+        self._owner_capability=object()
+        self._history_head=_journal_head(history)
+        self._requires_restore=len(history)!=1 or history[0]["event"]!="run.created"
+        self._history_conflict=False
+
+    def _owns_lease(self,owner):
+        return owner.get("run_id")==self.store.run_id and owner.get("capability") is self._owner_capability
+
+    def _append(self,event,node_id=None,data=None):
+        # Serialize history publication and head advancement across scheduler
+        # and component phase callbacks from this exact engine.
+        with self._lock:
+            answer=self.store.append(event,node_id=node_id,data=data)
+            self._history_head=(answer["sequence"],answer["record_sha256"])
+            return answer
 
     @staticmethod
     def _empty(node):
@@ -224,6 +249,11 @@ class WorkflowEngine:
             require(Path(owner.store.folder) == Path(store.folder) and
                     owner.definition.fingerprint == store.definition.fingerprint,
                     "WORKFLOW_LIVE_OWNER_HISTORY_MISMATCH")
+            require(_same_runtime_owner(owner.runtime,runtime),"WORKFLOW_LIVE_OWNER_RUNTIME_MISMATCH")
+            require(all(node.tool_id in catalog and
+                    catalog[node.tool_id].to_dict()==owner.catalog[node.tool_id].to_dict()
+                    for node in owner.definition.nodes if node.kind in ("TOOL","REPEAT")),
+                    "WORKFLOW_LIVE_OWNER_CATALOG_MISMATCH")
             # This is the same still-live runtime capability, not adoption of
             # an owner reconstructed from a saved reference. Opening stays passive.
             return owner
@@ -235,7 +265,7 @@ class WorkflowEngine:
                         owner.definition.fingerprint == store.definition.fingerprint,
                         "WORKFLOW_LIVE_OWNER_HISTORY_MISMATCH")
                 actual = {key: dict(value) for key, value in _LEASES.items()
-                          if value["run_id"] == store.run_id}
+                          if owner._owns_lease(value)}
                 require(actual == expected_leases and not owner._driving,
                         "WORKFLOW_PAUSED_NATIVE_OWNER_CHANGED")
                 require(_same_runtime_owner(owner.runtime, runtime), "WORKFLOW_LIVE_OWNER_RUNTIME_MISMATCH")
@@ -248,8 +278,11 @@ class WorkflowEngine:
                 # enter this registry. Explicit resume still revalidates sources
                 # and every R10 action obtains fresh consent and native checks.
                 return owner
-        engine = cls(store.definition, catalog=catalog, store=store, runtime=runtime)
-        saved = store.load_state()
+        history=store.read_events()
+        engine=cls.__new__(cls)
+        engine._initialize(store.definition,catalog=catalog,store=store,runtime=runtime,history=history)
+        saved = store._state_from_events(history)
+        engine._requires_restore=False
         engine._state = saved.get("state", "QUEUED")
         engine._elapsed = saved.get("elapsed_seconds", 0) or 0
         engine._cleanup = saved.get("cleanup", engine._cleanup)
@@ -258,7 +291,7 @@ class WorkflowEngine:
             if row.get("node_id") in engine._records:
                 engine._records[row["node_id"]].update(deepcopy(row))
         intents, results = {}, set()
-        for event in store.read_events():
+        for event in history:
             data = event.get("data", {})
             if event.get("event") == "node.intent":
                 intents[data["node_run_id"]] = data
@@ -306,7 +339,7 @@ class WorkflowEngine:
     def _retain_paused_owner(self):
         with _LEASE_LOCK:
             leases = {key: dict(value) for key, value in _LEASES.items()
-                      if value["run_id"] == self.store.run_id}
+                      if self._owns_lease(value)}
             if not any(not value["active"] and value["status"] == "RETAINED" for value in leases.values()):
                 return
             require(all(not value["active"] for value in leases.values()), "WORKFLOW_PAUSED_OWNER_STILL_ACTIVE")
@@ -326,7 +359,7 @@ class WorkflowEngine:
             if previous is None or previous[0] is not self:
                 return
             leases = {key: dict(value) for key, value in _LEASES.items()
-                      if value["run_id"] == self.store.run_id}
+                      if self._owns_lease(value)}
             if not leases and self._cleanup.get("confirmed") is True:
                 del _PAUSED_OWNERS[self.store.run_id]
             else:
@@ -366,7 +399,7 @@ class WorkflowEngine:
                 return
             state = "WAITING_FOR_HUMAN" if phase == "WAITING_FOR_HUMAN" else "RUNNING"
             row["state"] = state
-            self.store.append("node.state", node_id=ctx.node_id,
+            self._append("node.state", node_id=ctx.node_id,
                 data={"node_id": ctx.node_id, "node_run_id": ctx.node_run_id, "state": state,
                       "phase": str(phase)[:128]})
             self._notify(force=state == "WAITING_FOR_HUMAN")
@@ -375,14 +408,14 @@ class WorkflowEngine:
         with self._lock:
             self._state = state
             snapshot = self.snapshot()
-            self.store.append("run.state", data={key: snapshot[key] for key in
+            self._append("run.state", data={key: snapshot[key] for key in
                 ("state", "coverage", "cleanup", "elapsed_seconds", "errors")})
             self._notify(force=True)
 
     def _skip(self, node, reason, *, state="SKIPPED"):
         row = self._records[node.node_id]
         row.update(state=state, reason_code=reason, execution_started=False)
-        self.store.append("node.state", node_id=node.node_id,
+        self._append("node.state", node_id=node.node_id,
             data={"node_id": node.node_id, "state": state, "reason_code": reason, "execution_started": False})
 
     def _inputs(self, node):
@@ -436,15 +469,15 @@ class WorkflowEngine:
         with _LEASE_LOCK:
             for key in keys:
                 owner = _LEASES.get(key)
-                if owner and (owner["run_id"] != self.store.run_id or owner["active"] or
+                if owner and (not self._owns_lease(owner) or owner["active"] or
                               owner["status"] != "RETAINED"):
                     return False
-            owned = {key for key, owner in _LEASES.items() if owner["run_id"] == self.store.run_id}
+            owned = {key for key, owner in _LEASES.items() if self._owns_lease(owner)}
             if len(owned | set(keys)) > self.definition.budget.get("max_owned_resources", 8):
                 return False
             for key in keys:
                 _LEASES[key] = {"run_id": self.store.run_id, "invocation": invocation,
-                               "active": True, "status": "RUNNING"}
+                               "active": True, "status": "RUNNING","capability":self._owner_capability}
         return True
 
     def _reservation_acknowledgements(self, node, ctx, cleanup):
@@ -465,7 +498,7 @@ class WorkflowEngine:
         with _LEASE_LOCK:
             for key in self._resource_keys(node):
                 owner = _LEASES.get(key)
-                if not owner or owner["run_id"] != self.store.run_id or owner["invocation"] != invocation:
+                if not owner or not self._owns_lease(owner) or owner["invocation"] != invocation:
                     continue
                 if cleanup.get("confirmed") is True or key in (reservations or {}):
                     del _LEASES[key]
@@ -593,7 +626,7 @@ class WorkflowEngine:
             # disk failure prevents its durable publication. This is explicitly
             # unconfirmed persistence, never a replacement synthetic receipt.
             try:
-                self.store.append("node.result", node_id=node.node_id, data=record)
+                self._append("node.result", node_id=node.node_id, data=record)
             except Exception:
                 row.update(state="RECOVERY_UNCONFIRMED", persistence="PUBLICATION_UNCONFIRMED")
                 raise
@@ -643,7 +676,7 @@ class WorkflowEngine:
         if node.kind == "CHECKPOINT":
             self._checkpoint = node.node_id
             self._records[node.node_id]["state"] = "WAITING_FOR_HUMAN"
-            self.store.append("run.checkpoint", node_id=node.node_id,
+            self._append("run.checkpoint", node_id=node.node_id,
                               data={"node_id": node.node_id, "state": "WAITING_FOR_HUMAN"})
             self._pause.set()
             return
@@ -708,7 +741,7 @@ class WorkflowEngine:
             if callback is None:
                 adapter = self.catalog.get("session_finalize")
         if callback is None and adapter is None:
-            self.store.append("run.cleanup", data={"cleanup": identity_cleanup,
+            self._append("run.cleanup", data={"cleanup": identity_cleanup,
                 "scope": "ACTUAL_IDENTITY_QUERY_OWNER_BOUNDARY"})
             self._runtime_cleanup = {"confirmed": identity_cleanup["confirmed"],
                 "status": "CONFIRMED" if identity_cleanup["confirmed"] else "RECOVERY_UNCONFIRMED",
@@ -747,7 +780,7 @@ class WorkflowEngine:
                 for key in list(_LEASES):
                     owner = _LEASES[key]
                     if key in ("EXISTING_DEEP_INSPECTOR_OWNER", "R60_EFFECTFUL_EXECUTION") and \
-                            owner["run_id"] == self.store.run_id and not owner["active"] and \
+                            self._owns_lease(owner) and not owner["active"] and \
                             (owner["status"] == "RETAINED" or cleanup.get("scope") == "CHAIN_OWNED_NATIVE_CONTEXT"):
                         del _LEASES[key]
         else:
@@ -758,7 +791,7 @@ class WorkflowEngine:
             "native_context": cleanup, "identity_queries": identity_cleanup}
         if not identity_cleanup["confirmed"]:
             self._errors.append({"code": "WORKFLOW_IDENTITY_CLEANUP_UNCONFIRMED"})
-        self.store.append("run.cleanup", data={"cleanup": self._runtime_cleanup,
+        self._append("run.cleanup", data={"cleanup": self._runtime_cleanup,
             "scope": "SEPARATE_ACTUAL_OWNER_ACKNOWLEDGEMENTS", "actual_cleanup_call": actual_cleanup_call})
 
     def _drain_retained(self, pool, pending):
@@ -778,7 +811,7 @@ class WorkflowEngine:
                 self._finalize()
                 exited = pool.close()
                 with _LEASE_LOCK:
-                    leases = [o for o in _LEASES.values() if o["run_id"] == self.store.run_id]
+                    leases = [o for o in _LEASES.values() if self._owns_lease(o)]
                 self._cleanup = {"confirmed": exited and not leases and
                     getattr(self, "_runtime_cleanup", {}).get("confirmed", True) is True,
                     "status": "LATE_OWNER_BOUNDARY_OBSERVED", "worker_exit_confirmed": exited,
@@ -795,7 +828,10 @@ class WorkflowEngine:
                 self.store.release_writer()
             except Exception:
                 return
-            _RETAINED_WORKERS.pop(self.store.run_id, None)
+            with _LEASE_LOCK:
+                owner=_RETAINED_WORKERS.get(self.store.run_id)
+                if owner is not None and owner[0] is self:
+                    del _RETAINED_WORKERS[self.store.run_id]
         thread = threading.Thread(target=drain, name="blackbox-chain-retained-drain", daemon=True)
         thread.start()
 
@@ -812,18 +848,34 @@ class WorkflowEngine:
     def _drive(self, *, resuming, on_event):
         with self._lock:
             require(not self._driving, "WORKFLOW_ALREADY_RUNNING")
-            if self.store.run_id in _RETAINED_WORKERS and not getattr(self, "_retained_drained", False):
-                return self._return_snapshot()
+            retained_owner=_RETAINED_WORKERS.get(self.store.run_id)
+            if retained_owner is not None:
+                require(retained_owner[0] is self,"WORKFLOW_LIVE_OWNER_EXECUTOR_REQUIRED")
+                if not getattr(self, "_retained_drained", False):
+                    return self._return_snapshot()
             if self._state in ("COMPLETED", "CANCELLED", "FAILED", "RECOVERY_UNCONFIRMED", "PARTIAL") and not self._cancel.is_set():
                 return self._return_snapshot()
             require(resuming or self._state == "QUEUED", "WORKFLOW_EXPLICIT_RESUME_REQUIRED")
+            with _LEASE_LOCK:
+                require(self.store.run_id not in _DRIVING_RUNS,"WORKFLOW_RUN_ALREADY_DRIVING")
+                paused=_PAUSED_OWNERS.get(self.store.run_id)
+                require(paused is None or paused[0] is self,"WORKFLOW_LIVE_OWNER_EXECUTOR_REQUIRED")
+                require(not any(owner["run_id"]==self.store.run_id and not self._owns_lease(owner)
+                                for owner in _LEASES.values()),"WORKFLOW_RUN_OWNER_CAPABILITY_MISMATCH")
+                _DRIVING_RUNS[self.store.run_id]=self
             self._driving, self._callback = True, on_event
         pool, pending = None, {}
         acquired = False
         retained = False
+        admitted = False
         try:
             self.store.acquire_writer()
             acquired = True
+            actual_head=_journal_head(self.store.read_events())
+            if self._history_conflict or actual_head!=self._history_head or self._requires_restore:
+                self._history_conflict=True
+                raise WorkflowError("WORKFLOW_HISTORY_ADVANCED")
+            admitted=True
             if self._cancel.is_set():
                 # Cancellation of a paused/reopened run never dispatches a
                 # diagnostic node, validates consent, or completes a checkpoint.
@@ -832,13 +884,14 @@ class WorkflowEngine:
                         self._skip(node, "WORKFLOW_CANCELLED_BEFORE_DISPATCH", state="CANCELLED")
                 self._finalize()
                 with _LEASE_LOCK:
-                    live = [owner for owner in _LEASES.values() if owner["run_id"] == self.store.run_id]
+                    live = [owner for owner in _LEASES.values() if self._owns_lease(owner)]
                 clean = not live and getattr(self, "_runtime_cleanup", {}).get("confirmed", True) is True
                 self._cleanup = {"confirmed": clean, "status": "CONFIRMED" if clean else "RECOVERY_UNCONFIRMED",
                     "scope": "CANCELLED_PAUSED_RUN_ACTUAL_OWNERS_ONLY", "worker_exit_confirmed": True}
                 uncertain = any(row["state"] == "RECOVERY_UNCONFIRMED" for row in self._records.values())
                 self._run_state("RECOVERY_UNCONFIRMED" if not clean or uncertain else "CANCELLED")
-                if clean and self.store.run_id in _RETAINED_WORKERS:
+                retained_owner=_RETAINED_WORKERS.get(self.store.run_id)
+                if clean and retained_owner is not None and retained_owner[0] is self:
                     self.store.unpin_writer()
                     _RETAINED_WORKERS.pop(self.store.run_id, None)
                 return self._return_snapshot()
@@ -957,7 +1010,7 @@ class WorkflowEngine:
                                     _LEASES[resource]["invocation"] = ctx.node_run_id
                             row.update(state="RUNNING", node_run_id=ctx.node_run_id,
                                        started_monotonic_ns=time.monotonic_ns())
-                            self.store.append("node.intent", node_id=key, data={"node_id": key,
+                            self._append("node.intent", node_id=key, data={"node_id": key,
                                 "node_run_id": ctx.node_run_id, "iteration": ctx.iteration, "state": "RUNNING",
                                 "tool_id": node.tool_id, "read_only": self.catalog[node.tool_id].read_only,
                                 "execution_started": None, "started_monotonic_ns": row["started_monotonic_ns"]})
@@ -1000,7 +1053,7 @@ class WorkflowEngine:
                 else:
                     retained = True
             with _LEASE_LOCK:
-                leases = [dict(value) for value in _LEASES.values() if value["run_id"] == self.store.run_id]
+                leases = [value for value in _LEASES.values() if self._owns_lease(value)]
             clean = not leases and not retained and getattr(self, "_runtime_cleanup", {}).get("confirmed", True) is True
             self._cleanup = {"confirmed": clean, "status": "CONFIRMED" if clean else "RECOVERY_UNCONFIRMED",
                 "scope": "ACTUAL_WORKFLOW_WORKERS_AND_DECLARED_RESOURCE_LEASES_ONLY",
@@ -1015,6 +1068,10 @@ class WorkflowEngine:
             self._run_state(state)
             return self._return_snapshot()
         except BaseException as error:
+            if not admitted:
+                # A stale facade has no authority to append a replacement
+                # state or invoke cleanup belonging to the advanced run.
+                raise
             self.request_cancel()
             # Persisting history itself can fail. Preserve live owners and the
             # primary failure in memory; never release a writer/lease while an
@@ -1062,4 +1119,7 @@ class WorkflowEngine:
                         returned.update(self.snapshot())
             with self._lock:
                 self._driving = False
+            with _LEASE_LOCK:
+                if _DRIVING_RUNS.get(self.store.run_id) is self:
+                    del _DRIVING_RUNS[self.store.run_id]
             self._refresh_paused_owner()

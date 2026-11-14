@@ -1,7 +1,13 @@
 """Read-only psutil adapter: no signals, terminate, suspend, inject, or execute."""
 from __future__ import annotations
 import time
+import math
 from .contracts import ObserverError, Sample
+
+
+def _valid_birth(value):
+    try:return type(value) in (int,float) and value>0 and math.isfinite(value)
+    except OverflowError:return False
 
 
 class PsutilProbe:
@@ -16,7 +22,9 @@ class PsutilProbe:
         self.psutil = psutil
         try:
             self.process = psutil.Process(pid)
-            self.created = float(self.process.create_time())
+            created=self.process.create_time()
+            if not _valid_birth(created):raise ObserverError('PID_REUSED','attach')
+            self.created = float(created)
             self.process.cpu_percent(interval=None)  # nonblocking baseline
         except psutil.AccessDenied:
             raise ObserverError("ACCESS_DENIED", "attach") from None
@@ -31,7 +39,9 @@ class PsutilProbe:
         psutil, p = self.psutil, self.process
         try:
             began = time.monotonic_ns()
-            if abs(p.create_time() - self.created) > 0.000001:
+            if not _valid_birth(self.created):raise ObserverError('PID_REUSED','sample')
+            actual=p.create_time()
+            if not _valid_birth(actual) or abs(actual - self.created) > 0.000001:
                 raise ObserverError("PID_REUSED", "sample")
             with p.oneshot():
                 mem = p.memory_info()
@@ -49,7 +59,8 @@ class PsutilProbe:
                 children = None
             # A process can exit/recycle while individual fields are read.
             # Recheck with a fresh OS Process object, avoiding cached birth.
-            if abs(psutil.Process(self.pid).create_time() - self.created) > 0.000001:
+            actual=psutil.Process(self.pid).create_time()
+            if not _valid_birth(actual) or abs(actual - self.created) > 0.000001:
                 raise ObserverError("PID_REUSED", "sample")
             ended = time.monotonic_ns()
             self.last_observation = {

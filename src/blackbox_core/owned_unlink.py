@@ -6,6 +6,12 @@ POSIX anchors traversal with directory file descriptors and O_NOFOLLOW.
 import ctypes as C,os,stat
 from pathlib import Path
 from .library_files import checked
+class OwnedFileCloseUnconfirmed(OSError):
+ cleanup_required=True
+ def __init__(self,owner,code=None):
+  self.owner=owner;self.cleanup_unconfirmed=True;self.owner_retained=True
+  self.cleanup=dict(owner.cleanup_evidence)
+  super().__init__(code or 0,'OWNED_FILE_CLOSE_UNCONFIRMED')
 class WindowsFile:
  def __init__(self,path,*,delete=False):
   from ctypes import wintypes as W
@@ -29,9 +35,28 @@ class WindowsFile:
    if final.startswith('\\\\?\\UNC\\'):raise ValueError('OWNED_DELETE_UNC')
    if final.startswith('\\\\?\\'):final=final[4:]
    self.final=os.path.normcase(os.path.normpath(final));self.identity=['WIN32_FILE_ID',int(info.volume),int(info.index_high)<<32|int(info.index_low)];self.directory=bool(info.attributes&0x10)
-  except BaseException:self.close();raise
+  except BaseException as primary:
+   try:self.close()
+   except OwnedFileCloseUnconfirmed as cleanup:raise cleanup from primary
+   raise
  def close(self):
-  if self.handle is not None:self.k.CloseHandle(self.handle);self.handle=None
+  if self.handle is None:return getattr(self,'cleanup_evidence',{'confirmed':True,'status':'CONFIRMED'})
+  if not getattr(self,'_close_retry_allowed',True):raise OwnedFileCloseUnconfirmed(self)
+  try:
+   closed=bool(self.k.CloseHandle(self.handle));code=None if closed else getattr(C,'get_last_error',lambda:None)()
+  except BaseException as primary:
+   self._close_retry_allowed=False
+   self.cleanup_evidence={'confirmed':False,'status':'RECOVERY_UNCONFIRMED','scope':'OWNED_FILE_HANDLE',
+    'owner_retained':True,'retry_allowed':False,'reason':'CLOSE_EXCEPTION_OWNERSHIP_UNCONFIRMED'}
+   raise OwnedFileCloseUnconfirmed(self,getattr(primary,'winerror',None)) from primary
+  if not closed:
+   self._close_retry_allowed=code!=6
+   self.cleanup_evidence={'confirmed':False,'status':'RECOVERY_UNCONFIRMED','scope':'OWNED_FILE_HANDLE',
+    'owner_retained':True,'retry_allowed':self._close_retry_allowed,'winerror':code}
+   raise OwnedFileCloseUnconfirmed(self,code)
+  self.handle=None
+  self.cleanup_evidence={'confirmed':True,'status':'CONFIRMED','scope':'OWNED_FILE_HANDLE','owner_retained':False}
+  return dict(self.cleanup_evidence)
  def remove(self):
   flag=C.c_ubyte(1) # FILE_DISPOSITION_INFO contains one BOOLEAN.
   if not self.k.SetFileInformationByHandle(self.handle,4,C.byref(flag),C.sizeof(flag)):raise OSError(C.get_last_error(),'OWNED_DELETE_DISPOSITION_FAILED')

@@ -14,6 +14,7 @@ import sqlite3
 import time
 
 from .decoder_cpu import ETW_PROVIDER, ETW_PROVIDER_GUID
+from .decoder_limits import checked_index_path
 from .session_v2 import safe_path
 
 SCHEDULE_SCHEMA = "blackbox.thread-schedule/1"
@@ -29,7 +30,7 @@ def _int(value, minimum=0, maximum=2**63-1):
 
 
 def _number(value):
-    return type(value) in (int, float) and math.isfinite(value) and abs(value) < 1e15
+    return type(value) in (int, float) and abs(value) < 1e15 and math.isfinite(value)
 
 
 def _identity(value, now):
@@ -99,7 +100,7 @@ def build_wait_report(index_path, *, pid=0, process_instance=None, tid=None,
     A reported loss or truncated index makes spans candidates only: neither an
     exact off-CPU duration nor its blocked/ready components is then asserted.
     """
-    from .decoder_index import APP_ID, validate_event
+    from .decoder_index import APP_ID, _saved_json, read_index_summary, require_index_tables, validate_event
     if (not _int(pid) or (process_instance is not None and not _int(process_instance)) or
             (tid is not None and not _int(tid)) or
             (start_ms is not None and not _number(start_ms)) or
@@ -107,9 +108,7 @@ def build_wait_report(index_path, *, pid=0, process_instance=None, tid=None,
             (start_ms is not None and end_ms is not None and start_ms >= end_ms) or
             not _int(max_intervals, 1, MAX_INTERVALS)):
         raise ValueError("INVALID_WAIT_FILTER")
-    path = safe_path(index_path)
-    if not path.is_file():
-        raise ValueError("INVALID_INDEX_FILE")
+    path = checked_index_path(index_path)
     deadline = time.monotonic() + 30
 
     def check():
@@ -236,7 +235,8 @@ def build_wait_report(index_path, *, pid=0, process_instance=None, tid=None,
                     db.execute("PRAGMA user_version").fetchone()[0] not in (1, 2, 3, 4)):
                 raise ValueError("INVALID_INDEX_SCHEMA")
             db.execute("BEGIN")
-            summary = json.loads(db.execute("SELECT value FROM metadata WHERE key='summary'").fetchone()[0])
+            require_index_tables(db,("metadata","events"))
+            summary = read_index_summary(db)
             if type(summary) is not dict or summary.get("status") not in ("DECODED", "TRUNCATED"):
                 raise ValueError("INVALID_INDEX_SUMMARY")
             loss = summary.get("decoder_reported_lost_events")
@@ -251,7 +251,7 @@ def build_wait_report(index_path, *, pid=0, process_instance=None, tid=None,
                 check(); counts["candidate_events"] += 1
                 if counts["candidate_events"] > MAX_SCHEDULE_EVENTS:
                     raise ValueError("WAIT_EVENT_BUDGET")
-                row = json.loads(raw)
+                row = _saved_json(raw)
                 validate_event(row, event_id)
                 if (row["pid"] != stored_pid or row["time_ms"] != stored_time or
                         row["provider"] != provider or row["name"] != name):

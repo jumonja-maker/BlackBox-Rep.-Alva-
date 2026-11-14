@@ -2,9 +2,10 @@
 from __future__ import annotations
 
 from pathlib import Path
+import hashlib
 from uuid import uuid4
 
-from .chain_contracts import (MAX_DEPTH, MAX_RUN_SECONDS, MAX_WORKERS, PROFILE_SCHEMA, WorkflowError,
+from .chain_contracts import (MAX_DEPTH, MAX_DEFINITION_BYTES, MAX_RUN_SECONDS, MAX_WORKERS, PROFILE_SCHEMA, WorkflowError,
     identifier, json_data, number, parse_json, require)
 from .library_files import atomic_json
 from .session_v2 import safe_path
@@ -123,7 +124,15 @@ def save_profile(profile, path):
 
 
 def load_profile(path):
-    return validate_profile(parse_json(safe_path(Path(path)).read_bytes()))
+    from .chain_io import fingerprint_file
+    path = safe_path(Path(path))
+    before = fingerprint_file(path, max_bytes=MAX_DEFINITION_BYTES)
+    with path.open("rb") as stream:
+        raw = stream.read(MAX_DEFINITION_BYTES + 1)
+    require(len(raw) <= MAX_DEFINITION_BYTES and hashlib.sha256(raw).hexdigest()==before["sha256"],
+            "WORKFLOW_PROFILE_CHANGED_DURING_READ")
+    require(fingerprint_file(path, max_bytes=MAX_DEFINITION_BYTES)==before, "WORKFLOW_PROFILE_CHANGED_DURING_READ")
+    return validate_profile(parse_json(raw))
 
 
 def verify_source_scope(artifact, source_ids, *, known_artifacts=(), inputs=None,
@@ -138,14 +147,15 @@ def verify_source_scope(artifact, source_ids, *, known_artifacts=(), inputs=None
     """
     from .chain_contracts import Artifact, canonical
     from .chain_io import verify_artifact
+    require(type(source_ids) in (list, tuple) and len(source_ids) <= 256 and
+            all(type(value) is str for value in source_ids), "INVALID_PROFILE_SELECTION")
     if not isinstance(artifact, Artifact):
         artifact = Artifact.from_dict(artifact)
     verify_artifact(artifact, cancel=cancel, deadline=deadline, owner_run_id=owner_run_id)
     if not source_ids or artifact.kind in ("RECEIPT", "BOOLEAN", "PROCESS"):
         return {"scope": "WORKFLOW_PLAN_ONLY_NOT_AUTHORIZATION", "byte_roots": []}
-    require(type(source_ids) in (list, tuple) and len(source_ids) <= 256 and
-            all(type(value) is str for value in source_ids), "INVALID_PROFILE_SELECTION")
-    allowed = set(source_ids)
+    allowed = {value.lower() if len(value)==64 and all(character in "0123456789abcdefABCDEF" for character in value)
+               else value for value in source_ids}
     # A selected SHA cannot be reinterpreted as an arbitrary metadata alias
     # attached to different bytes by an imported source declaration.
     aliases = {value for value in allowed if not (len(value) == 64 and

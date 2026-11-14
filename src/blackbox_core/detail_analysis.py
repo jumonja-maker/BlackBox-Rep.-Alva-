@@ -11,6 +11,7 @@ from contextlib import closing
 from math import isfinite
 from pathlib import Path
 import sqlite3
+import time
 
 
 def _seconds(value: object) -> float | None:
@@ -44,7 +45,11 @@ def analyze_detail_threads(folder: Path, *, max_samples: int = 128,
     try:
         with closing(sqlite3.connect(path.resolve().as_uri() + "?mode=ro",
                                      uri=True, timeout=1)) as db:
+            deadline = time.monotonic() + 15.0
+            db.setlimit(sqlite3.SQLITE_LIMIT_LENGTH, 1024 * 1024)
+            db.set_progress_handler(lambda: int(time.monotonic() >= deadline), 1000)
             db.execute("PRAGMA query_only=ON")
+            db.execute("PRAGMA trusted_schema=OFF")
             row = db.execute(
                 "SELECT schema_version, pid, created FROM detail_metadata LIMIT 1"
             ).fetchone()
@@ -74,7 +79,7 @@ def analyze_detail_threads(folder: Path, *, max_samples: int = 128,
                         "warnings": ["TOO_MANY_THREAD_ROWS"]}
             by_seq: dict[int, dict[int, tuple[float, float]]] = {}
             for seq, observed_pid, tid, user, system in details:
-                if (type(seq) is not int or type(tid) is not int or tid < 0
+                if (type(seq) is not int or type(tid) is not int or tid <= 0
                         or observed_pid != pid or _seconds(user) is None
                         or _seconds(system) is None):
                     return {**empty, "status": "INVALID_DETAILED_DATA",
