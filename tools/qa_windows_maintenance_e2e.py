@@ -55,6 +55,15 @@ BASELINE_RELEASES = {
         "7045b8f0e86b2279e36fd0fe87f9f33956375bb5738c14b7ac4a4aa72f49c543",
         "https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/releases/tag/v0.5.3",
     ),
+    # Immutable published v0.6.0 baseline. Source PR49 did not alter these bytes.
+    "v0.6.0": Release(
+        "v0.6.0",
+        "https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/releases/"
+        "download/v0.6.0/BLACK.BOX-Universal-Windows.zip",
+        115958681,
+        "c0563e3f16274d7785db3dec2a0735abd59674fbcef9db85557c6851cc5ef6b4",
+        "https://github.com/jumonja-maker/BlackBox-Rep.-Alva-/releases/tag/v0.6.0",
+    ),
     # Immutable R00 published baseline: exact official v0.5.4 ZIP.
     "v0.5.4": Release(
         "v0.5.4",
